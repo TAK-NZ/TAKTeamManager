@@ -1,7 +1,7 @@
 {
   "name": "tak-team-manager",
   "version": "1.0.0",
-  "description": "TAK Team Manager - Standalone web application for managing TAK teams, users, and channels with Authentik integration",
+  "description": "Manage TAK teams, users, and channels via Authentik",
   "main": "server/index.js",
   "scripts": {
     "dev": "concurrently \"npm run server:dev\" \"npm run client:dev\"",
@@ -9,6 +9,9 @@
     "client:dev": "cd client && npm run dev",
     "build": "cd client && npm run build",
     "start": "node server/index.js",
+    "docker:up": "docker-compose up --build",
+    "docker:down": "docker-compose down",
+    "docker:init-db": "docker-compose exec app node database/init.js",
     "test": "jest"
   },
   "dependencies": {
@@ -31,5 +34,5 @@
   },
   "keywords": ["tak", "team-management", "authentik", "ldap"],
   "author": "TAK-NZ",
-  "license": "MIT"
+  "license": "AGPL-3.0"
 }

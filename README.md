@@ -1,6 +1,6 @@
 # TAK Team Manager
 
-A standalone web application for managing TAK (Team Awareness Kit) teams, users, and channels with Authentik integration.
+Manage TAK teams, users, and channels via Authentik
 
 ## Features
 
@@ -21,13 +21,36 @@ A standalone web application for managing TAK (Team Awareness Kit) teams, users,
 
 ## Development Setup
 
-### Prerequisites
+### Option 1: Docker (Recommended)
+
+1. Copy environment file:
+```bash
+cp .env.example .env
+```
+
+2. Configure `.env` with your Authentik details
+
+3. Start with Docker:
+```bash
+docker-compose up --build
+```
+
+4. Initialize database (first time only):
+```bash
+docker-compose exec app node database/init.js
+```
+
+5. Access application at http://localhost:3000
+
+### Option 2: Local Development
+
+#### Prerequisites
 
 - Node.js 18+
 - PostgreSQL 14+
 - Authentik instance
 
-### Backend Setup
+#### Backend Setup
 
 1. Install dependencies:
 ```bash
@@ -98,4 +121,4 @@ The application is designed to run on AWS ECS Fargate with:
 
 ## License
 
-MIT
+GNU Affero General Public License v3.0

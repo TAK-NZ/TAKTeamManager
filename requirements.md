@@ -67,7 +67,7 @@
 - **Team Hierarchy:** Maximum 5 levels deep (technical limitation)
 - **Performance:** Support up to 1000 users, 100 teams initially
 - **Browser Support:** Modern browsers (Chrome, Firefox, Safari, Edge)
-- **LDAP Mapping:** 1-3 LDAP groups per channel based on permission model
+- **LDAP Mapping:** 3 LDAP groups per channel - tak_ChannelName (read/write), tak_ChannelName_READ (read-only), tak_ChannelName_WRITE (write-only)
 
 ## Security & Compliance
 - [ ] **OAuth2 Authentication** via Authentik for existing users
