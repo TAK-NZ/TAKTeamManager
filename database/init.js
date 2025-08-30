@@ -18,6 +18,13 @@ async function initializeDatabase() {
       ON CONFLICT DO NOTHING
     `);
     
+    // Insert initial sync status
+    await pool.query(`
+      INSERT INTO sync_status (sync_type, status) 
+      VALUES ('user_sync', 'pending') 
+      ON CONFLICT DO NOTHING
+    `);
+    
     console.log('Default data inserted');
     process.exit(0);
   } catch (error) {

@@ -25,6 +25,8 @@ app.use(limiter);
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
+
+
 // Routes
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/teams', require('./routes/teams'));
@@ -32,6 +34,7 @@ app.use('/api/users', require('./routes/users'));
 app.use('/api/channels', require('./routes/channels'));
 app.use('/api/requests', require('./routes/requests'));
 app.use('/api/config', require('./routes/config'));
+app.use('/api/sync', require('./routes/sync'));
 
 // Serve frontend for all non-API routes
 app.get('*', (req, res) => {
@@ -68,4 +71,8 @@ app.use('*', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`TAK Team Manager server running on port ${PORT}`);
+  
+  // Start periodic sync service
+  const authentikSync = require('./services/authentikSync');
+  authentikSync.startPeriodicSync();
 });

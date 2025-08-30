@@ -7,7 +7,7 @@ const api = axios.create({
   },
 });
 
-// Add auth token to requests
+// Add auth token
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('token');
   if (token) {
@@ -73,6 +73,8 @@ export const teamsAPI = {
   getById: (id) => api.get(`/teams/${id}`),
   addMember: (teamId, data) => api.post(`/teams/${teamId}/members`, data),
   getHierarchy: (id) => api.get(`/teams/${id}/hierarchy`),
+  getSubTeams: (id) => api.get(`/teams/${id}/sub-teams`),
+  delete: (id) => api.delete(`/teams/${id}`),
 };
 
 export const usersAPI = {

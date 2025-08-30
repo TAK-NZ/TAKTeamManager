@@ -3,6 +3,7 @@ import { useForm } from 'react-hook-form'
 import { Link } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import { requestsAPI } from '../services/api'
+import { ThemeProvider } from '../contexts/ThemeContext'
 
 export default function RequestAccess() {
   const [submitted, setSubmitted] = useState(false)
@@ -20,41 +21,44 @@ export default function RequestAccess() {
 
   if (submitted) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4">
-        <div className="max-w-md w-full">
-          <div className="card text-center">
-            <div className="w-16 h-16 mx-auto mb-4 bg-green-100 rounded-full flex items-center justify-center">
-              <svg className="w-8 h-8 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-              </svg>
+      <ThemeProvider>
+        <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 py-12 px-4">
+          <div className="max-w-md w-full">
+            <div className="card text-center">
+              <div className="w-16 h-16 mx-auto mb-4 bg-green-100 dark:bg-green-900 rounded-full flex items-center justify-center">
+                <svg className="w-8 h-8 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+              </div>
+              <h2 className="text-xl font-bold text-gray-900 dark:text-gray-100 mb-2">Request Submitted</h2>
+              <p className="text-gray-600 dark:text-gray-400 mb-6">
+                Your team access request has been submitted. A team administrator will review your request and contact you via email.
+              </p>
+              <Link to="/" className="btn-primary">
+                Back to Login
+              </Link>
             </div>
-            <h2 className="text-xl font-bold text-gray-900 mb-2">Request Submitted</h2>
-            <p className="text-gray-600 mb-6">
-              Your team access request has been submitted. A team administrator will review your request and contact you via email.
-            </p>
-            <Link to="/" className="btn-primary">
-              Back to Login
-            </Link>
           </div>
         </div>
-      </div>
+      </ThemeProvider>
     )
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4">
-      <div className="max-w-md w-full">
-        <div className="card">
-          <div className="text-center mb-6">
-            <h2 className="text-2xl font-bold text-gray-900">Request Team Access</h2>
-            <p className="text-gray-600 mt-2">
-              Fill out this form to request access to a TAK team
-            </p>
-          </div>
+    <ThemeProvider>
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 py-12 px-4">
+        <div className="max-w-md w-full">
+          <div className="card">
+            <div className="text-center mb-6">
+              <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Request Team Access</h2>
+              <p className="text-gray-600 dark:text-gray-400 mt-2">
+                Fill out this form to request access to a TAK team
+              </p>
+            </div>
 
           <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                 Email Address
               </label>
               <input
@@ -69,7 +73,7 @@ export default function RequestAccess() {
 
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                   First Name
                 </label>
                 <input
@@ -82,7 +86,7 @@ export default function RequestAccess() {
                 )}
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                   Last Name
                 </label>
                 <input
@@ -97,7 +101,7 @@ export default function RequestAccess() {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                 Team Name
               </label>
               <input
@@ -112,7 +116,7 @@ export default function RequestAccess() {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                 Reason for Access
               </label>
               <textarea
@@ -143,8 +147,9 @@ export default function RequestAccess() {
               Already have an account? Sign in
             </Link>
           </div>
+          </div>
         </div>
       </div>
-    </div>
+    </ThemeProvider>
   )
 }

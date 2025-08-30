@@ -11,9 +11,34 @@ const authenticateToken = async (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded;
+    
+    // Fetch full user data from cache
+    const authentikSync = require('../services/authentikSync');
+    const cachedUser = await authentikSync.getUserFromCache(decoded.username);
+    
+    if (!cachedUser) {
+      return res.status(401).json({ error: 'User not found' });
+    }
+    
+    // Set user data on request
+    req.user = {
+      id: cachedUser.authentik_id,
+      userId: cachedUser.id,
+      username: cachedUser.username,
+      email: cachedUser.email,
+      first_name: cachedUser.first_name,
+      last_name: cachedUser.last_name,
+      name: cachedUser.first_name + (cachedUser.last_name ? ' ' + cachedUser.last_name : ''),
+      isAdmin: cachedUser.is_admin,
+      takRole: cachedUser.tak_role,
+      takColor: cachedUser.tak_color,
+      takCallsign: cachedUser.tak_callsign,
+      groups: cachedUser.groups || []
+    };
+    
     next();
   } catch (error) {
+    console.error('JWT verification failed:', error.message);
     return res.status(403).json({ error: 'Invalid token' });
   }
 };

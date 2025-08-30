@@ -45,55 +45,46 @@ router.get('/callback', async (req, res) => {
       {
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded'
-        }
+        },
+        timeout: 10000
       }
     );
 
     const { access_token } = tokenResponse.data;
 
-    // Get user info
+    // Get basic user info for authentication
     const userResponse = await axios.get(process.env.AUTHENTIK_USERINFO_URL, {
-      headers: { Authorization: `Bearer ${access_token}` }
+      headers: { Authorization: `Bearer ${access_token}` },
+      timeout: 10000
     });
 
-    // Get user attributes from Authentik API
-    const userDetailsResponse = await axios.get(`${process.env.AUTHENTIK_URL}/api/v3/core/users/?username=${userResponse.data.preferred_username}`, {
-      headers: { Authorization: `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }
-    });
-    
-    const userDetails = userDetailsResponse.data.results[0];
-    console.log('User details from API:', userDetails);
-    
-    const user = {
-      ...userResponse.data,
-      takRole: userDetails?.attributes?.takRole,
-      takColor: userDetails?.attributes?.takColor,
-      takCallsign: userDetails?.attributes?.takCallsign
-    };
-    
-    console.log('User with TAK attributes:', user);
+    const basicUser = userResponse.data;
+    console.log('Basic user from OAuth:', basicUser.preferred_username);
 
-    // Create JWT token
+    // Get cached user data from local database
+    const authentikSync = require('../services/authentikSync');
+    const cachedUser = await authentikSync.getUserFromCache(basicUser.preferred_username);
+    
+    if (!cachedUser) {
+      console.warn('User not found in cache, may need sync:', basicUser.preferred_username);
+      return res.redirect(process.env.FRONTEND_URL + '?error=user_not_synced');
+    }
+
+    console.log('Using cached user data:', cachedUser.username);
+
+    // Create minimal JWT token with just user ID
     const jwtToken = jwt.sign(
       { 
-        id: user.sub,
-        email: user.email,
-        name: user.name || user.preferred_username,
-        first_name: user.given_name || user.name || user.preferred_username,
-        last_name: user.family_name || '',
-        username: user.preferred_username,
-        groups: user.groups || [],
-        groups_obj: user.groups_obj || [],
-        takRole: user.takRole,
-        takColor: user.takColor,
-        takCallsign: user.takCallsign,
-        isGlobalAdmin: user.groups?.includes(process.env.ADMIN_GROUP_NAME || 'TakTeamManager_Admin') || false
+        userId: cachedUser.id,
+        username: cachedUser.username
       },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN }
     );
+    
 
-    // Redirect with token as URL parameter (frontend will store it)
+
+    // Redirect with token as URL parameter (now much shorter)
     res.redirect(`${process.env.FRONTEND_URL}/dashboard?token=${jwtToken}`);
   } catch (error) {
     console.error('OAuth callback error:', error.response?.data || error.message);
@@ -107,18 +98,9 @@ router.post('/logout', (req, res) => {
 });
 
 // Get current user
-router.get('/me', (req, res) => {
-  try {
-    const token = req.headers.authorization?.replace('Bearer ', '');
-    if (!token) {
-      return res.status(401).json({ error: 'No token provided' });
-    }
-
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    res.json({ user: decoded });
-  } catch (error) {
-    res.status(401).json({ error: 'Invalid token' });
-  }
+const { authenticateToken } = require('../middleware/auth');
+router.get('/me', authenticateToken, (req, res) => {
+  res.json({ user: req.user });
 });
 
 module.exports = router;

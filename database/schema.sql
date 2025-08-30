@@ -19,6 +19,10 @@ CREATE TABLE teams (
     id SERIAL PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
     description TEXT,
+    slug VARCHAR(255),
+    color VARCHAR(7) DEFAULT '#3B82F6',
+    visibility VARCHAR(20) DEFAULT 'private',
+    can_join BOOLEAN DEFAULT false,
     parent_team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE,
     created_by INTEGER REFERENCES users(id),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -31,16 +35,8 @@ CREATE TABLE team_memberships (
     id SERIAL PRIMARY KEY,
     user_id INTEGER REFERENCES users(id) ON DELETE CASCADE UNIQUE, -- UNIQUE ensures single team membership
     team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE,
+    role VARCHAR(20) DEFAULT 'member',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- Team management permissions (users can manage multiple teams)
-CREATE TABLE team_managers (
-    id SERIAL PRIMARY KEY,
-    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-    team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(user_id, team_id)
 );
 
 -- Channels (map to Authentik LDAP groups)
@@ -82,6 +78,36 @@ CREATE TABLE access_requests (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- User cache table for Authentik sync
+CREATE TABLE user_cache (
+    id SERIAL PRIMARY KEY,
+    authentik_id VARCHAR(255) UNIQUE NOT NULL,
+    username VARCHAR(255) UNIQUE NOT NULL,
+    email VARCHAR(255) NOT NULL,
+    first_name VARCHAR(255),
+    last_name VARCHAR(255),
+    is_active BOOLEAN DEFAULT true,
+    tak_role VARCHAR(100),
+    tak_color VARCHAR(50),
+    tak_callsign VARCHAR(100),
+    groups TEXT[], -- Array of group names
+    is_admin BOOLEAN DEFAULT false,
+    last_synced TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Sync status table
+CREATE TABLE sync_status (
+    id SERIAL PRIMARY KEY,
+    sync_type VARCHAR(50) NOT NULL,
+    last_sync TIMESTAMP,
+    status VARCHAR(20) DEFAULT 'pending', -- pending, running, success, error
+    error_message TEXT,
+    records_synced INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Audit log for tracking changes
 CREATE TABLE audit_logs (
     id SERIAL PRIMARY KEY,
@@ -95,14 +121,18 @@ CREATE TABLE audit_logs (
 
 -- Indexes for performance
 CREATE INDEX idx_teams_parent ON teams(parent_team_id);
+CREATE UNIQUE INDEX idx_teams_slug ON teams(slug) WHERE slug IS NOT NULL;
 CREATE INDEX idx_team_memberships_user ON team_memberships(user_id);
 CREATE INDEX idx_team_memberships_team ON team_memberships(team_id);
-CREATE INDEX idx_team_managers_user ON team_managers(user_id);
-CREATE INDEX idx_team_managers_team ON team_managers(team_id);
+CREATE INDEX idx_team_memberships_role ON team_memberships(role);
 CREATE INDEX idx_channels_team ON channels(team_id);
 CREATE INDEX idx_channel_memberships_user ON channel_memberships(user_id);
 CREATE INDEX idx_channel_memberships_channel ON channel_memberships(channel_id);
 CREATE INDEX idx_access_requests_status ON access_requests(status);
+CREATE INDEX idx_user_cache_username ON user_cache(username);
+CREATE INDEX idx_user_cache_authentik_id ON user_cache(authentik_id);
+CREATE INDEX idx_user_cache_is_admin ON user_cache(is_admin);
+CREATE INDEX idx_user_cache_last_synced ON user_cache(last_synced);
 CREATE INDEX idx_audit_logs_user ON audit_logs(user_id);
 CREATE INDEX idx_audit_logs_created ON audit_logs(created_at);
 

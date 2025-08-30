@@ -1,9 +1,11 @@
 import { Link } from 'react-router-dom'
 import { authAPI } from '../services/api'
+import { ThemeProvider } from '../contexts/ThemeContext'
 
 export default function Login() {
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
+    <ThemeProvider>
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 py-12 px-4 sm:px-6 lg:px-8">
       <div className="max-w-md w-full space-y-8">
         <div>
           <img
@@ -11,10 +13,10 @@ export default function Login() {
             src="https://raw.githubusercontent.com/TAK-NZ/auth-infra/refs/heads/main/authentik/branding/icons/tak-nz-brand-tall.svg"
             alt="TAK.NZ"
           />
-          <h2 className="mt-6 text-center text-3xl font-bold text-gray-900">
+          <h2 className="mt-6 text-center text-3xl font-bold text-gray-900 dark:text-gray-100">
             TAK Team Manager
           </h2>
-          <p className="mt-2 text-center text-sm text-gray-600">
+          <p className="mt-2 text-center text-sm text-gray-600 dark:text-gray-400">
             Manage your TAK teams and channels
           </p>
         </div>
@@ -27,7 +29,7 @@ export default function Login() {
           </button>
           
           <div className="text-center">
-            <span className="text-sm text-gray-500">Don't have an account?</span>
+            <span className="text-sm text-gray-500 dark:text-gray-400">Don't have an account?</span>
             <Link
               to="/request-access"
               className="ml-2 text-sm text-primary-600 hover:text-primary-500"
@@ -36,7 +38,8 @@ export default function Login() {
             </Link>
           </div>
         </div>
+        </div>
       </div>
-    </div>
+    </ThemeProvider>
   )
 }

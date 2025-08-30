@@ -7,11 +7,14 @@ import {
   ClipboardDocumentListIcon,
   Bars3Icon,
   XMarkIcon,
-  CogIcon
+  CogIcon,
+  SunIcon,
+  MoonIcon
 } from '@heroicons/react/24/outline'
 import { authAPI } from '../services/api'
+import { useTheme } from '../contexts/ThemeContext'
 
-const getNavigation = (isGlobalAdmin) => {
+const getNavigation = (isAdmin) => {
   const baseNavigation = [
     { name: 'Dashboard', href: '/dashboard', icon: HomeIcon },
     { name: 'Teams', href: '/teams', icon: UserGroupIcon },
@@ -19,7 +22,7 @@ const getNavigation = (isGlobalAdmin) => {
     { name: 'Requests', href: '/requests', icon: ClipboardDocumentListIcon },
   ]
   
-  if (isGlobalAdmin) {
+  if (isAdmin) {
     baseNavigation.push({ name: 'Admin', href: '/admin', icon: CogIcon })
   }
   
@@ -29,7 +32,8 @@ const getNavigation = (isGlobalAdmin) => {
 export default function Layout({ children, user }) {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const location = useLocation()
-  const navigation = getNavigation(user?.isGlobalAdmin)
+  const navigation = getNavigation(user?.isAdmin)
+  const { theme, toggleTheme } = useTheme()
 
   const handleLogout = async () => {
     try {
@@ -41,11 +45,11 @@ export default function Layout({ children, user }) {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
       {/* Mobile sidebar */}
       <div className={`fixed inset-0 z-50 lg:hidden ${sidebarOpen ? '' : 'hidden'}`}>
         <div className="fixed inset-0 bg-gray-600 bg-opacity-75" onClick={() => setSidebarOpen(false)} />
-        <div className="fixed inset-y-0 left-0 flex w-64 flex-col bg-white">
+        <div className="fixed inset-y-0 left-0 flex w-64 flex-col bg-white dark:bg-gray-800">
           <div className="flex h-16 items-center justify-between py-4">
             <img 
               src="https://raw.githubusercontent.com/TAK-NZ/auth-infra/refs/heads/main/authentik/branding/icons/tak-nz-brand-wide.svg" 
@@ -63,8 +67,8 @@ export default function Layout({ children, user }) {
                 to={item.href}
                 className={`group flex items-center px-2 py-2 text-sm font-medium rounded-md ${
                   location.pathname === item.href
-                    ? 'bg-primary-100 text-primary-700'
-                    : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
+                    ? 'bg-primary-100 dark:bg-primary-900 text-primary-700 dark:text-primary-300'
+                    : 'text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 hover:text-gray-900 dark:hover:text-gray-100'
                 }`}
                 onClick={() => setSidebarOpen(false)}
               >
@@ -78,7 +82,7 @@ export default function Layout({ children, user }) {
 
       {/* Desktop sidebar */}
       <div className="hidden lg:fixed lg:inset-y-0 lg:flex lg:w-64 lg:flex-col">
-        <div className="flex flex-col flex-grow bg-white border-r border-gray-200">
+        <div className="flex flex-col flex-grow bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700">
           <div className="flex h-16 items-center py-4">
             <img 
               src="https://raw.githubusercontent.com/TAK-NZ/auth-infra/refs/heads/main/authentik/branding/icons/tak-nz-brand-wide.svg" 
@@ -93,8 +97,8 @@ export default function Layout({ children, user }) {
                 to={item.href}
                 className={`group flex items-center px-2 py-2 text-sm font-medium rounded-md ${
                   location.pathname === item.href
-                    ? 'bg-primary-100 text-primary-700'
-                    : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
+                    ? 'bg-primary-100 dark:bg-primary-900 text-primary-700 dark:text-primary-300'
+                    : 'text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 hover:text-gray-900 dark:hover:text-gray-100'
                 }`}
               >
                 <item.icon className="mr-3 h-6 w-6" />
@@ -108,7 +112,7 @@ export default function Layout({ children, user }) {
       {/* Main content */}
       <div className="lg:pl-64">
         {/* Top bar */}
-        <div className="sticky top-0 z-40 flex h-16 bg-white shadow">
+        <div className="sticky top-0 z-40 flex h-16 bg-white dark:bg-gray-800 shadow">
           <button
             className="px-4 text-gray-500 lg:hidden"
             onClick={() => setSidebarOpen(true)}
@@ -116,14 +120,24 @@ export default function Layout({ children, user }) {
             <Bars3Icon className="h-6 w-6" />
           </button>
           <div className="flex flex-1 justify-between items-center px-4">
-            <h1 className="text-xl font-bold text-gray-900">TAK Team Manager</h1>
+            <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">TAK Team Manager</h1>
             <div className="flex items-center space-x-4">
-              <span className="text-sm text-gray-700">
+              <button
+                onClick={toggleTheme}
+                className="p-2 text-gray-400 hover:text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 dark:hover:text-gray-300 rounded-md"
+              >
+                {theme === 'dark' ? (
+                  <SunIcon className="h-5 w-5" />
+                ) : (
+                  <MoonIcon className="h-5 w-5" />
+                )}
+              </button>
+              <span className="text-sm text-gray-700 dark:text-gray-300">
                 {user?.first_name} {user?.last_name}
               </span>
               <button
                 onClick={handleLogout}
-                className="px-3 py-1 text-sm text-gray-700 border border-gray-300 rounded hover:bg-gray-50 hover:border-gray-400"
+                className="px-3 py-1 text-sm text-gray-700 dark:text-gray-300 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-700 hover:border-gray-400 dark:hover:border-gray-500"
               >
                 Logout
               </button>

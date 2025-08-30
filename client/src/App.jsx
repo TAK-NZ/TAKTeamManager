@@ -1,6 +1,7 @@
 import { Routes, Route } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import { authAPI } from './services/api'
+import { ThemeProvider } from './contexts/ThemeContext'
 import Layout from './components/Layout'
 import Dashboard from './pages/Dashboard'
 import Teams from './pages/Teams'
@@ -21,6 +22,7 @@ function App() {
     const tokenFromUrl = urlParams.get('token')
     
     if (tokenFromUrl) {
+      console.log('Setting token from URL:', tokenFromUrl.substring(0, 50))
       localStorage.setItem('token', tokenFromUrl)
       // Remove token from URL
       window.history.replaceState({}, document.title, window.location.pathname)
@@ -68,17 +70,19 @@ function App() {
   }
 
   return (
-    <Layout user={user}>
-      <Routes>
-        <Route path="/" element={<Dashboard user={user} />} />
-        <Route path="/dashboard" element={<Dashboard user={user} />} />
-        <Route path="/teams" element={<Teams />} />
-        <Route path="/teams/:teamId" element={<TeamDetail />} />
-        <Route path="/users" element={<Users />} />
-        <Route path="/requests" element={<Requests />} />
-        <Route path="/admin" element={<Admin user={user} />} />
-      </Routes>
-    </Layout>
+    <ThemeProvider>
+      <Layout user={user}>
+        <Routes>
+          <Route path="/" element={<Dashboard user={user} />} />
+          <Route path="/dashboard" element={<Dashboard user={user} />} />
+          <Route path="/teams" element={<Teams user={user} />} />
+          <Route path="/teams/:teamId" element={<TeamDetail />} />
+          <Route path="/users" element={<Users />} />
+          <Route path="/requests" element={<Requests />} />
+          <Route path="/admin" element={<Admin user={user} />} />
+        </Routes>
+      </Layout>
+    </ThemeProvider>
   )
 }
 

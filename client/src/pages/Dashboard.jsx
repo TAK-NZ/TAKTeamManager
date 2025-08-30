@@ -163,10 +163,10 @@ export default function Dashboard({ user }) {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">
+        <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
           Welcome back, {user.first_name}!
         </h1>
-        <p className="text-gray-600">
+        <p className="text-gray-600 dark:text-gray-400">
           View your TAK team assignment and channel access.
         </p>
       </div>
@@ -174,18 +174,18 @@ export default function Dashboard({ user }) {
       {/* TAK Profile */}
       {(user.takRole || user.takColor || user.takCallsign) && (
         <div className="card">
-          <h2 className="text-lg font-medium text-gray-900 mb-4">TAK Profile</h2>
+          <h2 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">TAK Profile</h2>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {user.takCallsign && (
               <div>
-                <dt className="text-sm font-medium text-gray-500">My Callsign</dt>
-                <dd className="text-sm text-gray-900">{user.takCallsign}</dd>
+                <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">My Callsign</dt>
+                <dd className="text-sm text-gray-900 dark:text-gray-100">{user.takCallsign}</dd>
               </div>
             )}
             {user.takColor && (
               <div>
-                <dt className="text-sm font-medium text-gray-500">My Team</dt>
-                <dd className="flex items-center text-sm text-gray-900">
+                <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">My Team</dt>
+                <dd className="flex items-center text-sm text-gray-900 dark:text-gray-100">
                   <div 
                     className="w-4 h-4 rounded border border-gray-300 mr-2" 
                     style={{ backgroundColor: getColorValue(user.takColor) }}
@@ -196,8 +196,8 @@ export default function Dashboard({ user }) {
             )}
             {user.takRole && (
               <div>
-                <dt className="text-sm font-medium text-gray-500">My Role</dt>
-                <dd className="flex items-center text-sm text-gray-900">
+                <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">My Role</dt>
+                <dd className="flex items-center text-sm text-gray-900 dark:text-gray-100">
                   {user.takRole}
                   {roleDescriptions[user.takRole] && (
                     <div className="relative group ml-1">
@@ -223,8 +223,8 @@ export default function Dashboard({ user }) {
               <UserGroupIcon className="h-8 w-8 text-primary-600" />
             </div>
             <div className="ml-4">
-              <p className="text-sm font-medium text-gray-500">My Unit</p>
-              <p className="text-lg font-bold text-gray-900">
+              <p className="text-sm font-medium text-gray-500 dark:text-gray-400">My Unit</p>
+              <p className="text-lg font-bold text-gray-900 dark:text-gray-100">
                 {userTeam ? userTeam.name : 'Not assigned to a unit'}
               </p>
             </div>
@@ -237,8 +237,8 @@ export default function Dashboard({ user }) {
               <ClipboardDocumentListIcon className="h-8 w-8 text-yellow-600" />
             </div>
             <div className="ml-4">
-              <p className="text-sm font-medium text-gray-500">Pending Requests</p>
-              <p className="text-2xl font-bold text-gray-900">{stats.requests}</p>
+              <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Pending Requests</p>
+              <p className="text-2xl font-bold text-gray-900 dark:text-gray-100">{stats.requests}</p>
             </div>
           </div>
         </div>
@@ -249,8 +249,8 @@ export default function Dashboard({ user }) {
               <UsersIcon className="h-8 w-8 text-green-600" />
             </div>
             <div className="ml-4">
-              <p className="text-sm font-medium text-gray-500">Total Channels</p>
-              <p className="text-2xl font-bold text-gray-900">
+              <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Total Channels</p>
+              <p className="text-2xl font-bold text-gray-900 dark:text-gray-100">
                 {filteredChannels.length}
               </p>
             </div>
@@ -261,8 +261,8 @@ export default function Dashboard({ user }) {
       {/* My Channels */}
       <div className="card">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-medium text-gray-900">My Channels</h2>
-          <span className="text-sm text-gray-500">
+          <h2 className="text-lg font-medium text-gray-900 dark:text-gray-100">My Channels</h2>
+          <span className="text-sm text-gray-500 dark:text-gray-400">
             {filteredChannels.length} of {userChannels.length} channels
           </span>
         </div>
@@ -274,7 +274,7 @@ export default function Dashboard({ user }) {
             <input
               type="text"
               placeholder="Search channels by name or description..."
-              className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+              className="w-full pl-10 pr-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-500 dark:placeholder-gray-400"
               value={searchQuery}
               onChange={handleSearchChange}
             />
@@ -282,42 +282,60 @@ export default function Dashboard({ user }) {
         </div>
         
         {userChannels.length === 0 ? (
-          <p className="text-gray-500 text-center py-8">
+          <p className="text-gray-500 dark:text-gray-400 text-center py-8">
             You don't have access to any TAK channels yet.
           </p>
         ) : filteredChannels.length === 0 ? (
-          <p className="text-gray-500 text-center py-8">
+          <p className="text-gray-500 dark:text-gray-400 text-center py-8">
             No channels match your search.
           </p>
         ) : (
           <>
             <div className="space-y-3">
               {paginatedChannels.map((channel) => (
-                <div key={channel.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                <div key={channel.id} className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-lg">
                   <div className="flex-1">
-                    <h3 className="font-medium text-gray-900">{channel.display_name}</h3>
-                    <p className="text-sm text-gray-500">
+                    <h3 className="font-medium text-gray-900 dark:text-gray-100">{channel.display_name}</h3>
+                    <p className="text-sm text-gray-500 dark:text-gray-400">
                       {channel.description}
                     </p>
                   </div>
                   <div className="flex items-center space-x-2">
                     {channel.permissions.includes('read') && (
-                      <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-blue-100 text-blue-800 rounded">
-                        <ArrowUpRightIcon className="h-3 w-3 mr-1" />
-                        Read
-                      </span>
+                      <div className="relative group">
+                        <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-blue-100 text-blue-800 rounded cursor-help">
+                          <ArrowUpRightIcon className="h-3 w-3 mr-1" />
+                          Read
+                        </span>
+                        <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
+                          Receive data only - view others' locations and messages
+                          <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
+                        </div>
+                      </div>
                     )}
                     {channel.permissions.includes('write') && (
-                      <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-green-100 text-green-800 rounded">
-                        <ArrowDownLeftIcon className="h-3 w-3 mr-1" />
-                        Write
-                      </span>
+                      <div className="relative group">
+                        <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-green-100 text-green-800 rounded cursor-help">
+                          <ArrowDownLeftIcon className="h-3 w-3 mr-1" />
+                          Write
+                        </span>
+                        <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
+                          Send data only - share your location and messages
+                          <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
+                        </div>
+                      </div>
                     )}
                     {channel.permissions.includes('readwrite') && (
-                      <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-purple-100 text-purple-800 rounded">
-                        <ArrowsRightLeftIcon className="h-3 w-3 mr-1" />
-                        Read/Write
-                      </span>
+                      <div className="relative group">
+                        <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-purple-100 text-purple-800 rounded cursor-help">
+                          <ArrowsRightLeftIcon className="h-3 w-3 mr-1" />
+                          Read/Write
+                        </span>
+                        <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
+                          Full access - send and receive all data
+                          <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
+                        </div>
+                      </div>
                     )}
                   </div>
                 </div>
