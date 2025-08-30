@@ -4,6 +4,17 @@ const { authenticateToken, requireTeamAdmin } = require('../middleware/auth');
 const Team = require('../models/Team');
 const router = express.Router();
 
+// Get joinable teams (public endpoint)
+router.get('/joinable', async (req, res) => {
+  try {
+    const teams = await Team.getJoinableTeams();
+    res.json({ teams });
+  } catch (error) {
+    console.error('Failed to fetch joinable teams:', error);
+    res.status(500).json({ error: 'Failed to fetch joinable teams' });
+  }
+});
+
 // Get user's teams
 router.get('/my-teams', authenticateToken, async (req, res) => {
   try {
@@ -81,6 +92,46 @@ router.post('/', authenticateToken, [
     console.error('Error details:', error.message);
     console.error('Error stack:', error.stack);
     res.status(500).json({ error: 'Failed to create team', details: error.message });
+  }
+});
+
+// Update team
+router.put('/:teamId', authenticateToken, [
+  body('name').optional().trim().isLength({ min: 1, max: 255 }),
+  body('description').optional().trim(),
+  body('slug').optional().trim(),
+  body('visibility').optional().isIn(['public', 'private']),
+  body('canJoin').optional().isBoolean()
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
+  try {
+    // Only global admins can update teams for now
+    if (!req.user.isAdmin) {
+      return res.status(403).json({ error: 'Admin access required to update teams' });
+    }
+
+    const team = await Team.findById(req.params.teamId);
+    if (!team) {
+      return res.status(404).json({ error: 'Team not found' });
+    }
+
+    const { name, description, slug, visibility, canJoin } = req.body;
+    const updatedTeam = await Team.update(req.params.teamId, {
+      name,
+      description,
+      slug,
+      visibility,
+      can_join: canJoin
+    });
+
+    res.json({ team: updatedTeam });
+  } catch (error) {
+    console.error('Failed to update team:', error);
+    res.status(500).json({ error: 'Failed to update team' });
   }
 });
 

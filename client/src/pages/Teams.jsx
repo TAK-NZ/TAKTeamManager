@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { PlusIcon, UserGroupIcon, XMarkIcon, TrashIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, ChevronRightIcon } from '@heroicons/react/24/outline'
+import { PlusIcon, UserGroupIcon, XMarkIcon, TrashIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, ChevronRightIcon, EyeSlashIcon, ArrowRightOnRectangleIcon, PencilIcon } from '@heroicons/react/24/outline'
 import { teamsAPI } from '../services/api'
 import api from '../services/api'
 
@@ -13,7 +13,7 @@ export default function Teams({ user }) {
     description: '',
     slug: '',
     color: 'Blue',
-    visibility: 'private',
+    visibility: 'public',
     canJoin: false
   })
   const [creating, setCreating] = useState(false)
@@ -26,6 +26,7 @@ export default function Teams({ user }) {
   const [currentPage, setCurrentPage] = useState(1)
   const itemsPerPage = 15
   const [expandedTeams, setExpandedTeams] = useState(new Set())
+  const [editingTeamId, setEditingTeamId] = useState(null)
 
   useEffect(() => {
     const fetchData = async () => {
@@ -50,22 +51,26 @@ export default function Teams({ user }) {
     e.preventDefault()
     setCreating(true)
     try {
-      console.log('Creating team with data:', formData)
-      const response = await teamsAPI.create(formData)
-      console.log('Team created:', response.data)
-      setTeams([...teams, response.data.team])
+      if (editingTeamId) {
+        const response = await teamsAPI.update(editingTeamId, formData)
+        setTeams(teams.map(team => team.id === editingTeamId ? {...team, ...response.data.team} : team))
+      } else {
+        const response = await teamsAPI.create(formData)
+        setTeams([...teams, response.data.team])
+      }
       setShowCreateDialog(false)
+      setEditingTeamId(null)
       setFormData({
         name: '',
         description: '',
         slug: '',
         color: 'Blue',
-        visibility: 'private',
+        visibility: 'public',
         canJoin: false
       })
     } catch (error) {
-      console.error('Failed to create team:', error)
-      alert('Failed to create team: ' + (error.response?.data?.error || error.message))
+      console.error(editingTeamId ? 'Failed to update team:' : 'Failed to create team:', error)
+      alert((editingTeamId ? 'Failed to update team: ' : 'Failed to create team: ') + (error.response?.data?.error || error.message))
     } finally {
       setCreating(false)
     }
@@ -302,12 +307,20 @@ export default function Teams({ user }) {
                         ) : (
                           <div className="w-6 mr-2" />
                         )}
-                        <Link
-                          to={`/teams/${team.id}`}
-                          className="text-sm font-medium text-gray-900 dark:text-gray-100 hover:text-primary-600 dark:hover:text-primary-400 cursor-pointer"
-                        >
-                          {team.name}
-                        </Link>
+                        <div className="flex items-center space-x-2">
+                          <Link
+                            to={`/teams/${team.id}`}
+                            className="text-sm font-medium text-gray-900 dark:text-gray-100 hover:text-primary-600 dark:hover:text-primary-400 cursor-pointer"
+                          >
+                            {team.name}
+                          </Link>
+                          {team.visibility === 'private' && (
+                            <EyeSlashIcon className="h-4 w-4 text-red-500" title="Private team" />
+                          )}
+                          {team.can_join && (
+                            <ArrowRightOnRectangleIcon className="h-4 w-4 text-green-500" title="Joinable team" />
+                          )}
+                        </div>
                         {team.description && (
                           <div className="absolute bottom-full left-0 mb-2 px-3 py-2 bg-gray-900 text-white text-sm rounded-lg shadow-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-10 whitespace-normal w-64">
                             {team.description}
@@ -343,11 +356,40 @@ export default function Teams({ user }) {
                         >
                           <MagnifyingGlassIcon className="h-4 w-4" />
                         </Link>
+                        {isGlobalAdmin && (
+                          <button
+                            onClick={() => {
+                              setFormData({
+                                name: team.name,
+                                description: team.description || '',
+                                slug: team.slug || '',
+                                color: team.color || 'Blue',
+                                visibility: team.visibility || 'private',
+                                canJoin: team.can_join || false
+                              })
+                              setEditingTeamId(team.id)
+                              setShowCreateDialog(true)
+                            }}
+                            className="text-gray-600 hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300"
+                            title="Edit team"
+                          >
+                            <PencilIcon className="h-4 w-4" />
+                          </button>
+                        )}
                         {isGlobalAdmin && (!team.hasChildren || (team.sub_teams_count || 0) === 0) && (
                           <button
                             onClick={() => setDeleteTeamId(team.id)}
                             className="text-red-600 hover:text-red-500 dark:text-red-400 dark:hover:text-red-300"
                             title="Delete team"
+                          >
+                            <TrashIcon className="h-4 w-4" />
+                          </button>
+                        )}
+                        {isGlobalAdmin && (team.hasChildren && (team.sub_teams_count || 0) > 0) && (
+                          <button
+                            disabled
+                            className="text-gray-400 dark:text-gray-600 cursor-not-allowed"
+                            title="Cannot delete team with sub-teams"
                           >
                             <TrashIcon className="h-4 w-4" />
                           </button>
@@ -398,9 +440,20 @@ export default function Teams({ user }) {
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
-              <h3 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Create New Team</h3>
+              <h3 className="text-xl font-semibold text-gray-900 dark:text-gray-100">{editingTeamId ? 'Edit Team' : 'Create New Team'}</h3>
               <button
-                onClick={() => setShowCreateDialog(false)}
+                onClick={() => {
+                  setShowCreateDialog(false)
+                  setEditingTeamId(null)
+                  setFormData({
+                    name: '',
+                    description: '',
+                    slug: '',
+                    color: 'Blue',
+                    visibility: 'public',
+                    canJoin: false
+                  })
+                }}
                 className="text-gray-400 hover:text-gray-500 dark:hover:text-gray-300"
               >
                 <XMarkIcon className="h-6 w-6" />
@@ -548,7 +601,7 @@ export default function Teams({ user }) {
                   disabled={creating}
                   className="btn-primary px-6 py-2"
                 >
-                  {creating ? 'Creating Team...' : 'Create Team'}
+                  {creating ? (editingTeamId ? 'Updating Team...' : 'Creating Team...') : (editingTeamId ? 'Update Team' : 'Create Team')}
                 </button>
               </div>
             </form>

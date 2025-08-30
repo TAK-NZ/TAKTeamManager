@@ -13,7 +13,8 @@ router.post('/team-access', [
   body('email').isEmail().normalizeEmail(),
   body('firstName').trim().isLength({ min: 1 }),
   body('lastName').trim().isLength({ min: 1 }),
-  body('teamName').trim().isLength({ min: 1 }),
+  body('teamId').isInt(),
+  body('teamName').optional().trim(),
   body('reason').trim().isLength({ min: 10, max: 500 })
 ], async (req, res) => {
   const errors = validationResult(req);
@@ -21,15 +22,30 @@ router.post('/team-access', [
     return res.status(400).json({ errors: errors.array() });
   }
 
-  const { email, firstName, lastName, teamName, reason } = req.body;
+  const { email, firstName, lastName, teamId, teamName, reason } = req.body;
   
   try {
-    const request = await AccessRequest.create(req.body);
+    // Verify team exists and is joinable
+    const team = await Team.findById(teamId);
+    if (!team || !team.can_join || team.visibility !== 'public') {
+      return res.status(400).json({ error: 'Team is not available for joining' });
+    }
+
+    const requestData = {
+      email,
+      firstName,
+      lastName,
+      teamName: team.name,
+      reason
+    };
+    
+    const request = await AccessRequest.create(requestData);
     res.json({ 
       message: 'Access request submitted successfully',
       requestId: request.id
     });
   } catch (error) {
+    console.error('Failed to submit request:', error);
     res.status(500).json({ error: 'Failed to submit request' });
   }
 });

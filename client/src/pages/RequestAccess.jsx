@@ -1,22 +1,71 @@
-import { useState } from 'react'
-import { useForm } from 'react-hook-form'
+import { useState, useEffect } from 'react'
+import { useForm, Controller } from 'react-hook-form'
 import { Link } from 'react-router-dom'
 import toast from 'react-hot-toast'
-import { requestsAPI } from '../services/api'
+import { requestsAPI, teamsAPI } from '../services/api'
 import { ThemeProvider } from '../contexts/ThemeContext'
+import { ChevronDownIcon, MagnifyingGlassIcon } from '@heroicons/react/24/outline'
 
 export default function RequestAccess() {
   const [submitted, setSubmitted] = useState(false)
-  const { register, handleSubmit, formState: { errors, isSubmitting } } = useForm()
+  const [teams, setTeams] = useState([])
+  const [filteredTeams, setFilteredTeams] = useState([])
+  const [searchTerm, setSearchTerm] = useState('')
+  const [isDropdownOpen, setIsDropdownOpen] = useState(false)
+  const [selectedTeam, setSelectedTeam] = useState(null)
+  const { register, handleSubmit, control, formState: { errors, isSubmitting } } = useForm()
+
+  useEffect(() => {
+    const fetchJoinableTeams = async () => {
+      try {
+        const response = await teamsAPI.getJoinable()
+        setTeams(response.data.teams)
+        setFilteredTeams(response.data.teams)
+      } catch (error) {
+        console.error('Failed to fetch joinable teams:', error)
+        toast.error('Failed to load available teams')
+      }
+    }
+    fetchJoinableTeams()
+  }, [])
+
+  useEffect(() => {
+    const filtered = teams.filter(team => 
+      team.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (team.description && team.description.toLowerCase().includes(searchTerm.toLowerCase()))
+    )
+    setFilteredTeams(filtered)
+  }, [searchTerm, teams])
+
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (!event.target.closest('.team-dropdown')) {
+        setIsDropdownOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
 
   const onSubmit = async (data) => {
     try {
-      await requestsAPI.submitTeamAccess(data)
+      const submitData = {
+        ...data,
+        teamId: selectedTeam?.id,
+        teamName: selectedTeam?.name
+      }
+      await requestsAPI.submitTeamAccess(submitData)
       setSubmitted(true)
       toast.success('Access request submitted successfully!')
     } catch (error) {
       toast.error('Failed to submit request. Please try again.')
     }
+  }
+
+  const handleTeamSelect = (team) => {
+    setSelectedTeam(team)
+    setSearchTerm(team.name)
+    setIsDropdownOpen(false)
   }
 
   if (submitted) {
@@ -102,16 +151,71 @@ export default function RequestAccess() {
 
             <div>
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                Team Name
+                Select Team
               </label>
-              <input
-                type="text"
-                className="input"
-                placeholder="e.g., Fire Department, Police, Emergency Services"
-                {...register('teamName', { required: 'Team name is required' })}
+              <Controller
+                name="teamId"
+                control={control}
+                rules={{ required: 'Please select a team' }}
+                render={({ field }) => (
+                  <div className="relative team-dropdown">
+                    <div className="relative">
+                      <input
+                        type="text"
+                        className="input pr-10"
+                        placeholder="Search for a team..."
+                        value={searchTerm}
+                        onChange={(e) => {
+                          setSearchTerm(e.target.value)
+                          setIsDropdownOpen(true)
+                          if (!e.target.value) setSelectedTeam(null)
+                        }}
+                        onFocus={() => setIsDropdownOpen(true)}
+                      />
+                      <div className="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none">
+                        <MagnifyingGlassIcon className="h-5 w-5 text-gray-400" />
+                      </div>
+                    </div>
+                    
+                    {isDropdownOpen && filteredTeams.length > 0 && (
+                      <div className="absolute z-10 mt-1 w-full bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-md shadow-lg max-h-60 overflow-auto">
+                        {filteredTeams.map((team) => (
+                          <div
+                            key={team.id}
+                            className="px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 cursor-pointer"
+                            onClick={() => {
+                              handleTeamSelect(team)
+                              field.onChange(team.id)
+                            }}
+                          >
+                            <div className="font-medium text-gray-900 dark:text-gray-100">
+                              {team.name}
+                            </div>
+                            {team.description && (
+                              <div className="text-sm text-gray-500 dark:text-gray-400 truncate">
+                                {team.description}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    
+                    {isDropdownOpen && filteredTeams.length === 0 && searchTerm && (
+                      <div className="absolute z-10 mt-1 w-full bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-md shadow-lg">
+                        <div className="px-4 py-2 text-gray-500 dark:text-gray-400">
+                          No teams found matching "{searchTerm}"
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
               />
-              {errors.teamName && (
-                <p className="text-red-600 text-sm mt-1">{errors.teamName.message}</p>
+              {errors.teamId && (
+                <p className="text-red-600 text-sm mt-1">{errors.teamId.message}</p>
+              )}
+              {!selectedTeam && searchTerm && (
+                <p className="text-amber-600 text-sm mt-1">Please select a team from the dropdown</p>
               )}
             </div>
 
@@ -135,7 +239,7 @@ export default function RequestAccess() {
 
             <button
               type="submit"
-              disabled={isSubmitting}
+              disabled={isSubmitting || !selectedTeam}
               className="w-full btn-primary disabled:opacity-50"
             >
               {isSubmitting ? 'Submitting...' : 'Submit Request'}

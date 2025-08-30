@@ -139,6 +139,20 @@ class Team {
     }
   }
 
+  static async update(teamId, updateData) {
+    const { name, description, slug, visibility, can_join } = updateData;
+    try {
+      const result = await pool.query(
+        'UPDATE teams SET name = COALESCE($1, name), description = COALESCE($2, description), slug = COALESCE($3, slug), visibility = COALESCE($4, visibility), can_join = COALESCE($5, can_join), updated_at = CURRENT_TIMESTAMP WHERE id = $6 RETURNING *',
+        [name, description, slug, visibility, can_join, teamId]
+      );
+      return result.rows[0];
+    } catch (error) {
+      console.error('Error updating team:', error);
+      throw error;
+    }
+  }
+
   static async delete(teamId) {
     try {
       // Delete team memberships first
@@ -150,6 +164,21 @@ class Team {
     } catch (error) {
       console.error('Error deleting team:', error);
       throw error;
+    }
+  }
+
+  static async getJoinableTeams() {
+    try {
+      const result = await pool.query(`
+        SELECT id, name, description, visibility
+        FROM teams 
+        WHERE can_join = true AND visibility = 'public'
+        ORDER BY name
+      `);
+      return result.rows;
+    } catch (error) {
+      console.error('Error fetching joinable teams:', error);
+      return [];
     }
   }
 }

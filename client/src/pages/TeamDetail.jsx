@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { PlusIcon, UsersIcon, UserPlusIcon, ShieldCheckIcon, BuildingOfficeIcon, FolderPlusIcon, HashtagIcon, XMarkIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, TrashIcon } from '@heroicons/react/24/outline'
+import { PlusIcon, UsersIcon, UserPlusIcon, ShieldCheckIcon, BuildingOfficeIcon, FolderPlusIcon, HashtagIcon, XMarkIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, TrashIcon, PencilIcon } from '@heroicons/react/24/outline'
 import { teamsAPI, channelsAPI } from '../services/api'
 
 export default function TeamDetail() {
@@ -44,12 +44,21 @@ export default function TeamDetail() {
     name: '',
     description: '',
     slug: '',
-    visibility: 'private',
+    visibility: 'public',
     canJoin: false
   })
   const [creatingSubTeam, setCreatingSubTeam] = useState(false)
   const [deleteSubTeamId, setDeleteSubTeamId] = useState(null)
   const [deletingSubTeam, setDeletingSubTeam] = useState(false)
+  const [showEditDialog, setShowEditDialog] = useState(false)
+  const [editFormData, setEditFormData] = useState({
+    name: '',
+    description: '',
+    slug: '',
+    visibility: 'public',
+    canJoin: false
+  })
+  const [updating, setUpdating] = useState(false)
 
   const handleCreateSubTeam = async (e) => {
     e.preventDefault()
@@ -71,7 +80,7 @@ export default function TeamDetail() {
         name: '',
         description: '',
         slug: '',
-        visibility: 'private',
+        visibility: 'public',
         canJoin: false
       })
       setShowSubTeamDialog(false)
@@ -130,13 +139,9 @@ export default function TeamDetail() {
       if (isCancelled) return
       
       try {
-        console.log('Fetching team data for ID:', teamId)
         const teamResponse = await teamsAPI.getById(teamId)
         
         if (isCancelled) return
-        
-        console.log('Team response:', teamResponse.data)
-        console.log('Setting team:', teamResponse.data.team)
         
         const teamData = teamResponse.data.team
         const allMembers = teamResponse.data.members || []
@@ -177,7 +182,7 @@ export default function TeamDetail() {
           }
         }
         
-        console.log('Team state should be set now')
+
         
         // Skip channels for now since API might not exist
         if (!isCancelled) {
@@ -191,7 +196,6 @@ export default function TeamDetail() {
       }
       
       if (!isCancelled) {
-        console.log('Setting loading to false')
         setLoading(false)
       }
     }
@@ -383,6 +387,22 @@ export default function TeamDetail() {
           </div>
           <div className="flex flex-col gap-2 lg:items-end">
             <div className="flex flex-wrap gap-2">
+              <button 
+                onClick={() => {
+                  setEditFormData({
+                    name: team.name,
+                    description: team.description || '',
+                    slug: team.slug || '',
+                    visibility: team.visibility || 'private',
+                    canJoin: team.can_join || false
+                  })
+                  setShowEditDialog(true)
+                }}
+                className="btn-secondary flex items-center"
+              >
+                <PencilIcon className="h-4 w-4 mr-2" />
+                Edit Team
+              </button>
               <button className="btn-secondary flex items-center">
                 <UserPlusIcon className="h-4 w-4 mr-2" />
                 Add Member
@@ -669,6 +689,15 @@ export default function TeamDetail() {
                               <TrashIcon className="h-4 w-4" />
                             </button>
                           )}
+                          {(subTeam.sub_teams_count || 0) > 0 && (
+                            <button
+                              disabled
+                              className="text-gray-400 dark:text-gray-600 cursor-not-allowed"
+                              title="Cannot delete team with sub-teams"
+                            >
+                              <TrashIcon className="h-4 w-4" />
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -901,6 +930,123 @@ export default function TeamDetail() {
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Team Dialog */}
+      {showEditDialog && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
+              <h3 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Edit Team</h3>
+              <button
+                onClick={() => setShowEditDialog(false)}
+                className="text-gray-400 hover:text-gray-500 dark:hover:text-gray-300"
+              >
+                <XMarkIcon className="h-6 w-6" />
+              </button>
+            </div>
+            
+            <form onSubmit={async (e) => {
+              e.preventDefault()
+              setUpdating(true)
+              try {
+                await teamsAPI.update(team.id, editFormData)
+                setTeam({...team, ...editFormData})
+                setShowEditDialog(false)
+              } catch (error) {
+                console.error('Failed to update team:', error)
+                alert('Failed to update team: ' + (error.response?.data?.error || error.message))
+              } finally {
+                setUpdating(false)
+              }
+            }} className="p-6">
+              <div className="space-y-6">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Team Name *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={editFormData.name}
+                    onChange={(e) => setEditFormData({...editFormData, name: e.target.value})}
+                    className="input w-full"
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Description
+                  </label>
+                  <textarea
+                    value={editFormData.description}
+                    onChange={(e) => setEditFormData({...editFormData, description: e.target.value})}
+                    className="input w-full"
+                    rows={3}
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Team Slug
+                  </label>
+                  <input
+                    type="text"
+                    value={editFormData.slug}
+                    onChange={(e) => setEditFormData({...editFormData, slug: e.target.value})}
+                    className="input w-full"
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Visibility
+                  </label>
+                  <select
+                    value={editFormData.visibility}
+                    onChange={(e) => setEditFormData({...editFormData, visibility: e.target.value})}
+                    className="input w-full"
+                  >
+                    <option value="private">Private</option>
+                    <option value="public">Public</option>
+                  </select>
+                </div>
+                
+                <div className="flex items-start">
+                  <input
+                    type="checkbox"
+                    id="editCanJoin"
+                    checked={editFormData.canJoin}
+                    onChange={(e) => setEditFormData({...editFormData, canJoin: e.target.checked})}
+                    className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded mt-1"
+                  />
+                  <div className="ml-3">
+                    <label htmlFor="editCanJoin" className="text-sm text-gray-700 dark:text-gray-300 font-medium">
+                      Allow join requests
+                    </label>
+                  </div>
+                </div>
+              </div>
+              
+              <div className="flex justify-end space-x-3 pt-6 mt-6 border-t border-gray-200 dark:border-gray-700">
+                <button
+                  type="button"
+                  onClick={() => setShowEditDialog(false)}
+                  className="btn-secondary px-6 py-2"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={updating}
+                  className="btn-primary px-6 py-2"
+                >
+                  {updating ? 'Updating...' : 'Update Team'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

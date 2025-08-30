@@ -69,7 +69,9 @@ export const authAPI = {
 
 export const teamsAPI = {
   getMyTeams: () => api.get('/teams/my-teams'),
+  getJoinable: () => axios.get('/api/teams/joinable'),
   create: (data) => api.post('/teams', data),
+  update: (id, data) => api.put(`/teams/${id}`, data),
   getById: (id) => api.get(`/teams/${id}`),
   addMember: (teamId, data) => api.post(`/teams/${teamId}/members`, data),
   getHierarchy: (id) => api.get(`/teams/${id}/hierarchy`),

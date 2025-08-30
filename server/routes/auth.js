@@ -59,7 +59,7 @@ router.get('/callback', async (req, res) => {
     });
 
     const basicUser = userResponse.data;
-    console.log('Basic user from OAuth:', basicUser.preferred_username);
+
 
     // Get cached user data from local database
     const authentikSync = require('../services/authentikSync');
@@ -70,7 +70,7 @@ router.get('/callback', async (req, res) => {
       return res.redirect(process.env.FRONTEND_URL + '?error=user_not_synced');
     }
 
-    console.log('Using cached user data:', cachedUser.username);
+
 
     // Create minimal JWT token with just user ID
     const jwtToken = jwt.sign(
