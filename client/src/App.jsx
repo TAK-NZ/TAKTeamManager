@@ -15,13 +15,36 @@ function App() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
+    // Handle OAuth callback token
+    const urlParams = new URLSearchParams(window.location.search)
+    const tokenFromUrl = urlParams.get('token')
+    
+    if (tokenFromUrl) {
+      localStorage.setItem('token', tokenFromUrl)
+      // Remove token from URL
+      window.history.replaceState({}, document.title, window.location.pathname)
+    }
+    
     const token = localStorage.getItem('token')
     if (token) {
       authAPI.getProfile()
         .then(response => setUser(response.data.user))
-        .catch(() => localStorage.removeItem('token'))
+        .catch(() => {
+          localStorage.removeItem('token')
+          setUser(null)
+        })
         .finally(() => setLoading(false))
     } else {
+      // Auto-login if coming from Authentik or auto_login parameter
+      const referrer = document.referrer
+      const autoLogin = urlParams.get('auto_login')
+      
+      if ((referrer && referrer.includes('account.test.tak.nz')) || autoLogin === 'true') {
+        // User came from Authentik, automatically start OAuth flow
+        authAPI.login()
+        return
+      }
+      
       setLoading(false)
     }
   }, [])

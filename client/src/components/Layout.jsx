@@ -36,8 +36,12 @@ export default function Layout({ children, user }) {
       <div className={`fixed inset-0 z-50 lg:hidden ${sidebarOpen ? '' : 'hidden'}`}>
         <div className="fixed inset-0 bg-gray-600 bg-opacity-75" onClick={() => setSidebarOpen(false)} />
         <div className="fixed inset-y-0 left-0 flex w-64 flex-col bg-white">
-          <div className="flex h-16 items-center justify-between px-4">
-            <h1 className="text-xl font-bold text-gray-900">TAK Team Manager</h1>
+          <div className="flex h-16 items-center justify-between py-4">
+            <img 
+              src="https://raw.githubusercontent.com/TAK-NZ/auth-infra/refs/heads/main/authentik/branding/icons/tak-nz-brand-wide.svg" 
+              alt="TAK.NZ" 
+              className="h-10 w-auto"
+            />
             <button onClick={() => setSidebarOpen(false)}>
               <XMarkIcon className="h-6 w-6" />
             </button>
@@ -65,8 +69,12 @@ export default function Layout({ children, user }) {
       {/* Desktop sidebar */}
       <div className="hidden lg:fixed lg:inset-y-0 lg:flex lg:w-64 lg:flex-col">
         <div className="flex flex-col flex-grow bg-white border-r border-gray-200">
-          <div className="flex h-16 items-center px-4">
-            <h1 className="text-xl font-bold text-gray-900">TAK Team Manager</h1>
+          <div className="flex h-16 items-center py-4">
+            <img 
+              src="https://raw.githubusercontent.com/TAK-NZ/auth-infra/refs/heads/main/authentik/branding/icons/tak-nz-brand-wide.svg" 
+              alt="TAK.NZ" 
+              className="h-10 w-auto"
+            />
           </div>
           <nav className="flex-1 space-y-1 px-2 py-4">
             {navigation.map((item) => (
@@ -97,14 +105,15 @@ export default function Layout({ children, user }) {
           >
             <Bars3Icon className="h-6 w-6" />
           </button>
-          <div className="flex flex-1 justify-end px-4">
+          <div className="flex flex-1 justify-between items-center px-4">
+            <h1 className="text-xl font-bold text-gray-900">TAK Team Manager</h1>
             <div className="flex items-center space-x-4">
               <span className="text-sm text-gray-700">
                 {user?.first_name} {user?.last_name}
               </span>
               <button
                 onClick={handleLogout}
-                className="text-sm text-gray-500 hover:text-gray-700"
+                className="px-3 py-1 text-sm text-gray-700 border border-gray-300 rounded hover:bg-gray-50 hover:border-gray-400"
               >
                 Logout
               </button>

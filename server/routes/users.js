@@ -6,6 +6,21 @@ const Team = require('../models/Team');
 const authentikService = require('../services/authentik');
 const router = express.Router();
 
+// List all users
+router.get('/', authenticateToken, async (req, res) => {
+  try {
+    console.log('Fetching users from Authentik...');
+    // Fetch users from Authentik
+    const authentikUsers = await authentikService.getUsers();
+    console.log('Authentik users:', authentikUsers.length, 'users found');
+    
+    res.json({ users: authentikUsers });
+  } catch (error) {
+    console.error('Failed to fetch users:', error);
+    res.status(500).json({ error: 'Failed to fetch users' });
+  }
+});
+
 // Get current user profile
 router.get('/me', authenticateToken, async (req, res) => {
   try {

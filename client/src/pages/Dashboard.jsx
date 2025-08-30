@@ -1,35 +1,128 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { UserGroupIcon, UsersIcon, ClipboardDocumentListIcon } from '@heroicons/react/24/outline'
+import { UserGroupIcon, UsersIcon, ClipboardDocumentListIcon, ArrowUpRightIcon, ArrowDownLeftIcon, ArrowsRightLeftIcon, MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon } from '@heroicons/react/24/outline'
 import { teamsAPI, requestsAPI } from '../services/api'
+import axios from 'axios'
 
 export default function Dashboard({ user }) {
-  const [stats, setStats] = useState({ teams: 0, requests: 0 })
-  const [recentTeams, setRecentTeams] = useState([])
+  const [stats, setStats] = useState({ requests: 0 })
+  const [userTeam, setUserTeam] = useState(null)
+  const [userChannels, setUserChannels] = useState([])
   const [loading, setLoading] = useState(true)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [currentPage, setCurrentPage] = useState(1)
+  const channelsPerPage = 10
+
+  // Map color names to CSS colors
+  const getColorValue = (colorName) => {
+    const colorMap = {
+      'Red': '#ef4444',
+      'Blue': '#3b82f6', 
+      'Green': '#22c55e',
+      'Yellow': '#eab308',
+      'Purple': '#a855f7',
+      'Orange': '#f97316',
+      'Pink': '#ec4899',
+      'Cyan': '#06b6d4',
+      'Gray': '#6b7280',
+      'Black': '#1f2937',
+      'White': '#f9fafb'
+    }
+    return colorMap[colorName] || '#6b7280'
+  }
 
   useEffect(() => {
-    const fetchData = async () => {
+    const fetchChannelData = async () => {
       try {
-        const [teamsResponse, requestsResponse] = await Promise.all([
-          teamsAPI.getMyTeams(),
-          requestsAPI.getPending().catch(() => ({ data: { requests: [] } }))
-        ])
-        
-        setRecentTeams(teamsResponse.data.teams.slice(0, 5))
-        setStats({
-          teams: teamsResponse.data.teams.length,
-          requests: requestsResponse.data.requests.length
+        // Fetch channel descriptions from API
+        const response = await axios.get('/api/channels/descriptions', {
+          headers: {
+            Authorization: `Bearer ${localStorage.getItem('token')}`
+          }
         })
+        
+        const channelDescriptions = response.data.channels
+        console.log('Channel descriptions:', channelDescriptions)
+        
+        // Process TAK channels and group by base name
+        const takGroups = user.groups?.filter(groupName => {
+          console.log('Checking group:', groupName, 'starts with tak_:', groupName.startsWith('tak_'))
+          return groupName.startsWith('tak_')
+        }) || []
+        
+        // Create lookup map for descriptions
+        const descriptionMap = new Map()
+        channelDescriptions.forEach(channel => {
+          descriptionMap.set(channel.name, channel)
+        })
+        
+        // Group channels by base name and determine permissions
+        const channelMap = new Map()
+        
+        takGroups.forEach(groupName => {
+          let baseName, permission
+          
+          if (groupName.endsWith('_READ')) {
+            baseName = groupName.slice(0, -5) // Remove '_READ'
+            permission = 'read'
+          } else if (groupName.endsWith('_WRITE')) {
+            baseName = groupName.slice(0, -6) // Remove '_WRITE'
+            permission = 'write'
+          } else {
+            baseName = groupName
+            permission = 'readwrite'
+          }
+          
+          if (!channelMap.has(baseName)) {
+            const channelInfo = descriptionMap.get(baseName)
+            channelMap.set(baseName, {
+              id: baseName,
+              name: baseName,
+              display_name: channelInfo?.display_name || baseName.replace('tak_', '').replace(/_/g, ' / '),
+              description: channelInfo?.description || 'TAK Channel',
+              permissions: new Set()
+            })
+          }
+          
+          channelMap.get(baseName).permissions.add(permission)
+        })
+        
+        const takChannels = Array.from(channelMap.values()).map(channel => ({
+          ...channel,
+          permissions: Array.from(channel.permissions)
+        })).sort((a, b) => a.display_name.localeCompare(b.display_name))
+        
+        console.log('TAK channels found:', takChannels)
+        
+        setUserChannels(takChannels)
+        setStats({ requests: 0 })
       } catch (error) {
-        console.error('Failed to fetch dashboard data:', error)
+        console.error('Failed to fetch channel data:', error)
+        setStats({ requests: 0 })
       } finally {
         setLoading(false)
       }
     }
 
-    fetchData()
-  }, [])
+    fetchChannelData()
+  }, [user])
+
+  // Filter channels based on search query
+  const filteredChannels = userChannels.filter(channel => 
+    channel.display_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    channel.description.toLowerCase().includes(searchQuery.toLowerCase())
+  )
+
+  // Pagination logic
+  const totalPages = Math.ceil(filteredChannels.length / channelsPerPage)
+  const startIndex = (currentPage - 1) * channelsPerPage
+  const paginatedChannels = filteredChannels.slice(startIndex, startIndex + channelsPerPage)
+
+  // Reset to first page when search changes
+  const handleSearchChange = (e) => {
+    setSearchQuery(e.target.value)
+    setCurrentPage(1)
+  }
 
   if (loading) {
     return (
@@ -46,9 +139,42 @@ export default function Dashboard({ user }) {
           Welcome back, {user.first_name}!
         </h1>
         <p className="text-gray-600">
-          Manage your TAK teams and channels from your dashboard.
+          View your TAK team assignment and channel access.
         </p>
       </div>
+
+      {/* TAK Profile */}
+      {(user.takRole || user.takColor || user.takCallsign) && (
+        <div className="card">
+          <h2 className="text-lg font-medium text-gray-900 mb-4">TAK Profile</h2>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {user.takRole && (
+              <div>
+                <dt className="text-sm font-medium text-gray-500">Role</dt>
+                <dd className="text-sm text-gray-900">{user.takRole}</dd>
+              </div>
+            )}
+            {user.takColor && (
+              <div>
+                <dt className="text-sm font-medium text-gray-500">Color</dt>
+                <dd className="flex items-center text-sm text-gray-900">
+                  <div 
+                    className="w-4 h-4 rounded border border-gray-300 mr-2" 
+                    style={{ backgroundColor: getColorValue(user.takColor) }}
+                  ></div>
+                  {user.takColor}
+                </dd>
+              </div>
+            )}
+            {user.takCallsign && (
+              <div>
+                <dt className="text-sm font-medium text-gray-500">Callsign</dt>
+                <dd className="text-sm text-gray-900">{user.takCallsign}</dd>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Stats */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -58,8 +184,10 @@ export default function Dashboard({ user }) {
               <UserGroupIcon className="h-8 w-8 text-primary-600" />
             </div>
             <div className="ml-4">
-              <p className="text-sm font-medium text-gray-500">My Teams</p>
-              <p className="text-2xl font-bold text-gray-900">{stats.teams}</p>
+              <p className="text-sm font-medium text-gray-500">My Team</p>
+              <p className="text-lg font-bold text-gray-900">
+                {userTeam ? userTeam.name : 'Not assigned to a team'}
+              </p>
             </div>
           </div>
         </div>
@@ -84,45 +212,109 @@ export default function Dashboard({ user }) {
             <div className="ml-4">
               <p className="text-sm font-medium text-gray-500">Total Channels</p>
               <p className="text-2xl font-bold text-gray-900">
-                {recentTeams.reduce((acc, team) => acc + (team.channels?.length || 0), 0)}
+                {filteredChannels.length}
               </p>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Recent Teams */}
+      {/* My Channels */}
       <div className="card">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-medium text-gray-900">My Teams</h2>
-          <Link to="/teams" className="text-sm text-primary-600 hover:text-primary-500">
-            View all
-          </Link>
+          <h2 className="text-lg font-medium text-gray-900">My Channels</h2>
+          <span className="text-sm text-gray-500">
+            {filteredChannels.length} of {userChannels.length} channels
+          </span>
         </div>
         
-        {recentTeams.length === 0 ? (
+        {/* Search */}
+        <div className="mb-4">
+          <div className="relative">
+            <MagnifyingGlassIcon className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
+            <input
+              type="text"
+              placeholder="Search channels by name or description..."
+              className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+              value={searchQuery}
+              onChange={handleSearchChange}
+            />
+          </div>
+        </div>
+        
+        {userChannels.length === 0 ? (
           <p className="text-gray-500 text-center py-8">
-            You're not a member of any teams yet.
+            You don't have access to any TAK channels yet.
+          </p>
+        ) : filteredChannels.length === 0 ? (
+          <p className="text-gray-500 text-center py-8">
+            No channels match your search.
           </p>
         ) : (
-          <div className="space-y-3">
-            {recentTeams.map((team) => (
-              <div key={team.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                <div>
-                  <h3 className="font-medium text-gray-900">{team.name}</h3>
-                  <p className="text-sm text-gray-500">
-                    Role: {team.role} • {team.description || 'No description'}
-                  </p>
+          <>
+            <div className="space-y-3">
+              {paginatedChannels.map((channel) => (
+                <div key={channel.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                  <div className="flex-1">
+                    <h3 className="font-medium text-gray-900">{channel.display_name}</h3>
+                    <p className="text-sm text-gray-500">
+                      {channel.description}
+                    </p>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    {channel.permissions.includes('read') && (
+                      <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-blue-100 text-blue-800 rounded">
+                        <ArrowUpRightIcon className="h-3 w-3 mr-1" />
+                        Read
+                      </span>
+                    )}
+                    {channel.permissions.includes('write') && (
+                      <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-green-100 text-green-800 rounded">
+                        <ArrowDownLeftIcon className="h-3 w-3 mr-1" />
+                        Write
+                      </span>
+                    )}
+                    {channel.permissions.includes('readwrite') && (
+                      <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-purple-100 text-purple-800 rounded">
+                        <ArrowsRightLeftIcon className="h-3 w-3 mr-1" />
+                        Read/Write
+                      </span>
+                    )}
+                  </div>
                 </div>
-                <Link
-                  to={`/teams/${team.id}`}
-                  className="text-sm text-primary-600 hover:text-primary-500"
-                >
-                  View
-                </Link>
+              ))}
+            </div>
+            
+            {/* Pagination */}
+            {totalPages > 1 && (
+              <div className="flex items-center justify-between mt-6 pt-4 border-t border-gray-200">
+                <div className="text-sm text-gray-700">
+                  Showing {startIndex + 1} to {Math.min(startIndex + channelsPerPage, filteredChannels.length)} of {filteredChannels.length} channels
+                </div>
+                <div className="flex items-center space-x-2">
+                  <button
+                    onClick={() => setCurrentPage(Math.max(1, currentPage - 1))}
+                    disabled={currentPage === 1}
+                    className="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-500 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <ChevronLeftIcon className="h-4 w-4 mr-1" />
+                    Previous
+                  </button>
+                  <span className="text-sm text-gray-700">
+                    Page {currentPage} of {totalPages}
+                  </span>
+                  <button
+                    onClick={() => setCurrentPage(Math.min(totalPages, currentPage + 1))}
+                    disabled={currentPage === totalPages}
+                    className="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-500 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Next
+                    <ChevronRightIcon className="h-4 w-4 ml-1" />
+                  </button>
+                </div>
               </div>
-            ))}
-          </div>
+            )}
+          </>
         )}
       </div>
 

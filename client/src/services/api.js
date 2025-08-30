@@ -29,9 +29,42 @@ api.interceptors.response.use(
 );
 
 export const authAPI = {
-  login: () => window.location.href = '/api/auth/login',
+  login: () => {
+    console.log('Login button clicked, redirecting to:', 'http://44.229.3.37:3000/api/auth/login');
+    window.open('http://44.229.3.37:3000/api/auth/login', '_self');
+  },
+  silentLogin: () => {
+    return new Promise((resolve, reject) => {
+      // Open small popup window for silent auth check
+      const popup = window.open(
+        'http://44.229.3.37:3000/api/auth/silent',
+        'silent-auth',
+        'width=1,height=1,left=-1000,top=-1000'
+      )
+      
+      const timeout = setTimeout(() => {
+        popup?.close()
+        reject(new Error('Silent login timeout'))
+      }, 5000)
+      
+      window.addEventListener('message', function handler(event) {
+        if (event.origin !== 'http://44.229.3.37:3000') return
+        
+        clearTimeout(timeout)
+        popup?.close()
+        window.removeEventListener('message', handler)
+        
+        if (event.data.success) {
+          window.location.href = event.data.redirectUrl
+          resolve()
+        } else {
+          reject(new Error('No valid session'))
+        }
+      })
+    })
+  },
   logout: () => api.post('/auth/logout'),
-  getProfile: () => api.get('/users/me'),
+  getProfile: () => api.get('/auth/me'),
 };
 
 export const teamsAPI = {
@@ -43,6 +76,7 @@ export const teamsAPI = {
 };
 
 export const usersAPI = {
+  getAll: () => api.get('/users'),
   create: (data) => api.post('/users', data),
   search: (query) => api.get(`/users/search?q=${query}`),
   moveToHoldingPen: (userId) => api.post(`/users/${userId}/holding-pen`),

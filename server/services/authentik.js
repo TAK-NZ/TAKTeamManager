@@ -32,6 +32,12 @@ class AuthentikService {
     });
   }
 
+  // Get all users (excluding service accounts)
+  async getUsers() {
+    const response = await this.client.get('/core/users/?type=internal');
+    return response.data.results;
+  }
+
   // Get user by username
   async getUserByUsername(username) {
     const response = await this.client.get(`/core/users/?username=${username}`);

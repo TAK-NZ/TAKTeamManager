@@ -8,6 +8,7 @@ CREATE TABLE users (
     email VARCHAR(254) UNIQUE NOT NULL,
     first_name VARCHAR(150),
     last_name VARCHAR(150),
+    is_global_manager BOOLEAN DEFAULT false,
     is_active BOOLEAN DEFAULT true,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -25,12 +26,19 @@ CREATE TABLE teams (
     UNIQUE(name, parent_team_id)
 );
 
--- Team memberships with roles
+-- Team memberships (users can only be member of one team)
 CREATE TABLE team_memberships (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE UNIQUE, -- UNIQUE ensures single team membership
+    team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Team management permissions (users can manage multiple teams)
+CREATE TABLE team_managers (
     id SERIAL PRIMARY KEY,
     user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
     team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE,
-    role VARCHAR(50) DEFAULT 'member', -- 'admin', 'member'
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(user_id, team_id)
 );
@@ -89,6 +97,8 @@ CREATE TABLE audit_logs (
 CREATE INDEX idx_teams_parent ON teams(parent_team_id);
 CREATE INDEX idx_team_memberships_user ON team_memberships(user_id);
 CREATE INDEX idx_team_memberships_team ON team_memberships(team_id);
+CREATE INDEX idx_team_managers_user ON team_managers(user_id);
+CREATE INDEX idx_team_managers_team ON team_managers(team_id);
 CREATE INDEX idx_channels_team ON channels(team_id);
 CREATE INDEX idx_channel_memberships_user ON channel_memberships(user_id);
 CREATE INDEX idx_channel_memberships_channel ON channel_memberships(channel_id);

@@ -24,13 +24,26 @@
 - [ ] **Reporting & Analytics** - Team membership reports
 - [ ] **Advanced Permissions** - Granular role-based access
 
+## User Roles & Permissions
+### User Role Hierarchy
+- **Global Manager** - Full system access, can manage all teams and users
+- **Team Manager** - Can manage specific teams they're assigned to manage
+- **Team Member** - Standard user, member of exactly one team
+
+### Team Membership Rules
+- **Single Team Membership** - Each user can only be a member of one team at a time
+- **Multiple Management** - A user can manage multiple teams (without being a member)
+- **Role Separation** - Team managers don't need to be members of teams they manage
+
 ## User Stories
 1. **As a new user, I want to request access to a team so that I can join TAK communications**
-2. **As a team admin, I want to approve/deny user requests so that I control team membership**
-3. **As a team admin, I want to create sub-teams and channels so that I can organize my team structure**
-4. **As a team admin, I want to create new users in Authentik so that I can onboard team members**
-5. **As a user, I want to see my assigned teams and channels so that I know my current access**
-6. **As a team admin, I want to move users to a holding pen so that I can remove access without deleting accounts**
+2. **As a team manager, I want to approve/deny user requests for teams I manage so that I control team membership**
+3. **As a team manager, I want to create sub-teams and channels for teams I manage so that I can organize team structure**
+4. **As a global manager, I want to create new users in Authentik and assign team management roles**
+5. **As a user, I want to see my assigned team and channels so that I know my current access**
+6. **As a team manager, I want to move users to a holding pen so that I can remove access without deleting accounts**
+7. **As a global manager, I want to assign team management permissions to users**
+8. **As a team manager, I want to transfer users between teams I manage**
 
 ## Technical Requirements
 ### Frontend
@@ -72,7 +85,8 @@
 ## Security & Compliance
 - [ ] **OAuth2 Authentication** via Authentik for existing users
 - [ ] **Data Encryption** in transit (HTTPS) and at rest
-- [ ] **Permission Isolation** - admins only manage their level and below
+- [ ] **Permission Isolation** - team managers only manage assigned teams, global managers have full access
+- [ ] **Role-Based Access Control** - enforce single team membership and management permissions
 - [ ] **Audit Logging** for user creation/modification
 - [ ] **GDPR Compliance** for user data handling
 - [ ] **Secure API Integration** with Authentik

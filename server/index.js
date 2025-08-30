@@ -32,6 +32,21 @@ app.use('/api/users', require('./routes/users'));
 app.use('/api/channels', require('./routes/channels'));
 app.use('/api/requests', require('./routes/requests'));
 
+// Serve frontend for all non-API routes
+app.get('*', (req, res) => {
+  if (!req.path.startsWith('/api') && !req.path.startsWith('/health')) {
+    res.send(`
+      <html>
+        <head><title>TAK Team Manager</title></head>
+        <body>
+          <h1>TAK Team Manager</h1>
+          <p>Frontend build not available. API is running at <a href="http://44.229.3.37:3000/api/auth/login">http://44.229.3.37:3000/api/auth/login</a></p>
+        </body>
+      </html>
+    `);
+  }
+});
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'OK', timestamp: new Date().toISOString() });

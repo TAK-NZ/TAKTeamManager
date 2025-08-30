@@ -11,13 +11,7 @@ const authenticateToken = async (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await User.findById(decoded.userId);
-    
-    if (!user || !user.is_active) {
-      return res.status(401).json({ error: 'Invalid or inactive user' });
-    }
-
-    req.user = user;
+    req.user = decoded;
     next();
   } catch (error) {
     return res.status(403).json({ error: 'Invalid token' });
