@@ -86,7 +86,8 @@ router.get('/callback', async (req, res) => {
         groups_obj: user.groups_obj || [],
         takRole: user.takRole,
         takColor: user.takColor,
-        takCallsign: user.takCallsign
+        takCallsign: user.takCallsign,
+        isGlobalAdmin: user.groups?.includes(process.env.ADMIN_GROUP_NAME || 'TakTeamManager_Admin') || false
       },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN }

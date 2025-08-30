@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { UserGroupIcon, UsersIcon, ClipboardDocumentListIcon, ArrowUpRightIcon, ArrowDownLeftIcon, ArrowsRightLeftIcon, MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon } from '@heroicons/react/24/outline'
+import { UserGroupIcon, UsersIcon, ClipboardDocumentListIcon, ArrowUpRightIcon, ArrowDownLeftIcon, ArrowsRightLeftIcon, MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon, InformationCircleIcon } from '@heroicons/react/24/outline'
 import { teamsAPI, requestsAPI } from '../services/api'
 import axios from 'axios'
 
@@ -26,9 +26,41 @@ export default function Dashboard({ user }) {
       'Cyan': '#06b6d4',
       'Gray': '#6b7280',
       'Black': '#1f2937',
-      'White': '#f9fafb'
+      'White': '#f9fafb',
+      'Magenta': '#ec4899',
+      'Maroon': '#7f1d1d',
+      'Dark Blue': '#1e3a8a',
+      'Teal': '#14b8a6',
+      'Dark Green': '#166534',
+      'Brown': '#92400e'
     }
     return colorMap[colorName] || '#6b7280'
+  }
+
+  const [colorMappings, setColorMappings] = useState({})
+  const [roleDescriptions, setRoleDescriptions] = useState({})
+
+  // Fetch color mappings from API
+  useEffect(() => {
+    const fetchColorMappings = async () => {
+      try {
+        const response = await axios.get('/api/config/color-mappings', {
+          headers: {
+            Authorization: `Bearer ${localStorage.getItem('token')}`
+          }
+        })
+        setColorMappings(response.data.colorMappings)
+        setRoleDescriptions(response.data.roleDescriptions)
+      } catch (error) {
+        console.error('Failed to fetch color mappings:', error)
+      }
+    }
+    fetchColorMappings()
+  }, [])
+
+  // Map color names to organization names
+  const getOrganizationName = (colorName) => {
+    return colorMappings[colorName] || colorName
   }
 
   useEffect(() => {
@@ -42,11 +74,9 @@ export default function Dashboard({ user }) {
         })
         
         const channelDescriptions = response.data.channels
-        console.log('Channel descriptions:', channelDescriptions)
         
         // Process TAK channels and group by base name
         const takGroups = user.groups?.filter(groupName => {
-          console.log('Checking group:', groupName, 'starts with tak_:', groupName.startsWith('tak_'))
           return groupName.startsWith('tak_')
         }) || []
         
@@ -91,8 +121,6 @@ export default function Dashboard({ user }) {
           ...channel,
           permissions: Array.from(channel.permissions)
         })).sort((a, b) => a.display_name.localeCompare(b.display_name))
-        
-        console.log('TAK channels found:', takChannels)
         
         setUserChannels(takChannels)
         setStats({ requests: 0 })
@@ -148,28 +176,39 @@ export default function Dashboard({ user }) {
         <div className="card">
           <h2 className="text-lg font-medium text-gray-900 mb-4">TAK Profile</h2>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {user.takRole && (
+            {user.takCallsign && (
               <div>
-                <dt className="text-sm font-medium text-gray-500">Role</dt>
-                <dd className="text-sm text-gray-900">{user.takRole}</dd>
+                <dt className="text-sm font-medium text-gray-500">My Callsign</dt>
+                <dd className="text-sm text-gray-900">{user.takCallsign}</dd>
               </div>
             )}
             {user.takColor && (
               <div>
-                <dt className="text-sm font-medium text-gray-500">Color</dt>
+                <dt className="text-sm font-medium text-gray-500">My Team</dt>
                 <dd className="flex items-center text-sm text-gray-900">
                   <div 
                     className="w-4 h-4 rounded border border-gray-300 mr-2" 
                     style={{ backgroundColor: getColorValue(user.takColor) }}
                   ></div>
-                  {user.takColor}
+                  {getOrganizationName(user.takColor)}
                 </dd>
               </div>
             )}
-            {user.takCallsign && (
+            {user.takRole && (
               <div>
-                <dt className="text-sm font-medium text-gray-500">Callsign</dt>
-                <dd className="text-sm text-gray-900">{user.takCallsign}</dd>
+                <dt className="text-sm font-medium text-gray-500">My Role</dt>
+                <dd className="flex items-center text-sm text-gray-900">
+                  {user.takRole}
+                  {roleDescriptions[user.takRole] && (
+                    <div className="relative group ml-1">
+                      <InformationCircleIcon className="h-4 w-4 text-gray-400 cursor-help" />
+                      <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
+                        {roleDescriptions[user.takRole]}
+                        <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
+                      </div>
+                    </div>
+                  )}
+                </dd>
               </div>
             )}
           </div>
@@ -184,9 +223,9 @@ export default function Dashboard({ user }) {
               <UserGroupIcon className="h-8 w-8 text-primary-600" />
             </div>
             <div className="ml-4">
-              <p className="text-sm font-medium text-gray-500">My Team</p>
+              <p className="text-sm font-medium text-gray-500">My Unit</p>
               <p className="text-lg font-bold text-gray-900">
-                {userTeam ? userTeam.name : 'Not assigned to a team'}
+                {userTeam ? userTeam.name : 'Not assigned to a unit'}
               </p>
             </div>
           </div>

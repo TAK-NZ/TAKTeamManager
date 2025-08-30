@@ -6,20 +6,30 @@ import {
   UsersIcon, 
   ClipboardDocumentListIcon,
   Bars3Icon,
-  XMarkIcon
+  XMarkIcon,
+  CogIcon
 } from '@heroicons/react/24/outline'
 import { authAPI } from '../services/api'
 
-const navigation = [
-  { name: 'Dashboard', href: '/dashboard', icon: HomeIcon },
-  { name: 'Teams', href: '/teams', icon: UserGroupIcon },
-  { name: 'Users', href: '/users', icon: UsersIcon },
-  { name: 'Requests', href: '/requests', icon: ClipboardDocumentListIcon },
-]
+const getNavigation = (isGlobalAdmin) => {
+  const baseNavigation = [
+    { name: 'Dashboard', href: '/dashboard', icon: HomeIcon },
+    { name: 'Teams', href: '/teams', icon: UserGroupIcon },
+    { name: 'Users', href: '/users', icon: UsersIcon },
+    { name: 'Requests', href: '/requests', icon: ClipboardDocumentListIcon },
+  ]
+  
+  if (isGlobalAdmin) {
+    baseNavigation.push({ name: 'Admin', href: '/admin', icon: CogIcon })
+  }
+  
+  return baseNavigation
+}
 
 export default function Layout({ children, user }) {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const location = useLocation()
+  const navigation = getNavigation(user?.isGlobalAdmin)
 
   const handleLogout = async () => {
     try {

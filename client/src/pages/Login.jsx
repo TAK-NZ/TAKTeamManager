@@ -6,6 +6,11 @@ export default function Login() {
     <div className="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
       <div className="max-w-md w-full space-y-8">
         <div>
+          <img
+            className="mx-auto h-40 w-auto"
+            src="https://raw.githubusercontent.com/TAK-NZ/auth-infra/refs/heads/main/authentik/branding/icons/tak-nz-brand-tall.svg"
+            alt="TAK.NZ"
+          />
           <h2 className="mt-6 text-center text-3xl font-bold text-gray-900">
             TAK Team Manager
           </h2>
@@ -18,7 +23,7 @@ export default function Login() {
             onClick={authAPI.login}
             className="group relative w-full flex justify-center py-3 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500"
           >
-            Sign in with Authentik
+            Sign in
           </button>
           
           <div className="text-center">
@@ -27,7 +32,7 @@ export default function Login() {
               to="/request-access"
               className="ml-2 text-sm text-primary-600 hover:text-primary-500"
             >
-              Request team access
+              Request an account
             </Link>
           </div>
         </div>

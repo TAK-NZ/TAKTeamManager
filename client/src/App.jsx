@@ -9,6 +9,7 @@ import Users from './pages/Users'
 import Requests from './pages/Requests'
 import RequestAccess from './pages/RequestAccess'
 import Login from './pages/Login'
+import Admin from './pages/Admin'
 
 function App() {
   const [user, setUser] = useState(null)
@@ -75,6 +76,7 @@ function App() {
         <Route path="/teams/:teamId" element={<TeamDetail />} />
         <Route path="/users" element={<Users />} />
         <Route path="/requests" element={<Requests />} />
+        <Route path="/admin" element={<Admin user={user} />} />
       </Routes>
     </Layout>
   )

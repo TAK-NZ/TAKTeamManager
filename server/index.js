@@ -31,6 +31,7 @@ app.use('/api/teams', require('./routes/teams'));
 app.use('/api/users', require('./routes/users'));
 app.use('/api/channels', require('./routes/channels'));
 app.use('/api/requests', require('./routes/requests'));
+app.use('/api/config', require('./routes/config'));
 
 // Serve frontend for all non-API routes
 app.get('*', (req, res) => {

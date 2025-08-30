@@ -26,14 +26,20 @@
 
 ## User Roles & Permissions
 ### User Role Hierarchy
-- **Global Manager** - Full system access, can manage all teams and users
-- **Team Manager** - Can manage specific teams they're assigned to manage
+- **Global Admin** - Members of configurable Authentik admin group, full system access, can create top-level teams
+- **Team Manager** - Can manage specific teams they're assigned to manage, can create child teams only
 - **Team Member** - Standard user, member of exactly one team
+
+### Admin Group Configuration
+- **Admin Group Name** - Configurable via `ADMIN_GROUP_NAME` environment variable (default: `TakTeamManager_Admin`)
+- **Admin Detection** - Users in admin group see additional "Admin" tab and have elevated permissions
+- **Hierarchical Permissions** - Global admins create top-level teams, team managers create sub-teams
 
 ### Team Membership Rules
 - **Single Team Membership** - Each user can only be a member of one team at a time
 - **Multiple Management** - A user can manage multiple teams (without being a member)
 - **Role Separation** - Team managers don't need to be members of teams they manage
+- **Admin Privileges** - Global admins have access to admin interface and can manage all teams
 
 ## User Stories
 1. **As a new user, I want to request access to a team so that I can join TAK communications**
@@ -42,8 +48,10 @@
 4. **As a global manager, I want to create new users in Authentik and assign team management roles**
 5. **As a user, I want to see my assigned team and channels so that I know my current access**
 6. **As a team manager, I want to move users to a holding pen so that I can remove access without deleting accounts**
-7. **As a global manager, I want to assign team management permissions to users**
+7. **As a global admin, I want to assign team management permissions to users**
 8. **As a team manager, I want to transfer users between teams I manage**
+9. **As a global admin, I want to access the admin interface to manage the entire system**
+10. **As a global admin, I want to create top-level teams that team managers cannot create**
 
 ## Technical Requirements
 ### Frontend
