@@ -1,27 +1,61 @@
 const express = require('express');
+const { body, validationResult } = require('express-validator');
 const { authenticateToken } = require('../middleware/auth');
+const SiteConfig = require('../models/SiteConfig');
 const router = express.Router();
 
-// Get color mappings from environment variables
-router.get('/color-mappings', authenticateToken, (req, res) => {
+// Get public config (no auth required)
+router.get('/public', async (req, res) => {
   try {
+    const config = await SiteConfig.getPublicConfig();
+    res.json(config);
+  } catch (error) {
+    console.error('Failed to fetch public config:', error);
+    res.status(500).json({ error: 'Failed to fetch configuration' });
+  }
+});
+
+// Get all config (admin only)
+router.get('/all', authenticateToken, async (req, res) => {
+  try {
+    if (!req.user.isAdmin) {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    
+    const config = await SiteConfig.getAll();
+    res.json({ config });
+  } catch (error) {
+    console.error('Failed to fetch config:', error);
+    res.status(500).json({ error: 'Failed to fetch configuration' });
+  }
+});
+
+// Get color mappings and role descriptions (legacy endpoint for admin page)
+router.get('/color-mappings', authenticateToken, async (req, res) => {
+  try {
+    if (!req.user.isAdmin) {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    
+    // Load color mappings from environment variables
     const colorMappings = {
-      'Yellow': process.env.TAK_COLOR_YELLOW || 'Yellow',
-      'Cyan': process.env.TAK_COLOR_CYAN || 'Cyan',
-      'Green': process.env.TAK_COLOR_GREEN || 'Green',
-      'Red': process.env.TAK_COLOR_RED || 'Red',
-      'Purple': process.env.TAK_COLOR_PURPLE || 'Purple',
-      'Orange': process.env.TAK_COLOR_ORANGE || 'Orange',
-      'Blue': process.env.TAK_COLOR_BLUE || 'Blue',
-      'Magenta': process.env.TAK_COLOR_MAGENTA || 'Magenta',
-      'White': process.env.TAK_COLOR_WHITE || 'White',
-      'Maroon': process.env.TAK_COLOR_MAROON || 'Maroon',
-      'Dark Blue': process.env.TAK_COLOR_DARK_BLUE || 'Dark Blue',
-      'Teal': process.env.TAK_COLOR_TEAL || 'Teal',
-      'Dark Green': process.env.TAK_COLOR_DARK_GREEN || 'Dark Green',
-      'Brown': process.env.TAK_COLOR_BROWN || 'Brown'
+      'Yellow': process.env.TAK_COLOR_YELLOW || '',
+      'Cyan': process.env.TAK_COLOR_CYAN || '',
+      'Green': process.env.TAK_COLOR_GREEN || '',
+      'Red': process.env.TAK_COLOR_RED || '',
+      'Purple': process.env.TAK_COLOR_PURPLE || '',
+      'Orange': process.env.TAK_COLOR_ORANGE || '',
+      'Blue': process.env.TAK_COLOR_BLUE || '',
+      'Magenta': process.env.TAK_COLOR_MAGENTA || '',
+      'White': process.env.TAK_COLOR_WHITE || '',
+      'Maroon': process.env.TAK_COLOR_MAROON || '',
+      'Dark Blue': process.env.TAK_COLOR_DARK_BLUE || '',
+      'Teal': process.env.TAK_COLOR_TEAL || '',
+      'Dark Green': process.env.TAK_COLOR_DARK_GREEN || '',
+      'Brown': process.env.TAK_COLOR_BROWN || ''
     };
     
+    // Load role descriptions from environment variables
     const roleDescriptions = {
       'Team Member': process.env.TAK_ROLE_TEAM_MEMBER || '',
       'Team Lead': process.env.TAK_ROLE_TEAM_LEAD || '',
@@ -35,8 +69,37 @@ router.get('/color-mappings', authenticateToken, (req, res) => {
     
     res.json({ colorMappings, roleDescriptions });
   } catch (error) {
-    console.error('Failed to get color mappings:', error);
-    res.status(500).json({ error: 'Failed to get color mappings' });
+    console.error('Failed to fetch color mappings:', error);
+    res.status(500).json({ error: 'Failed to fetch configuration' });
+  }
+});
+
+// Update config (admin only)
+router.put('/:key', authenticateToken, [
+  body('value').trim().isLength({ min: 1 })
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
+  try {
+    if (!req.user.isAdmin) {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    const { key } = req.params;
+    const { value } = req.body;
+    
+    const updatedConfig = await SiteConfig.update(key, value, req.user.id);
+    if (!updatedConfig) {
+      return res.status(404).json({ error: 'Configuration key not found' });
+    }
+
+    res.json({ config: updatedConfig });
+  } catch (error) {
+    console.error('Failed to update config:', error);
+    res.status(500).json({ error: 'Failed to update configuration' });
   }
 });
 

@@ -11,10 +11,13 @@ export default function Teams({ user }) {
   const [formData, setFormData] = useState({
     name: '',
     description: '',
-    slug: '',
+    callsignPrefix: '',
     color: 'Blue',
     visibility: 'public',
-    canJoin: false
+    canJoin: false,
+    parentTeamId: null,
+    callsignSubteamDepth: 1,
+    callsignNameFormat: 'full_name'
   })
   const [creating, setCreating] = useState(false)
   const [colorMappings, setColorMappings] = useState({})
@@ -63,10 +66,13 @@ export default function Teams({ user }) {
       setFormData({
         name: '',
         description: '',
-        slug: '',
+        callsignPrefix: '',
         color: 'Blue',
         visibility: 'public',
-        canJoin: false
+        canJoin: false,
+        parentTeamId: null,
+        callsignSubteamDepth: 1,
+        callsignNameFormat: 'full_name'
       })
     } catch (error) {
       console.error(editingTeamId ? 'Failed to update team:' : 'Failed to create team:', error)
@@ -125,7 +131,7 @@ export default function Teams({ user }) {
   const filteredTeams = searchTerm ? 
     allFlatTeams.filter(team =>
       team.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      (team.slug && team.slug.toLowerCase().includes(searchTerm.toLowerCase()))
+      (team.callsign_prefix && team.callsign_prefix.toLowerCase().includes(searchTerm.toLowerCase()))
     ) : flattenHierarchy(hierarchicalTeams)
 
   // Pagination
@@ -255,11 +261,11 @@ export default function Teams({ user }) {
                     </th>
                     <th 
                       className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700"
-                      onClick={() => handleSort('slug')}
+                      onClick={() => handleSort('callsign_prefix')}
                     >
                       <div className="flex items-center space-x-1">
-                        <span>Slug</span>
-                        {getSortIcon('slug')}
+                        <span>Prefix</span>
+                        {getSortIcon('callsign_prefix')}
                       </div>
                     </th>
                     <th 
@@ -312,7 +318,7 @@ export default function Teams({ user }) {
                             to={`/teams/${team.id}`}
                             className="text-sm font-medium text-gray-900 dark:text-gray-100 hover:text-primary-600 dark:hover:text-primary-400 cursor-pointer"
                           >
-                            {team.name}
+                            {team.level > 0 ? `${teams.find(t => t.id === team.parent_team_id)?.callsign_prefix || teams.find(t => t.id === team.parent_team_id)?.name || 'Root'} - ${team.name}` : team.name}
                           </Link>
                           {team.visibility === 'private' && (
                             <EyeSlashIcon className="h-4 w-4 text-red-500" title="Private team" />
@@ -330,7 +336,7 @@ export default function Teams({ user }) {
                       </div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                      {team.slug || '-'}
+                      {team.callsign_prefix || '-'}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                       {team.member_count || 0}
@@ -362,10 +368,13 @@ export default function Teams({ user }) {
                               setFormData({
                                 name: team.name,
                                 description: team.description || '',
-                                slug: team.slug || '',
+                                callsignPrefix: team.callsign_prefix || '',
                                 color: team.color || 'Blue',
                                 visibility: team.visibility || 'private',
-                                canJoin: team.can_join || false
+                                canJoin: team.can_join || false,
+                                parentTeamId: team.parent_team_id || null,
+                                callsignSubteamDepth: team.callsign_subteam_depth || 1,
+                                callsignNameFormat: team.callsign_name_format || 'full_name'
                               })
                               setEditingTeamId(team.id)
                               setShowCreateDialog(true)
@@ -448,10 +457,13 @@ export default function Teams({ user }) {
                   setFormData({
                     name: '',
                     description: '',
-                    slug: '',
+                    callsignPrefix: '',
                     color: 'Blue',
                     visibility: 'public',
-                    canJoin: false
+                    canJoin: false,
+                    parentTeamId: null,
+                    callsignSubteamDepth: 1,
+                    callsignNameFormat: 'full_name'
                   })
                 }}
                 className="text-gray-400 hover:text-gray-500 dark:hover:text-gray-300"
@@ -465,7 +477,7 @@ export default function Teams({ user }) {
                 <div className="space-y-6">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                      Team Name *
+                      {formData.parentTeamId ? 'Team Name *' : 'Team Name *'}
                     </label>
                     <input
                       type="text"
@@ -473,25 +485,94 @@ export default function Teams({ user }) {
                       value={formData.name}
                       onChange={(e) => setFormData({...formData, name: e.target.value})}
                       className="input w-full"
-                      placeholder="Enter team name"
+                      placeholder={formData.parentTeamId ? "Southland District" : "Enter team name"}
                     />
+                    {formData.parentTeamId && formData.name && (
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                        Display name will be: <span className="font-medium">{teams.find(t => t.id === formData.parentTeamId)?.callsign_prefix || teams.find(t => t.id === formData.parentTeamId)?.name || 'Parent'} - {formData.name}</span>
+                      </p>
+                    )}
                   </div>
                   
                   <div>
                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                      Team Slug
+                      Prefix
                     </label>
                     <input
                       type="text"
-                      value={formData.slug}
-                      onChange={(e) => setFormData({...formData, slug: e.target.value})}
+                      value={formData.callsignPrefix}
+                      onChange={(e) => setFormData({...formData, callsignPrefix: e.target.value})}
                       className="input w-full"
-                      placeholder="team-slug (auto-generated if empty)"
+                      placeholder="FENZ, STL, etc."
                     />
                     <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                      Used in URLs and identifiers. Leave empty to auto-generate from team name.
+                      Used to build callsigns. Example: FENZ-STL-John Smith
                     </p>
                   </div>
+                  
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                      Parent Team
+                    </label>
+                    <select
+                      value={formData.parentTeamId || ''}
+                      onChange={(e) => setFormData({...formData, parentTeamId: e.target.value ? parseInt(e.target.value) : null})}
+                      className="input w-full"
+                    >
+                      <option value="">No parent (Top-level team)</option>
+                      {teams.filter(t => t.id !== editingTeamId).map(team => (
+                        <option key={team.id} value={team.id}>
+                          {team.name}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                      Select a parent team to create a sub-team, or leave empty for a top-level team.
+                    </p>
+                  </div>
+                  
+                  {!formData.parentTeamId && (
+                    <>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                          Callsign Sub-team Depth
+                        </label>
+                        <select
+                          value={formData.callsignSubteamDepth}
+                          onChange={(e) => setFormData({...formData, callsignSubteamDepth: parseInt(e.target.value)})}
+                          className="input w-full"
+                        >
+                          <option value={0}>0 - Root prefix only (FENZ-John Doe)</option>
+                          <option value={1}>1 - Include 1 sub-team (FENZ-STL-John Doe)</option>
+                          <option value={2}>2 - Include 2 sub-teams</option>
+                          <option value={3}>3 - Include 3 sub-teams</option>
+                          <option value={4}>4 - Include 4 sub-teams</option>
+                          <option value={5}>5 - Include all sub-teams</option>
+                        </select>
+                        <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                          How many sub-team prefixes to include in callsigns for this team hierarchy.
+                        </p>
+                      </div>
+                      
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                          Callsign Name Format
+                        </label>
+                        <select
+                          value={formData.callsignNameFormat}
+                          onChange={(e) => setFormData({...formData, callsignNameFormat: e.target.value})}
+                          className="input w-full"
+                        >
+                          <option value="full_name">Full Name (John Doe)</option>
+                          <option value="first_initial_last">First Initial + Last Name (J Doe)</option>
+                          <option value="first_last_initial">First Name + Last Initial (John D)</option>
+                        </select>
+                        <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                          How user names will appear in callsigns for this team hierarchy.
+                        </p>
+                      </div>
+                    </>
+                  )}
                   
                   <div>
                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">

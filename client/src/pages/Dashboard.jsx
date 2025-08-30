@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { UserGroupIcon, UsersIcon, ClipboardDocumentListIcon, ArrowUpRightIcon, ArrowDownLeftIcon, ArrowsRightLeftIcon, MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon, InformationCircleIcon } from '@heroicons/react/24/outline'
+import { UserGroupIcon, UsersIcon, ClipboardDocumentListIcon, ArrowUpRightIcon, ArrowDownLeftIcon, ArrowsRightLeftIcon, MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon, InformationCircleIcon, FolderIcon, FolderOpenIcon, ChevronRightIcon as ChevronRightSmall, ChevronDownIcon, ChevronUpIcon } from '@heroicons/react/24/outline'
 import { teamsAPI, requestsAPI } from '../services/api'
 import axios from 'axios'
 
@@ -12,6 +12,8 @@ export default function Dashboard({ user }) {
   const [searchQuery, setSearchQuery] = useState('')
   const [currentPage, setCurrentPage] = useState(1)
   const channelsPerPage = 10
+  const [expandedFolders, setExpandedFolders] = useState(new Set())
+  const [folderSeparator, setFolderSeparator] = useState(' / ')
 
   // Map color names to CSS colors
   const getColorValue = (colorName) => {
@@ -40,27 +42,189 @@ export default function Dashboard({ user }) {
   const [colorMappings, setColorMappings] = useState({})
   const [roleDescriptions, setRoleDescriptions] = useState({})
 
-  // Fetch color mappings from API
+  // Fetch color mappings and folder separator from API
   useEffect(() => {
-    const fetchColorMappings = async () => {
+    const fetchConfig = async () => {
       try {
-        const response = await axios.get('/api/config/color-mappings', {
-          headers: {
-            Authorization: `Bearer ${localStorage.getItem('token')}`
-          }
-        })
-        setColorMappings(response.data.colorMappings)
-        setRoleDescriptions(response.data.roleDescriptions)
+        const [colorResponse, publicResponse] = await Promise.all([
+          axios.get('/api/config/color-mappings', {
+            headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+          }),
+          axios.get('/api/config/public')
+        ])
+        setColorMappings(colorResponse.data.colorMappings)
+        setRoleDescriptions(colorResponse.data.roleDescriptions)
+        setFolderSeparator(publicResponse.data.channel_folder_separator || ' / ')
       } catch (error) {
-        console.error('Failed to fetch color mappings:', error)
+        console.error('Failed to fetch config:', error)
       }
     }
-    fetchColorMappings()
+    fetchConfig()
   }, [])
 
   // Map color names to organization names
   const getOrganizationName = (colorName) => {
     return colorMappings[colorName] || colorName
+  }
+
+  // Build folder tree from channels
+  const buildFolderTree = (channels) => {
+    const tree = { folders: {}, channels: [] }
+    
+    channels.forEach(channel => {
+      const parts = channel.display_name.split(folderSeparator)
+      if (parts.length === 1) {
+        tree.channels.push(channel)
+      } else {
+        let current = tree
+        for (let i = 0; i < parts.length - 1; i++) {
+          const folderName = parts[i].trim()
+          if (!current.folders[folderName]) {
+            current.folders[folderName] = { folders: {}, channels: [] }
+          }
+          current = current.folders[folderName]
+        }
+        current.channels.push({
+          ...channel,
+          display_name: parts[parts.length - 1].trim()
+        })
+      }
+    })
+    
+    return tree
+  }
+
+  const toggleFolder = (folderPath) => {
+    const newExpanded = new Set(expandedFolders)
+    if (newExpanded.has(folderPath)) {
+      newExpanded.delete(folderPath)
+    } else {
+      newExpanded.add(folderPath)
+    }
+    setExpandedFolders(newExpanded)
+  }
+
+  const getAllFolderPaths = (tree, basePath = '') => {
+    const paths = []
+    Object.keys(tree.folders).forEach(folderName => {
+      const folderPath = basePath ? `${basePath}/${folderName}` : folderName
+      paths.push(folderPath)
+      paths.push(...getAllFolderPaths(tree.folders[folderName], folderPath))
+    })
+    return paths
+  }
+
+  const expandAllFolders = () => {
+    const allPaths = getAllFolderPaths(buildFolderTree(filteredChannels))
+    setExpandedFolders(new Set(allPaths))
+  }
+
+  const collapseAllFolders = () => {
+    setExpandedFolders(new Set())
+  }
+
+  const getPathsToChannels = (channels) => {
+    const paths = new Set()
+    channels.forEach(channel => {
+      const parts = channel.display_name.split(folderSeparator)
+      if (parts.length > 1) {
+        let currentPath = ''
+        for (let i = 0; i < parts.length - 1; i++) {
+          const folderName = parts[i].trim()
+          currentPath = currentPath ? `${currentPath}/${folderName}` : folderName
+          paths.add(currentPath)
+        }
+      }
+    })
+    return paths
+  }
+
+  const renderFolderTree = (tree, path = '') => {
+    const items = []
+    
+    // Render folders
+    Object.entries(tree.folders).forEach(([folderName, subtree]) => {
+      const folderPath = path ? `${path}/${folderName}` : folderName
+      const isExpanded = expandedFolders.has(folderPath)
+      
+      items.push(
+        <div key={folderPath}>
+          <div 
+            className="flex items-center p-3 bg-gray-100 dark:bg-gray-600 rounded-lg cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-500"
+            onClick={() => toggleFolder(folderPath)}
+          >
+            <div className="flex items-center flex-1">
+              {isExpanded ? (
+                <FolderOpenIcon className="h-5 w-5 text-blue-600 mr-2" />
+              ) : (
+                <FolderIcon className="h-5 w-5 text-blue-600 mr-2" />
+              )}
+              <span className="font-medium text-gray-900 dark:text-gray-100">{folderName}</span>
+            </div>
+            <ChevronRightSmall className={`h-4 w-4 text-gray-500 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+          </div>
+          {isExpanded && (
+            <div className="ml-6 mt-2 space-y-2">
+              {renderFolderTree(subtree, folderPath)}
+            </div>
+          )}
+        </div>
+      )
+    })
+    
+    // Render channels
+    tree.channels.forEach(channel => {
+      items.push(
+        <div key={channel.id} className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-lg ml-6">
+          <div className="flex-1">
+            <h3 className="font-medium text-gray-900 dark:text-gray-100">{channel.display_name}</h3>
+            <p className="text-sm text-gray-500 dark:text-gray-400">
+              {channel.description}
+            </p>
+          </div>
+          <div className="flex items-center space-x-2">
+            {channel.permissions.includes('read') && (
+              <div className="relative group">
+                <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-blue-100 text-blue-800 rounded cursor-help">
+                  <ArrowUpRightIcon className="h-3 w-3 mr-1" />
+                  Read
+                </span>
+                <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
+                  Receive data only - view others' locations and messages
+                  <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
+                </div>
+              </div>
+            )}
+            {channel.permissions.includes('write') && (
+              <div className="relative group">
+                <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-green-100 text-green-800 rounded cursor-help">
+                  <ArrowDownLeftIcon className="h-3 w-3 mr-1" />
+                  Write
+                </span>
+                <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
+                  Send data only - share your location and messages
+                  <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
+                </div>
+              </div>
+            )}
+            {channel.permissions.includes('readwrite') && (
+              <div className="relative group">
+                <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-purple-100 text-purple-800 rounded cursor-help">
+                  <ArrowsRightLeftIcon className="h-3 w-3 mr-1" />
+                  Read/Write
+                </span>
+                <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
+                  Full access - send and receive all data
+                  <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )
+    })
+    
+    return items
   }
 
   useEffect(() => {
@@ -146,10 +310,21 @@ export default function Dashboard({ user }) {
   const startIndex = (currentPage - 1) * channelsPerPage
   const paginatedChannels = filteredChannels.slice(startIndex, startIndex + channelsPerPage)
 
-  // Reset to first page when search changes
+  // Reset to first page when search changes and expand relevant folders
   const handleSearchChange = (e) => {
-    setSearchQuery(e.target.value)
+    const query = e.target.value
+    setSearchQuery(query)
     setCurrentPage(1)
+    
+    if (query.trim()) {
+      // Auto-expand folders that contain search results
+      const searchResults = userChannels.filter(channel => 
+        channel.display_name.toLowerCase().includes(query.toLowerCase()) ||
+        channel.description.toLowerCase().includes(query.toLowerCase())
+      )
+      const pathsToExpand = getPathsToChannels(searchResults)
+      setExpandedFolders(new Set([...expandedFolders, ...pathsToExpand]))
+    }
   }
 
   if (loading) {
@@ -267,8 +442,8 @@ export default function Dashboard({ user }) {
           </span>
         </div>
         
-        {/* Search */}
-        <div className="mb-4">
+        {/* Search and Controls */}
+        <div className="mb-4 space-y-3">
           <div className="relative">
             <MagnifyingGlassIcon className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
             <input
@@ -279,6 +454,25 @@ export default function Dashboard({ user }) {
               onChange={handleSearchChange}
             />
           </div>
+          
+          {filteredChannels.length > 0 && Object.keys(buildFolderTree(filteredChannels).folders).length > 0 && (
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={expandAllFolders}
+                className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
+              >
+                <ChevronDownIcon className="h-4 w-4 mr-1" />
+                Expand All
+              </button>
+              <button
+                onClick={collapseAllFolders}
+                className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
+              >
+                <ChevronUpIcon className="h-4 w-4 mr-1" />
+                Collapse All
+              </button>
+            </div>
+          )}
         </div>
         
         {userChannels.length === 0 ? (
@@ -292,85 +486,9 @@ export default function Dashboard({ user }) {
         ) : (
           <>
             <div className="space-y-3">
-              {paginatedChannels.map((channel) => (
-                <div key={channel.id} className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-lg">
-                  <div className="flex-1">
-                    <h3 className="font-medium text-gray-900 dark:text-gray-100">{channel.display_name}</h3>
-                    <p className="text-sm text-gray-500 dark:text-gray-400">
-                      {channel.description}
-                    </p>
-                  </div>
-                  <div className="flex items-center space-x-2">
-                    {channel.permissions.includes('read') && (
-                      <div className="relative group">
-                        <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-blue-100 text-blue-800 rounded cursor-help">
-                          <ArrowUpRightIcon className="h-3 w-3 mr-1" />
-                          Read
-                        </span>
-                        <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
-                          Receive data only - view others' locations and messages
-                          <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
-                        </div>
-                      </div>
-                    )}
-                    {channel.permissions.includes('write') && (
-                      <div className="relative group">
-                        <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-green-100 text-green-800 rounded cursor-help">
-                          <ArrowDownLeftIcon className="h-3 w-3 mr-1" />
-                          Write
-                        </span>
-                        <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
-                          Send data only - share your location and messages
-                          <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
-                        </div>
-                      </div>
-                    )}
-                    {channel.permissions.includes('readwrite') && (
-                      <div className="relative group">
-                        <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-purple-100 text-purple-800 rounded cursor-help">
-                          <ArrowsRightLeftIcon className="h-3 w-3 mr-1" />
-                          Read/Write
-                        </span>
-                        <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
-                          Full access - send and receive all data
-                          <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              ))}
+              {renderFolderTree(buildFolderTree(filteredChannels))}
             </div>
-            
-            {/* Pagination */}
-            {totalPages > 1 && (
-              <div className="flex items-center justify-between mt-6 pt-4 border-t border-gray-200">
-                <div className="text-sm text-gray-700">
-                  Showing {startIndex + 1} to {Math.min(startIndex + channelsPerPage, filteredChannels.length)} of {filteredChannels.length} channels
-                </div>
-                <div className="flex items-center space-x-2">
-                  <button
-                    onClick={() => setCurrentPage(Math.max(1, currentPage - 1))}
-                    disabled={currentPage === 1}
-                    className="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-500 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <ChevronLeftIcon className="h-4 w-4 mr-1" />
-                    Previous
-                  </button>
-                  <span className="text-sm text-gray-700">
-                    Page {currentPage} of {totalPages}
-                  </span>
-                  <button
-                    onClick={() => setCurrentPage(Math.min(totalPages, currentPage + 1))}
-                    disabled={currentPage === totalPages}
-                    className="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-500 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    Next
-                    <ChevronRightIcon className="h-4 w-4 ml-1" />
-                  </button>
-                </div>
-              </div>
-            )}
+
           </>
         )}
       </div>

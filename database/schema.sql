@@ -19,7 +19,7 @@ CREATE TABLE teams (
     id SERIAL PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
     description TEXT,
-    slug VARCHAR(255),
+    callsign_prefix VARCHAR(255),
     color VARCHAR(7) DEFAULT '#3B82F6',
     visibility VARCHAR(20) DEFAULT 'private',
     can_join BOOLEAN DEFAULT false,
@@ -119,9 +119,26 @@ CREATE TABLE audit_logs (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Site configuration for editable text content
+CREATE TABLE site_config (
+    id SERIAL PRIMARY KEY,
+    config_key VARCHAR(100) UNIQUE NOT NULL,
+    config_value TEXT NOT NULL,
+    description TEXT,
+    updated_by INTEGER REFERENCES users(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Insert default values for request access page
+INSERT INTO site_config (config_key, config_value, description) VALUES 
+('request_access_title', 'Request Team Access', 'Title shown on the request access page'),
+('request_access_subtitle', 'Fill out this form to request access to a TAK team', 'Subtitle shown on the request access page'),
+('request_access_footer', 'Note: TAK.NZ is for New Zealand Based First Responders or those sponsored by New Zealand Public Safety Agencies. If you are not a New Zealand First Responder refer to TAK.GOV for more information on TAK.', 'Footer text shown at the bottom of the request access page');
+
 -- Indexes for performance
 CREATE INDEX idx_teams_parent ON teams(parent_team_id);
-CREATE UNIQUE INDEX idx_teams_slug ON teams(slug) WHERE slug IS NOT NULL;
+CREATE UNIQUE INDEX idx_teams_callsign_prefix ON teams(callsign_prefix) WHERE callsign_prefix IS NOT NULL;
 CREATE INDEX idx_team_memberships_user ON team_memberships(user_id);
 CREATE INDEX idx_team_memberships_team ON team_memberships(team_id);
 CREATE INDEX idx_team_memberships_role ON team_memberships(role);
@@ -135,6 +152,7 @@ CREATE INDEX idx_user_cache_is_admin ON user_cache(is_admin);
 CREATE INDEX idx_user_cache_last_synced ON user_cache(last_synced);
 CREATE INDEX idx_audit_logs_user ON audit_logs(user_id);
 CREATE INDEX idx_audit_logs_created ON audit_logs(created_at);
+CREATE INDEX idx_site_config_key ON site_config(config_key);
 
 -- Function to update updated_at timestamp
 CREATE OR REPLACE FUNCTION update_updated_at_column()
@@ -149,3 +167,4 @@ $$ language 'plpgsql';
 CREATE TRIGGER update_users_updated_at BEFORE UPDATE ON users FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 CREATE TRIGGER update_teams_updated_at BEFORE UPDATE ON teams FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 CREATE TRIGGER update_channels_updated_at BEFORE UPDATE ON channels FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+CREATE TRIGGER update_site_config_updated_at BEFORE UPDATE ON site_config FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();

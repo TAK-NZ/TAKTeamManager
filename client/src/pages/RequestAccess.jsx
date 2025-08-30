@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { useForm, Controller } from 'react-hook-form'
 import { Link } from 'react-router-dom'
 import toast from 'react-hot-toast'
-import { requestsAPI, teamsAPI } from '../services/api'
+import { requestsAPI, teamsAPI, configAPI } from '../services/api'
 import { ThemeProvider } from '../contexts/ThemeContext'
 import { ChevronDownIcon, MagnifyingGlassIcon } from '@heroicons/react/24/outline'
 
@@ -13,25 +13,36 @@ export default function RequestAccess() {
   const [searchTerm, setSearchTerm] = useState('')
   const [isDropdownOpen, setIsDropdownOpen] = useState(false)
   const [selectedTeam, setSelectedTeam] = useState(null)
+  const [config, setConfig] = useState({
+    request_access_title: 'Request Team Access',
+    request_access_subtitle: 'Fill out this form to request access to a TAK team',
+    request_access_footer: ''
+  })
   const { register, handleSubmit, control, formState: { errors, isSubmitting } } = useForm()
 
   useEffect(() => {
-    const fetchJoinableTeams = async () => {
+    const fetchData = async () => {
       try {
-        const response = await teamsAPI.getJoinable()
-        setTeams(response.data.teams)
-        setFilteredTeams(response.data.teams)
+        const [teamsResponse, configResponse] = await Promise.all([
+          teamsAPI.getJoinable(),
+          configAPI.getPublic()
+        ])
+        setTeams(teamsResponse.data.teams || [])
+        setFilteredTeams(teamsResponse.data.teams || [])
+        setConfig(configResponse.data)
       } catch (error) {
-        console.error('Failed to fetch joinable teams:', error)
-        toast.error('Failed to load available teams')
+        console.error('Failed to fetch data:', error)
+        toast.error('Failed to load page data')
       }
     }
-    fetchJoinableTeams()
+    fetchData()
   }, [])
 
   useEffect(() => {
+    if (!Array.isArray(teams)) return
     const filtered = teams.filter(team => 
-      team.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      team.display_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      team.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
       (team.description && team.description.toLowerCase().includes(searchTerm.toLowerCase()))
     )
     setFilteredTeams(filtered)
@@ -64,7 +75,7 @@ export default function RequestAccess() {
 
   const handleTeamSelect = (team) => {
     setSelectedTeam(team)
-    setSearchTerm(team.name)
+    setSearchTerm(team.display_name || team.name)
     setIsDropdownOpen(false)
   }
 
@@ -99,9 +110,14 @@ export default function RequestAccess() {
         <div className="max-w-md w-full">
           <div className="card">
             <div className="text-center mb-6">
-              <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Request Team Access</h2>
+              <img
+                className="mx-auto h-32 w-auto mb-4"
+                src="https://raw.githubusercontent.com/TAK-NZ/auth-infra/refs/heads/main/authentik/branding/icons/tak-nz-brand-tall.svg"
+                alt="TAK.NZ"
+              />
+              <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100">{config.request_access_title}</h2>
               <p className="text-gray-600 dark:text-gray-400 mt-2">
-                Fill out this form to request access to a TAK team
+                {config.request_access_subtitle}
               </p>
             </div>
 
@@ -189,7 +205,7 @@ export default function RequestAccess() {
                             }}
                           >
                             <div className="font-medium text-gray-900 dark:text-gray-100">
-                              {team.name}
+                              {team.display_name || team.name}
                             </div>
                             {team.description && (
                               <div className="text-sm text-gray-500 dark:text-gray-400 truncate">
@@ -245,6 +261,15 @@ export default function RequestAccess() {
               {isSubmitting ? 'Submitting...' : 'Submit Request'}
             </button>
           </form>
+
+          {config.request_access_footer && (
+            <div className="mt-6 p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md">
+              <div 
+                className="text-sm text-blue-800 dark:text-blue-200"
+                dangerouslySetInnerHTML={{ __html: config.request_access_footer }}
+              />
+            </div>
+          )}
 
           <div className="text-center mt-6">
             <Link to="/" className="text-sm text-primary-600 hover:text-primary-500">

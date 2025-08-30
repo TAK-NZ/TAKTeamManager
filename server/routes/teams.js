@@ -2,6 +2,7 @@ const express = require('express');
 const { body, validationResult } = require('express-validator');
 const { authenticateToken, requireTeamAdmin } = require('../middleware/auth');
 const Team = require('../models/Team');
+const pool = require('../config/database');
 const router = express.Router();
 
 // Get joinable teams (public endpoint)
@@ -37,11 +38,13 @@ router.get('/my-teams', authenticateToken, async (req, res) => {
 router.post('/', authenticateToken, [
   body('name').trim().isLength({ min: 1, max: 255 }),
   body('description').optional().trim(),
-  body('slug').optional().trim(),
+  body('callsignPrefix').optional().trim(),
   body('color').optional().trim(),
   body('visibility').optional().isIn(['public', 'private']),
   body('canJoin').optional().isBoolean(),
-  body('parentTeamId').optional().isInt()
+  body('parentTeamId').optional().isInt(),
+  body('callsignSubteamDepth').optional().isInt({ min: 0, max: 5 }),
+  body('callsignNameFormat').optional().isIn(['full_name', 'first_initial_last', 'first_last_initial'])
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -49,7 +52,7 @@ router.post('/', authenticateToken, [
   }
 
   try {
-    const { name, description, slug, color, visibility, canJoin, parentTeamId } = req.body;
+    const { name, description, callsignPrefix, color, visibility, canJoin, parentTeamId, callsignSubteamDepth, callsignNameFormat } = req.body;
     
     // If creating top-level team, verify global admin access
     if (!parentTeamId && !req.user.isAdmin) {
@@ -66,7 +69,7 @@ router.post('/', authenticateToken, [
     console.log('Creating team with data:', {
       name,
       description,
-      slug,
+      callsign_prefix: callsignPrefix,
       color,
       visibility: visibility || 'private',
       can_join: canJoin || false,
@@ -76,12 +79,14 @@ router.post('/', authenticateToken, [
     const team = await Team.create({
       name,
       description,
-      slug,
+      callsign_prefix: callsignPrefix,
       color,
       visibility: visibility || 'private',
       can_join: canJoin || false,
       parent_team_id: parentTeamId,
-      created_by: null // Skip created_by for now since user ID is string
+      created_by: null, // Skip created_by for now since user ID is string
+      callsign_subteam_depth: !parentTeamId ? callsignSubteamDepth : null,
+      callsign_name_format: !parentTeamId ? callsignNameFormat : null
     });
 
     // Skip adding creator as admin for now since user ID is string
@@ -99,9 +104,12 @@ router.post('/', authenticateToken, [
 router.put('/:teamId', authenticateToken, [
   body('name').optional().trim().isLength({ min: 1, max: 255 }),
   body('description').optional().trim(),
-  body('slug').optional().trim(),
+  body('callsignPrefix').optional().trim(),
   body('visibility').optional().isIn(['public', 'private']),
-  body('canJoin').optional().isBoolean()
+  body('canJoin').optional().isBoolean(),
+  body('parentTeamId').optional().custom(value => value === null || Number.isInteger(Number(value))),
+  body('callsignSubteamDepth').optional().isInt({ min: 0, max: 5 }),
+  body('callsignNameFormat').optional().isIn(['full_name', 'first_initial_last', 'first_last_initial'])
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -119,13 +127,16 @@ router.put('/:teamId', authenticateToken, [
       return res.status(404).json({ error: 'Team not found' });
     }
 
-    const { name, description, slug, visibility, canJoin } = req.body;
+    const { name, description, callsignPrefix, visibility, canJoin, parentTeamId, callsignSubteamDepth, callsignNameFormat } = req.body;
     const updatedTeam = await Team.update(req.params.teamId, {
       name,
       description,
-      slug,
+      callsign_prefix: callsignPrefix,
       visibility,
-      can_join: canJoin
+      can_join: canJoin,
+      parent_team_id: parentTeamId,
+      callsign_subteam_depth: callsignSubteamDepth,
+      callsign_name_format: callsignNameFormat
     });
 
     res.json({ team: updatedTeam });
@@ -149,6 +160,7 @@ router.get('/:teamId', authenticateToken, async (req, res) => {
     console.log('Team found:', team);
     
     let members = [];
+    let channels = [];
     try {
       members = await Team.getMembers(req.params.teamId);
       console.log('Members fetched:', members?.length || 0);
@@ -157,7 +169,16 @@ router.get('/:teamId', authenticateToken, async (req, res) => {
       members = [];
     }
 
-    res.json({ team, members: members || [] });
+    try {
+      const channelResult = await pool.query('SELECT * FROM channels WHERE team_id = $1', [req.params.teamId]);
+      channels = channelResult.rows;
+      console.log('Channels fetched:', channels?.length || 0);
+    } catch (channelError) {
+      console.error('Error fetching channels, continuing with empty array:', channelError);
+      channels = [];
+    }
+
+    res.json({ team, members: members || [], channels: channels || [] });
   } catch (error) {
     console.error('Failed to fetch team details:', error);
     res.status(500).json({ error: 'Failed to fetch team', details: error.message });

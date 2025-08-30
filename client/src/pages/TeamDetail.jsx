@@ -43,7 +43,7 @@ export default function TeamDetail() {
   const [subTeamFormData, setSubTeamFormData] = useState({
     name: '',
     description: '',
-    slug: '',
+    callsignPrefix: '',
     visibility: 'public',
     canJoin: false
   })
@@ -54,10 +54,14 @@ export default function TeamDetail() {
   const [editFormData, setEditFormData] = useState({
     name: '',
     description: '',
-    slug: '',
+    callsignPrefix: '',
     visibility: 'public',
-    canJoin: false
+    canJoin: false,
+    parentTeamId: null,
+    callsignSubteamDepth: 1,
+    callsignNameFormat: 'full_name'
   })
+  const [allTeams, setAllTeams] = useState([])
   const [updating, setUpdating] = useState(false)
 
   const handleCreateSubTeam = async (e) => {
@@ -79,7 +83,7 @@ export default function TeamDetail() {
       setSubTeamFormData({
         name: '',
         description: '',
-        slug: '',
+        callsignPrefix: '',
         visibility: 'public',
         canJoin: false
       })
@@ -149,6 +153,7 @@ export default function TeamDetail() {
         setTeam(teamData)
         setMembers(allMembers.filter(m => m.role === 'member'))
         setAdmins(allMembers.filter(m => m.role === 'admin'))
+        setChannels(teamResponse.data.channels || [])
         
         // Fetch parent team if exists, otherwise clear it
         if (teamData.parent_team_id && !isCancelled) {
@@ -167,27 +172,29 @@ export default function TeamDetail() {
           setParentTeam(null)
         }
         
-        // Fetch sub-teams
+        // Fetch sub-teams and all teams for parent selection
         if (!isCancelled) {
           try {
-            const subTeamsResponse = await teamsAPI.getSubTeams(teamId)
+            const [subTeamsResponse, allTeamsResponse] = await Promise.all([
+              teamsAPI.getSubTeams(teamId),
+              teamsAPI.getMyTeams()
+            ])
             if (!isCancelled) {
               setSubTeams(subTeamsResponse.data.subTeams || [])
+              setAllTeams(allTeamsResponse.data.teams || [])
             }
           } catch (err) {
-            console.error('Failed to fetch sub-teams:', err)
+            console.error('Failed to fetch teams:', err)
             if (!isCancelled) {
               setSubTeams([])
+              setAllTeams([])
             }
           }
         }
         
 
         
-        // Skip channels for now since API might not exist
-        if (!isCancelled) {
-          setChannels([])
-        }
+        // Channels are now fetched with team data
       } catch (error) {
         console.error('Failed to fetch team data:', error)
         if (!isCancelled) {
@@ -329,7 +336,9 @@ export default function TeamDetail() {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <div className="flex-1">
             <div className="flex items-center space-x-2 mb-2">
-              <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">{team.name}</h1>
+              <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
+                {team.parent_team_id ? `${parentTeam?.callsign_prefix || parentTeam?.name || 'Root'} - ${team.name}` : team.name}
+              </h1>
               {team.color && (
                 <div 
                   className="w-4 h-4 rounded border border-gray-300" 
@@ -338,6 +347,16 @@ export default function TeamDetail() {
                 ></div>
               )}
             </div>
+            {team.parent_team_id && (
+              <div className="mb-3">
+                <div className="text-sm text-gray-500 dark:text-gray-400">
+                  <span className="font-medium">Team Name:</span> {team.name}
+                </div>
+                <div className="text-sm text-gray-500 dark:text-gray-400">
+                  <span className="font-medium">Display Name:</span> {parentTeam?.callsign_prefix || parentTeam?.name || 'Root'} - {team.name}
+                </div>
+              </div>
+            )}
             <p className="text-gray-600 dark:text-gray-400 mb-3">{team.description || 'No description provided'}</p>
             <div className="space-y-2">
               <div className="flex items-center text-sm text-gray-500 dark:text-gray-400">
@@ -360,7 +379,7 @@ export default function TeamDetail() {
                 )}
               </div>
               
-              <div className="flex items-center space-x-4 text-sm text-gray-500 dark:text-gray-400">
+              <div className="flex items-center flex-wrap gap-x-4 gap-y-2 text-sm text-gray-500 dark:text-gray-400">
                 <div className="flex items-center">
                   <span>Visibility: </span>
                   <span className={`ml-1 px-2 py-1 text-xs font-medium rounded-full ${
@@ -382,6 +401,19 @@ export default function TeamDetail() {
                     {team.can_join ? 'Allowed' : 'Disabled'}
                   </span>
                 </div>
+                
+                {!team.parent_team_id && (
+                  <div className="flex items-center">
+                    <span>Callsign: </span>
+                    <span className="ml-1 px-2 py-1 text-xs font-medium rounded-full bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200">
+                      Depth {team.callsign_subteam_depth || 1}
+                    </span>
+                    <span className="ml-1 px-2 py-1 text-xs font-medium rounded-full bg-indigo-100 text-indigo-800 dark:bg-indigo-900 dark:text-indigo-200">
+                      {team.callsign_name_format === 'first_initial_last' ? 'J Doe' : 
+                       team.callsign_name_format === 'first_last_initial' ? 'John D' : 'John Doe'}
+                    </span>
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -392,9 +424,12 @@ export default function TeamDetail() {
                   setEditFormData({
                     name: team.name,
                     description: team.description || '',
-                    slug: team.slug || '',
+                    callsignPrefix: team.callsign_prefix || '',
                     visibility: team.visibility || 'private',
-                    canJoin: team.can_join || false
+                    canJoin: team.can_join || false,
+                    parentTeamId: team.parent_team_id || null,
+                    callsignSubteamDepth: team.callsign_subteam_depth || 1,
+                    callsignNameFormat: team.callsign_name_format || 'full_name'
                   })
                   setShowEditDialog(true)
                 }}
@@ -620,10 +655,10 @@ export default function TeamDetail() {
                         {getSortIcon('name')}
                       </div>
                     </th>
-                    <th onClick={() => handleSort('slug')} className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700">
+                    <th onClick={() => handleSort('callsign_prefix')} className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700">
                       <div className="flex items-center space-x-1">
-                        <span>Slug</span>
-                        {getSortIcon('slug')}
+                        <span>Prefix</span>
+                        {getSortIcon('callsign_prefix')}
                       </div>
                     </th>
                     <th onClick={() => handleSort('member_count')} className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700">
@@ -663,7 +698,7 @@ export default function TeamDetail() {
                         </div>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                        {subTeam.slug || '-'}
+                        {subTeam.callsign_prefix || '-'}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                         {subTeam.member_count || 0}
@@ -821,17 +856,17 @@ export default function TeamDetail() {
                 
                 <div>
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                    Sub-Team Slug
+                    Prefix
                   </label>
                   <input
                     type="text"
-                    value={subTeamFormData.slug}
-                    onChange={(e) => setSubTeamFormData({...subTeamFormData, slug: e.target.value})}
+                    value={subTeamFormData.callsignPrefix}
+                    onChange={(e) => setSubTeamFormData({...subTeamFormData, callsignPrefix: e.target.value})}
                     className="input w-full"
-                    placeholder="sub-team-slug (auto-generated if empty)"
+                    placeholder="STL, AKL, etc."
                   />
                   <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                    Used in URLs and identifiers. Leave empty to auto-generate from team name.
+                    Used to build callsigns. Example: FENZ-STL-John Smith
                   </p>
                 </div>
                 
@@ -953,7 +988,19 @@ export default function TeamDetail() {
               setUpdating(true)
               try {
                 await teamsAPI.update(team.id, editFormData)
-                setTeam({...team, ...editFormData})
+                const updatedTeam = {...team, ...editFormData, parent_team_id: editFormData.parentTeamId}
+                setTeam(updatedTeam)
+                
+                // Update parent team if changed
+                if (editFormData.parentTeamId !== team.parent_team_id) {
+                  if (editFormData.parentTeamId) {
+                    const newParent = allTeams.find(t => t.id === editFormData.parentTeamId)
+                    setParentTeam(newParent || null)
+                  } else {
+                    setParentTeam(null)
+                  }
+                }
+                
                 setShowEditDialog(false)
               } catch (error) {
                 console.error('Failed to update team:', error)
@@ -990,15 +1037,77 @@ export default function TeamDetail() {
                 
                 <div>
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                    Team Slug
+                    Prefix
                   </label>
                   <input
                     type="text"
-                    value={editFormData.slug}
-                    onChange={(e) => setEditFormData({...editFormData, slug: e.target.value})}
+                    value={editFormData.callsignPrefix}
+                    onChange={(e) => setEditFormData({...editFormData, callsignPrefix: e.target.value})}
                     className="input w-full"
+                    placeholder="FENZ, STL, etc."
                   />
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    Used to build callsigns. Example: FENZ-STL-John Smith
+                  </p>
                 </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Parent Team
+                  </label>
+                  <select
+                    value={editFormData.parentTeamId || ''}
+                    onChange={(e) => setEditFormData({...editFormData, parentTeamId: e.target.value ? parseInt(e.target.value) : null})}
+                    className="input w-full"
+                  >
+                    <option value="">No parent (Top-level team)</option>
+                    {allTeams.filter(t => t.id !== team.id).map(parentTeam => (
+                      <option key={parentTeam.id} value={parentTeam.id}>
+                        {parentTeam.name}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    Select a parent team to make this a sub-team, or leave empty for a top-level team.
+                  </p>
+                </div>
+                
+                {!editFormData.parentTeamId && (
+                  <>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                        Callsign Sub-team Depth
+                      </label>
+                      <select
+                        value={editFormData.callsignSubteamDepth}
+                        onChange={(e) => setEditFormData({...editFormData, callsignSubteamDepth: parseInt(e.target.value)})}
+                        className="input w-full"
+                      >
+                        <option value={0}>0 - Root prefix only</option>
+                        <option value={1}>1 - Include 1 sub-team</option>
+                        <option value={2}>2 - Include 2 sub-teams</option>
+                        <option value={3}>3 - Include 3 sub-teams</option>
+                        <option value={4}>4 - Include 4 sub-teams</option>
+                        <option value={5}>5 - Include all sub-teams</option>
+                      </select>
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                        Callsign Name Format
+                      </label>
+                      <select
+                        value={editFormData.callsignNameFormat}
+                        onChange={(e) => setEditFormData({...editFormData, callsignNameFormat: e.target.value})}
+                        className="input w-full"
+                      >
+                        <option value="full_name">Full Name</option>
+                        <option value="first_initial_last">First Initial + Last Name</option>
+                        <option value="first_last_initial">First Name + Last Initial</option>
+                      </select>
+                    </div>
+                  </>
+                )}
                 
                 <div>
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">

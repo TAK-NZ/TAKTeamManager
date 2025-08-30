@@ -100,4 +100,10 @@ export const requestsAPI = {
   makeDecision: (requestId, data) => api.post(`/requests/${requestId}/decision`, data),
 };
 
+export const configAPI = {
+  getPublic: () => axios.get('/api/config/public'),
+  getAll: () => api.get('/config/all'),
+  update: (key, data) => api.put(`/config/${key}`, data),
+};
+
 export default api;

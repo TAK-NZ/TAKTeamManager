@@ -2,13 +2,19 @@ const pool = require('../config/database');
 
 class Team {
   static async create(teamData) {
-    const { name, description, slug, color, visibility, can_join, parent_team_id, created_by } = teamData;
+    const { name, description, callsign_prefix, color, visibility, can_join, parent_team_id, created_by, callsign_subteam_depth, callsign_name_format } = teamData;
     try {
       const result = await pool.query(
-        'INSERT INTO teams (name, description, slug, color, visibility, can_join, parent_team_id, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *',
-        [name, description, slug, color, visibility, can_join, parent_team_id, created_by]
+        'INSERT INTO teams (name, description, callsign_prefix, color, visibility, can_join, parent_team_id, created_by, callsign_subteam_depth, callsign_name_format) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *',
+        [name, description, callsign_prefix, color, visibility, can_join, parent_team_id, created_by, callsign_subteam_depth, callsign_name_format]
       );
-      return result.rows[0];
+      
+      const team = result.rows[0];
+      
+      // Auto-create team channel
+      await this.createTeamChannel(team.id);
+      
+      return team;
     } catch (error) {
       console.error('Error creating team:', error);
       // Fallback to basic creation if new columns don't exist
@@ -140,12 +146,23 @@ class Team {
   }
 
   static async update(teamId, updateData) {
-    const { name, description, slug, visibility, can_join } = updateData;
+    const { name, description, callsign_prefix, visibility, can_join, parent_team_id, callsign_subteam_depth, callsign_name_format } = updateData;
     try {
+      // Handle empty callsign_prefix by setting to null
+      const cleanPrefix = callsign_prefix && callsign_prefix.trim() !== '' ? callsign_prefix : null;
+      
       const result = await pool.query(
-        'UPDATE teams SET name = COALESCE($1, name), description = COALESCE($2, description), slug = COALESCE($3, slug), visibility = COALESCE($4, visibility), can_join = COALESCE($5, can_join), updated_at = CURRENT_TIMESTAMP WHERE id = $6 RETURNING *',
-        [name, description, slug, visibility, can_join, teamId]
+        'UPDATE teams SET name = COALESCE($1, name), description = COALESCE($2, description), callsign_prefix = $3, visibility = COALESCE($4, visibility), can_join = COALESCE($5, can_join), parent_team_id = $6, callsign_subteam_depth = COALESCE($7, callsign_subteam_depth), callsign_name_format = COALESCE($8, callsign_name_format), updated_at = CURRENT_TIMESTAMP WHERE id = $9 RETURNING *',
+        [name, description, cleanPrefix, visibility, can_join, parent_team_id, callsign_subteam_depth, callsign_name_format, teamId]
       );
+      
+      // If callsign_prefix is provided (even as null), update it directly
+      if (callsign_prefix !== undefined) {
+        await pool.query(
+          'UPDATE teams SET callsign_prefix = $1 WHERE id = $2',
+          [cleanPrefix, teamId]
+        );
+      }
       return result.rows[0];
     } catch (error) {
       console.error('Error updating team:', error);
@@ -170,15 +187,114 @@ class Team {
   static async getJoinableTeams() {
     try {
       const result = await pool.query(`
-        SELECT id, name, description, visibility
-        FROM teams 
-        WHERE can_join = true AND visibility = 'public'
-        ORDER BY name
+        SELECT t.id, t.name, t.description, t.visibility,
+               CASE 
+                 WHEN t.parent_team_id IS NOT NULL THEN 
+                   COALESCE(rt.callsign_prefix, rt.name, '') || ' - ' || t.name
+                 ELSE t.name
+               END as display_name
+        FROM teams t
+        LEFT JOIN teams rt ON rt.id = (
+          WITH RECURSIVE root_team AS (
+            SELECT id, name, parent_team_id FROM teams WHERE id = t.id
+            UNION ALL
+            SELECT p.id, p.name, p.parent_team_id 
+            FROM teams p JOIN root_team r ON p.id = r.parent_team_id
+          )
+          SELECT id FROM root_team WHERE parent_team_id IS NULL
+        )
+        WHERE t.can_join = true AND t.visibility = 'public'
+        ORDER BY display_name
       `);
       return result.rows;
     } catch (error) {
       console.error('Error fetching joinable teams:', error);
       return [];
+    }
+  }
+
+  static async createTeamChannel(teamId) {
+    try {
+      // Get team with root team info
+      const teamResult = await pool.query(`
+        WITH RECURSIVE root_team AS (
+          SELECT id, name, callsign_prefix, parent_team_id FROM teams WHERE id = $1
+          UNION ALL
+          SELECT p.id, p.name, p.callsign_prefix, p.parent_team_id 
+          FROM teams p JOIN root_team r ON p.id = r.parent_team_id
+        )
+        SELECT t.id, t.name, t.parent_team_id,
+               rt.callsign_prefix as root_prefix,
+               CASE 
+                 WHEN t.parent_team_id IS NOT NULL THEN 
+                   COALESCE(rt.callsign_prefix, rt.name, '') || ' - ' || t.name
+                 ELSE t.name
+               END as display_name
+        FROM teams t
+        LEFT JOIN (SELECT name, callsign_prefix FROM root_team WHERE parent_team_id IS NULL) rt ON true
+        WHERE t.id = $1
+      `, [teamId]);
+      
+      if (!teamResult.rows[0]) return null;
+      
+      const team = teamResult.rows[0];
+      
+      // Generate channel name
+      let channelName;
+      if (team.parent_team_id) {
+        // Sub-team: "Teams / FENZ / Southland District"
+        channelName = `Teams / ${team.root_prefix} / ${team.name}`;
+      } else {
+        // Root team: "Teams / FENZ"
+        channelName = `Teams / ${team.root_prefix || team.name}`;
+      }
+      
+      const description = `Users from ${team.display_name} (Location sharing enabled)`;
+      
+      // Create groups in Authentik with tak_ prefix
+      const authentikGroupName = `tak_${channelName}`;
+      const channelDbName = channelName.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+      
+      try {
+        // Create read/write group
+        const groupResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            name: authentikGroupName,
+            attributes: {
+              CN: channelName,
+              description: description
+            }
+          })
+        });
+        
+        const group = await groupResponse.json();
+        
+        // Create channel with Authentik group ID
+        const channelResult = await pool.query(
+          'INSERT INTO channels (name, display_name, description, team_id, authentik_group_id, is_primary) VALUES ($1, $2, $3, $4, $5, true) RETURNING *',
+          [channelDbName, channelName, description, teamId, group.pk]
+        );
+        
+        return channelResult.rows[0];
+      } catch (authentikError) {
+        console.error('Error creating Authentik groups:', authentikError);
+        
+        // Fallback: create channel without Authentik groups
+        const channelResult = await pool.query(
+          'INSERT INTO channels (name, display_name, description, team_id, is_primary) VALUES ($1, $2, $3, $4, true) RETURNING *',
+          [channelDbName, channelName, description, teamId]
+        );
+        
+        return channelResult.rows[0];
+      }
+    } catch (error) {
+      console.error('Error creating team channel:', error);
+      return null;
     }
   }
 }
