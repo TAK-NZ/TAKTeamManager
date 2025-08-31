@@ -4,10 +4,11 @@ import { UserGroupIcon, UsersIcon, ClipboardDocumentListIcon, ArrowUpRightIcon, 
 import { teamsAPI, requestsAPI } from '../services/api'
 import axios from 'axios'
 
-export default function Dashboard({ user }) {
+export default function Dashboard({ user, refreshUser }) {
   const [stats, setStats] = useState({ requests: 0 })
   const [userTeam, setUserTeam] = useState(null)
   const [userChannels, setUserChannels] = useState([])
+  const [freshUser, setFreshUser] = useState(user)
   const [loading, setLoading] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
   const [currentPage, setCurrentPage] = useState(1)
@@ -230,6 +231,21 @@ export default function Dashboard({ user }) {
   useEffect(() => {
     const fetchChannelData = async () => {
       try {
+        // Fetch user's team assignment
+        const userResponse = await axios.get('/api/users/me', {
+          headers: {
+            Authorization: `Bearer ${localStorage.getItem('token')}`
+          }
+        })
+        
+        setFreshUser(userResponse.data.user)
+        
+        if (userResponse.data.teams && userResponse.data.teams.length > 0) {
+          setUserTeam(userResponse.data.teams[0])
+        } else {
+          setUserTeam(null)
+        }
+        
         // Fetch channel descriptions from API
         const response = await axios.get('/api/channels/descriptions', {
           headers: {
@@ -240,7 +256,7 @@ export default function Dashboard({ user }) {
         const channelDescriptions = response.data.channels
         
         // Process TAK channels and group by base name
-        const takGroups = user.groups?.filter(groupName => {
+        const takGroups = freshUser.groups?.filter(groupName => {
           return groupName.startsWith('tak_')
         }) || []
         
@@ -347,38 +363,38 @@ export default function Dashboard({ user }) {
       </div>
 
       {/* TAK Profile */}
-      {(user.takRole || user.takColor || user.takCallsign) && (
+      {(freshUser.takRole || freshUser.takColor || freshUser.takCallsign) && (
         <div className="card">
           <h2 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">TAK Profile</h2>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {user.takCallsign && (
+            {freshUser.takCallsign && (
               <div>
                 <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">My Callsign</dt>
-                <dd className="text-sm text-gray-900 dark:text-gray-100">{user.takCallsign}</dd>
+                <dd className="text-sm text-gray-900 dark:text-gray-100">{freshUser.takCallsign}</dd>
               </div>
             )}
-            {user.takColor && (
+            {freshUser.takColor && (
               <div>
                 <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">My Team</dt>
                 <dd className="flex items-center text-sm text-gray-900 dark:text-gray-100">
                   <div 
                     className="w-4 h-4 rounded border border-gray-300 mr-2" 
-                    style={{ backgroundColor: getColorValue(user.takColor) }}
+                    style={{ backgroundColor: getColorValue(freshUser.takColor) }}
                   ></div>
-                  {getOrganizationName(user.takColor)}
+                  {getOrganizationName(freshUser.takColor)}
                 </dd>
               </div>
             )}
-            {user.takRole && (
+            {freshUser.takRole && (
               <div>
                 <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">My Role</dt>
                 <dd className="flex items-center text-sm text-gray-900 dark:text-gray-100">
-                  {user.takRole}
-                  {roleDescriptions[user.takRole] && (
+                  {freshUser.takRole}
+                  {roleDescriptions[freshUser.takRole] && (
                     <div className="relative group ml-1">
                       <InformationCircleIcon className="h-4 w-4 text-gray-400 cursor-help" />
                       <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
-                        {roleDescriptions[user.takRole]}
+                        {roleDescriptions[freshUser.takRole]}
                         <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
                       </div>
                     </div>
@@ -400,8 +416,13 @@ export default function Dashboard({ user }) {
             <div className="ml-4">
               <p className="text-sm font-medium text-gray-500 dark:text-gray-400">My Unit</p>
               <p className="text-lg font-bold text-gray-900 dark:text-gray-100">
-                {userTeam ? userTeam.name : 'Not assigned to a unit'}
+                {userTeam ? userTeam.display_name : 'Not assigned to a unit'}
               </p>
+              {!userTeam && (
+                <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
+                  Contact your administrator to be assigned to a unit
+                </p>
+              )}
             </div>
           </div>
         </div>
@@ -437,9 +458,24 @@ export default function Dashboard({ user }) {
       <div className="card">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-medium text-gray-900 dark:text-gray-100">My Channels</h2>
-          <span className="text-sm text-gray-500 dark:text-gray-400">
-            {filteredChannels.length} of {userChannels.length} channels
-          </span>
+          <div className="flex items-center space-x-2">
+            <button
+              onClick={() => {
+                if (refreshUser) {
+                  refreshUser().then(() => {
+                    fetchChannelData()
+                  })
+                }
+              }}
+              className="text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300"
+              title="Refresh channels"
+            >
+              Refresh
+            </button>
+            <span className="text-sm text-gray-500 dark:text-gray-400">
+              {filteredChannels.length} of {userChannels.length} channels
+            </span>
+          </div>
         </div>
         
         {/* Search and Controls */}
@@ -476,9 +512,16 @@ export default function Dashboard({ user }) {
         </div>
         
         {userChannels.length === 0 ? (
-          <p className="text-gray-500 dark:text-gray-400 text-center py-8">
-            You don't have access to any TAK channels yet.
-          </p>
+          <div className="text-center py-8">
+            <p className="text-gray-500 dark:text-gray-400 mb-4">
+              You don't have access to any TAK channels yet.
+            </p>
+            {!userTeam && (
+              <p className="text-sm text-gray-400 dark:text-gray-500">
+                You need to be assigned to a unit to access channels.
+              </p>
+            )}
+          </div>
         ) : filteredChannels.length === 0 ? (
           <p className="text-gray-500 dark:text-gray-400 text-center py-8">
             No channels match your search.

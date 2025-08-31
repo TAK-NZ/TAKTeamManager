@@ -83,12 +83,19 @@ export const usersAPI = {
   getAll: () => api.get('/users'),
   create: (data) => api.post('/users', data),
   search: (query) => api.get(`/users/search?q=${query}`),
+  getAvailable: (search) => api.get(`/users/available${search ? `?search=${encodeURIComponent(search)}` : ''}`),
+  createAndAdd: (email, firstName, lastName, teamId) => 
+    api.post('/users/create-and-add', { email, firstName, lastName, teamId }),
+  addToTeam: (userId, teamId) => api.post('/users/add-to-team', { userId, teamId }),
+  removeFromTeam: (userId, teamId) => api.delete(`/users/remove-from-team/${userId}`, { data: { teamId } }),
   moveToHoldingPen: (userId) => api.post(`/users/${userId}/holding-pen`),
 };
 
 export const channelsAPI = {
   getByTeam: (teamId) => api.get(`/channels/team/${teamId}`),
   create: (data) => api.post('/channels', data),
+  createCustom: (teamId, customSuffix, memberPermissions) => 
+    api.post('/channels/custom', { teamId, customSuffix, memberPermissions }),
   addMember: (channelId, data) => api.post(`/channels/${channelId}/members`, data),
   removeMember: (channelId, userId) => api.delete(`/channels/${channelId}/members/${userId}`),
   getMembers: (channelId) => api.get(`/channels/${channelId}/members`),

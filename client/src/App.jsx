@@ -16,6 +16,15 @@ function App() {
   const [user, setUser] = useState(null)
   const [loading, setLoading] = useState(true)
 
+  const refreshUser = async () => {
+    try {
+      const response = await authAPI.getProfile()
+      setUser(response.data.user)
+    } catch (error) {
+      console.error('Failed to refresh user:', error)
+    }
+  }
+
   useEffect(() => {
     // Handle OAuth callback token
     const urlParams = new URLSearchParams(window.location.search)
@@ -73,10 +82,10 @@ function App() {
     <ThemeProvider>
       <Layout user={user}>
         <Routes>
-          <Route path="/" element={<Dashboard user={user} />} />
-          <Route path="/dashboard" element={<Dashboard user={user} />} />
+          <Route path="/" element={<Dashboard user={user} refreshUser={refreshUser} />} />
+          <Route path="/dashboard" element={<Dashboard user={user} refreshUser={refreshUser} />} />
           <Route path="/teams" element={<Teams user={user} />} />
-          <Route path="/teams/:teamId" element={<TeamDetail />} />
+          <Route path="/teams/:teamId" element={<TeamDetail refreshUser={refreshUser} />} />
           <Route path="/users" element={<Users />} />
           <Route path="/requests" element={<Requests />} />
           <Route path="/admin" element={<Admin user={user} />} />

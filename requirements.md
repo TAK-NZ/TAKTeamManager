@@ -5,17 +5,21 @@
 **Purpose:** Standalone web application for managing TAK (Team Awareness Kit) teams, users, and channels with Authentik integration
 **Target Users:** Team administrators, end users requesting team access, IT administrators
 
+**Terminology Note:** In user-facing interfaces, refer to "Authentik" as "Account Management System" to maintain system abstraction.
+
+**Development Mode:** Currently in development - update database schema directly instead of using migrations.
+
 ## Core Features
 ### Must-Have (MVP)
-- [ ] **Authentik OAuth2 Integration** - SSO login for existing users
-- [ ] **Team Management** - Create/manage teams with hierarchical sub-teams
-- [ ] **User Management** - Create users in Authentik, assign to teams
-- [ ] **Channel Management** - Create/manage TAK channels (map to LDAP groups)
-- [ ] **Access Requests** - Unauthenticated interface for team join requests
+- [x] **Authentik OAuth2 Integration** - SSO login for existing users
+- [x] **Team Management** - Create/manage teams with hierarchical sub-teams
+- [ ] **User Management** - Create users in Account Management System, assign to teams
+- [x] **Channel Management** - Create/manage TAK channels (map to LDAP groups)
+- [x] **Access Requests** - Unauthenticated interface for team join requests
 - [ ] **Approval System** - Team admins approve/deny user requests
-- [ ] **User Dashboard** - View assigned teams and channels
-- [ ] **Admin Dashboard** - Manage teams, users, approvals
-- [ ] **Mobile Responsive** - Works on mobile devices
+- [x] **User Dashboard** - View assigned teams and channels
+- [x] **Admin Dashboard** - Manage teams, users, approvals
+- [x] **Mobile Responsive** - Works on mobile devices
 
 ### Nice-to-Have (Future)
 - [ ] **Email Notifications** - Notify admins of pending requests
@@ -45,7 +49,7 @@
 1. **As a new user, I want to request access to a team so that I can join TAK communications**
 2. **As a team manager, I want to approve/deny user requests for teams I manage so that I control team membership**
 3. **As a team manager, I want to create sub-teams and channels for teams I manage so that I can organize team structure**
-4. **As a global manager, I want to create new users in Authentik and assign team management roles**
+4. **As a global manager, I want to create new users in Account Management System and assign team management roles**
 5. **As a user, I want to see my assigned team and channels so that I know my current access**
 6. **As a team manager, I want to move users to a holding pen so that I can remove access without deleting accounts**
 7. **As a global admin, I want to assign team management permissions to users**
@@ -77,18 +81,19 @@
 - **Environment:** Development, staging, production
 
 ## Success Criteria
-- [ ] **User Onboarding:** New users can request team access without existing accounts
-- [ ] **Team Management:** Admins can create hierarchical teams and manage membership
-- [ ] **Channel Integration:** Channels properly map to Authentik LDAP groups
-- [ ] **Mobile Usability:** All core functions work on mobile devices
-- [ ] **Performance:** Page loads under 2 seconds, handles 100+ concurrent users
+- [x] **User Onboarding:** New users can request team access without existing accounts
+- [x] **Team Management:** Admins can create hierarchical teams and manage membership
+- [x] **Channel Integration:** Channels properly map to Authentik LDAP groups
+- [x] **Mobile Usability:** All core functions work on mobile devices
+- [x] **Performance:** Page loads under 2 seconds, handles 100+ concurrent users
 
 ## Constraints & Assumptions
 - **Integration Dependency:** Requires existing Authentik installation
 - **Team Hierarchy:** Maximum 5 levels deep (technical limitation)
 - **Performance:** Support up to 1000 users, 100 teams initially
 - **Browser Support:** Modern browsers (Chrome, Firefox, Safari, Edge)
-- **LDAP Mapping:** 3 LDAP groups per channel - tak_ChannelName (read/write), tak_ChannelName_READ (read-only), tak_ChannelName_WRITE (write-only)
+- **LDAP Mapping:** Authentik groups with tak_ prefix and CN attributes for TAK integration
+- **TAK Attribute Names:** Always use takRole, takColor, takCallsign (camelCase, not snake_case)
 
 ## Security & Compliance
 - [ ] **OAuth2 Authentication** via Authentik for existing users
@@ -99,6 +104,33 @@
 - [ ] **GDPR Compliance** for user data handling
 - [ ] **Secure API Integration** with Authentik
 
+## Implementation Status
+
+### ✅ Completed Features
+- **OAuth2 Authentication** - Full Authentik SSO integration with JWT tokens
+- **Hierarchical Team Management** - Root teams and unlimited sub-team depth
+- **Callsign System** - Configurable prefix-based callsign generation
+- **Automatic Channel Creation** - Teams get channels with proper LDAP group mapping
+- **Request Access Interface** - Public form with searchable team dropdown
+- **Admin Interface** - Team creation, editing, deletion with proper permissions
+- **Site Configuration** - Editable page content and color mappings
+- **Mobile Responsive Design** - Works across all device sizes
+- **Channel Display** - Teams show associated channels in detail view
+
+### 🔄 In Progress
+- **User Management** - Basic framework exists, needs Account Management System user creation
+- **Approval System** - Request submission works, needs admin approval workflow
+
+### 📋 Technical Implementation Details
+- **Database Schema** - PostgreSQL with teams, channels, site_config, user_cache tables
+- **Team Structure** - Parent-child relationships with callsign_prefix for display names
+- **Channel Naming** - "Teams / {prefix} / {name}" format with automatic Authentik group creation
+- **LDAP Integration** - Groups created with tak_ prefix and proper CN attributes
+- **Color System** - Environment-based TAK color mappings for New Zealand agencies
+- **Bulk Import** - 82 teams imported including full LandSAR hierarchy
+- **TAK User Attributes** - Use correct attribute names: takRole, takColor, takCallsign (NOT tak_role, tak_color, tak_callsign)
+- **User Removal** - When users are removed from teams, TAK attributes (takRole, takColor, takCallsign) must be cleared/removed
+
 ---
-*Created: [Date]*
-*Last Updated: [Date]*
+*Created: December 2024*
+*Last Updated: January 2025*

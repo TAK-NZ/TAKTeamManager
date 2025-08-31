@@ -1,6 +1,10 @@
 const express = require('express');
 const axios = require('axios');
+const { body, validationResult } = require('express-validator');
 const { authenticateToken } = require('../middleware/auth');
+const Channel = require('../models/Channel');
+const Team = require('../models/Team');
+const pool = require('../config/database');
 const router = express.Router();
 
 // Get channel descriptions for user's groups
@@ -49,6 +53,68 @@ router.get('/descriptions', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('Failed to fetch channel descriptions:', error);
     res.status(500).json({ error: 'Failed to fetch channel descriptions' });
+  }
+});
+
+// Create custom channel
+router.post('/custom', authenticateToken, [
+  body('teamId').isInt(),
+  body('customSuffix').trim().isLength({ min: 1, max: 100 }),
+  body('memberPermissions').isArray()
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
+  try {
+    const { teamId, customSuffix, memberPermissions } = req.body;
+    
+    // Check if team exists and user has permission
+    const team = await Team.findById(teamId);
+    if (!team) {
+      return res.status(404).json({ error: 'Team not found' });
+    }
+    
+    // Check channel limit (3 total including primary)
+    const channelCount = await Channel.getChannelCount(teamId);
+    if (channelCount >= 3) {
+      return res.status(400).json({ error: 'Maximum of 3 channels allowed per team' });
+    }
+    
+    // Validate member permissions format
+    for (const memberPerm of memberPermissions) {
+      if (!memberPerm.userId || !['read', 'write', 'read_write'].includes(memberPerm.permission)) {
+        return res.status(400).json({ error: 'Invalid member permission format' });
+      }
+    }
+    
+    const channel = await Channel.createCustomChannel(teamId, customSuffix, memberPermissions);
+    res.status(201).json({ channel });
+  } catch (error) {
+    console.error('Failed to create custom channel:', error);
+    res.status(500).json({ error: 'Failed to create custom channel' });
+  }
+});
+
+// Get channels for a team with member counts
+router.get('/team/:teamId', authenticateToken, async (req, res) => {
+  try {
+    const { teamId } = req.params;
+    
+    const result = await pool.query(`
+      SELECT c.*, COUNT(cm.user_id) as member_count
+      FROM channels c
+      LEFT JOIN channel_memberships cm ON c.id = cm.channel_id
+      WHERE c.team_id = $1
+      GROUP BY c.id
+      ORDER BY c.is_primary DESC, c.name
+    `, [teamId]);
+    
+    res.json({ channels: result.rows });
+  } catch (error) {
+    console.error('Failed to fetch channels:', error);
+    res.status(500).json({ error: 'Failed to fetch channels' });
   }
 });
 

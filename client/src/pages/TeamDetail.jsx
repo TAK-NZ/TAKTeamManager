@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react'
+import React from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { PlusIcon, UsersIcon, UserPlusIcon, ShieldCheckIcon, BuildingOfficeIcon, FolderPlusIcon, HashtagIcon, XMarkIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, TrashIcon, PencilIcon } from '@heroicons/react/24/outline'
-import { teamsAPI, channelsAPI } from '../services/api'
+import { PlusIcon, UsersIcon, UserPlusIcon, ShieldCheckIcon, BuildingOfficeIcon, FolderPlusIcon, HashtagIcon, XMarkIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, TrashIcon, PencilIcon, CheckIcon } from '@heroicons/react/24/outline'
+import { teamsAPI, channelsAPI, usersAPI } from '../services/api'
 
-export default function TeamDetail() {
+export default function TeamDetail({ refreshUser }) {
   const { teamId } = useParams()
   const [team, setTeam] = useState(null)
   const [members, setMembers] = useState([])
@@ -63,6 +64,26 @@ export default function TeamDetail() {
   })
   const [allTeams, setAllTeams] = useState([])
   const [updating, setUpdating] = useState(false)
+  const [showChannelDialog, setShowChannelDialog] = useState(false)
+  const [channelFormData, setChannelFormData] = useState({
+    customSuffix: '',
+    memberPermissions: []
+  })
+  const [creatingChannel, setCreatingChannel] = useState(false)
+  const [showAddMemberDialog, setShowAddMemberDialog] = useState(false)
+  const [addMemberTab, setAddMemberTab] = useState('existing')
+  const [availableUsers, setAvailableUsers] = useState([])
+  const [userSearch, setUserSearch] = useState('')
+  const [selectedUserId, setSelectedUserId] = useState('')
+  const [newUserForm, setNewUserForm] = useState({
+    email: '',
+    firstName: '',
+    lastName: ''
+  })
+  const [addingMember, setAddingMember] = useState(false)
+  const [removeUserId, setRemoveUserId] = useState(null)
+  const [removeUserRole, setRemoveUserRole] = useState('')
+  const [removingUser, setRemovingUser] = useState(false)
 
   const handleCreateSubTeam = async (e) => {
     e.preventDefault()
@@ -112,6 +133,161 @@ export default function TeamDetail() {
     }
   }
 
+  const handleCreateChannel = async (e) => {
+    e.preventDefault()
+    setCreatingChannel(true)
+    try {
+      const response = await channelsAPI.createCustom(
+        team.id, 
+        channelFormData.customSuffix, 
+        channelFormData.memberPermissions
+      )
+      
+      setChannels([...channels, response.data.channel])
+      setChannelFormData({ customSuffix: '', memberPermissions: [] })
+      setShowChannelDialog(false)
+    } catch (error) {
+      console.error('Failed to create channel:', error)
+      alert('Failed to create channel: ' + (error.response?.data?.error || error.message))
+    } finally {
+      setCreatingChannel(false)
+    }
+  }
+
+  const toggleMemberPermission = (memberId, permission) => {
+    const existing = channelFormData.memberPermissions.find(mp => mp.userId === memberId)
+    let newPermissions
+    
+    if (existing) {
+      if (existing.permission === permission) {
+        // Remove if same permission clicked
+        newPermissions = channelFormData.memberPermissions.filter(mp => mp.userId !== memberId)
+      } else {
+        // Update permission
+        newPermissions = channelFormData.memberPermissions.map(mp => 
+          mp.userId === memberId ? { ...mp, permission } : mp
+        )
+      }
+    } else {
+      // Add new permission
+      newPermissions = [...channelFormData.memberPermissions, { userId: memberId, permission }]
+    }
+    
+    setChannelFormData({ ...channelFormData, memberPermissions: newPermissions })
+  }
+
+  const getMemberPermission = (memberId) => {
+    return channelFormData.memberPermissions.find(mp => mp.userId === memberId)?.permission
+  }
+
+  const fetchAvailableUsers = async (search = '') => {
+    try {
+      const response = await usersAPI.getAvailable(search)
+      setAvailableUsers(response.data.users)
+    } catch (error) {
+      console.error('Failed to fetch available users:', error)
+    }
+  }
+
+  const handleAddExistingUser = async () => {
+    if (!selectedUserId) return
+    
+    setAddingMember(true)
+    try {
+      await usersAPI.addToTeam(selectedUserId, team.id)
+      
+      // Refresh team data
+      const teamResponse = await teamsAPI.getById(team.id)
+      const allMembers = teamResponse.data.members || []
+      setMembers(allMembers.filter(m => m.role === 'member'))
+      setAdmins(allMembers.filter(m => m.role === 'admin'))
+      
+      // Notify Dashboard to refresh
+      window.dispatchEvent(new CustomEvent('userAssignmentChanged'))
+      
+      setShowAddMemberDialog(false)
+      setSelectedUserId('')
+      setUserSearch('')
+    } catch (error) {
+      console.error('Failed to add user:', error)
+      alert('Failed to add user: ' + (error.response?.data?.error || error.message))
+    } finally {
+      setAddingMember(false)
+    }
+  }
+
+  const handleCreateNewUser = async (e) => {
+    e.preventDefault()
+    setAddingMember(true)
+    try {
+      await usersAPI.createAndAdd(
+        newUserForm.email,
+        newUserForm.firstName,
+        newUserForm.lastName,
+        team.id
+      )
+      
+      // Refresh team data
+      const teamResponse = await teamsAPI.getById(team.id)
+      const allMembers = teamResponse.data.members || []
+      setMembers(allMembers.filter(m => m.role === 'member'))
+      setAdmins(allMembers.filter(m => m.role === 'admin'))
+      
+      // Notify Dashboard to refresh
+      window.dispatchEvent(new CustomEvent('userAssignmentChanged'))
+      
+      setShowAddMemberDialog(false)
+      setNewUserForm({ email: '', firstName: '', lastName: '' })
+    } catch (error) {
+      console.error('Failed to create user:', error)
+      alert('Failed to create user: ' + (error.response?.data?.error || error.message))
+    } finally {
+      setAddingMember(false)
+    }
+  }
+
+  // Fetch available users when dialog opens
+  React.useEffect(() => {
+    if (showAddMemberDialog && addMemberTab === 'existing') {
+      fetchAvailableUsers(userSearch)
+    }
+  }, [showAddMemberDialog, addMemberTab, userSearch])
+
+  const handleRemoveUser = (userId, role) => {
+    setRemoveUserId(userId)
+    setRemoveUserRole(role)
+  }
+
+  const confirmRemoveUser = async () => {
+    if (!removeUserId) return
+    
+    setRemovingUser(true)
+    try {
+      await usersAPI.removeFromTeam(removeUserId, team.id)
+      
+      // Refresh team data
+      const teamResponse = await teamsAPI.getById(team.id)
+      const allMembers = teamResponse.data.members || []
+      setMembers(allMembers.filter(m => m.role === 'member'))
+      setAdmins(allMembers.filter(m => m.role === 'admin'))
+      
+      // Refresh channels to update member counts
+      const channelsResponse = await channelsAPI.getByTeam(team.id)
+      setChannels(channelsResponse.data.channels || [])
+      
+      // Notify Dashboard to refresh
+      window.dispatchEvent(new CustomEvent('userAssignmentChanged'))
+      
+      setRemoveUserId(null)
+      setRemoveUserRole('')
+    } catch (error) {
+      console.error('Failed to remove user:', error)
+      alert('Failed to remove user: ' + (error.response?.data?.error || error.message))
+    } finally {
+      setRemovingUser(false)
+    }
+  }
+
   // Map color names to CSS colors (same as Dashboard)
   const getColorValue = (colorName) => {
     const colorMap = {
@@ -153,7 +329,7 @@ export default function TeamDetail() {
         setTeam(teamData)
         setMembers(allMembers.filter(m => m.role === 'member'))
         setAdmins(allMembers.filter(m => m.role === 'admin'))
-        setChannels(teamResponse.data.channels || [])
+        // Channels will be fetched separately with member counts
         
         // Fetch parent team if exists, otherwise clear it
         if (teamData.parent_team_id && !isCancelled) {
@@ -194,7 +370,14 @@ export default function TeamDetail() {
         
 
         
-        // Channels are now fetched with team data
+        // Fetch channels with member counts
+        try {
+          const channelsResponse = await channelsAPI.getByTeam(teamId);
+          setChannels(channelsResponse.data.channels || []);
+        } catch (channelError) {
+          console.error('Error fetching channels with counts:', channelError);
+          setChannels([]);
+        }
       } catch (error) {
         console.error('Failed to fetch team data:', error)
         if (!isCancelled) {
@@ -438,7 +621,10 @@ export default function TeamDetail() {
                 <PencilIcon className="h-4 w-4 mr-2" />
                 Edit Team
               </button>
-              <button className="btn-secondary flex items-center">
+              <button 
+                onClick={() => setShowAddMemberDialog(true)}
+                className="btn-secondary flex items-center"
+              >
                 <UserPlusIcon className="h-4 w-4 mr-2" />
                 Add Member
               </button>
@@ -455,9 +641,14 @@ export default function TeamDetail() {
                 <FolderPlusIcon className="h-4 w-4 mr-2" />
                 Add Sub-team
               </button>
-              <button className="btn-primary flex items-center">
+              <button 
+                onClick={() => setShowChannelDialog(true)}
+                disabled={channels.length >= 3}
+                className={`btn-primary flex items-center ${channels.length >= 3 ? 'opacity-50 cursor-not-allowed' : ''}`}
+                title={channels.length >= 3 ? 'Maximum 3 channels allowed' : 'Create custom channel'}
+              >
                 <HashtagIcon className="h-4 w-4 mr-2" />
-                Create Channel
+                Create Channel ({channels.length}/3)
               </button>
             </div>
           </div>
@@ -533,6 +724,9 @@ export default function TeamDetail() {
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                       Role
                     </th>
+                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                      Actions
+                    </th>
                   </tr>
                 </thead>
                 <tbody className="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
@@ -548,6 +742,15 @@ export default function TeamDetail() {
                         <span className="px-2 py-1 text-xs font-medium rounded-full bg-gray-100 text-gray-800 dark:bg-gray-600 dark:text-gray-200">
                           Member
                         </span>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                        <button
+                          onClick={() => handleRemoveUser(member.id, 'member')}
+                          className="text-red-600 hover:text-red-500 dark:text-red-400 dark:hover:text-red-300"
+                          title="Remove from team"
+                        >
+                          <TrashIcon className="h-4 w-4" />
+                        </button>
                       </td>
                     </tr>
                   ))}
@@ -576,6 +779,9 @@ export default function TeamDetail() {
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                       Role
                     </th>
+                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                      Actions
+                    </th>
                   </tr>
                 </thead>
                 <tbody className="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
@@ -591,6 +797,15 @@ export default function TeamDetail() {
                         <span className="px-2 py-1 text-xs font-medium rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">
                           Admin
                         </span>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                        <button
+                          onClick={() => handleRemoveUser(admin.id, 'admin')}
+                          className="text-red-600 hover:text-red-500 dark:text-red-400 dark:hover:text-red-300"
+                          title="Remove from team"
+                        >
+                          <TrashIcon className="h-4 w-4" />
+                        </button>
                       </td>
                     </tr>
                   ))}
@@ -610,11 +825,14 @@ export default function TeamDetail() {
                         {getSortIcon('display_name')}
                       </div>
                     </th>
-                    <th onClick={() => handleSort('description')} className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700">
+                    <th onClick={() => handleSort('channel_type')} className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700">
                       <div className="flex items-center space-x-1">
-                        <span>Description</span>
-                        {getSortIcon('description')}
+                        <span>Type</span>
+                        {getSortIcon('channel_type')}
                       </div>
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                      Members
                     </th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                       Status
@@ -626,14 +844,28 @@ export default function TeamDetail() {
                     <tr key={channel.id} className="hover:bg-gray-50 dark:hover:bg-gray-800">
                       <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">
                         {channel.display_name}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                        {channel.description || '-'}
+                        {channel.custom_suffix && (
+                          <div className="text-xs text-gray-500 dark:text-gray-400">
+                            Suffix: {channel.custom_suffix}
+                          </div>
+                        )}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
-                        {channel.is_primary && (
-                          <span className="px-2 py-1 text-xs font-medium rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
-                            Primary
+                        <span className={`px-2 py-1 text-xs font-medium rounded-full ${
+                          channel.channel_type === 'primary' 
+                            ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
+                            : 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200'
+                        }`}>
+                          {channel.channel_type === 'primary' ? 'Primary' : 'Custom'}
+                        </span>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+                        {channel.member_count || 0} members
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        {channel.authentik_group_id && (
+                          <span className="px-2 py-1 text-xs font-medium rounded-full bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200">
+                            Synced
                           </span>
                         )}
                       </td>
@@ -962,6 +1194,345 @@ export default function TeamDetail() {
                   className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50"
                 >
                   {deletingSubTeam ? 'Deleting...' : 'Delete Sub-Team'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add Member Dialog */}
+      {showAddMemberDialog && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
+              <h3 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Add Member to Team</h3>
+              <button
+                onClick={() => {
+                  setShowAddMemberDialog(false)
+                  setAddMemberTab('existing')
+                  setSelectedUserId('')
+                  setUserSearch('')
+                  setNewUserForm({ email: '', firstName: '', lastName: '' })
+                }}
+                className="text-gray-400 hover:text-gray-500 dark:hover:text-gray-300"
+              >
+                <XMarkIcon className="h-6 w-6" />
+              </button>
+            </div>
+            
+            {/* Tab Navigation */}
+            <div className="border-b border-gray-200 dark:border-gray-700">
+              <nav className="-mb-px flex">
+                <button
+                  onClick={() => setAddMemberTab('existing')}
+                  className={`py-4 px-6 border-b-2 font-medium text-sm ${
+                    addMemberTab === 'existing'
+                      ? 'border-primary-500 text-primary-600 dark:text-primary-400'
+                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'
+                  }`}
+                >
+                  Add Existing User
+                </button>
+                <button
+                  onClick={() => setAddMemberTab('new')}
+                  className={`py-4 px-6 border-b-2 font-medium text-sm ${
+                    addMemberTab === 'new'
+                      ? 'border-primary-500 text-primary-600 dark:text-primary-400'
+                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'
+                  }`}
+                >
+                  Create New User
+                </button>
+              </nav>
+            </div>
+            
+            <div className="p-6">
+              {addMemberTab === 'existing' && (
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                      Search Users
+                    </label>
+                    <input
+                      type="text"
+                      value={userSearch}
+                      onChange={(e) => setUserSearch(e.target.value)}
+                      className="input w-full"
+                      placeholder="Search by name, email, or username..."
+                    />
+                  </div>
+                  
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                      Available Users
+                    </label>
+                    <div className="max-h-64 overflow-y-auto border border-gray-200 dark:border-gray-600 rounded-lg">
+                      {availableUsers.length === 0 ? (
+                        <div className="p-4 text-center text-gray-500 dark:text-gray-400">
+                          {userSearch ? 'No users found matching your search.' : 'No available users (all users are already in teams).'}
+                        </div>
+                      ) : (
+                        <div className="space-y-1 p-2">
+                          {availableUsers.map((user) => (
+                            <label key={user.id} className="flex items-center p-3 hover:bg-gray-50 dark:hover:bg-gray-700 rounded cursor-pointer">
+                              <input
+                                type="radio"
+                                name="selectedUser"
+                                value={user.id}
+                                checked={selectedUserId === user.id}
+                                onChange={(e) => setSelectedUserId(e.target.value)}
+                                className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300"
+                              />
+                              <div className="ml-3">
+                                <div className="text-sm font-medium text-gray-900 dark:text-gray-100">
+                                  {user.first_name} {user.last_name}
+                                </div>
+                                <div className="text-xs text-gray-500 dark:text-gray-400">
+                                  {user.email}
+                                </div>
+                              </div>
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  
+                  <div className="flex justify-end space-x-3 pt-4">
+                    <button
+                      type="button"
+                      onClick={() => setShowAddMemberDialog(false)}
+                      className="btn-secondary px-6 py-2"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={handleAddExistingUser}
+                      disabled={!selectedUserId || addingMember}
+                      className="btn-primary px-6 py-2"
+                    >
+                      {addingMember ? 'Adding...' : 'Add User'}
+                    </button>
+                  </div>
+                </div>
+              )}
+              
+              {addMemberTab === 'new' && (
+                <form onSubmit={handleCreateNewUser} className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                      Email Address *
+                    </label>
+                    <input
+                      type="email"
+                      required
+                      value={newUserForm.email}
+                      onChange={(e) => setNewUserForm({...newUserForm, email: e.target.value})}
+                      className="input w-full"
+                      placeholder="user@example.com"
+                    />
+                  </div>
+                  
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                        First Name *
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={newUserForm.firstName}
+                        onChange={(e) => setNewUserForm({...newUserForm, firstName: e.target.value})}
+                        className="input w-full"
+                        placeholder="John"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                        Last Name *
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={newUserForm.lastName}
+                        onChange={(e) => setNewUserForm({...newUserForm, lastName: e.target.value})}
+                        className="input w-full"
+                        placeholder="Doe"
+                      />
+                    </div>
+                  </div>
+                  
+                  <div className="bg-blue-50 dark:bg-blue-900 p-4 rounded-lg">
+                    <p className="text-sm text-blue-800 dark:text-blue-200">
+                      <strong>Note:</strong> The user will be created in the Account Management System and automatically added to this team. 
+                      They will need to set their password on first login.
+                    </p>
+                  </div>
+                  
+                  <div className="flex justify-end space-x-3 pt-4">
+                    <button
+                      type="button"
+                      onClick={() => setShowAddMemberDialog(false)}
+                      className="btn-secondary px-6 py-2"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={!newUserForm.email || !newUserForm.firstName || !newUserForm.lastName || addingMember}
+                      className="btn-primary px-6 py-2"
+                    >
+                      {addingMember ? 'Creating...' : 'Create & Add User'}
+                    </button>
+                  </div>
+                </form>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Create Channel Dialog */}
+      {showChannelDialog && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
+              <h3 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Create Custom Channel</h3>
+              <button
+                onClick={() => setShowChannelDialog(false)}
+                className="text-gray-400 hover:text-gray-500 dark:hover:text-gray-300"
+              >
+                <XMarkIcon className="h-6 w-6" />
+              </button>
+            </div>
+            
+            <form onSubmit={handleCreateChannel} className="p-6">
+              <div className="space-y-6">
+                <div className="bg-gray-50 dark:bg-gray-700 p-4 rounded-lg">
+                  <h4 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Channel Name Preview:</h4>
+                  <p className="text-sm text-gray-900 dark:text-gray-100">
+                    {team.parent_team_id 
+                      ? `Teams / ${parentTeam?.callsign_prefix || parentTeam?.name || 'Root'} / ${team.name}`
+                      : `Teams / ${team.callsign_prefix || team.name}`
+                    }
+                    {channelFormData.customSuffix && ` - ${channelFormData.customSuffix}`}
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Channel Suffix *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={channelFormData.customSuffix}
+                    onChange={(e) => setChannelFormData({...channelFormData, customSuffix: e.target.value})}
+                    className="input w-full"
+                    placeholder="Example Text"
+                    maxLength={100}
+                  />
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    This will be added after " - " to create the full channel name
+                  </p>
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-4">
+                    Select Members and Permissions
+                  </label>
+                  <div className="space-y-2 max-h-64 overflow-y-auto border border-gray-200 dark:border-gray-600 rounded-lg p-3">
+                    {members.map((member) => {
+                      const currentPermission = getMemberPermission(member.id)
+                      return (
+                        <div key={member.id} className="flex items-center justify-between py-2 px-3 bg-gray-50 dark:bg-gray-700 rounded">
+                          <div className="flex-1">
+                            <span className="text-sm font-medium text-gray-900 dark:text-gray-100">
+                              {member.first_name} {member.last_name}
+                            </span>
+                            <span className="text-xs text-gray-500 dark:text-gray-400 ml-2">
+                              {member.email}
+                            </span>
+                          </div>
+                          <div className="flex space-x-2">
+                            {['read', 'write', 'read_write'].map((permission) => (
+                              <button
+                                key={permission}
+                                type="button"
+                                onClick={() => toggleMemberPermission(member.id, permission)}
+                                className={`px-3 py-1 text-xs font-medium rounded-full border transition-colors ${
+                                  currentPermission === permission
+                                    ? 'bg-primary-100 text-primary-800 border-primary-300 dark:bg-primary-900 dark:text-primary-200'
+                                    : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50 dark:bg-gray-600 dark:text-gray-300 dark:border-gray-500 dark:hover:bg-gray-500'
+                                }`}
+                              >
+                                {currentPermission === permission && <CheckIcon className="h-3 w-3 inline mr-1" />}
+                                {permission === 'read_write' ? 'Read/Write' : permission.charAt(0).toUpperCase() + permission.slice(1)}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
+                    Select members and their permissions. Members without permissions will not be added to the channel.
+                  </p>
+                </div>
+              </div>
+              
+              <div className="flex justify-end space-x-3 pt-6 mt-6 border-t border-gray-200 dark:border-gray-700">
+                <button
+                  type="button"
+                  onClick={() => setShowChannelDialog(false)}
+                  className="btn-secondary px-6 py-2"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={creatingChannel || !channelFormData.customSuffix || channelFormData.memberPermissions.length === 0}
+                  className="btn-primary px-6 py-2"
+                >
+                  {creatingChannel ? 'Creating Channel...' : 'Create Channel'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Remove User Confirmation Dialog */}
+      {removeUserId && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full">
+            <div className="p-6">
+              <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
+                Remove {removeUserRole === 'admin' ? 'Admin' : 'Member'}
+              </h3>
+              <p className="text-gray-600 dark:text-gray-400 mb-6">
+                Are you sure you want to remove this {removeUserRole} from the team? 
+                They will be removed from all team channels and lose access to team resources.
+              </p>
+              <div className="flex justify-end space-x-3">
+                <button
+                  onClick={() => {
+                    setRemoveUserId(null)
+                    setRemoveUserRole('')
+                  }}
+                  className="btn-secondary"
+                  disabled={removingUser}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmRemoveUser}
+                  disabled={removingUser}
+                  className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50"
+                >
+                  {removingUser ? 'Removing...' : 'Remove User'}
                 </button>
               </div>
             </div>

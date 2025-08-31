@@ -48,7 +48,10 @@ CREATE TABLE channels (
     team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE,
     authentik_group_id INTEGER,
     authentik_read_group_id INTEGER,
+    authentik_write_group_id INTEGER,
     is_primary BOOLEAN DEFAULT false,
+    channel_type VARCHAR(20) DEFAULT 'primary',
+    custom_suffix VARCHAR(255),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(name, team_id)
@@ -59,6 +62,7 @@ CREATE TABLE channel_memberships (
     id SERIAL PRIMARY KEY,
     user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
     channel_id INTEGER REFERENCES channels(id) ON DELETE CASCADE,
+    permission VARCHAR(20) DEFAULT 'read_write',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(user_id, channel_id)
 );
@@ -87,9 +91,9 @@ CREATE TABLE user_cache (
     first_name VARCHAR(255),
     last_name VARCHAR(255),
     is_active BOOLEAN DEFAULT true,
-    tak_role VARCHAR(100),
-    tak_color VARCHAR(50),
-    tak_callsign VARCHAR(100),
+    takRole VARCHAR(100),
+    takColor VARCHAR(50),
+    takCallsign VARCHAR(100),
     groups TEXT[], -- Array of group names
     is_admin BOOLEAN DEFAULT false,
     last_synced TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

@@ -127,7 +127,7 @@ router.put('/:teamId', authenticateToken, [
       return res.status(404).json({ error: 'Team not found' });
     }
 
-    const { name, description, callsignPrefix, visibility, canJoin, parentTeamId, callsignSubteamDepth, callsignNameFormat } = req.body;
+    const { name, description, callsignPrefix, visibility, canJoin, parentTeamId, callsignSubteamDepth, callsignNameFormat, color } = req.body;
     const updatedTeam = await Team.update(req.params.teamId, {
       name,
       description,
@@ -136,8 +136,15 @@ router.put('/:teamId', authenticateToken, [
       can_join: canJoin,
       parent_team_id: parentTeamId,
       callsign_subteam_depth: callsignSubteamDepth,
-      callsign_name_format: callsignNameFormat
+      callsign_name_format: callsignNameFormat,
+      color
     });
+
+    // Update user attributes if callsign settings or color changed
+    const UserAttributesService = require('../services/userAttributes');
+    if (callsignSubteamDepth !== undefined || callsignNameFormat !== undefined || color !== undefined) {
+      await UserAttributesService.updateTeamUserAttributes(req.params.teamId);
+    }
 
     res.json({ team: updatedTeam });
   } catch (error) {
