@@ -96,9 +96,28 @@ router.get('/me', authenticateToken, async (req, res) => {
       });
       if (authentikResponse.ok) {
         const authentikUser = await authentikResponse.json();
+        
+        // Fetch group names for the user's groups
+        const groupNames = [];
+        if (authentikUser.groups && authentikUser.groups.length > 0) {
+          for (const groupId of authentikUser.groups) {
+            try {
+              const groupResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${groupId}/`, {
+                headers: { Authorization: `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }
+              });
+              if (groupResponse.ok) {
+                const group = await groupResponse.json();
+                groupNames.push(group.name);
+              }
+            } catch (groupError) {
+              console.error('Failed to fetch group:', groupError);
+            }
+          }
+        }
+        
         freshUserData = {
           ...req.user,
-          groups: authentikUser.groups || [],
+          groups: groupNames,
           takCallsign: authentikUser.attributes?.takCallsign,
           takColor: authentikUser.attributes?.takColor,
           takRole: authentikUser.attributes?.takRole

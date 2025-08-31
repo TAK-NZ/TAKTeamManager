@@ -147,34 +147,72 @@ export default function Dashboard({ user, refreshUser }) {
     Object.entries(tree.folders).forEach(([folderName, subtree]) => {
       const folderPath = path ? `${path}/${folderName}` : folderName
       const isExpanded = expandedFolders.has(folderPath)
+      const parentChannel = tree.channels.find(c => c.display_name === folderName)
       
-      items.push(
-        <div key={folderPath}>
-          <div 
-            className="flex items-center p-3 bg-gray-100 dark:bg-gray-600 rounded-lg cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-500"
-            onClick={() => toggleFolder(folderPath)}
-          >
+      if (parentChannel) {
+        // Render as expandable channel
+        items.push(
+          <div key={folderPath} className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-lg ml-6">
             <div className="flex items-center flex-1">
-              {isExpanded ? (
-                <FolderOpenIcon className="h-5 w-5 text-blue-600 mr-2" />
-              ) : (
-                <FolderIcon className="h-5 w-5 text-blue-600 mr-2" />
+              <button
+                onClick={() => toggleFolder(folderPath)}
+                className="mr-2 p-1 hover:bg-gray-200 dark:hover:bg-gray-600 rounded"
+              >
+                <ChevronRightSmall className={`h-4 w-4 text-gray-500 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+              </button>
+              <div className="flex-1">
+                <h3 className="font-medium text-gray-900 dark:text-gray-100">{parentChannel.display_name}</h3>
+                <p className="text-sm text-gray-500 dark:text-gray-400">
+                  {parentChannel.description}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center space-x-2">
+              {parentChannel.permissions.includes('readwrite') && (
+                <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-purple-100 text-purple-800 rounded">
+                  <ArrowsRightLeftIcon className="h-3 w-3 mr-1" />
+                  Read/Write
+                </span>
               )}
-              <span className="font-medium text-gray-900 dark:text-gray-100">{folderName}</span>
             </div>
-            <ChevronRightSmall className={`h-4 w-4 text-gray-500 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
           </div>
-          {isExpanded && (
-            <div className="ml-6 mt-2 space-y-2">
-              {renderFolderTree(subtree, folderPath)}
+        )
+      } else {
+        // Render as regular folder
+        items.push(
+          <div key={folderPath}>
+            <div 
+              className="flex items-center p-3 bg-gray-100 dark:bg-gray-600 rounded-lg cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-500"
+              onClick={() => toggleFolder(folderPath)}
+            >
+              <div className="flex items-center flex-1">
+                {isExpanded ? (
+                  <FolderOpenIcon className="h-5 w-5 text-blue-600 mr-2" />
+                ) : (
+                  <FolderIcon className="h-5 w-5 text-blue-600 mr-2" />
+                )}
+                <span className="font-medium text-gray-900 dark:text-gray-100">{folderName}</span>
+              </div>
+              <ChevronRightSmall className={`h-4 w-4 text-gray-500 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
             </div>
-          )}
-        </div>
-      )
+          </div>
+        )
+      }
+      
+      if (isExpanded) {
+        items.push(
+          <div key={`${folderPath}-children`} className="ml-6 mt-2 space-y-2">
+            {renderFolderTree(subtree, folderPath)}
+          </div>
+        )
+      }
     })
     
-    // Render channels
-    tree.channels.forEach(channel => {
+
+    
+    // Render regular channels (excluding those that are parent channels)
+    const parentChannelNames = new Set(Object.keys(tree.folders))
+    tree.channels.filter(c => !parentChannelNames.has(c.display_name)).forEach(channel => {
       items.push(
         <div key={channel.id} className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-lg ml-6">
           <div className="flex-1">
@@ -184,41 +222,11 @@ export default function Dashboard({ user, refreshUser }) {
             </p>
           </div>
           <div className="flex items-center space-x-2">
-            {channel.permissions.includes('read') && (
-              <div className="relative group">
-                <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-blue-100 text-blue-800 rounded cursor-help">
-                  <ArrowUpRightIcon className="h-3 w-3 mr-1" />
-                  Read
-                </span>
-                <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
-                  Receive data only - view others' locations and messages
-                  <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
-                </div>
-              </div>
-            )}
-            {channel.permissions.includes('write') && (
-              <div className="relative group">
-                <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-green-100 text-green-800 rounded cursor-help">
-                  <ArrowDownLeftIcon className="h-3 w-3 mr-1" />
-                  Write
-                </span>
-                <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
-                  Send data only - share your location and messages
-                  <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
-                </div>
-              </div>
-            )}
             {channel.permissions.includes('readwrite') && (
-              <div className="relative group">
-                <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-purple-100 text-purple-800 rounded cursor-help">
-                  <ArrowsRightLeftIcon className="h-3 w-3 mr-1" />
-                  Read/Write
-                </span>
-                <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
-                  Full access - send and receive all data
-                  <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
-                </div>
-              </div>
+              <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-purple-100 text-purple-800 rounded">
+                <ArrowsRightLeftIcon className="h-3 w-3 mr-1" />
+                Read/Write
+              </span>
             )}
           </div>
         </div>
