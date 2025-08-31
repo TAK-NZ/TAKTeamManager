@@ -202,7 +202,7 @@ export default function TeamDetail({ refreshUser }) {
       // Refresh team data
       const teamResponse = await teamsAPI.getById(team.id)
       const allMembers = teamResponse.data.members || []
-      setMembers(allMembers.filter(m => m.role === 'member'))
+      setMembers(allMembers.filter(m => m.role === 'member' || m.role === 'inherited'))
       setAdmins(allMembers.filter(m => m.role === 'admin'))
       
       // Notify Dashboard to refresh
@@ -233,7 +233,7 @@ export default function TeamDetail({ refreshUser }) {
       // Refresh team data
       const teamResponse = await teamsAPI.getById(team.id)
       const allMembers = teamResponse.data.members || []
-      setMembers(allMembers.filter(m => m.role === 'member'))
+      setMembers(allMembers.filter(m => m.role === 'member' || m.role === 'inherited'))
       setAdmins(allMembers.filter(m => m.role === 'admin'))
       
       // Notify Dashboard to refresh
@@ -271,7 +271,7 @@ export default function TeamDetail({ refreshUser }) {
       // Refresh team data
       const teamResponse = await teamsAPI.getById(team.id)
       const allMembers = teamResponse.data.members || []
-      setMembers(allMembers.filter(m => m.role === 'member'))
+      setMembers(allMembers.filter(m => m.role === 'member' || m.role === 'inherited'))
       setAdmins(allMembers.filter(m => m.role === 'admin'))
       
       // Refresh channels to update member counts
@@ -330,7 +330,7 @@ export default function TeamDetail({ refreshUser }) {
         const allMembers = teamResponse.data.members || []
         
         setTeam(teamData)
-        setMembers(allMembers.filter(m => m.role === 'member'))
+        setMembers(allMembers.filter(m => m.role === 'member' || m.role === 'inherited'))
         setAdmins(allMembers.filter(m => m.role === 'admin'))
         // Channels will be fetched separately with member counts
         
@@ -746,18 +746,30 @@ export default function TeamDetail({ refreshUser }) {
                         {member.email}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
-                        <span className="px-2 py-1 text-xs font-medium rounded-full bg-gray-100 text-gray-800 dark:bg-gray-600 dark:text-gray-200">
-                          Member
-                        </span>
+                        {member.inherited_from_team_name ? (
+                          <span className="px-2 py-1 text-xs font-medium rounded-full bg-blue-100 text-blue-800 dark:bg-blue-600 dark:text-blue-200">
+                            Inherited from <Link to={`/teams/${member.inherited_from_team_id}`} className="underline hover:no-underline">{member.inherited_from_team_name}</Link>
+                          </span>
+                        ) : (
+                          <span className="px-2 py-1 text-xs font-medium rounded-full bg-gray-100 text-gray-800 dark:bg-gray-600 dark:text-gray-200">
+                            Member
+                          </span>
+                        )}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                        <button
-                          onClick={() => handleRemoveUser(member.id, 'member')}
-                          className="text-red-600 hover:text-red-500 dark:text-red-400 dark:hover:text-red-300"
-                          title="Remove from team"
-                        >
-                          <TrashIcon className="h-4 w-4" />
-                        </button>
+                        {member.inherited_from_team_name ? (
+                          <span className="text-gray-400 dark:text-gray-500 text-xs">
+                            Cannot remove inherited member
+                          </span>
+                        ) : (
+                          <button
+                            onClick={() => handleRemoveUser(member.id, 'member')}
+                            className="text-red-600 hover:text-red-500 dark:text-red-400 dark:hover:text-red-300"
+                            title="Remove from team"
+                          >
+                            <TrashIcon className="h-4 w-4" />
+                          </button>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -801,18 +813,30 @@ export default function TeamDetail({ refreshUser }) {
                         {admin.email}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
-                        <span className="px-2 py-1 text-xs font-medium rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">
-                          Admin
-                        </span>
+                        {admin.inherited_from_team_name ? (
+                          <span className="px-2 py-1 text-xs font-medium rounded-full bg-purple-100 text-purple-800 dark:bg-purple-600 dark:text-purple-200">
+                            Inherited Admin from <Link to={`/teams/${admin.inherited_from_team_id}`} className="underline hover:no-underline">{admin.inherited_from_team_name}</Link>
+                          </span>
+                        ) : (
+                          <span className="px-2 py-1 text-xs font-medium rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">
+                            Admin
+                          </span>
+                        )}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                        <button
-                          onClick={() => handleRemoveUser(admin.id, 'admin')}
-                          className="text-red-600 hover:text-red-500 dark:text-red-400 dark:hover:text-red-300"
-                          title="Remove from team"
-                        >
-                          <TrashIcon className="h-4 w-4" />
-                        </button>
+                        {admin.inherited_from_team_name ? (
+                          <span className="text-gray-400 dark:text-gray-500 text-xs">
+                            Cannot remove inherited admin
+                          </span>
+                        ) : (
+                          <button
+                            onClick={() => handleRemoveUser(admin.id, 'admin')}
+                            className="text-red-600 hover:text-red-500 dark:text-red-400 dark:hover:text-red-300"
+                            title="Remove from team"
+                          >
+                            <TrashIcon className="h-4 w-4" />
+                          </button>
+                        )}
                       </td>
                     </tr>
                   ))}

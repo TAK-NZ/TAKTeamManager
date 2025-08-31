@@ -13,32 +13,44 @@ class UserAttributesService {
       
       const user = userResult.rows[0];
       
-      // Get team hierarchy and root team settings
+      // Get team hierarchy from root to target team
       const teamResult = await pool.query(`
-        WITH RECURSIVE team_hierarchy AS (
-          SELECT id, name, callsign_prefix, parent_team_id, 0 as level,
-                 callsign_subteam_depth, callsign_name_format, color
+        WITH RECURSIVE team_path AS (
+          -- Start from target team and go up to root
+          SELECT id, name, callsign_prefix, parent_team_id,
+                 callsign_subteam_depth, callsign_name_format, color,
+                 ARRAY[id] as path
           FROM teams WHERE id = $1
           UNION ALL
-          SELECT t.id, t.name, t.callsign_prefix, t.parent_team_id, th.level + 1,
-                 t.callsign_subteam_depth, t.callsign_name_format, t.color
+          SELECT t.id, t.name, t.callsign_prefix, t.parent_team_id,
+                 t.callsign_subteam_depth, t.callsign_name_format, t.color,
+                 t.id || tp.path
           FROM teams t
-          JOIN team_hierarchy th ON t.id = th.parent_team_id
+          JOIN team_path tp ON t.id = tp.parent_team_id
+        ),
+        root_team AS (
+          SELECT * FROM team_path WHERE parent_team_id IS NULL
         )
-        SELECT * FROM team_hierarchy ORDER BY level DESC
+        SELECT t.id, t.name, t.callsign_prefix, t.parent_team_id,
+               rt.callsign_subteam_depth, rt.callsign_name_format, rt.color,
+               array_position(rt.path, t.id) as position
+        FROM root_team rt,
+             unnest(rt.path) WITH ORDINALITY AS u(team_id, pos)
+        JOIN teams t ON t.id = u.team_id
+        ORDER BY u.pos
       `, [teamId]);
       
       if (teamResult.rows.length === 0) return null;
       
-      const rootTeam = teamResult.rows[teamResult.rows.length - 1]; // Last item is root
-      const teamPath = teamResult.rows.reverse(); // Reverse to get root-to-leaf order
+      const rootTeam = teamResult.rows[0];
+      const teamPath = teamResult.rows;
       
       // Build callsign parts
-      const parts = [rootTeam.callsign_prefix || rootTeam.name];
+      const parts = [];
       
-      // Add sub-team prefixes based on depth setting
+      // Add team prefixes based on depth setting
       const depth = rootTeam.callsign_subteam_depth || 1;
-      for (let i = 1; i < Math.min(teamPath.length, depth + 1); i++) {
+      for (let i = 0; i < Math.min(teamPath.length, depth + 1); i++) {
         if (teamPath[i].callsign_prefix) {
           parts.push(teamPath[i].callsign_prefix);
         }

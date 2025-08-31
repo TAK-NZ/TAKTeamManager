@@ -37,7 +37,7 @@ router.get('/', authenticateToken, async (req, res) => {
             )
             SELECT id FROM root_team WHERE parent_team_id IS NULL
           )
-          WHERE u.authentik_user_id = $1
+          WHERE u.authentik_user_id = $1 AND tm.inherited_from_team_id IS NULL
         `, [user.pk]);
         
         return {
@@ -62,7 +62,7 @@ router.get('/', authenticateToken, async (req, res) => {
 // Get current user profile
 router.get('/me', authenticateToken, async (req, res) => {
   try {
-    // Get user's team with display name
+    // Get user's direct team membership only (exclude inherited)
     const teamResult = await pool.query(`
       SELECT t.id, t.name, t.parent_team_id,
              CASE 
@@ -82,7 +82,7 @@ router.get('/me', authenticateToken, async (req, res) => {
         )
         SELECT id FROM root_team WHERE parent_team_id IS NULL
       )
-      WHERE u.authentik_user_id = $1
+      WHERE u.authentik_user_id = $1 AND tm.inherited_from_team_id IS NULL
     `, [req.user.id]);
     
     const teams = teamResult.rows;
@@ -254,7 +254,7 @@ router.get('/available', authenticateToken, async (req, res) => {
       SELECT uc.authentik_id as id, uc.email, uc.first_name, uc.last_name
       FROM user_cache uc
       LEFT JOIN users u ON uc.authentik_id::text = u.authentik_user_id::text
-      LEFT JOIN team_memberships tm ON u.id = tm.user_id
+      LEFT JOIN team_memberships tm ON u.id = tm.user_id AND tm.inherited_from_team_id IS NULL
       WHERE tm.user_id IS NULL AND uc.is_active = true 
         AND uc.email IS NOT NULL AND uc.email != ''
         AND uc.first_name IS NOT NULL AND uc.first_name != ''
@@ -340,11 +340,71 @@ router.post('/create-and-add', authenticateToken, [
     
     const localUserId = localUserResult.rows[0].id;
     
+    // Remove any existing inherited memberships for this user from this team
+    await pool.query(
+      'DELETE FROM team_memberships WHERE user_id = $1 AND inherited_from_team_id = $2',
+      [localUserId, teamId]
+    );
+    
     // Add to team
     await pool.query(
       'INSERT INTO team_memberships (team_id, user_id, role) VALUES ($1, $2, $3)',
       [teamId, localUserId, 'member']
     );
+    
+    // Add to all parent teams with inherited role
+    const parentTeamsResult = await pool.query(`
+      WITH RECURSIVE parent_teams AS (
+        SELECT parent_team_id FROM teams WHERE id = $1 AND parent_team_id IS NOT NULL
+        UNION ALL
+        SELECT t.parent_team_id 
+        FROM teams t 
+        JOIN parent_teams pt ON t.id = pt.parent_team_id
+        WHERE t.parent_team_id IS NOT NULL
+      )
+      SELECT parent_team_id as team_id FROM parent_teams
+    `, [teamId]);
+    
+    for (const parentTeam of parentTeamsResult.rows) {
+      await pool.query(
+        'INSERT INTO team_memberships (team_id, user_id, role, inherited_from_team_id) VALUES ($1, $2, $3, $4)',
+        [parentTeam.team_id, localUserId, 'inherited', teamId]
+      );
+      
+      // Add to parent team's primary channel
+      const parentChannelResult = await pool.query(
+        'SELECT id, authentik_group_id FROM channels WHERE team_id = $1 AND is_primary = true',
+        [parentTeam.team_id]
+      );
+      
+      if (parentChannelResult.rows.length > 0) {
+        const parentChannel = parentChannelResult.rows[0];
+        
+        // Add to channel in database
+        await pool.query(
+          'INSERT INTO channel_memberships (channel_id, user_id, permission) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+          [parentChannel.id, localUserId, 'read_write']
+        );
+        
+        // Add to Authentik group if group exists
+        if (parentChannel.authentik_group_id) {
+          try {
+            await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${parentChannel.authentik_group_id}/add_user/`, {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                pk: newUser.pk
+              })
+            });
+          } catch (authentikError) {
+            console.error('Failed to add user to parent team Authentik group:', authentikError);
+          }
+        }
+      }
+    }
     
     // Update user callsign and color
     const attributes = await UserAttributesService.generateCallsign(localUserId, teamId);
@@ -454,9 +514,9 @@ router.post('/add-to-team', authenticateToken, [
     
     const localUserId = localUserResult.rows[0].id;
     
-    // Check if user is already in a team
+    // Check if user is already in a team (exclude inherited memberships)
     const existingMembership = await pool.query(
-      'SELECT team_id FROM team_memberships WHERE user_id = $1',
+      'SELECT team_id FROM team_memberships WHERE user_id = $1 AND inherited_from_team_id IS NULL',
       [localUserId]
     );
     
@@ -470,6 +530,59 @@ router.post('/add-to-team', authenticateToken, [
       [teamId, localUserId, 'member']
     );
     
+    // Add to all parent teams with inherited role
+    const parentTeamsResult = await pool.query(`
+      WITH RECURSIVE parent_teams AS (
+        SELECT parent_team_id FROM teams WHERE id = $1 AND parent_team_id IS NOT NULL
+        UNION ALL
+        SELECT t.parent_team_id 
+        FROM teams t 
+        JOIN parent_teams pt ON t.id = pt.parent_team_id
+        WHERE t.parent_team_id IS NOT NULL
+      )
+      SELECT parent_team_id as team_id FROM parent_teams
+    `, [teamId]);
+    
+    for (const parentTeam of parentTeamsResult.rows) {
+      await pool.query(
+        'INSERT INTO team_memberships (team_id, user_id, role, inherited_from_team_id) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
+        [parentTeam.team_id, localUserId, 'inherited', teamId]
+      );
+      
+      // Add to parent team's primary channel
+      const parentChannelResult = await pool.query(
+        'SELECT id, authentik_group_id FROM channels WHERE team_id = $1 AND is_primary = true',
+        [parentTeam.team_id]
+      );
+      
+      if (parentChannelResult.rows.length > 0) {
+        const parentChannel = parentChannelResult.rows[0];
+        
+        // Add to channel in database
+        await pool.query(
+          'INSERT INTO channel_memberships (channel_id, user_id, permission) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+          [parentChannel.id, localUserId, 'read_write']
+        );
+        
+        // Add to Authentik group if group exists
+        if (parentChannel.authentik_group_id) {
+          try {
+            await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${parentChannel.authentik_group_id}/add_user/`, {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                pk: user.authentik_id
+              })
+            });
+          } catch (authentikError) {
+            console.error('Failed to add user to parent team Authentik group:', authentikError);
+          }
+        }
+      }
+    }
 
     // Update user callsign and color
     const attributes = await UserAttributesService.generateCallsign(localUserId, teamId);
@@ -601,10 +714,63 @@ router.delete('/remove-from-team/:userId', authenticateToken, [
       }
     }
     
-    // Remove from team
+    // Remove from team (both direct and inherited memberships)
     await pool.query(
       'DELETE FROM team_memberships WHERE team_id = $1 AND user_id = $2',
       [teamId, userId]
+    );
+    
+    // Get parent teams before removing inherited memberships
+    const parentTeamsResult = await pool.query(`
+      WITH RECURSIVE parent_teams AS (
+        SELECT parent_team_id FROM teams WHERE id = $1 AND parent_team_id IS NOT NULL
+        UNION ALL
+        SELECT t.parent_team_id 
+        FROM teams t 
+        JOIN parent_teams pt ON t.id = pt.parent_team_id
+        WHERE t.parent_team_id IS NOT NULL
+      )
+      SELECT parent_team_id as team_id FROM parent_teams
+    `, [teamId]);
+    
+    // Remove from parent team channels
+    for (const parentTeam of parentTeamsResult.rows) {
+      const parentChannelsResult = await pool.query(
+        'SELECT id, authentik_group_id FROM channels WHERE team_id = $1',
+        [parentTeam.team_id]
+      );
+      
+      for (const channel of parentChannelsResult.rows) {
+        // Remove from database
+        await pool.query(
+          'DELETE FROM channel_memberships WHERE channel_id = $1 AND user_id = $2',
+          [channel.id, userId]
+        );
+        
+        // Remove from Authentik group
+        if (channel.authentik_group_id) {
+          try {
+            await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${channel.authentik_group_id}/remove_user/`, {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                pk: authentikUserId
+              })
+            });
+          } catch (authentikError) {
+            console.error('Failed to remove user from parent team Authentik group:', authentikError);
+          }
+        }
+      }
+    }
+    
+    // Remove inherited memberships from parent teams that were created by this team membership
+    await pool.query(
+      'DELETE FROM team_memberships WHERE user_id = $1 AND inherited_from_team_id = $2',
+      [userId, teamId]
     );
     
     // Clear TAK attributes in Authentik

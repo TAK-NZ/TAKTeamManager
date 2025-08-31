@@ -71,12 +71,18 @@ class Team {
 
   static async getMembers(teamId) {
     try {
-      // First try with users table
+      // Get members including inherited memberships
       const result = await pool.query(`
-        SELECT u.*, tm.role 
+        SELECT u.*, tm.role, tm.inherited_from_team_id,
+               CASE 
+                 WHEN tm.inherited_from_team_id IS NOT NULL THEN t.name
+                 ELSE NULL
+               END as inherited_from_team_name
         FROM users u 
         JOIN team_memberships tm ON u.id = tm.user_id 
+        LEFT JOIN teams t ON tm.inherited_from_team_id = t.id
         WHERE tm.team_id = $1
+        ORDER BY tm.role DESC, u.first_name, u.last_name
       `, [teamId]);
       return result.rows;
     } catch (error) {
@@ -84,10 +90,11 @@ class Team {
       try {
         // Fallback to just team memberships
         const result = await pool.query(`
-          SELECT tm.user_id as id, tm.role, 
+          SELECT tm.user_id as id, tm.role, tm.inherited_from_team_id,
                  tm.user_id::text as first_name, 
                  '' as last_name, 
-                 tm.user_id::text || '@example.com' as email
+                 tm.user_id::text || '@example.com' as email,
+                 NULL as inherited_from_team_name
           FROM team_memberships tm 
           WHERE tm.team_id = $1
         `, [teamId]);
@@ -119,7 +126,7 @@ class Team {
           (SELECT COUNT(*) FROM team_memberships tm2 WHERE tm2.team_id = t.id) as member_count
         FROM teams t
         LEFT JOIN team_memberships tm ON t.id = tm.team_id AND tm.user_id = $1
-        WHERE tm.user_id IS NOT NULL
+        WHERE tm.user_id IS NOT NULL AND tm.inherited_from_team_id IS NULL
         ORDER BY t.name
       `, [userId]);
       return result.rows;

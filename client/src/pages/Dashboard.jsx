@@ -296,92 +296,106 @@ export default function Dashboard({ user, refreshUser }) {
     return items
   }
 
-  useEffect(() => {
-    const fetchChannelData = async () => {
-      try {
-        // Fetch user's team assignment
-        const userResponse = await axios.get('/api/users/me', {
-          headers: {
-            Authorization: `Bearer ${localStorage.getItem('token')}`
-          }
-        })
+  const fetchChannelData = async () => {
+    try {
+      // Fetch user's team assignment
+      const userResponse = await axios.get('/api/users/me', {
+        headers: {
+          Authorization: `Bearer ${localStorage.getItem('token')}`
+        }
+      })
+      
+      setFreshUser(userResponse.data.user)
+      
+      if (userResponse.data.teams && userResponse.data.teams.length > 0) {
+        setUserTeam(userResponse.data.teams[0])
+      } else {
+        setUserTeam(null)
+      }
+      
+      // Fetch channel descriptions from API
+      const response = await axios.get('/api/channels/descriptions', {
+        headers: {
+          Authorization: `Bearer ${localStorage.getItem('token')}`
+        }
+      })
+      
+      const channelDescriptions = response.data.channels
+      
+      // Process TAK channels and group by base name
+      const takGroups = userResponse.data.user.groups?.filter(groupName => {
+        return groupName.startsWith('tak_')
+      }) || []
+      
+      // Create lookup map for descriptions
+      const descriptionMap = new Map()
+      channelDescriptions.forEach(channel => {
+        descriptionMap.set(channel.name, channel)
+      })
+      
+      // Group channels by base name and determine permissions
+      const channelMap = new Map()
+      
+      takGroups.forEach(groupName => {
+        let baseName, permission
         
-        setFreshUser(userResponse.data.user)
-        
-        if (userResponse.data.teams && userResponse.data.teams.length > 0) {
-          setUserTeam(userResponse.data.teams[0])
+        if (groupName.endsWith('_READ')) {
+          baseName = groupName.slice(0, -5) // Remove '_READ'
+          permission = 'read'
+        } else if (groupName.endsWith('_WRITE')) {
+          baseName = groupName.slice(0, -6) // Remove '_WRITE'
+          permission = 'write'
         } else {
-          setUserTeam(null)
+          baseName = groupName
+          permission = 'readwrite'
         }
         
-        // Fetch channel descriptions from API
-        const response = await axios.get('/api/channels/descriptions', {
-          headers: {
-            Authorization: `Bearer ${localStorage.getItem('token')}`
-          }
-        })
+        if (!channelMap.has(baseName)) {
+          const channelInfo = descriptionMap.get(baseName)
+          channelMap.set(baseName, {
+            id: baseName,
+            name: baseName,
+            display_name: channelInfo?.display_name || baseName.replace('tak_', '').replace(/_/g, ' / '),
+            description: channelInfo?.description || 'TAK Channel',
+            permissions: new Set()
+          })
+        }
         
-        const channelDescriptions = response.data.channels
-        
-        // Process TAK channels and group by base name
-        const takGroups = freshUser.groups?.filter(groupName => {
-          return groupName.startsWith('tak_')
-        }) || []
-        
-        // Create lookup map for descriptions
-        const descriptionMap = new Map()
-        channelDescriptions.forEach(channel => {
-          descriptionMap.set(channel.name, channel)
-        })
-        
-        // Group channels by base name and determine permissions
-        const channelMap = new Map()
-        
-        takGroups.forEach(groupName => {
-          let baseName, permission
-          
-          if (groupName.endsWith('_READ')) {
-            baseName = groupName.slice(0, -5) // Remove '_READ'
-            permission = 'read'
-          } else if (groupName.endsWith('_WRITE')) {
-            baseName = groupName.slice(0, -6) // Remove '_WRITE'
-            permission = 'write'
-          } else {
-            baseName = groupName
-            permission = 'readwrite'
-          }
-          
-          if (!channelMap.has(baseName)) {
-            const channelInfo = descriptionMap.get(baseName)
-            channelMap.set(baseName, {
-              id: baseName,
-              name: baseName,
-              display_name: channelInfo?.display_name || baseName.replace('tak_', '').replace(/_/g, ' / '),
-              description: channelInfo?.description || 'TAK Channel',
-              permissions: new Set()
-            })
-          }
-          
-          channelMap.get(baseName).permissions.add(permission)
-        })
-        
-        const takChannels = Array.from(channelMap.values()).map(channel => ({
-          ...channel,
-          permissions: Array.from(channel.permissions)
-        })).sort((a, b) => a.display_name.localeCompare(b.display_name))
-        
-        setUserChannels(takChannels)
-        setStats({ requests: 0 })
-      } catch (error) {
-        console.error('Failed to fetch channel data:', error)
-        setStats({ requests: 0 })
-      } finally {
-        setLoading(false)
-      }
+        channelMap.get(baseName).permissions.add(permission)
+      })
+      
+      const takChannels = Array.from(channelMap.values()).map(channel => ({
+        ...channel,
+        permissions: Array.from(channel.permissions)
+      })).sort((a, b) => a.display_name.localeCompare(b.display_name))
+      
+      setUserChannels(takChannels)
+      setStats({ requests: 0 })
+    } catch (error) {
+      console.error('Failed to fetch channel data:', error)
+      setStats({ requests: 0 })
+    } finally {
+      setLoading(false)
     }
+  }
 
+  useEffect(() => {
     fetchChannelData()
+    
+    // Listen for user assignment changes
+    const handleUserAssignmentChanged = () => {
+      fetchChannelData()
+    }
+    
+    window.addEventListener('userAssignmentChanged', handleUserAssignmentChanged)
+    
+    return () => {
+      window.removeEventListener('userAssignmentChanged', handleUserAssignmentChanged)
+    }
   }, [user])
+
+  // Remove old useEffect - now handled above
+
 
   // Filter channels based on search query
   const filteredChannels = userChannels.filter(channel => 

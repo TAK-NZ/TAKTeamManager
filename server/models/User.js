@@ -25,7 +25,7 @@ class User {
       SELECT t.*, tm.role 
       FROM teams t 
       JOIN team_memberships tm ON t.id = tm.team_id 
-      WHERE tm.user_id = $1
+      WHERE tm.user_id = $1 AND tm.inherited_from_team_id IS NULL
     `, [userId]);
     return result.rows;
   }
