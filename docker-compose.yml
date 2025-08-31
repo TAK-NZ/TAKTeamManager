@@ -36,5 +36,21 @@ services:
       - /app/client/node_modules
     command: sh -c "npm run dev"
 
+  sync-worker:
+    build: .
+    env_file:
+      - .env
+    environment:
+      DB_HOST: postgres
+      DB_PASSWORD: postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - /app/node_modules
+    command: node server/workers/syncWorker.js
+    restart: unless-stopped
+
 volumes:
   postgres_data:
