@@ -36,6 +36,7 @@ app.use('/api/requests', require('./routes/requests'));
 app.use('/api/config', require('./routes/config'));
 app.use('/api/sync', require('./routes/sync'));
 app.use('/api/operations', require('./routes/operations'));
+app.use('/api/global-channels', require('./routes/globalChannels'));
 
 // Serve frontend for all non-API routes
 app.get('*', (req, res) => {

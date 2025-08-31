@@ -30,6 +30,11 @@ class TeamMembershipService {
         }, createdBy);
       }
       
+      // Also ensure user is assigned to all global channels
+      await EventPublisher.publishOperation('assign_user_to_global_channels', {
+        target_user_id: userId
+      }, createdBy);
+      
       await client.query('COMMIT');
       return { success: true, groupsQueued: requiredGroups.length };
       

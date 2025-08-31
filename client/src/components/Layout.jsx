@@ -5,6 +5,7 @@ import {
   UserGroupIcon, 
   UsersIcon, 
   ClipboardDocumentListIcon,
+  GlobeAltIcon,
   Bars3Icon,
   XMarkIcon,
   CogIcon,
@@ -14,7 +15,7 @@ import {
 import { authAPI } from '../services/api'
 import { useTheme } from '../contexts/ThemeContext'
 
-const getNavigation = (isAdmin) => {
+const getNavigation = (user) => {
   const baseNavigation = [
     { name: 'Dashboard', href: '/dashboard', icon: HomeIcon },
     { name: 'Teams', href: '/teams', icon: UserGroupIcon },
@@ -22,7 +23,11 @@ const getNavigation = (isAdmin) => {
     { name: 'Requests', href: '/requests', icon: ClipboardDocumentListIcon },
   ]
   
-  if (isAdmin) {
+  if (user?.is_global_manager) {
+    baseNavigation.push({ name: 'Global Channels', href: '/global-channels', icon: GlobeAltIcon })
+  }
+  
+  if (user?.isAdmin) {
     baseNavigation.push({ name: 'Admin', href: '/admin', icon: CogIcon })
   }
   
@@ -32,7 +37,7 @@ const getNavigation = (isAdmin) => {
 export default function Layout({ children, user }) {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const location = useLocation()
-  const navigation = getNavigation(user?.isAdmin)
+  const navigation = getNavigation(user)
   const { theme, toggleTheme } = useTheme()
 
   const handleLogout = async () => {

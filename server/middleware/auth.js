@@ -29,7 +29,8 @@ const authenticateToken = async (req, res, next) => {
       first_name: cachedUser.first_name,
       last_name: cachedUser.last_name,
       name: cachedUser.first_name + (cachedUser.last_name ? ' ' + cachedUser.last_name : ''),
-      isAdmin: cachedUser.is_admin,
+      isAdmin: cachedUser.is_admin, // Team admin capabilities
+      is_global_manager: cachedUser.is_admin, // Global manager = Authentik TakTeamManager_Admin group
       takRole: cachedUser.tak_role,
       takColor: cachedUser.tak_color,
       takCallsign: cachedUser.tak_callsign,

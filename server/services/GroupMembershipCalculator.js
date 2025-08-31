@@ -68,24 +68,19 @@ class GroupMembershipCalculator {
         break;
         
       case 'bch_channels':
-        // All users get BCH channel access
-        const bchChannels = await this.getBchChannels();
-        for (const channel of bchChannels) {
-          if (rule.permission_type === 'read' || rule.permission_type === 'read_write') {
-            groups.push({ name: channel.read_group_id, permission: 'read' });
-          }
-          if (rule.permission_type === 'write' || rule.permission_type === 'read_write') {
-            groups.push({ name: channel.write_group_id, permission: 'write' });
-          }
-        }
+        // Apply BCH channel rule based on target group pattern
+        groups.push({
+          name: rule.target_group_pattern,
+          permission: rule.permission_type
+        });
         break;
         
       case 'region_channels':
-        // All users get region channel access
-        const regionChannels = await this.getRegionChannels();
-        for (const channel of regionChannels) {
-          groups.push({ name: channel.group_id, permission: rule.permission_type });
-        }
+        // Apply region channel rule based on target group pattern
+        groups.push({
+          name: rule.target_group_pattern,
+          permission: rule.permission_type
+        });
         break;
     }
     

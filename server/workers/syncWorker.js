@@ -92,6 +92,22 @@ class SyncWorker {
           await this.bulkAddUserToTeam(payload);
           break;
           
+        case 'create_bch_channel_groups':
+          await this.createBchChannelGroups(payload);
+          break;
+          
+        case 'create_region_channel_group':
+          await this.createRegionChannelGroup(payload);
+          break;
+          
+        case 'assign_user_to_global_channels':
+          await this.assignUserToGlobalChannels(payload);
+          break;
+          
+        case 'deactivate_global_channel':
+          await this.deactivateGlobalChannel(payload);
+          break;
+          
         default:
           throw new Error(`Unknown operation type: ${operation.operation_type}`);
       }
@@ -200,6 +216,161 @@ class SyncWorker {
         ['pending', error.message, retryCount, nextRetry, operation.id]
       );
     }
+  }
+
+  async createBchChannelGroups(payload) {
+    const { channel_name, service_account_username, service_account_password, bch_channel_id } = payload;
+    
+    // Create read and write groups
+    const readGroupName = `bch_${channel_name.toLowerCase().replace(/\s+/g, '_')}_read`;
+    const writeGroupName = `bch_${channel_name.toLowerCase().replace(/\s+/g, '_')}_write`;
+    
+    const readGroupResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        name: readGroupName,
+        attributes: { channel_type: 'bch', permission: 'read' }
+      })
+    });
+    
+    const writeGroupResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        name: writeGroupName,
+        attributes: { channel_type: 'bch', permission: 'write' }
+      })
+    });
+    
+    if (!readGroupResponse.ok || !writeGroupResponse.ok) {
+      throw new Error('Failed to create BCH channel groups');
+    }
+    
+    const readGroup = await readGroupResponse.json();
+    const writeGroup = await writeGroupResponse.json();
+    
+    // Create service account
+    const userResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: service_account_username,
+        name: `ETL Service Account - ${channel_name}`,
+        is_active: true,
+        type: 'service_account',
+        attributes: { service_type: 'etl', channel_name }
+      })
+    });
+    
+    if (!userResponse.ok) {
+      throw new Error('Failed to create service account');
+    }
+    
+    const serviceAccount = await userResponse.json();
+    
+    // Set service account password
+    await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${serviceAccount.pk}/set_password/`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ password: service_account_password })
+    });
+    
+    // Add service account to write group
+    await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${writeGroup.pk}/add_user/`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ pk: serviceAccount.pk })
+    });
+    
+    // Update database with group IDs
+    await pool.query(`
+      UPDATE bch_channels 
+      SET service_account_id = $1, read_group_id = $2, write_group_id = $3
+      WHERE id = $4
+    `, [serviceAccount.pk, readGroup.pk, writeGroup.pk, bch_channel_id]);
+  }
+
+  async createRegionChannelGroup(payload) {
+    const { channel_name, region_channel_id } = payload;
+    
+    const groupName = `region_${channel_name.toLowerCase().replace(/\s+/g, '_')}`;
+    
+    const groupResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        name: groupName,
+        attributes: { channel_type: 'region' }
+      })
+    });
+    
+    if (!groupResponse.ok) {
+      throw new Error('Failed to create region channel group');
+    }
+    
+    const group = await groupResponse.json();
+    
+    // Update database with group ID
+    await pool.query(`
+      UPDATE region_channels 
+      SET group_id = $1
+      WHERE id = $2
+    `, [group.pk, region_channel_id]);
+  }
+
+  async assignUserToGlobalChannels(payload) {
+    const GroupMembershipCalculator = require('../services/GroupMembershipCalculator');
+    const requiredGroups = await GroupMembershipCalculator.calculateUserGroups(payload.target_user_id);
+    
+    const user = await this.getUser(payload.target_user_id);
+    if (!user) throw new Error(`User ${payload.target_user_id} not found`);
+    
+    // Filter for global channel groups only
+    const globalGroups = requiredGroups.filter(group => 
+      group.name.startsWith('bch_') || group.name.startsWith('region_')
+    );
+    
+    for (const group of globalGroups) {
+      await this.addUserToGroup({
+        target_user_id: payload.target_user_id,
+        target_group_id: group.name
+      });
+    }
+    
+    // Update bulk operation progress
+    if (payload.bulk_operation_id) {
+      await pool.query(`
+        UPDATE bulk_operations 
+        SET processed_items = processed_items + 1,
+            progress_percentage = (processed_items::decimal / total_items) * 100
+        WHERE id = $1
+      `, [payload.bulk_operation_id]);
+    }
+  }
+
+  async deactivateGlobalChannel(payload) {
+    // This would remove all users from the channel groups
+    // Implementation depends on specific requirements
+    console.log('Deactivating global channel:', payload.channel_id);
   }
 
   async getUser(userId) {
