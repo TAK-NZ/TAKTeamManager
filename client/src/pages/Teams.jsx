@@ -501,12 +501,13 @@ export default function Teams({ user }) {
                     <input
                       type="text"
                       value={formData.callsignPrefix}
-                      onChange={(e) => setFormData({...formData, callsignPrefix: e.target.value})}
-                      className="input w-full"
+                      onChange={editingTeamId ? undefined : (e) => setFormData({...formData, callsignPrefix: e.target.value})}
+                      className={`input w-full ${editingTeamId ? 'bg-gray-100 dark:bg-gray-600 text-gray-500' : ''}`}
                       placeholder="FENZ, STL, etc."
+                      readOnly={editingTeamId}
                     />
                     <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                      Used to build callsigns. Example: FENZ-STL-John Smith
+                      {editingTeamId ? 'Prefix cannot be changed after team creation' : 'Used to build callsigns. Example: FENZ-STL-John Smith'}
                     </p>
                   </div>
                   
@@ -516,7 +517,15 @@ export default function Teams({ user }) {
                     </label>
                     <select
                       value={formData.parentTeamId || ''}
-                      onChange={(e) => setFormData({...formData, parentTeamId: e.target.value ? parseInt(e.target.value) : null})}
+                      onChange={(e) => {
+                        const parentId = e.target.value ? parseInt(e.target.value) : null
+                        const parentTeam = parentId ? teams.find(t => t.id === parentId) : null
+                        setFormData({
+                          ...formData, 
+                          parentTeamId: parentId,
+                          color: parentTeam ? parentTeam.color : formData.color
+                        })
+                      }}
                       className="input w-full"
                     >
                       <option value="">No parent (Top-level team)</option>
@@ -580,8 +589,9 @@ export default function Teams({ user }) {
                     </label>
                     <select
                       value={formData.color}
-                      onChange={(e) => setFormData({...formData, color: e.target.value})}
-                      className="input w-full"
+                      onChange={editingTeamId || formData.parentTeamId ? undefined : (e) => setFormData({...formData, color: e.target.value})}
+                      className={`input w-full ${editingTeamId || formData.parentTeamId ? 'bg-gray-100 dark:bg-gray-600 text-gray-500' : ''}`}
+                      disabled={editingTeamId || formData.parentTeamId}
                     >
                       {Object.keys(colorMappings).length > 0 ? (
                         Object.entries(colorMappings).map(([color, organization]) => (
@@ -611,7 +621,9 @@ export default function Teams({ user }) {
                       )}
                     </select>
                     <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                      TAK color designation for team members.
+                      {editingTeamId ? 'TAK color cannot be changed after team creation' : 
+                       formData.parentTeamId ? 'Sub-teams inherit TAK color from parent team' : 
+                       'TAK color designation for team members.'}
                     </p>
                   </div>
                 </div>

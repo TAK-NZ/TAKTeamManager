@@ -52,16 +52,22 @@ router.post('/', authenticateToken, [
   }
 
   try {
-    const { name, description, callsignPrefix, color, visibility, canJoin, parentTeamId, callsignSubteamDepth, callsignNameFormat } = req.body;
+    let { name, description, callsignPrefix, color, visibility, canJoin, parentTeamId, callsignSubteamDepth, callsignNameFormat } = req.body;
     
     // If creating top-level team, verify global admin access
     if (!parentTeamId && !req.user.isAdmin) {
       return res.status(403).json({ error: 'Global admin access required to create top-level teams' });
     }
     
-    // If creating sub-team, verify admin access to parent
+    // If creating sub-team, inherit color from parent
     if (parentTeamId) {
       console.log('Creating sub-team for parent:', parentTeamId, 'by user:', req.user.id);
+      const parentTeam = await Team.findById(parentTeamId);
+      if (!parentTeam) {
+        return res.status(400).json({ error: 'Parent team not found' });
+      }
+      // Sub-teams inherit color from parent
+      color = parentTeam.color;
       // For now, allow any authenticated user to create sub-teams
       // TODO: Implement proper team admin checking when team memberships are set up
     }
@@ -127,22 +133,22 @@ router.put('/:teamId', authenticateToken, [
       return res.status(404).json({ error: 'Team not found' });
     }
 
-    const { name, description, callsignPrefix, visibility, canJoin, parentTeamId, callsignSubteamDepth, callsignNameFormat, color } = req.body;
+    const { name, description, callsignPrefix, visibility, canJoin, parentTeamId, callsignSubteamDepth, callsignNameFormat } = req.body;
+    
     const updatedTeam = await Team.update(req.params.teamId, {
       name,
       description,
-      callsign_prefix: callsignPrefix,
       visibility,
       can_join: canJoin,
       parent_team_id: parentTeamId,
       callsign_subteam_depth: callsignSubteamDepth,
-      callsign_name_format: callsignNameFormat,
-      color
+      callsign_name_format: callsignNameFormat
+      // Note: color is intentionally excluded - cannot be changed after creation
     });
 
-    // Update user attributes if callsign settings or color changed
+    // Update user attributes if callsign settings changed
     const UserAttributesService = require('../services/userAttributes');
-    if (callsignSubteamDepth !== undefined || callsignNameFormat !== undefined || color !== undefined) {
+    if (callsignSubteamDepth !== undefined || callsignNameFormat !== undefined) {
       await UserAttributesService.updateTeamUserAttributes(req.params.teamId);
     }
 

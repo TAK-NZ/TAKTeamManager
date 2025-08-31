@@ -3,6 +3,7 @@ import React from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { PlusIcon, UsersIcon, UserPlusIcon, ShieldCheckIcon, BuildingOfficeIcon, FolderPlusIcon, HashtagIcon, XMarkIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, TrashIcon, PencilIcon, CheckIcon } from '@heroicons/react/24/outline'
 import { teamsAPI, channelsAPI, usersAPI } from '../services/api'
+import api from '../services/api'
 
 export default function TeamDetail({ refreshUser }) {
   const { teamId } = useParams()
@@ -51,19 +52,21 @@ export default function TeamDetail({ refreshUser }) {
   const [creatingSubTeam, setCreatingSubTeam] = useState(false)
   const [deleteSubTeamId, setDeleteSubTeamId] = useState(null)
   const [deletingSubTeam, setDeletingSubTeam] = useState(false)
+  const [allTeams, setAllTeams] = useState([])
   const [showEditDialog, setShowEditDialog] = useState(false)
   const [editFormData, setEditFormData] = useState({
     name: '',
     description: '',
     callsignPrefix: '',
+    color: 'Blue',
     visibility: 'public',
     canJoin: false,
     parentTeamId: null,
     callsignSubteamDepth: 1,
     callsignNameFormat: 'full_name'
   })
-  const [allTeams, setAllTeams] = useState([])
   const [updating, setUpdating] = useState(false)
+  const [colorMappings, setColorMappings] = useState({})
   const [showChannelDialog, setShowChannelDialog] = useState(false)
   const [channelFormData, setChannelFormData] = useState({
     customSuffix: '',
@@ -348,22 +351,25 @@ export default function TeamDetail({ refreshUser }) {
           setParentTeam(null)
         }
         
-        // Fetch sub-teams and all teams for parent selection
+        // Fetch sub-teams, all teams, and color mappings
         if (!isCancelled) {
           try {
-            const [subTeamsResponse, allTeamsResponse] = await Promise.all([
+            const [subTeamsResponse, allTeamsResponse, configResponse] = await Promise.all([
               teamsAPI.getSubTeams(teamId),
-              teamsAPI.getMyTeams()
+              teamsAPI.getMyTeams(),
+              api.get('/config/color-mappings')
             ])
             if (!isCancelled) {
               setSubTeams(subTeamsResponse.data.subTeams || [])
               setAllTeams(allTeamsResponse.data.teams || [])
+              setColorMappings(configResponse.data.colorMappings || {})
             }
           } catch (err) {
             console.error('Failed to fetch teams:', err)
             if (!isCancelled) {
               setSubTeams([])
               setAllTeams([])
+              setColorMappings({})
             }
           }
         }
@@ -608,6 +614,7 @@ export default function TeamDetail({ refreshUser }) {
                     name: team.name,
                     description: team.description || '',
                     callsignPrefix: team.callsign_prefix || '',
+                    color: team.color || 'Blue',
                     visibility: team.visibility || 'private',
                     canJoin: team.can_join || false,
                     parentTeamId: team.parent_team_id || null,
@@ -1093,9 +1100,9 @@ export default function TeamDetail({ refreshUser }) {
                   <input
                     type="text"
                     value={subTeamFormData.callsignPrefix}
-                    onChange={(e) => setSubTeamFormData({...subTeamFormData, callsignPrefix: e.target.value})}
-                    className="input w-full"
+                    className="input w-full bg-gray-100 dark:bg-gray-600 text-gray-500"
                     placeholder="STL, AKL, etc."
+                    readOnly
                   />
                   <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                     Used to build callsigns. Example: FENZ-STL-John Smith
@@ -1540,10 +1547,11 @@ export default function TeamDetail({ refreshUser }) {
         </div>
       )}
 
+
       {/* Edit Team Dialog */}
       {showEditDialog && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
               <h3 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Edit Team</h3>
               <button
@@ -1580,132 +1588,173 @@ export default function TeamDetail({ refreshUser }) {
                 setUpdating(false)
               }
             }} className="p-6">
-              <div className="space-y-6">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                    Team Name *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={editFormData.name}
-                    onChange={(e) => setEditFormData({...editFormData, name: e.target.value})}
-                    className="input w-full"
-                  />
-                </div>
-                
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                    Description
-                  </label>
-                  <textarea
-                    value={editFormData.description}
-                    onChange={(e) => setEditFormData({...editFormData, description: e.target.value})}
-                    className="input w-full"
-                    rows={3}
-                  />
-                </div>
-                
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                    Prefix
-                  </label>
-                  <input
-                    type="text"
-                    value={editFormData.callsignPrefix}
-                    onChange={(e) => setEditFormData({...editFormData, callsignPrefix: e.target.value})}
-                    className="input w-full"
-                    placeholder="FENZ, STL, etc."
-                  />
-                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                    Used to build callsigns. Example: FENZ-STL-John Smith
-                  </p>
-                </div>
-                
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                    Parent Team
-                  </label>
-                  <select
-                    value={editFormData.parentTeamId || ''}
-                    onChange={(e) => setEditFormData({...editFormData, parentTeamId: e.target.value ? parseInt(e.target.value) : null})}
-                    className="input w-full"
-                  >
-                    <option value="">No parent (Top-level team)</option>
-                    {allTeams.filter(t => t.id !== team.id).map(parentTeam => (
-                      <option key={parentTeam.id} value={parentTeam.id}>
-                        {parentTeam.name}
-                      </option>
-                    ))}
-                  </select>
-                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                    Select a parent team to make this a sub-team, or leave empty for a top-level team.
-                  </p>
-                </div>
-                
-                {!editFormData.parentTeamId && (
-                  <>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                        Callsign Sub-team Depth
-                      </label>
-                      <select
-                        value={editFormData.callsignSubteamDepth}
-                        onChange={(e) => setEditFormData({...editFormData, callsignSubteamDepth: parseInt(e.target.value)})}
-                        className="input w-full"
-                      >
-                        <option value={0}>0 - Root prefix only</option>
-                        <option value={1}>1 - Include 1 sub-team</option>
-                        <option value={2}>2 - Include 2 sub-teams</option>
-                        <option value={3}>3 - Include 3 sub-teams</option>
-                        <option value={4}>4 - Include 4 sub-teams</option>
-                        <option value={5}>5 - Include all sub-teams</option>
-                      </select>
-                    </div>
-                    
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                        Callsign Name Format
-                      </label>
-                      <select
-                        value={editFormData.callsignNameFormat}
-                        onChange={(e) => setEditFormData({...editFormData, callsignNameFormat: e.target.value})}
-                        className="input w-full"
-                      >
-                        <option value="full_name">Full Name</option>
-                        <option value="first_initial_last">First Initial + Last Name</option>
-                        <option value="first_last_initial">First Name + Last Initial</option>
-                      </select>
-                    </div>
-                  </>
-                )}
-                
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                    Visibility
-                  </label>
-                  <select
-                    value={editFormData.visibility}
-                    onChange={(e) => setEditFormData({...editFormData, visibility: e.target.value})}
-                    className="input w-full"
-                  >
-                    <option value="private">Private</option>
-                    <option value="public">Public</option>
-                  </select>
-                </div>
-                
-                <div className="flex items-start">
-                  <input
-                    type="checkbox"
-                    id="editCanJoin"
-                    checked={editFormData.canJoin}
-                    onChange={(e) => setEditFormData({...editFormData, canJoin: e.target.checked})}
-                    className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded mt-1"
-                  />
-                  <div className="ml-3">
-                    <label htmlFor="editCanJoin" className="text-sm text-gray-700 dark:text-gray-300 font-medium">
-                      Allow join requests
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="space-y-6">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                      Team Name *
                     </label>
+                    <input
+                      type="text"
+                      required
+                      value={editFormData.name}
+                      onChange={(e) => setEditFormData({...editFormData, name: e.target.value})}
+                      className="input w-full"
+                    />
+                  </div>
+                  
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                      Prefix
+                    </label>
+                    <input
+                      type="text"
+                      value={editFormData.callsignPrefix}
+                      className="input w-full bg-gray-100 dark:bg-gray-600 text-gray-500"
+                      readOnly
+                    />
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                      Prefix cannot be changed after team creation
+                    </p>
+                  </div>
+                  
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                      Parent Team
+                    </label>
+                    <select
+                      value={editFormData.parentTeamId || ''}
+                      onChange={(e) => setEditFormData({...editFormData, parentTeamId: e.target.value ? parseInt(e.target.value) : null})}
+                      className="input w-full"
+                    >
+                      <option value="">No parent (Top-level team)</option>
+                      {allTeams.filter(t => t.id !== team.id).map(parentTeam => (
+                        <option key={parentTeam.id} value={parentTeam.id}>
+                          {parentTeam.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  
+                  {!editFormData.parentTeamId && (
+                    <>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                          Callsign Sub-team Depth
+                        </label>
+                        <select
+                          value={editFormData.callsignSubteamDepth}
+                          onChange={(e) => setEditFormData({...editFormData, callsignSubteamDepth: parseInt(e.target.value)})}
+                          className="input w-full"
+                        >
+                          <option value={0}>0 - Root prefix only</option>
+                          <option value={1}>1 - Include 1 sub-team</option>
+                          <option value={2}>2 - Include 2 sub-teams</option>
+                          <option value={3}>3 - Include 3 sub-teams</option>
+                          <option value={4}>4 - Include 4 sub-teams</option>
+                          <option value={5}>5 - Include all sub-teams</option>
+                        </select>
+                      </div>
+                      
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                          Callsign Name Format
+                        </label>
+                        <select
+                          value={editFormData.callsignNameFormat}
+                          onChange={(e) => setEditFormData({...editFormData, callsignNameFormat: e.target.value})}
+                          className="input w-full"
+                        >
+                          <option value="full_name">Full Name</option>
+                          <option value="first_initial_last">First Initial + Last Name</option>
+                          <option value="first_last_initial">First Name + Last Initial</option>
+                        </select>
+                      </div>
+                    </>
+                  )}
+                  
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                      TAK Color
+                    </label>
+                    <select
+                      value={editFormData.color}
+                      className="input w-full bg-gray-100 dark:bg-gray-600 text-gray-500"
+                      disabled
+                    >
+                      {Object.keys(colorMappings).length > 0 ? (
+                        Object.entries(colorMappings).map(([color, organization]) => (
+                          <option key={color} value={color}>
+                            {organization && organization.trim() !== '' ? organization : color}
+                          </option>
+                        ))
+                      ) : (
+                        [
+                          { color: 'Red', org: 'Fire and Emergency New Zealand (FENZ)' },
+                          { color: 'Blue', org: 'New Zealand Police' },
+                          { color: 'Yellow', org: 'Hato Hone St John' },
+                          { color: 'Orange', org: 'Land Search and Rescue New Zealand (LandSAR)' },
+                          { color: 'Green', org: 'Department of Conservation (DOC)' },
+                          { color: 'Purple', org: 'National Emergency Management Agency (NEMA)' },
+                          { color: 'Cyan', org: 'Health New Zealand (Te Whatu Ora)' },
+                          { color: 'White', org: 'Wellington Free Ambulance' },
+                          { color: 'Maroon', org: 'New Zealand Red Cross' },
+                          { color: 'Dark Blue', org: 'New Zealand Customs Service' },
+                          { color: 'Teal', org: 'Coastguard New Zealand' },
+                          { color: 'Brown', org: 'New Zealand Defence Force (NZDF)' }
+                        ].map(({ color, org }) => (
+                          <option key={color} value={color}>
+                            {org}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                      TAK color cannot be changed after team creation
+                    </p>
+                  </div>
+                </div>
+                
+                <div className="space-y-6">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                      Description
+                    </label>
+                    <textarea
+                      value={editFormData.description}
+                      onChange={(e) => setEditFormData({...editFormData, description: e.target.value})}
+                      className="input w-full"
+                      rows={4}
+                    />
+                  </div>
+                  
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                      Visibility
+                    </label>
+                    <select
+                      value={editFormData.visibility}
+                      onChange={(e) => setEditFormData({...editFormData, visibility: e.target.value})}
+                      className="input w-full"
+                    >
+                      <option value="private">Private</option>
+                      <option value="public">Public</option>
+                    </select>
+                  </div>
+                  
+                  <div className="flex items-start">
+                    <input
+                      type="checkbox"
+                      id="editCanJoin"
+                      checked={editFormData.canJoin}
+                      onChange={(e) => setEditFormData({...editFormData, canJoin: e.target.checked})}
+                      className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded mt-1"
+                    />
+                    <div className="ml-3">
+                      <label htmlFor="editCanJoin" className="text-sm text-gray-700 dark:text-gray-300 font-medium">
+                        Allow join requests
+                      </label>
+                    </div>
                   </div>
                 </div>
               </div>

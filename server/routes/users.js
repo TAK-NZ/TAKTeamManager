@@ -451,6 +451,7 @@ router.post('/add-to-team', authenticateToken, [
       [teamId, localUserId, 'member']
     );
     
+
     // Update user callsign and color
     const attributes = await UserAttributesService.generateCallsign(localUserId, teamId);
     if (attributes) {

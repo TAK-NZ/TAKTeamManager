@@ -146,23 +146,12 @@ class Team {
   }
 
   static async update(teamId, updateData) {
-    const { name, description, callsign_prefix, visibility, can_join, parent_team_id, callsign_subteam_depth, callsign_name_format } = updateData;
+    const { name, description, visibility, can_join, parent_team_id, callsign_subteam_depth, callsign_name_format } = updateData;
     try {
-      // Handle empty callsign_prefix by setting to null
-      const cleanPrefix = callsign_prefix && callsign_prefix.trim() !== '' ? callsign_prefix : null;
-      
       const result = await pool.query(
-        'UPDATE teams SET name = COALESCE($1, name), description = COALESCE($2, description), callsign_prefix = $3, visibility = COALESCE($4, visibility), can_join = COALESCE($5, can_join), parent_team_id = $6, callsign_subteam_depth = COALESCE($7, callsign_subteam_depth), callsign_name_format = COALESCE($8, callsign_name_format), updated_at = CURRENT_TIMESTAMP WHERE id = $9 RETURNING *',
-        [name, description, cleanPrefix, visibility, can_join, parent_team_id, callsign_subteam_depth, callsign_name_format, teamId]
+        'UPDATE teams SET name = COALESCE($1, name), description = COALESCE($2, description), visibility = COALESCE($3, visibility), can_join = COALESCE($4, can_join), parent_team_id = $5, callsign_subteam_depth = COALESCE($6, callsign_subteam_depth), callsign_name_format = COALESCE($7, callsign_name_format), updated_at = CURRENT_TIMESTAMP WHERE id = $8 RETURNING *',
+        [name, description, visibility, can_join, parent_team_id, callsign_subteam_depth, callsign_name_format, teamId]
       );
-      
-      // If callsign_prefix is provided (even as null), update it directly
-      if (callsign_prefix !== undefined) {
-        await pool.query(
-          'UPDATE teams SET callsign_prefix = $1 WHERE id = $2',
-          [cleanPrefix, teamId]
-        );
-      }
       return result.rows[0];
     } catch (error) {
       console.error('Error updating team:', error);
