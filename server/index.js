@@ -76,4 +76,9 @@ app.listen(PORT, () => {
   // Start periodic sync service
   const authentikSync = require('./services/authentikSync');
   authentikSync.startPeriodicSync();
+  
+  // Start escalation service
+  const EscalationService = require('./services/EscalationService');
+  const escalationService = new EscalationService();
+  escalationService.startDailySchedule();
 });

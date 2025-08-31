@@ -104,7 +104,9 @@ export const channelsAPI = {
 export const requestsAPI = {
   submitTeamAccess: (data) => api.post('/requests/team-access', data),
   getPending: () => api.get('/requests/pending'),
-  makeDecision: (requestId, data) => api.post(`/requests/${requestId}/decision`, data),
+  approveRequest: (requestId, data) => api.post(`/requests/${requestId}/approve`, data),
+  denyRequest: (requestId, data) => api.post(`/requests/${requestId}/deny`, data),
+  verifyEmail: (token) => axios.get(`/api/requests/verify/${token}`),
 };
 
 export const configAPI = {
