@@ -168,11 +168,41 @@ export default function Dashboard({ user, refreshUser }) {
               </div>
             </div>
             <div className="flex items-center space-x-2">
+              {parentChannel.permissions.includes('read') && (
+                <div className="relative group">
+                  <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-blue-100 text-blue-800 rounded cursor-help">
+                    <ArrowUpRightIcon className="h-3 w-3 mr-1" />
+                    Read
+                  </span>
+                  <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
+                    Receive data only - view others' locations and messages
+                    <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
+                  </div>
+                </div>
+              )}
+              {parentChannel.permissions.includes('write') && (
+                <div className="relative group">
+                  <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-green-100 text-green-800 rounded cursor-help">
+                    <ArrowDownLeftIcon className="h-3 w-3 mr-1" />
+                    Write
+                  </span>
+                  <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
+                    Send data only - share your location and messages
+                    <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
+                  </div>
+                </div>
+              )}
               {parentChannel.permissions.includes('readwrite') && (
-                <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-purple-100 text-purple-800 rounded">
-                  <ArrowsRightLeftIcon className="h-3 w-3 mr-1" />
-                  Read/Write
-                </span>
+                <div className="relative group">
+                  <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-purple-100 text-purple-800 rounded cursor-help">
+                    <ArrowsRightLeftIcon className="h-3 w-3 mr-1" />
+                    Read/Write
+                  </span>
+                  <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
+                    Full access - send and receive all data
+                    <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
+                  </div>
+                </div>
               )}
             </div>
           </div>
@@ -222,11 +252,41 @@ export default function Dashboard({ user, refreshUser }) {
             </p>
           </div>
           <div className="flex items-center space-x-2">
+            {channel.permissions.includes('read') && (
+              <div className="relative group">
+                <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-blue-100 text-blue-800 rounded cursor-help">
+                  <ArrowUpRightIcon className="h-3 w-3 mr-1" />
+                  Read
+                </span>
+                <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
+                  Receive data only - view others' locations and messages
+                  <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
+                </div>
+              </div>
+            )}
+            {channel.permissions.includes('write') && (
+              <div className="relative group">
+                <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-green-100 text-green-800 rounded cursor-help">
+                  <ArrowDownLeftIcon className="h-3 w-3 mr-1" />
+                  Write
+                </span>
+                <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
+                  Send data only - share your location and messages
+                  <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
+                </div>
+              </div>
+            )}
             {channel.permissions.includes('readwrite') && (
-              <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-purple-100 text-purple-800 rounded">
-                <ArrowsRightLeftIcon className="h-3 w-3 mr-1" />
-                Read/Write
-              </span>
+              <div className="relative group">
+                <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-purple-100 text-purple-800 rounded cursor-help">
+                  <ArrowsRightLeftIcon className="h-3 w-3 mr-1" />
+                  Read/Write
+                </span>
+                <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
+                  Full access - send and receive all data
+                  <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
+                </div>
+              </div>
             )}
           </div>
         </div>
