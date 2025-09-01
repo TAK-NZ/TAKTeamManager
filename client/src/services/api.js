@@ -120,9 +120,11 @@ export const globalChannelsAPI = {
   getRegionChannels: () => api.get('/global-channels/region'),
   createBchChannel: (data) => api.post('/global-channels/bch', data),
   createRegionChannel: (data) => api.post('/global-channels/region', data),
+  updateBchChannel: (channelId, data) => api.put(`/global-channels/bch/${channelId}`, data),
+  updateRegionChannel: (channelId, data) => api.put(`/global-channels/region/${channelId}`, data),
   getBchCredentials: (channelId) => api.get(`/global-channels/bch/${channelId}/credentials`),
   assignAllUsers: () => api.post('/global-channels/assign-all-users'),
-  deactivateChannel: (channelType, channelId) => api.delete(`/global-channels/${channelType}/${channelId}`),
+  deleteChannel: (channelType, channelId) => api.delete(`/global-channels/${channelType}/${channelId}`),
 };
 
 export default api;

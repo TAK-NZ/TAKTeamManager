@@ -37,8 +37,7 @@ router.get('/region', authenticateToken, async (req, res) => {
 
 // Create BCH channel (global managers only)
 router.post('/bch', authenticateToken, requireGlobalManager, [
-  body('name').trim().isLength({ min: 1, max: 50 }),
-  body('display_name').trim().isLength({ min: 1, max: 100 }),
+  body('name').trim().isLength({ min: 1, max: 100 }),
   body('description').optional().trim().isLength({ max: 500 })
 ], async (req, res) => {
   const errors = validationResult(req);
@@ -47,7 +46,7 @@ router.post('/bch', authenticateToken, requireGlobalManager, [
   }
 
   try {
-    const { name, display_name, description } = req.body;
+    const { name, description } = req.body;
     
     // Get local user ID
     const userResult = await pool.query(
@@ -57,7 +56,6 @@ router.post('/bch', authenticateToken, requireGlobalManager, [
     
     const result = await globalChannelService.createBchChannel({
       name,
-      display_name,
       description
     }, userResult.rows[0].id);
     
@@ -74,8 +72,7 @@ router.post('/bch', authenticateToken, requireGlobalManager, [
 
 // Create region channel (global managers only)
 router.post('/region', authenticateToken, requireGlobalManager, [
-  body('name').trim().isLength({ min: 1, max: 50 }),
-  body('display_name').trim().isLength({ min: 1, max: 100 }),
+  body('name').trim().isLength({ min: 1, max: 100 }),
   body('description').optional().trim().isLength({ max: 500 })
 ], async (req, res) => {
   const errors = validationResult(req);
@@ -84,7 +81,7 @@ router.post('/region', authenticateToken, requireGlobalManager, [
   }
 
   try {
-    const { name, display_name, description } = req.body;
+    const { name, description } = req.body;
     
     // Get local user ID
     const userResult = await pool.query(
@@ -94,7 +91,6 @@ router.post('/region', authenticateToken, requireGlobalManager, [
     
     const result = await globalChannelService.createRegionChannel({
       name,
-      display_name,
       description
     }, userResult.rows[0].id);
     
@@ -147,7 +143,69 @@ router.post('/assign-all-users', authenticateToken, requireGlobalManager, async 
   }
 });
 
-// Deactivate global channel (global managers only)
+// Update BCH channel (global managers only)
+router.put('/bch/:channelId', authenticateToken, requireGlobalManager, [
+  body('name').trim().isLength({ min: 1, max: 100 }),
+  body('description').optional().trim().isLength({ max: 500 })
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
+  try {
+    const { channelId } = req.params;
+    const { name, description } = req.body;
+    
+    const userResult = await pool.query(
+      'SELECT id FROM users WHERE authentik_user_id = $1',
+      [req.user.id]
+    );
+    
+    await globalChannelService.updateBchChannel(channelId, {
+      name,
+      description
+    }, userResult.rows[0].id);
+    
+    res.json({ message: 'BCH channel updated successfully' });
+  } catch (error) {
+    console.error('Failed to update BCH channel:', error);
+    res.status(500).json({ error: 'Failed to update BCH channel' });
+  }
+});
+
+// Update region channel (global managers only)
+router.put('/region/:channelId', authenticateToken, requireGlobalManager, [
+  body('name').trim().isLength({ min: 1, max: 100 }),
+  body('description').optional().trim().isLength({ max: 500 })
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
+  try {
+    const { channelId } = req.params;
+    const { name, description } = req.body;
+    
+    const userResult = await pool.query(
+      'SELECT id FROM users WHERE authentik_user_id = $1',
+      [req.user.id]
+    );
+    
+    await globalChannelService.updateRegionChannel(channelId, {
+      name,
+      description
+    }, userResult.rows[0].id);
+    
+    res.json({ message: 'Region channel updated successfully' });
+  } catch (error) {
+    console.error('Failed to update region channel:', error);
+    res.status(500).json({ error: 'Failed to update region channel' });
+  }
+});
+
+// Delete global channel (global managers only)
 router.delete('/:channelType/:channelId', authenticateToken, requireGlobalManager, async (req, res) => {
   try {
     const { channelType, channelId } = req.params;
@@ -156,22 +214,21 @@ router.delete('/:channelType/:channelId', authenticateToken, requireGlobalManage
       return res.status(400).json({ error: 'Invalid channel type' });
     }
     
-    // Get local user ID
     const userResult = await pool.query(
       'SELECT id FROM users WHERE authentik_user_id = $1',
       [req.user.id]
     );
     
-    await globalChannelService.deactivateGlobalChannel(
+    await globalChannelService.deleteGlobalChannel(
       channelId,
       channelType,
       userResult.rows[0].id
     );
     
-    res.json({ message: 'Global channel deactivated successfully' });
+    res.json({ message: 'Global channel deleted successfully' });
   } catch (error) {
-    console.error('Failed to deactivate global channel:', error);
-    res.status(500).json({ error: 'Failed to deactivate global channel' });
+    console.error('Failed to delete global channel:', error);
+    res.status(500).json({ error: 'Failed to delete global channel' });
   }
 });
 

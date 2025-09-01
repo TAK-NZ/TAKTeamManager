@@ -525,8 +525,16 @@ router.post('/add-to-team', authenticateToken, [
       return res.status(400).json({ error: 'User is already a member of another team' });
     }
     
+    // Get the local user ID for the requesting user
+    const requestingUserResult = await pool.query(
+      'SELECT id FROM users WHERE authentik_user_id = $1',
+      [req.user.id]
+    );
+    
+    const requestingUserId = requestingUserResult.rows[0]?.id;
+    
     // Use new service layer for team assignment
-    const result = await TeamMembershipService.addUserToTeam(localUserId, teamId, 'member', req.user.id);
+    const result = await TeamMembershipService.addUserToTeam(localUserId, teamId, 'member', requestingUserId);
     
     // Update user callsign and color
     const attributes = await UserAttributesService.generateCallsign(localUserId, teamId);
@@ -582,8 +590,16 @@ router.delete('/remove-from-team/:userId', authenticateToken, [
     
     const authentikUserId = userResult.rows[0].authentik_user_id;
     
+    // Get the local user ID for the requesting user
+    const requestingUserResult = await pool.query(
+      'SELECT id FROM users WHERE authentik_user_id = $1',
+      [req.user.id]
+    );
+    
+    const requestingUserId = requestingUserResult.rows[0]?.id;
+    
     // Use new service layer for team removal
-    const result = await TeamMembershipService.removeUserFromTeam(userId, req.user.id);
+    const result = await TeamMembershipService.removeUserFromTeam(userId, requestingUserId);
     
     // Clear TAK attributes in Authentik
     await UserAttributesService.clearUserAttributes(authentikUserId);

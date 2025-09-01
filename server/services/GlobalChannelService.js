@@ -16,13 +16,12 @@ class GlobalChannelService {
       // Create BCH channel record
       const result = await client.query(`
         INSERT INTO bch_channels (
-          name, display_name, description, service_account_username, 
+          name, description, service_account_username, 
           service_account_password, created_by
-        ) VALUES ($1, $2, $3, $4, $5, $6)
+        ) VALUES ($1, $2, $3, $4, $5)
         RETURNING id
       `, [
         channelData.name,
-        channelData.display_name,
         channelData.description,
         serviceAccountUsername,
         serviceAccountPassword, // In production, this should be encrypted
@@ -48,10 +47,10 @@ class GlobalChannelService {
         ($1, 'bch_channels', 'bch_channel', $2, $3, 'read', 50),
         ($4, 'bch_channels', 'bch_channel', $2, $5, 'write', 51)
       `, [
-        `BCH ${channelData.display_name} Read Access`,
+        `BCH ${channelData.name} Read Access`,
         channelId,
         `bch_${channelData.name.toLowerCase().replace(/\s+/g, '_')}_read`,
-        `BCH ${channelData.display_name} Write Access`,
+        `BCH ${channelData.name} Write Access`,
         `bch_${channelData.name.toLowerCase().replace(/\s+/g, '_')}_write`
       ]);
       
@@ -75,12 +74,11 @@ class GlobalChannelService {
       // Create region channel record
       const result = await client.query(`
         INSERT INTO region_channels (
-          name, display_name, description, created_by
-        ) VALUES ($1, $2, $3, $4)
+          name, description, created_by
+        ) VALUES ($1, $2, $3)
         RETURNING id
       `, [
         channelData.name,
-        channelData.display_name,
         channelData.description,
         createdBy
       ]);
@@ -100,7 +98,7 @@ class GlobalChannelService {
           target_group_pattern, permission_type, priority
         ) VALUES ($1, 'region_channels', 'region_channel', $2, $3, 'read_write', 60)
       `, [
-        `Region ${channelData.display_name} Access`,
+        `Region ${channelData.name} Access`,
         channelId,
         `region_${channelData.name.toLowerCase().replace(/\s+/g, '_')}`
       ]);
@@ -152,7 +150,7 @@ class GlobalChannelService {
       FROM bch_channels bc
       LEFT JOIN users u ON bc.created_by = u.id
       WHERE bc.is_active = true
-      ORDER BY bc.display_name
+      ORDER BY bc.name
     `);
     
     return result.rows.map(row => ({
@@ -167,7 +165,7 @@ class GlobalChannelService {
       FROM region_channels rc
       LEFT JOIN users u ON rc.created_by = u.id
       WHERE rc.is_active = true
-      ORDER BY rc.display_name
+      ORDER BY rc.name
     `);
     
     return result.rows.map(row => ({
@@ -198,6 +196,100 @@ class GlobalChannelService {
     }
     
     return result.rows[0];
+  }
+
+  async updateBchChannel(channelId, channelData, updatedBy) {
+    const client = await pool.connect();
+    
+    try {
+      await client.query('BEGIN');
+      
+      await client.query(`
+        UPDATE bch_channels 
+        SET name = $1, description = $2
+        WHERE id = $3
+      `, [channelData.name, channelData.description, channelId]);
+      
+      // Queue operation to update Authentik group
+      await EventPublisher.publishOperation('update_bch_channel_group', {
+        bch_channel_id: channelId,
+        channel_name: channelData.name,
+        description: channelData.description
+      }, updatedBy);
+      
+      await client.query('COMMIT');
+      return { success: true };
+      
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async updateRegionChannel(channelId, channelData, updatedBy) {
+    const client = await pool.connect();
+    
+    try {
+      await client.query('BEGIN');
+      
+      await client.query(`
+        UPDATE region_channels 
+        SET name = $1, description = $2
+        WHERE id = $3
+      `, [channelData.name, channelData.description, channelId]);
+      
+      // Queue operation to update Authentik group
+      await EventPublisher.publishOperation('update_region_channel_group', {
+        region_channel_id: channelId,
+        channel_name: channelData.name,
+        description: channelData.description
+      }, updatedBy);
+      
+      await client.query('COMMIT');
+      return { success: true };
+      
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async deleteGlobalChannel(channelId, channelType, deletedBy) {
+    const client = await pool.connect();
+    
+    try {
+      await client.query('BEGIN');
+      
+      const table = channelType === 'bch' ? 'bch_channels' : 'region_channels';
+      
+      // Delete channel
+      await client.query(`DELETE FROM ${table} WHERE id = $1`, [channelId]);
+      
+      // Delete related group membership rules
+      await client.query(`
+        DELETE FROM group_membership_rules 
+        WHERE source_type = $1 AND source_id = $2
+      `, [channelType === 'bch' ? 'bch_channel' : 'region_channel', channelId]);
+      
+      // Queue operation to delete Authentik groups
+      await EventPublisher.publishOperation('delete_global_channel', {
+        channel_id: channelId,
+        channel_type: channelType
+      }, deletedBy);
+      
+      await client.query('COMMIT');
+      return { success: true };
+      
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async deactivateGlobalChannel(channelId, channelType, deactivatedBy) {
