@@ -18,10 +18,16 @@ import { useTheme } from '../contexts/ThemeContext'
 const getNavigation = (user) => {
   const baseNavigation = [
     { name: 'Dashboard', href: '/dashboard', icon: HomeIcon },
-    { name: 'Teams', href: '/teams', icon: UserGroupIcon },
-    { name: 'Users', href: '/users', icon: UsersIcon },
-    { name: 'Requests', href: '/requests', icon: ClipboardDocumentListIcon },
   ]
+  
+  if (user?.isAdmin || user?.is_global_manager) {
+    baseNavigation.push({ name: 'Teams', href: '/teams', icon: UserGroupIcon })
+    baseNavigation.push({ name: 'Users', href: '/users', icon: UsersIcon })
+  }
+  
+  if (user?.isAdmin) {
+    baseNavigation.push({ name: 'Requests', href: '/requests', icon: ClipboardDocumentListIcon })
+  }
   
   if (user?.is_global_manager) {
     baseNavigation.push({ name: 'Global Channels', href: '/global-channels', icon: GlobeAltIcon })

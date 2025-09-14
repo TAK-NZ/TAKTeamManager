@@ -449,7 +449,8 @@ class SyncWorker {
   async createRegionChannelGroup(payload) {
     const { channel_name, region_channel_id } = payload;
     
-    const groupName = `tak_Regions / ${channel_name}`;
+    const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
+    const groupName = `tak_Regions${separator}${channel_name}`;
     
     console.log('Creating region channel group:', groupName);
     
@@ -603,9 +604,10 @@ class SyncWorker {
       return;
     }
     
+    const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
     const authentikDescription = `${description} (Bi-directional location sharing)`;
     const requestBody = {
-      name: `tak_Regions / ${channel_name}`,
+      name: `tak_Regions${separator}${channel_name}`,
       attributes: { 
         channel_type: 'region',
         description: authentikDescription

@@ -75,7 +75,7 @@ class UserAttributesService {
       parts.push(nameFormat);
       
       return {
-        callsign: parts.join('-'),
+        callsign: parts.join('-').trim(),
         color: rootTeam.color,
         role: 'Team Member'
       };
@@ -87,19 +87,23 @@ class UserAttributesService {
   
   static async updateUserAttributes(authentikUserId, attributes) {
     try {
+      const payload = {
+        attributes: {
+          takCallsign: attributes.callsign,
+          takColor: attributes.color,
+          takRole: attributes.role
+        }
+      };
+      
+      console.log('Updating user attributes:', authentikUserId, payload);
+      
       const response = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
         method: 'PATCH',
         headers: {
           'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({
-          attributes: {
-            takCallsign: attributes.callsign,
-            takColor: attributes.color,
-            takRole: attributes.role
-          }
-        })
+        body: JSON.stringify(payload)
       });
       
       if (!response.ok) {

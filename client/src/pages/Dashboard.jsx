@@ -14,7 +14,7 @@ export default function Dashboard({ user, refreshUser }) {
   const [currentPage, setCurrentPage] = useState(1)
   const channelsPerPage = 10
   const [expandedFolders, setExpandedFolders] = useState(new Set())
-  const [folderSeparator, setFolderSeparator] = useState(' / ')
+  const [folderSeparator, setFolderSeparator] = useState(' - ')
 
   // Map color names to CSS colors
   const getColorValue = (colorName) => {
@@ -55,7 +55,7 @@ export default function Dashboard({ user, refreshUser }) {
         ])
         setColorMappings(colorResponse.data.colorMappings)
         setRoleDescriptions(colorResponse.data.roleDescriptions)
-        setFolderSeparator(publicResponse.data.channel_folder_separator || ' / ')
+        setFolderSeparator(publicResponse.data.channel_folder_separator || ' - ')
       } catch (error) {
         console.error('Failed to fetch config:', error)
       }
@@ -238,8 +238,6 @@ export default function Dashboard({ user, refreshUser }) {
       }
     })
     
-
-    
     // Render regular channels (excluding those that are parent channels)
     const parentChannelNames = new Set(Object.keys(tree.folders))
     tree.channels.filter(c => !parentChannelNames.has(c.display_name)).forEach(channel => {
@@ -380,7 +378,10 @@ export default function Dashboard({ user, refreshUser }) {
   }
 
   useEffect(() => {
-    fetchChannelData()
+    // Only fetch channel data after folder separator is set
+    if (folderSeparator) {
+      fetchChannelData()
+    }
     
     // Listen for user assignment changes
     const handleUserAssignmentChanged = () => {
@@ -392,7 +393,7 @@ export default function Dashboard({ user, refreshUser }) {
     return () => {
       window.removeEventListener('userAssignmentChanged', handleUserAssignmentChanged)
     }
-  }, [user])
+  }, [user, folderSeparator])
 
   // Remove old useEffect - now handled above
 

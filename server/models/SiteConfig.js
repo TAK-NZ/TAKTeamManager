@@ -29,6 +29,10 @@ class SiteConfig {
     result.rows.forEach(row => {
       config[row.config_key] = row.config_value;
     });
+    
+    // Add channel folder separator from environment
+    config.channel_folder_separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
+    
     return config;
   }
 }

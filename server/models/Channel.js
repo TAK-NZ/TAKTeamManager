@@ -66,11 +66,12 @@ class Channel {
       const team = teamResult.rows[0];
       
       // Generate channel name
+      const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
       let baseChannelName;
       if (team.parent_team_id) {
-        baseChannelName = `Teams / ${team.root_prefix} / ${team.name}`;
+        baseChannelName = `Teams${separator}${team.root_prefix}${separator}${team.name}`;
       } else {
-        baseChannelName = `Teams / ${team.root_prefix || team.name}`;
+        baseChannelName = `Teams${separator}${team.root_prefix || team.name}`;
       }
       
       const fullChannelName = `${baseChannelName} - ${customSuffix}`;
