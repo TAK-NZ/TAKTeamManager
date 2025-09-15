@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
-import { PlusIcon, KeyIcon, GlobeAltIcon, RadioIcon, PencilIcon, TrashIcon } from '@heroicons/react/24/outline';
+import { PlusIcon, KeyIcon, GlobeAltIcon, RadioIcon, PencilIcon, TrashIcon, FolderIcon, FolderOpenIcon, ChevronRightIcon, ChevronDownIcon, ChevronUpIcon } from '@heroicons/react/24/outline';
 import toast from 'react-hot-toast';
-import { globalChannelsAPI } from '../services/api';
+import { globalChannelsAPI, configAPI } from '../services/api';
 
 export default function GlobalChannels({ user }) {
   const [bchChannels, setBchChannels] = useState([]);
@@ -15,6 +15,9 @@ export default function GlobalChannels({ user }) {
   const [deletingChannel, setDeletingChannel] = useState(false);
   const [showAssignDialog, setShowAssignDialog] = useState(false);
   const [assigningUsers, setAssigningUsers] = useState(false);
+  const [syncingChannels, setSyncingChannels] = useState(false);
+  const [expandedFolders, setExpandedFolders] = useState(new Set());
+  const [folderSeparator, setFolderSeparator] = useState(' - ');
   const [formData, setFormData] = useState({
     name: '',
     description: ''
@@ -23,6 +26,16 @@ export default function GlobalChannels({ user }) {
   const isGlobalManager = user?.is_global_manager; // Global managers only
 
   useEffect(() => {
+    const fetchConfig = async () => {
+      try {
+        const response = await configAPI.getPublic();
+        setFolderSeparator(response.data.channel_folder_separator || ' - ');
+      } catch (error) {
+        console.error('Failed to fetch config:', error);
+      }
+    };
+    
+    fetchConfig();
     fetchChannels();
   }, []);
 
@@ -123,6 +136,19 @@ export default function GlobalChannels({ user }) {
     }
   };
 
+  const handleSyncChannels = async () => {
+    setSyncingChannels(true);
+    try {
+      await globalChannelsAPI.syncExistingChannels();
+      toast.success('Channel sync completed successfully');
+      fetchChannels(); // Refresh the channel lists
+    } catch (error) {
+      toast.error('Failed to sync existing channels');
+    } finally {
+      setSyncingChannels(false);
+    }
+  };
+
   const handleAssignAllUsers = async () => {
     setAssigningUsers(true);
     try {
@@ -134,6 +160,153 @@ export default function GlobalChannels({ user }) {
     } finally {
       setAssigningUsers(false);
     }
+  };
+
+  // Build folder tree from channels
+  const buildFolderTree = (channels) => {
+    const tree = { folders: {}, channels: [] };
+    
+    channels.forEach(channel => {
+      const parts = channel.name.split(folderSeparator);
+      if (parts.length === 1) {
+        tree.channels.push(channel);
+      } else {
+        let current = tree;
+        for (let i = 0; i < parts.length - 1; i++) {
+          const folderName = parts[i].trim();
+          if (!current.folders[folderName]) {
+            current.folders[folderName] = { folders: {}, channels: [] };
+          }
+          current = current.folders[folderName];
+        }
+        current.channels.push({
+          ...channel,
+          name: parts[parts.length - 1].trim()
+        });
+      }
+    });
+    
+    return tree;
+  };
+
+  const toggleFolder = (folderPath) => {
+    const newExpanded = new Set(expandedFolders);
+    if (newExpanded.has(folderPath)) {
+      newExpanded.delete(folderPath);
+    } else {
+      newExpanded.add(folderPath);
+    }
+    setExpandedFolders(newExpanded);
+  };
+
+  const getAllFolderPaths = (tree, basePath = '') => {
+    const paths = [];
+    Object.keys(tree.folders).forEach(folderName => {
+      const folderPath = basePath ? `${basePath}/${folderName}` : folderName;
+      paths.push(folderPath);
+      paths.push(...getAllFolderPaths(tree.folders[folderName], folderPath));
+    });
+    return paths;
+  };
+
+  const expandAllFolders = (channels) => {
+    const allPaths = getAllFolderPaths(buildFolderTree(channels));
+    setExpandedFolders(new Set(allPaths));
+  };
+
+  const collapseAllFolders = () => {
+    setExpandedFolders(new Set());
+  };
+
+  const renderFolderTree = (tree, path = '', channelType) => {
+    const items = [];
+    
+    // Render folders
+    Object.entries(tree.folders).forEach(([folderName, subtree]) => {
+      const folderPath = path ? `${path}/${folderName}` : folderName;
+      const isExpanded = expandedFolders.has(folderPath);
+      
+      items.push(
+        <div key={folderPath}>
+          <div 
+            className="flex items-center p-3 bg-gray-100 dark:bg-gray-600 rounded-lg cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-500"
+            onClick={() => toggleFolder(folderPath)}
+          >
+            <div className="flex items-center flex-1">
+              {isExpanded ? (
+                <FolderOpenIcon className="h-5 w-5 text-blue-600 mr-2" />
+              ) : (
+                <FolderIcon className="h-5 w-5 text-blue-600 mr-2" />
+              )}
+              <span className="font-medium text-gray-900 dark:text-gray-100">{folderName}</span>
+            </div>
+            <ChevronRightIcon className={`h-4 w-4 text-gray-500 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+          </div>
+        </div>
+      );
+      
+      if (isExpanded) {
+        items.push(
+          <div key={`${folderPath}-children`} className="ml-6 mt-2 space-y-2">
+            {renderFolderTree(subtree, folderPath, channelType)}
+          </div>
+        );
+      }
+    });
+    
+    // Render channels
+    tree.channels.forEach(channel => {
+      items.push(
+        <div key={channel.id} className="border border-gray-200 dark:border-gray-700 rounded-lg p-4 ml-6">
+          <div className="flex justify-between items-start">
+            <div>
+              <h3 className="font-medium text-gray-900 dark:text-gray-100">
+                {channel.name}
+              </h3>
+              <p className="text-sm text-gray-600 dark:text-gray-400">
+                {channel.description}
+              </p>
+              <p className="text-xs text-gray-500 dark:text-gray-500 mt-1">
+                Created by {channel.created_by_name}
+                {channelType === 'bch' && channel.service_account_username && (
+                  <> • Service Account: {channel.service_account_username}</>
+                )}
+              </p>
+            </div>
+            
+            {isGlobalManager && (
+              <div className="flex items-center space-x-3">
+                {channelType === 'bch' && (
+                  <button
+                    onClick={() => handleGetCredentials(channel.id)}
+                    className="text-blue-600 hover:text-blue-500 dark:text-blue-400 dark:hover:text-blue-300"
+                    title="Get credentials"
+                  >
+                    <KeyIcon className="h-4 w-4" />
+                  </button>
+                )}
+                <button
+                  onClick={() => handleEdit(channel, channelType)}
+                  className="text-gray-600 hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300"
+                  title="Edit channel"
+                >
+                  <PencilIcon className="h-4 w-4" />
+                </button>
+                <button
+                  onClick={() => handleDelete(channel.id, channelType, channel.name)}
+                  className="text-red-600 hover:text-red-500 dark:text-red-400 dark:hover:text-red-300"
+                  title="Delete channel"
+                >
+                  <TrashIcon className="h-4 w-4" />
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    });
+    
+    return items;
   };
 
   if (loading) {
@@ -185,127 +358,105 @@ export default function GlobalChannels({ user }) {
           <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
             Global Channel Management
           </h3>
-          <button
-            onClick={() => setShowAssignDialog(true)}
-            className="btn-primary"
-          >
-            Assign All Users to Global Channels
-          </button>
-          <p className="text-sm text-gray-600 dark:text-gray-400 mt-2">
-            This will ensure all existing users are added to all active global channels.
-          </p>
+          <div className="flex space-x-3 mb-4">
+            <button
+              onClick={handleSyncChannels}
+              disabled={syncingChannels}
+              className="btn-secondary flex items-center"
+            >
+              {syncingChannels ? (
+                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current mr-2"></div>
+              ) : (
+                <GlobeAltIcon className="h-4 w-4 mr-2" />
+              )}
+              {syncingChannels ? 'Syncing...' : 'Sync Existing Channels'}
+            </button>
+            <button
+              onClick={() => setShowAssignDialog(true)}
+              className="btn-primary"
+            >
+              Assign All Users to Global Channels
+            </button>
+          </div>
+          <div className="space-y-2 text-sm text-gray-600 dark:text-gray-400">
+            <p>• <strong>Sync Existing Channels:</strong> Import BCH and Region channels that already exist in Authentik</p>
+            <p>• <strong>Assign All Users:</strong> Ensure all existing users are added to all active global channels</p>
+          </div>
         </div>
       )}
 
       {/* BCH Channels */}
       <div className="card">
-        <div className="flex items-center mb-4">
-          <RadioIcon className="h-6 w-6 text-blue-600 mr-2" />
-          <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
-            BCH Channels (Broadcast/ETL)
-          </h2>
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center">
+            <RadioIcon className="h-6 w-6 text-blue-600 mr-2" />
+            <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
+              BCH Channels (Broadcast/ETL)
+            </h2>
+          </div>
+          {bchChannels.length > 0 && Object.keys(buildFolderTree(bchChannels).folders).length > 0 && (
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={() => expandAllFolders(bchChannels)}
+                className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
+              >
+                <ChevronDownIcon className="h-4 w-4 mr-1" />
+                Expand All
+              </button>
+              <button
+                onClick={collapseAllFolders}
+                className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
+              >
+                <ChevronUpIcon className="h-4 w-4 mr-1" />
+                Collapse All
+              </button>
+            </div>
+          )}
         </div>
         
         {bchChannels.length === 0 ? (
           <p className="text-gray-500 dark:text-gray-400">No BCH channels configured.</p>
         ) : (
           <div className="space-y-3">
-            {bchChannels.map((channel) => (
-              <div key={channel.id} className="border border-gray-200 dark:border-gray-700 rounded-lg p-4">
-                <div className="flex justify-between items-start">
-                  <div>
-                    <h3 className="font-medium text-gray-900 dark:text-gray-100">
-                      {channel.name}
-                    </h3>
-                    <p className="text-sm text-gray-600 dark:text-gray-400">
-                      {channel.description}
-                    </p>
-                    <p className="text-xs text-gray-500 dark:text-gray-500 mt-1">
-                      Created by {channel.created_by_name} • Service Account: {channel.service_account_username}
-                    </p>
-                  </div>
-                  
-                  {isGlobalManager && (
-                    <div className="flex items-center space-x-3">
-                      <button
-                        onClick={() => handleGetCredentials(channel.id)}
-                        className="text-blue-600 hover:text-blue-500 dark:text-blue-400 dark:hover:text-blue-300"
-                        title="Get credentials"
-                      >
-                        <KeyIcon className="h-4 w-4" />
-                      </button>
-                      <button
-                        onClick={() => handleEdit(channel, 'bch')}
-                        className="text-gray-600 hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300"
-                        title="Edit channel"
-                      >
-                        <PencilIcon className="h-4 w-4" />
-                      </button>
-                      <button
-                        onClick={() => handleDelete(channel.id, 'bch', channel.name)}
-                        className="text-red-600 hover:text-red-500 dark:text-red-400 dark:hover:text-red-300"
-                        title="Delete channel"
-                      >
-                        <TrashIcon className="h-4 w-4" />
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            ))}
+            {renderFolderTree(buildFolderTree(bchChannels), '', 'bch')}
           </div>
         )}
       </div>
 
       {/* Region Channels */}
       <div className="card">
-        <div className="flex items-center mb-4">
-          <GlobeAltIcon className="h-6 w-6 text-green-600 mr-2" />
-          <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
-            Region Channels
-          </h2>
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center">
+            <GlobeAltIcon className="h-6 w-6 text-green-600 mr-2" />
+            <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
+              Region Channels
+            </h2>
+          </div>
+          {regionChannels.length > 0 && Object.keys(buildFolderTree(regionChannels).folders).length > 0 && (
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={() => expandAllFolders(regionChannels)}
+                className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
+              >
+                <ChevronDownIcon className="h-4 w-4 mr-1" />
+                Expand All
+              </button>
+              <button
+                onClick={collapseAllFolders}
+                className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
+              >
+                <ChevronUpIcon className="h-4 w-4 mr-1" />
+                Collapse All
+              </button>
+            </div>
+          )}
         </div>
         
         {regionChannels.length === 0 ? (
           <p className="text-gray-500 dark:text-gray-400">No region channels configured.</p>
         ) : (
           <div className="space-y-3">
-            {regionChannels.map((channel) => (
-              <div key={channel.id} className="border border-gray-200 dark:border-gray-700 rounded-lg p-4">
-                <div className="flex justify-between items-start">
-                  <div>
-                    <h3 className="font-medium text-gray-900 dark:text-gray-100">
-                      {channel.name}
-                    </h3>
-                    <p className="text-sm text-gray-600 dark:text-gray-400">
-                      {channel.description}
-                    </p>
-                    <p className="text-xs text-gray-500 dark:text-gray-500 mt-1">
-                      Created by {channel.created_by_name}
-                    </p>
-                  </div>
-                  
-                  {isGlobalManager && (
-                    <div className="flex items-center space-x-3">
-                      <button
-                        onClick={() => handleEdit(channel, 'region')}
-                        className="text-gray-600 hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300"
-                        title="Edit channel"
-                      >
-                        <PencilIcon className="h-4 w-4" />
-                      </button>
-                      <button
-                        onClick={() => handleDelete(channel.id, 'region', channel.name)}
-                        className="text-red-600 hover:text-red-500 dark:text-red-400 dark:hover:text-red-300"
-                        title="Delete channel"
-                      >
-                        <TrashIcon className="h-4 w-4" />
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            ))}
+            {renderFolderTree(buildFolderTree(regionChannels), '', 'region')}
           </div>
         )}
       </div>

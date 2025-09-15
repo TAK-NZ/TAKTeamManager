@@ -125,6 +125,7 @@ export const globalChannelsAPI = {
   getBchCredentials: (channelId) => api.get(`/global-channels/bch/${channelId}/credentials`),
   assignAllUsers: () => api.post('/global-channels/assign-all-users'),
   deleteChannel: (channelType, channelId) => api.delete(`/global-channels/${channelType}/${channelId}`),
+  syncExistingChannels: () => api.post('/global-channels/sync-existing'),
 };
 
 export default api;

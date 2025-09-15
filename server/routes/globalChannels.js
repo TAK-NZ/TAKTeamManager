@@ -205,6 +205,27 @@ router.put('/region/:channelId', authenticateToken, requireGlobalManager, [
   }
 });
 
+// Sync existing channels from Authentik (global managers only)
+router.post('/sync-existing', authenticateToken, requireGlobalManager, async (req, res) => {
+  try {
+    const userResult = await pool.query(
+      'SELECT id FROM users WHERE authentik_user_id = $1',
+      [req.user.id]
+    );
+    
+    const result = await globalChannelService.syncExistingChannels(userResult.rows[0].id);
+    
+    res.json({
+      message: 'Existing channels synced successfully',
+      bchCount: result.bchCount,
+      regionCount: result.regionCount
+    });
+  } catch (error) {
+    console.error('Failed to sync existing channels:', error);
+    res.status(500).json({ error: 'Failed to sync existing channels' });
+  }
+});
+
 // Delete global channel (global managers only)
 router.delete('/:channelType/:channelId', authenticateToken, requireGlobalManager, async (req, res) => {
   try {

@@ -227,6 +227,10 @@ class SyncWorker {
         await this.deactivateGlobalChannel(payload);
         break;
         
+      case 'sync_existing_global_channels':
+        await this.syncExistingGlobalChannels(payload);
+        break;
+        
       default:
         throw new Error(`Unknown operation type: ${operation.operation_type}`);
     }
@@ -361,9 +365,10 @@ class SyncWorker {
   async createBchChannelGroups(payload) {
     const { channel_name, service_account_username, service_account_password, bch_channel_id } = payload;
     
-    // Create read and write groups
-    const readGroupName = `bch_${channel_name.toLowerCase().replace(/\s+/g, '_')}_read`;
-    const writeGroupName = `bch_${channel_name.toLowerCase().replace(/\s+/g, '_')}_write`;
+    const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
+    // Create read and write groups using tak_BCH format
+    const readGroupName = `tak_BCH${separator}${channel_name}_READ`;
+    const writeGroupName = `tak_BCH${separator}${channel_name}`;
     
     const readGroupResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
       method: 'POST',
@@ -450,9 +455,10 @@ class SyncWorker {
     const { channel_name, region_channel_id } = payload;
     
     const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
-    const groupName = `tak_Regions${separator}${channel_name}`;
+    const readGroupName = `tak_Regions${separator}${channel_name}_READ`;
+    const writeGroupName = `tak_Regions${separator}${channel_name}`;
     
-    console.log('Creating region channel group:', groupName);
+    console.log('Creating region channel groups:', readGroupName, writeGroupName);
     
     // Get channel description from database
     const channelResult = await this.pool.query(
@@ -463,43 +469,58 @@ class SyncWorker {
     const description = channelResult.rows[0]?.description || channel_name;
     const authentikDescription = `${description} (Bi-directional location sharing)`;
     
-    const groupResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
+    // Create read group
+    const readGroupResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        name: groupName,
+        name: readGroupName,
         attributes: { 
           channel_type: 'region',
+          permission: 'read',
           description: authentikDescription
         }
       })
     });
     
-    if (!groupResponse.ok) {
-      const errorText = await groupResponse.text();
-      console.error('Authentik API error:', groupResponse.status, errorText);
-      throw new Error(`Failed to create region channel group: ${groupResponse.status} ${errorText}`);
+    // Create write group
+    const writeGroupResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        name: writeGroupName,
+        attributes: { 
+          channel_type: 'region',
+          permission: 'write',
+          description: authentikDescription
+        }
+      })
+    });
+    
+    if (!readGroupResponse.ok || !writeGroupResponse.ok) {
+      const readError = !readGroupResponse.ok ? await readGroupResponse.text() : null;
+      const writeError = !writeGroupResponse.ok ? await writeGroupResponse.text() : null;
+      console.error('Authentik API error:', { readError, writeError });
+      throw new Error('Failed to create region channel groups');
     }
     
-    const responseText = await groupResponse.text();
-    let group;
-    try {
-      group = JSON.parse(responseText);
-    } catch (parseError) {
-      console.error('Failed to parse Authentik response as JSON:', responseText);
-      throw new Error(`Invalid JSON response from Authentik: ${responseText}`);
-    }
-    console.log('Created group:', group.pk, group.name);
+    const readGroup = await readGroupResponse.json();
+    const writeGroup = await writeGroupResponse.json();
     
-    // Update database with group ID
+    console.log('Created groups:', readGroup.pk, writeGroup.pk);
+    
+    // Update database with group IDs
     await this.pool.query(`
       UPDATE region_channels 
-      SET group_id = $1
-      WHERE id = $2
-    `, [group.pk, region_channel_id]);
+      SET read_group_id = $1, group_id = $2
+      WHERE id = $3
+    `, [readGroup.pk, writeGroup.pk, region_channel_id]);
   }
 
   async updateBchChannelGroup(payload) {
@@ -521,10 +542,12 @@ class SyncWorker {
     const { read_group_id, write_group_id } = channelResult.rows[0];
     console.log('Found group IDs:', { read_group_id, write_group_id });
     
+    const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
+    
     // Update read group
     if (read_group_id) {
       const readRequestBody = {
-        name: `bch_${channel_name.toLowerCase().replace(/\s+/g, '_')}_read`,
+        name: `tak_BCH${separator}${channel_name}_READ`,
         attributes: { channel_type: 'bch', permission: 'read', description }
       };
       
@@ -553,7 +576,7 @@ class SyncWorker {
     // Update write group
     if (write_group_id) {
       const writeRequestBody = {
-        name: `bch_${channel_name.toLowerCase().replace(/\s+/g, '_')}_write`,
+        name: `tak_BCH${separator}${channel_name}`,
         attributes: { channel_type: 'bch', permission: 'write', description }
       };
       
@@ -713,17 +736,28 @@ class SyncWorker {
     const user = await this.getUser(payload.target_user_id);
     if (!user) throw new Error(`User ${payload.target_user_id} not found`);
     
-    // Get all active global channel group IDs
+    // Check if user belongs to a private team
+    const teamResult = await this.pool.query(`
+      SELECT t.visibility 
+      FROM team_memberships tm
+      JOIN teams t ON tm.team_id = t.id
+      WHERE tm.user_id = $1
+      LIMIT 1
+    `, [payload.target_user_id]);
+    
+    const isPrivateTeamUser = teamResult.rows.length > 0 && teamResult.rows[0].visibility === 'private';
+    
+    // Get all global channel group IDs
     const bchResult = await this.pool.query(`
       SELECT read_group_id, write_group_id 
       FROM bch_channels 
-      WHERE is_active = true AND read_group_id IS NOT NULL
+      WHERE read_group_id IS NOT NULL
     `);
     
     const regionResult = await this.pool.query(`
-      SELECT group_id 
+      SELECT group_id, read_group_id 
       FROM region_channels 
-      WHERE is_active = true AND group_id IS NOT NULL
+      WHERE (group_id IS NOT NULL OR read_group_id IS NOT NULL)
     `);
     
     const groupIds = [];
@@ -735,9 +769,13 @@ class SyncWorker {
       }
     }
     
-    // Add region groups (all users get read-write access)
+    // Add region groups based on team privacy
     for (const region of regionResult.rows) {
-      if (region.group_id) {
+      if (isPrivateTeamUser && region.read_group_id) {
+        // Private team users get read-only access
+        groupIds.push(region.read_group_id);
+      } else if (!isPrivateTeamUser && region.group_id) {
+        // Regular users get read-write access
         groupIds.push(region.group_id);
       }
     }
@@ -763,6 +801,165 @@ class SyncWorker {
             progress_percentage = (processed_items::decimal / total_items) * 100
         WHERE id = $1
       `, [payload.bulk_operation_id]);
+    }
+  }
+
+  async syncExistingGlobalChannels(payload) {
+    console.log('Syncing existing global channels from Authentik');
+    
+    let bchCount = 0;
+    let regionCount = 0;
+    
+    try {
+      // Get all groups from Authentik
+      const groupsResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/?page_size=1000`, {
+        headers: {
+          'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      
+      if (!groupsResponse.ok) {
+        throw new Error(`Failed to fetch groups from Authentik: ${groupsResponse.statusText}`);
+      }
+      
+      const groupsData = await groupsResponse.json();
+      const groups = groupsData.results;
+      
+      console.log(`Found ${groups.length} groups in Authentik`);
+      
+      // Define separator at the top
+      const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
+      
+      // Process BCH channels (groups starting with 'tak_BCH')
+      const bchPrefix = `tak_BCH${separator}`;
+      for (const group of groups) {
+        if (group.name.startsWith(bchPrefix) && group.name.endsWith('_READ')) {
+          // Extract channel name from read group
+          const channelName = group.name.replace(bchPrefix, '').replace('_READ', '');
+          
+          // Find corresponding write group (without _READ suffix)
+          const writeGroupName = `tak_BCH${separator}${channelName}`;
+          const writeGroup = groups.find(g => g.name === writeGroupName);
+          
+          // Use write group's description if available, otherwise fall back to read group
+          const description = writeGroup?.attributes?.description || group.attributes?.description || `BCH Channel - ${channelName}`;
+          
+          // Check if this channel already exists in database
+          const existingResult = await this.pool.query(
+            'SELECT id FROM bch_channels WHERE name ILIKE $1',
+            [channelName]
+          );
+          
+          if (existingResult.rows.length === 0) {
+            console.log(`Importing BCH channel: ${channelName}`);
+            
+            // Create channel in database
+            const insertResult = await this.pool.query(`
+              INSERT INTO bch_channels (
+                name, description, read_group_id, write_group_id, created_by
+              ) VALUES ($1, $2, $3, $4, $5)
+              RETURNING id
+            `, [
+              channelName,
+              description,
+              group.pk,
+              writeGroup?.pk || null,
+              payload.synced_by
+            ]);
+            
+            bchCount++;
+            console.log(`Created BCH channel ${channelName} with ID ${insertResult.rows[0].id}`);
+          } else {
+            // Update existing channel with correct description and group IDs
+            console.log(`Updating existing BCH channel: ${channelName}`);
+            
+            await this.pool.query(`
+              UPDATE bch_channels 
+              SET description = $1, read_group_id = $2, write_group_id = $3
+              WHERE name ILIKE $4
+            `, [
+              description,
+              group.pk,
+              writeGroup?.pk || null,
+              channelName
+            ]);
+            
+            console.log(`Updated BCH channel ${channelName} with correct description`);
+          }
+        }
+      }
+      
+      // Process Region channels (groups starting with 'tak_Regions')
+      const regionPrefix = `tak_Regions${separator}`;
+      
+      for (const group of groups) {
+        if (group.name.startsWith(regionPrefix) && group.name.endsWith('_READ')) {
+          // Extract channel name from read group
+          const channelName = group.name.replace(regionPrefix, '').replace('_READ', '');
+          
+          // Find corresponding write group (without _READ suffix)
+          const writeGroupName = `tak_Regions${separator}${channelName}`;
+          const writeGroup = groups.find(g => g.name === writeGroupName);
+          
+          // Use write group's description if available, otherwise fall back to read group
+          let description = channelName;
+          const sourceGroup = writeGroup || group;
+          if (sourceGroup.attributes?.description) {
+            // Remove the "(Bi-directional location sharing)" suffix if present
+            description = sourceGroup.attributes.description.replace(' (Bi-directional location sharing)', '');
+          }
+          
+          // Check if this channel already exists in database
+          const existingResult = await this.pool.query(
+            'SELECT id FROM region_channels WHERE name ILIKE $1',
+            [channelName]
+          );
+          
+          if (existingResult.rows.length === 0) {
+            console.log(`Importing Region channel: ${channelName}`);
+            
+            // Create channel in database
+            const insertResult = await this.pool.query(`
+              INSERT INTO region_channels (
+                name, description, read_group_id, group_id, created_by
+              ) VALUES ($1, $2, $3, $4, $5)
+              RETURNING id
+            `, [
+              channelName,
+              description,
+              group.pk,
+              writeGroup?.pk || null,
+              payload.synced_by
+            ]);
+            
+            regionCount++;
+            console.log(`Created Region channel ${channelName} with ID ${insertResult.rows[0].id}`);
+          } else {
+            // Update existing channel with correct description and group IDs
+            console.log(`Updating existing Region channel: ${channelName}`);
+            
+            await this.pool.query(`
+              UPDATE region_channels 
+              SET description = $1, read_group_id = $2, group_id = $3
+              WHERE name ILIKE $4
+            `, [
+              description,
+              group.pk,
+              writeGroup?.pk || null,
+              channelName
+            ]);
+            
+            console.log(`Updated Region channel ${channelName} with correct description and group IDs`);
+          }
+        }
+      }
+      
+      console.log(`Sync completed: ${bchCount} BCH channels, ${regionCount} Region channels imported`);
+      
+    } catch (error) {
+      console.error('Failed to sync existing channels:', error);
+      throw error;
     }
   }
 

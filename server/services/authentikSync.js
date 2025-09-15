@@ -76,14 +76,28 @@ class AuthentikSyncService {
   async processBatch(users) {
     const adminGroupName = process.env.ADMIN_GROUP_NAME || 'TakTeamManager_Admin';
 
-    // Fetch all groups to map UUIDs to names
-    const groupsResponse = await axios.get(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
-      headers: { Authorization: `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` },
-      timeout: 30000
-    });
+    // Fetch all groups with pagination to map UUIDs to names
+    let allGroups = [];
+    let currentPage = 1;
+    let hasMorePages = true;
+    
+    while (hasMorePages) {
+      const groupsResponse = await axios.get(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/?page=${currentPage}`, {
+        headers: { Authorization: `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` },
+        timeout: 30000
+      });
+      
+      allGroups = allGroups.concat(groupsResponse.data.results);
+      
+      if (groupsResponse.data.pagination && groupsResponse.data.pagination.next) {
+        currentPage = groupsResponse.data.pagination.next;
+      } else {
+        hasMorePages = false;
+      }
+    }
     
     const groupMap = {};
-    groupsResponse.data.results.forEach(group => {
+    allGroups.forEach(group => {
       groupMap[group.pk] = group.name;
     });
 

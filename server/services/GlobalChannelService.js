@@ -39,6 +39,7 @@ class GlobalChannelService {
       }, createdBy);
       
       // Add group membership rules for all users
+      const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
       await client.query(`
         INSERT INTO group_membership_rules (
           rule_name, rule_type, source_type, source_id, 
@@ -49,9 +50,9 @@ class GlobalChannelService {
       `, [
         `BCH ${channelData.name} Read Access`,
         channelId,
-        `bch_${channelData.name.toLowerCase().replace(/\s+/g, '_')}_read`,
+        `tak_BCH${separator}${channelData.name}_READ`,
         `BCH ${channelData.name} Write Access`,
-        `bch_${channelData.name.toLowerCase().replace(/\s+/g, '_')}_write`
+        `tak_BCH${separator}${channelData.name}`
       ]);
       
       await client.query('COMMIT');
@@ -91,16 +92,21 @@ class GlobalChannelService {
         channel_name: channelData.name
       }, createdBy);
       
-      // Add group membership rule for all users
+      // Add group membership rules for read and write access
+      const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
       await client.query(`
         INSERT INTO group_membership_rules (
           rule_name, rule_type, source_type, source_id, 
           target_group_pattern, permission_type, priority
-        ) VALUES ($1, 'region_channels', 'region_channel', $2, $3, 'read_write', 60)
+        ) VALUES 
+        ($1, 'region_channels', 'region_channel', $2, $3, 'read', 60),
+        ($4, 'region_channels', 'region_channel', $2, $5, 'write', 61)
       `, [
-        `Region ${channelData.name} Access`,
+        `Region ${channelData.name} Read Access`,
         channelId,
-        `region_${channelData.name.toLowerCase().replace(/\s+/g, '_')}`
+        `tak_Regions${separator}${channelData.name}_READ`,
+        `Region ${channelData.name} Write Access`,
+        `tak_Regions${separator}${channelData.name}`
       ]);
       
       await client.query('COMMIT');
@@ -289,6 +295,21 @@ class GlobalChannelService {
       throw error;
     } finally {
       client.release();
+    }
+  }
+
+  async syncExistingChannels(syncedBy) {
+    try {
+      // Queue operation to sync existing channels from Authentik
+      await EventPublisher.publishOperation('sync_existing_global_channels', {
+        synced_by: syncedBy
+      }, syncedBy);
+      
+      // Return success - actual sync happens asynchronously
+      return { success: true };
+      
+    } catch (error) {
+      throw error;
     }
   }
 

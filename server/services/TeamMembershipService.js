@@ -95,7 +95,7 @@ class TeamMembershipService {
         const globalChannels = await client.query(`
           SELECT read_group_id, write_group_id FROM bch_channels WHERE is_active = true AND read_group_id IS NOT NULL
           UNION ALL
-          SELECT group_id as read_group_id, NULL as write_group_id FROM region_channels WHERE is_active = true AND group_id IS NOT NULL
+          SELECT read_group_id, group_id as write_group_id FROM region_channels WHERE is_active = true AND (read_group_id IS NOT NULL OR group_id IS NOT NULL)
         `);
         
         // Queue removal from global channels

@@ -1124,9 +1124,9 @@ export default function TeamDetail({ refreshUser }) {
                   <input
                     type="text"
                     value={subTeamFormData.callsignPrefix}
-                    className="input w-full bg-gray-100 dark:bg-gray-600 text-gray-500"
+                    onChange={(e) => setSubTeamFormData({...subTeamFormData, callsignPrefix: e.target.value})}
+                    className="input w-full"
                     placeholder="STL, AKL, etc."
-                    readOnly
                   />
                   <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                     Used to build callsigns. Example: FENZ-STL-John Smith
