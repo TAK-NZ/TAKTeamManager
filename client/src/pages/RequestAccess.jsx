@@ -112,7 +112,7 @@ export default function RequestAccess() {
             <div className="text-center mb-6">
               <img
                 className="mx-auto h-32 w-auto mb-4"
-                src="https://raw.githubusercontent.com/TAK-NZ/auth-infra/refs/heads/main/authentik/branding/icons/tak-nz-brand-tall.svg"
+                src="/assets/tak-nz-brand-tall.svg"
                 alt="TAK.NZ"
               />
               <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100">{config.request_access_title}</h2>
