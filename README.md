@@ -41,6 +41,7 @@ docker-compose exec app node database/init.js
 ```
 
 5. Access application at http://localhost:3000
+6. New users can request access at http://localhost:3000/request-access
 
 ### Option 2: Local Development
 

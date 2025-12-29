@@ -22,13 +22,27 @@ export default function Requests() {
     fetchRequests()
   }, [])
 
-  const handleDecision = async (requestId, decision) => {
+  const handleApprove = async (requestId) => {
     try {
-      await requestsAPI.makeDecision(requestId, { decision })
+      const additionalDetails = prompt('Any additional details for the user? (optional)');
+      await requestsAPI.approveRequest(requestId, { additionalDetails: additionalDetails || '' })
       setRequests(requests.filter(r => r.id !== requestId))
-      toast.success(`Request ${decision}d successfully`)
+      toast.success('Request approved successfully')
     } catch (error) {
-      toast.error(`Failed to ${decision} request`)
+      toast.error('Failed to approve request')
+    }
+  }
+
+  const handleDeny = async (requestId) => {
+    const denialReason = prompt('Please provide a reason for denial:');
+    if (!denialReason) return;
+    
+    try {
+      await requestsAPI.denyRequest(requestId, { denialReason })
+      setRequests(requests.filter(r => r.id !== requestId))
+      toast.success('Request denied successfully')
+    } catch (error) {
+      toast.error('Failed to deny request')
     }
   }
 
@@ -84,14 +98,14 @@ export default function Requests() {
                 
                 <div className="flex space-x-2 ml-6">
                   <button
-                    onClick={() => handleDecision(request.id, 'approve')}
+                    onClick={() => handleApprove(request.id)}
                     className="flex items-center px-3 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 transition-colors"
                   >
                     <CheckIcon className="h-4 w-4 mr-1" />
                     Approve
                   </button>
                   <button
-                    onClick={() => handleDecision(request.id, 'deny')}
+                    onClick={() => handleDeny(request.id)}
                     className="flex items-center px-3 py-2 bg-red-600 text-white text-sm font-medium rounded-lg hover:bg-red-700 transition-colors"
                   >
                     <XMarkIcon className="h-4 w-4 mr-1" />

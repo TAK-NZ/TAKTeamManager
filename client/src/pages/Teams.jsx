@@ -496,18 +496,19 @@ export default function Teams({ user }) {
                   
                   <div>
                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                      Prefix
+                      Prefix {!editingTeamId && <span className="text-green-500">(EDITABLE)</span>}
                     </label>
                     <input
                       type="text"
                       value={formData.callsignPrefix}
-                      onChange={editingTeamId ? undefined : (e) => setFormData({...formData, callsignPrefix: e.target.value})}
-                      className={`input w-full ${editingTeamId ? 'bg-gray-100 dark:bg-gray-600 text-gray-500' : ''}`}
-                      placeholder="FENZ, STL, etc."
-                      readOnly={editingTeamId}
+                      onChange={(e) => setFormData({...formData, callsignPrefix: e.target.value})}
+                      className="input w-full"
+                      placeholder={formData.parentTeamId ? "STL, CHC, etc." : "FENZ, DOC, etc."}
                     />
                     <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                      {editingTeamId ? 'Prefix cannot be changed after team creation' : 'Used to build callsigns. Example: FENZ-STL-John Smith'}
+                      {editingTeamId ? 'Prefix cannot be changed after team creation' : 
+                       formData.parentTeamId ? 'Sub-team prefix for callsigns. Example: FENZ-STL-John Smith' :
+                       'Team prefix for callsigns. Example: FENZ-John Smith'}
                     </p>
                   </div>
                   

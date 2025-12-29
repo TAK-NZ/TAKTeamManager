@@ -34,15 +34,24 @@ router.get('/descriptions', authenticateToken, async (req, res) => {
           headers: { Authorization: `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }
         });
         const group = groupResponse.data.results[0];
+        const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
+        
+        // Use group name for hierarchy (remove tak_ prefix)
+        let displayName = baseName.replace('tak_', '');
+        
         return {
           name: baseName,
-          display_name: group?.attributes?.CN || baseName.replace('tak_', '').replace(/_/g, ' / '),
+          display_name: displayName,
           description: group?.attributes?.description || 'TAK Channel'
         };
       } catch (error) {
+        const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
+        // Use group name for hierarchy (remove tak_ prefix)
+        let displayName = baseName.replace('tak_', '');
+        
         return {
           name: baseName,
-          display_name: baseName.replace('tak_', '').replace(/_/g, ' / '),
+          display_name: displayName,
           description: 'TAK Channel'
         };
       }

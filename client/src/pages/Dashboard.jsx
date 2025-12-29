@@ -14,7 +14,7 @@ export default function Dashboard({ user, refreshUser }) {
   const [currentPage, setCurrentPage] = useState(1)
   const channelsPerPage = 10
   const [expandedFolders, setExpandedFolders] = useState(new Set())
-  const [folderSeparator, setFolderSeparator] = useState(' / ')
+  const [folderSeparator, setFolderSeparator] = useState(' - ')
 
   // Map color names to CSS colors
   const getColorValue = (colorName) => {
@@ -55,7 +55,7 @@ export default function Dashboard({ user, refreshUser }) {
         ])
         setColorMappings(colorResponse.data.colorMappings)
         setRoleDescriptions(colorResponse.data.roleDescriptions)
-        setFolderSeparator(publicResponse.data.channel_folder_separator || ' / ')
+        setFolderSeparator(publicResponse.data.channel_folder_separator || ' - ')
       } catch (error) {
         console.error('Failed to fetch config:', error)
       }
@@ -238,8 +238,6 @@ export default function Dashboard({ user, refreshUser }) {
       }
     })
     
-
-    
     // Render regular channels (excluding those that are parent channels)
     const parentChannelNames = new Set(Object.keys(tree.folders))
     tree.channels.filter(c => !parentChannelNames.has(c.display_name)).forEach(channel => {
@@ -380,7 +378,10 @@ export default function Dashboard({ user, refreshUser }) {
   }
 
   useEffect(() => {
-    fetchChannelData()
+    // Only fetch channel data after folder separator is set
+    if (folderSeparator) {
+      fetchChannelData()
+    }
     
     // Listen for user assignment changes
     const handleUserAssignmentChanged = () => {
@@ -392,7 +393,7 @@ export default function Dashboard({ user, refreshUser }) {
     return () => {
       window.removeEventListener('userAssignmentChanged', handleUserAssignmentChanged)
     }
-  }, [user])
+  }, [user, folderSeparator])
 
   // Remove old useEffect - now handled above
 
@@ -497,9 +498,22 @@ export default function Dashboard({ user, refreshUser }) {
             </div>
             <div className="ml-4">
               <p className="text-sm font-medium text-gray-500 dark:text-gray-400">My Unit</p>
-              <p className="text-lg font-bold text-gray-900 dark:text-gray-100">
-                {userTeam ? userTeam.display_name : 'Not assigned to a unit'}
-              </p>
+              <div className="flex items-center space-x-2">
+                <p className="text-lg font-bold text-gray-900 dark:text-gray-100">
+                  {userTeam ? userTeam.display_name : 'Not assigned to a unit'}
+                </p>
+                {userTeam?.visibility === 'private' && (
+                  <div className="relative group">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor" className="h-4 w-4 text-red-500 cursor-help">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M3.98 8.223A10.477 10.477 0 0 0 1.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.451 10.451 0 0 1 12 4.5c4.756 0 8.773 3.162 10.065 7.498a10.522 10.522 0 0 1-4.293 5.774M6.228 6.228 3 3m3.228 3.228 3.65 3.65m7.894 7.894L21 21m-3.228-3.228-3.65-3.65m0 0a3 3 0 1 0-4.243-4.243m4.242 4.242L9.88 9.88" />
+                    </svg>
+                    <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
+                      Private team
+                      <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
+                    </div>
+                  </div>
+                )}
+              </div>
               {!userTeam && (
                 <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
                   Contact your administrator to be assigned to a unit

@@ -1,6 +1,17 @@
 const pool = require('../config/database');
 
 class UserAttributesService {
+  static splitFullName(fullName) {
+    const parts = fullName.trim().split(' ');
+    if (parts.length === 1) {
+      return { firstName: parts[0], lastName: '' };
+    }
+    return {
+      firstName: parts[0],
+      lastName: parts.slice(1).join(' ')
+    };
+  }
+
   static async generateCallsign(userId, teamId) {
     try {
       // Get user info
@@ -57,25 +68,40 @@ class UserAttributesService {
       }
       
       // Format name based on root team setting (trim whitespace)
-      const firstName = user.first_name.trim();
-      const lastName = user.last_name.trim();
+      let firstName = user.first_name.trim();
+      let lastName = (user.last_name || '').trim();
+      
+      // If last_name is empty, split the first_name
+      if (!lastName && firstName.includes(' ')) {
+        const splitName = this.splitFullName(firstName);
+        firstName = splitName.firstName;
+        lastName = splitName.lastName;
+      }
       
       let nameFormat;
       switch (rootTeam.callsign_name_format) {
         case 'first_initial_last':
-          nameFormat = `${firstName.charAt(0)} ${lastName}`;
+          if (lastName) {
+            nameFormat = `${firstName.charAt(0)} ${lastName}`;
+          } else {
+            nameFormat = firstName;
+          }
           break;
         case 'first_last_initial':
-          nameFormat = `${firstName} ${lastName.charAt(0)}`;
+          if (lastName) {
+            nameFormat = `${firstName} ${lastName.charAt(0)}`;
+          } else {
+            nameFormat = firstName;
+          }
           break;
         default:
-          nameFormat = `${firstName} ${lastName}`;
+          nameFormat = `${firstName} ${lastName}`.trim();
       }
       
       parts.push(nameFormat);
       
       return {
-        callsign: parts.join('-'),
+        callsign: parts.join('-').trim(),
         color: rootTeam.color,
         role: 'Team Member'
       };
@@ -87,19 +113,23 @@ class UserAttributesService {
   
   static async updateUserAttributes(authentikUserId, attributes) {
     try {
+      const payload = {
+        attributes: {
+          takCallsign: attributes.callsign,
+          takColor: attributes.color,
+          takRole: attributes.role
+        }
+      };
+      
+      console.log('Updating user attributes:', authentikUserId, payload);
+      
       const response = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
         method: 'PATCH',
         headers: {
           'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({
-          attributes: {
-            takCallsign: attributes.callsign,
-            takColor: attributes.color,
-            takRole: attributes.role
-          }
-        })
+        body: JSON.stringify(payload)
       });
       
       if (!response.ok) {

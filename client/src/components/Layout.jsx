@@ -5,6 +5,7 @@ import {
   UserGroupIcon, 
   UsersIcon, 
   ClipboardDocumentListIcon,
+  GlobeAltIcon,
   Bars3Icon,
   XMarkIcon,
   CogIcon,
@@ -14,15 +15,25 @@ import {
 import { authAPI } from '../services/api'
 import { useTheme } from '../contexts/ThemeContext'
 
-const getNavigation = (isAdmin) => {
+const getNavigation = (user) => {
   const baseNavigation = [
     { name: 'Dashboard', href: '/dashboard', icon: HomeIcon },
-    { name: 'Teams', href: '/teams', icon: UserGroupIcon },
-    { name: 'Users', href: '/users', icon: UsersIcon },
-    { name: 'Requests', href: '/requests', icon: ClipboardDocumentListIcon },
   ]
   
-  if (isAdmin) {
+  if (user?.isAdmin || user?.is_global_manager) {
+    baseNavigation.push({ name: 'Teams', href: '/teams', icon: UserGroupIcon })
+    baseNavigation.push({ name: 'Users', href: '/users', icon: UsersIcon })
+  }
+  
+  if (user?.isAdmin) {
+    baseNavigation.push({ name: 'Requests', href: '/requests', icon: ClipboardDocumentListIcon })
+  }
+  
+  if (user?.is_global_manager) {
+    baseNavigation.push({ name: 'Global Channels', href: '/global-channels', icon: GlobeAltIcon })
+  }
+  
+  if (user?.isAdmin) {
     baseNavigation.push({ name: 'Admin', href: '/admin', icon: CogIcon })
   }
   
@@ -32,7 +43,7 @@ const getNavigation = (isAdmin) => {
 export default function Layout({ children, user }) {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const location = useLocation()
-  const navigation = getNavigation(user?.isAdmin)
+  const navigation = getNavigation(user)
   const { theme, toggleTheme } = useTheme()
 
   const handleLogout = async () => {
@@ -52,7 +63,7 @@ export default function Layout({ children, user }) {
         <div className="fixed inset-y-0 left-0 flex w-64 flex-col bg-white dark:bg-gray-800">
           <div className="flex h-16 items-center justify-between py-4">
             <img 
-              src="https://raw.githubusercontent.com/TAK-NZ/auth-infra/refs/heads/main/authentik/branding/icons/tak-nz-brand-wide.svg" 
+              src="/assets/tak-nz-brand-wide.svg" 
               alt="TAK.NZ" 
               className="h-10 w-auto"
             />
@@ -85,7 +96,7 @@ export default function Layout({ children, user }) {
         <div className="flex flex-col flex-grow bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700">
           <div className="flex h-16 items-center py-4">
             <img 
-              src="https://raw.githubusercontent.com/TAK-NZ/auth-infra/refs/heads/main/authentik/branding/icons/tak-nz-brand-wide.svg" 
+              src="/assets/tak-nz-brand-wide.svg" 
               alt="TAK.NZ" 
               className="h-10 w-auto"
             />

@@ -9,6 +9,8 @@ import TeamDetail from './pages/TeamDetail'
 import Users from './pages/Users'
 import Requests from './pages/Requests'
 import RequestAccess from './pages/RequestAccess'
+import VerifyRequest from './pages/VerifyRequest'
+import GlobalChannels from './pages/GlobalChannels'
 import Login from './pages/Login'
 import Admin from './pages/Admin'
 
@@ -73,6 +75,7 @@ function App() {
     return (
       <Routes>
         <Route path="/request-access" element={<RequestAccess />} />
+        <Route path="/verify-request" element={<VerifyRequest />} />
         <Route path="*" element={<Login />} />
       </Routes>
     )
@@ -88,6 +91,7 @@ function App() {
           <Route path="/teams/:teamId" element={<TeamDetail refreshUser={refreshUser} />} />
           <Route path="/users" element={<Users />} />
           <Route path="/requests" element={<Requests />} />
+          <Route path="/global-channels" element={<GlobalChannels user={user} />} />
           <Route path="/admin" element={<Admin user={user} />} />
         </Routes>
       </Layout>

@@ -25,6 +25,45 @@ async function initializeDatabase() {
       ON CONFLICT DO NOTHING
     `);
     
+    // Insert default system configuration
+    await pool.query(`
+      INSERT INTO system_config (config_key, config_value, description) VALUES 
+      ('escalation_hours', '24', 'Hours before request escalates to next level'),
+      ('weekend_escalation', 'false', 'Whether to escalate requests on weekends'),
+      ('holiday_escalation', 'false', 'Whether to escalate requests on holidays'),
+      ('email_verification_hours', '24', 'Hours before email verification expires')
+      ON CONFLICT (config_key) DO NOTHING
+    `);
+    
+    // Insert default email templates
+    await pool.query(`
+      INSERT INTO email_templates (template_key, subject_template, body_template, description) VALUES 
+      ('access_request_verification', 'Verify your TAK Team Manager access request', 
+      'Please click the following link to verify your email and complete your access request: {{verification_link}}\n\nThis link will expire in {{expiry_hours}} hours.\n\nIf you did not make this request, please ignore this email.',
+      'Email verification for new access requests'),
+      
+      ('access_request_approved', 'Your TAK Team Manager access request has been approved',
+      'Your request to {{request_description}} has been approved by {{admin_name}}.\n\n{{additional_details}}\n\nYou can now log in to TAK Team Manager.',
+      'Notification when access request is approved'),
+      
+      ('access_request_denied', 'Your TAK Team Manager access request has been denied',
+      'Your request to {{request_description}} has been denied by {{admin_name}}.\n\nReason: {{denial_reason}}\n\nIf you have questions, please contact your team administrator.',
+      'Notification when access request is denied'),
+      
+      ('admin_notification_digest', 'TAK Team Manager - Pending Requests Digest',
+      'You have {{pending_count}} pending access requests requiring your attention:\n\n{{request_list}}\n\nPlease log in to TAK Team Manager to review these requests.',
+      'Daily digest of pending requests for admins')
+      ON CONFLICT (template_key) DO NOTHING
+    `);
+    
+    // Insert default group membership rules
+    await pool.query(`
+      INSERT INTO group_membership_rules (rule_name, rule_type, source_type, target_group_pattern, permission_type, priority) VALUES
+      ('Team Channel Access', 'team_hierarchy', 'team', 'tak_{{team_name}}', 'read_write', 100),
+      ('Parent Team Inheritance', 'team_hierarchy', 'team', 'tak_{{parent_team_name}}', 'read_write', 200)
+      ON CONFLICT DO NOTHING
+    `);
+    
     console.log('Default data inserted');
     process.exit(0);
   } catch (error) {

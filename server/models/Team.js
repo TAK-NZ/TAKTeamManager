@@ -236,13 +236,14 @@ class Team {
       const team = teamResult.rows[0];
       
       // Generate channel name
+      const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
       let channelName;
       if (team.parent_team_id) {
-        // Sub-team: "Teams / FENZ / Southland District"
-        channelName = `Teams / ${team.root_prefix} / ${team.name}`;
+        // Sub-team: "Teams - FENZ - Southland District"
+        channelName = `Teams${separator}${team.root_prefix}${separator}${team.name}`;
       } else {
-        // Root team: "Teams / FENZ"
-        channelName = `Teams / ${team.root_prefix || team.name}`;
+        // Root team: "Teams - FENZ"
+        channelName = `Teams${separator}${team.root_prefix || team.name}`;
       }
       
       const description = `Users from ${team.display_name} (Location sharing enabled)`;

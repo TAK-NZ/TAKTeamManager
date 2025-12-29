@@ -104,13 +104,28 @@ export const channelsAPI = {
 export const requestsAPI = {
   submitTeamAccess: (data) => api.post('/requests/team-access', data),
   getPending: () => api.get('/requests/pending'),
-  makeDecision: (requestId, data) => api.post(`/requests/${requestId}/decision`, data),
+  approveRequest: (requestId, data) => api.post(`/requests/${requestId}/approve`, data),
+  denyRequest: (requestId, data) => api.post(`/requests/${requestId}/deny`, data),
+  verifyEmail: (token) => axios.get(`/api/requests/verify/${token}`),
 };
 
 export const configAPI = {
   getPublic: () => axios.get('/api/config/public'),
   getAll: () => api.get('/config/all'),
   update: (key, data) => api.put(`/config/${key}`, data),
+};
+
+export const globalChannelsAPI = {
+  getBchChannels: () => api.get('/global-channels/bch'),
+  getRegionChannels: () => api.get('/global-channels/region'),
+  createBchChannel: (data) => api.post('/global-channels/bch', data),
+  createRegionChannel: (data) => api.post('/global-channels/region', data),
+  updateBchChannel: (channelId, data) => api.put(`/global-channels/bch/${channelId}`, data),
+  updateRegionChannel: (channelId, data) => api.put(`/global-channels/region/${channelId}`, data),
+  getBchCredentials: (channelId) => api.get(`/global-channels/bch/${channelId}/credentials`),
+  assignAllUsers: () => api.post('/global-channels/assign-all-users'),
+  deleteChannel: (channelType, channelId) => api.delete(`/global-channels/${channelType}/${channelId}`),
+  syncExistingChannels: () => api.post('/global-channels/sync-existing'),
 };
 
 export default api;
