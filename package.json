@@ -9,9 +9,9 @@
     "client:dev": "cd client && npm run dev",
     "build": "cd client && npm run build",
     "start": "node server/index.js",
-    "docker:up": "docker-compose up --build",
-    "docker:down": "docker-compose down",
-    "docker:init-db": "docker-compose exec app node database/init.js",
+    "docker:up": "docker compose up --build",
+    "docker:down": "docker compose down",
+    "docker:init-db": "docker compose exec app node database/init.js",
     "test": "jest"
   },
   "dependencies": {

@@ -32,12 +32,12 @@ cp .env.example .env
 
 3. Start with Docker:
 ```bash
-docker-compose up --build
+docker compose up --build
 ```
 
 4. Initialize database (first time only):
 ```bash
-docker-compose exec app node database/init.js
+docker compose exec app node database/init.js
 ```
 
 5. Access application at http://localhost:3000
