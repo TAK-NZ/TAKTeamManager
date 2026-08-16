@@ -12,7 +12,7 @@ const { getLogger } = requestContext;
 const logger = require('./config/logger');
 const pool = require('./config/database');
 const { createGracefulShutdown } = require('./utils/gracefulShutdown');
-const { validateConfig } = require('./config/configValidator');
+const { validateConfig, assertAuthRouteMounted } = require('./config/configValidator');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -100,6 +100,23 @@ const PORT = process.env.PORT || 3000;
   // `TakServerService`.
   app.use('/uploads', express.static(process.env.UPLOADS_DIR || path.join(__dirname, 'uploads/branding')));
 
+  // Serve downloadable CSV bulk-import templates (Requirement 29.1,
+  // BUG-011): `public/templates/user-import-template.csv` and
+  // `public/templates/team-import-template.csv` exist on disk but were
+  // never reachable over HTTP -- the `client/dist` static mount above
+  // only serves the built client, and the `/uploads` mount above only
+  // serves `UPLOADS_DIR` (branding uploads). Mounted at `/templates`,
+  // following that same `/uploads` pattern. These are non-sensitive
+  // blank-header CSV templates, so no authentication is required, and --
+  // matching `/uploads`'s own precedent (see
+  // `permissions.registry.completeness.test.js`'s comment on why
+  // `express.static()` mounts are excluded from its walk) -- this is a
+  // static-file mount, not an Express route handler with a `req.route`,
+  // so it is intentionally NOT added to the Public_Route_Registry
+  // (`server/config/publicRoutes.js`), which is scoped to router-handled
+  // routes only.
+  app.use('/templates', express.static(path.join(__dirname, '../public/templates')));
+
   // Public_Route_Registry bootstrap (Requirement 33.2): consults the
   // Public_Route_Registry (server/config/publicRoutes.js) against every
   // incoming request's method + path before any route's own
@@ -121,12 +138,14 @@ const PORT = process.env.PORT || 3000;
   // precedent immediately above. `req.user` is not yet populated at this
   // router-mount-level point in the chain (each route file mounts its own
   // `authenticateToken`/`authorize` pair further down, per `authorize.js`'s
-  // header comment), so `requireCurrentAgreement` defensively skips any
-  // request lacking `req.user` here -- see that file's header comment for
-  // the full reasoning. It is written to also be usable mounted per-route,
-  // immediately after `authenticateToken`/`authorize`, which is where the
-  // gate is actually enforced (task 50.5's `server/routes/mou.js`, and any
-  // future route needing this gate, should follow that pattern).
+  // header comment). BUG-010 fix: `requireCurrentAgreement` no longer
+  // relies on `req.user` being set here -- it independently resolves the
+  // current user from the `tak_session` cookie itself (reusing
+  // `server/middleware/auth.js`'s `resolveUserFromRequest`), so the gate
+  // is actually enforced at this global mount point, not just when this
+  // same middleware is mounted per-route after `authenticateToken`/
+  // `authorize` (as `server/routes/mou.js` also does, task 50.5). See
+  // that file's header comment for the full reasoning.
   app.use(require('./middleware/requireCurrentAgreement'));
 
   // Routes
@@ -173,6 +192,14 @@ const PORT = process.env.PORT || 3000;
   app.use('*', (req, res) => {
     res.status(404).json({ error: 'Route not found' });
   });
+
+  // Requirement 1 Criterion 5: verify that the single active OAuth2
+  // authentication route module (mounted above at '/api/auth') is
+  // actually present in the router stack before binding to a port, so
+  // correct APP_URL/FRONTEND_URL configuration alone is never mistaken
+  // for evidence that authentication is functional. Must run after every
+  // route mount above but before app.listen() below.
+  assertAuthRouteMounted(app);
 
   const server = app.listen(PORT, () => {
     logger.info({ port: PORT }, 'TAK Team Manager server running');

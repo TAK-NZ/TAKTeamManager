@@ -39,7 +39,11 @@ const {
   collectTakServerConfigIssues,
   collectRetentionConfigIssues,
   isWellFormedUrl,
-  isValidJwtExpiry
+  isValidJwtExpiry,
+  isDatabaseTlsCertificateValidationDisabled,
+  warnIfDatabaseTlsCertificateValidationDisabled,
+  isAuthRouteMounted,
+  assertAuthRouteMounted
 } = require('./configValidator');
 
 /**
@@ -760,5 +764,160 @@ describe('Property 9: JWT expiry duration bounds (isValidJwtExpiry)', () => {
     [undefined, false]
   ])('isValidJwtExpiry(%j) === %j', (input, expected) => {
     expect(isValidJwtExpiry(input)).toBe(expected);
+  });
+});
+
+/**
+ * Requirement 15.5 (BUG-018): WHERE the App or Sync_Worker is started
+ * with NODE_ENV=production, a warning identifying that TLS certificate
+ * validation is disabled for the database pool must be logged at
+ * startup, mirroring `server/config/database.js`'s unconditional
+ * `ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false`.
+ * This must be a warning only -- it must never cause `validateConfig` to
+ * exit non-zero.
+ */
+describe('isDatabaseTlsCertificateValidationDisabled / warnIfDatabaseTlsCertificateValidationDisabled (Requirement 15.5, BUG-018)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('is false when NODE_ENV is not production', () => {
+    expect(isDatabaseTlsCertificateValidationDisabled({ NODE_ENV: 'test' })).toBe(false);
+    expect(isDatabaseTlsCertificateValidationDisabled({})).toBe(false);
+  });
+
+  it('is true when NODE_ENV is production', () => {
+    expect(isDatabaseTlsCertificateValidationDisabled({ NODE_ENV: 'production' })).toBe(true);
+  });
+
+  it('does not log a warning when NODE_ENV is not production', () => {
+    warnIfDatabaseTlsCertificateValidationDisabled({ NODE_ENV: 'test' });
+    expect(mockLoggerInstance.warn).not.toHaveBeenCalled();
+  });
+
+  it('logs a warning identifying disabled TLS certificate validation when NODE_ENV is production', () => {
+    warnIfDatabaseTlsCertificateValidationDisabled({ NODE_ENV: 'production' });
+    expect(mockLoggerInstance.warn).toHaveBeenCalledTimes(1);
+    expect(mockLoggerInstance.warn.mock.calls[0][0]).toMatch(/TLS certificate validation is disabled/);
+  });
+});
+
+describe('validateConfig (Requirement 15.5 TLS certificate validation warning integration, BUG-018)', () => {
+  let exitSpy;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    exitSpy.mockRestore();
+    jest.restoreAllMocks();
+  });
+
+  it('logs the TLS warning but does not exit when NODE_ENV=production and config is otherwise valid', async () => {
+    const env = buildValidBaseEnv({ NODE_ENV: 'production' });
+
+    await validateConfig(env);
+
+    expect(mockLoggerInstance.warn).toHaveBeenCalledTimes(1);
+    expect(mockLoggerInstance.warn.mock.calls[0][0]).toMatch(/TLS certificate validation is disabled/);
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not log the TLS warning when NODE_ENV is not production', async () => {
+    const env = buildValidBaseEnv();
+
+    await validateConfig(env);
+
+    expect(mockLoggerInstance.warn).not.toHaveBeenCalled();
+  });
+
+  it('still logs the TLS warning even when another check fails and validateConfig exits non-zero', async () => {
+    const env = buildValidBaseEnv({ NODE_ENV: 'production', JWT_SECRET: 'too-short' });
+
+    await validateConfig(env);
+
+    expect(mockLoggerInstance.warn).toHaveBeenCalledTimes(1);
+    expect(exitSpy).toHaveBeenCalledWith(1);
+  });
+});
+
+/**
+ * Requirement 1 Criterion 5 (BUG-019): correct APP_URL/FRONTEND_URL
+ * configuration alone must not be treated as sufficient evidence that
+ * authentication is functional -- there must be an explicit startup
+ * assertion that a route module is mounted at '/api/auth'.
+ */
+describe('isAuthRouteMounted / assertAuthRouteMounted (Requirement 1 Criterion 5, BUG-019)', () => {
+  const express = require('express');
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('returns true when a router is mounted at /api/auth', () => {
+    const app = express();
+    app.use('/api/auth', express.Router());
+    expect(isAuthRouteMounted(app)).toBe(true);
+  });
+
+  it('returns true when a router is mounted at /api/auth alongside other routes', () => {
+    const app = express();
+    app.use('/api/teams', express.Router());
+    app.use('/api/auth', express.Router());
+    app.use('/api/users', express.Router());
+    expect(isAuthRouteMounted(app)).toBe(true);
+  });
+
+  it('returns false when no router is mounted at /api/auth', () => {
+    const app = express();
+    app.use('/api/teams', express.Router());
+    app.use('/api/users', express.Router());
+    expect(isAuthRouteMounted(app)).toBe(false);
+  });
+
+  it('returns false for a freshly constructed app with no routes at all', () => {
+    const app = express();
+    // Force _router to exist without any mounted routes: express only
+    // lazily initializes app._router on the first app.use()/route call,
+    // so mount something unrelated to exercise the "present but no
+    // /api/auth entry" path distinctly from an app with no _router yet.
+    app.use('/unrelated', express.Router());
+    expect(isAuthRouteMounted(app)).toBe(false);
+  });
+
+  it('returns false when app._router does not exist yet', () => {
+    const app = express();
+    expect(isAuthRouteMounted(app)).toBe(false);
+  });
+
+  it('does not exit when a router is mounted at /api/auth', () => {
+    const app = express();
+    app.use('/api/auth', express.Router());
+
+    const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => {});
+    try {
+      assertAuthRouteMounted(app);
+      expect(exitSpy).not.toHaveBeenCalled();
+      expect(mockLoggerInstance.error).not.toHaveBeenCalled();
+    } finally {
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('logs a descriptive error and exits non-zero when no router is mounted at /api/auth', () => {
+    const app = express();
+    app.use('/api/teams', express.Router());
+
+    const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => {});
+    try {
+      assertAuthRouteMounted(app);
+      expect(exitSpy).toHaveBeenCalledWith(1);
+      expect(mockLoggerInstance.error).toHaveBeenCalledTimes(1);
+      expect(mockLoggerInstance.error.mock.calls[0][0]).toMatch(/\/api\/auth/);
+    } finally {
+      exitSpy.mockRestore();
+    }
   });
 });

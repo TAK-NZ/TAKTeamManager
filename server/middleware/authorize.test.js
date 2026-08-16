@@ -56,7 +56,8 @@ jest.mock('../config/permissions.registry', () => {
   return {
     routes: {
       'GET /api/widgets': ['widget:read'],
-      'PUT /api/teams/:teamId': ['team:update']
+      'PUT /api/teams/:teamId': ['team:update'],
+      'POST /api/teams/:teamId/members': ['team:members:add']
     },
     roleDefaults: {
       global_manager: ['*'],
@@ -82,6 +83,7 @@ function buildApp(user) {
   app.get('/api/no-such-route-entry', authorize, (req, res) => res.status(200).json({ ok: true }));
   app.get('/api/widgets', authorize, (req, res) => res.status(200).json({ ok: true }));
   app.put('/api/teams/:teamId', authorize, (req, res) => res.status(200).json({ ok: true }));
+  app.post('/api/teams/:teamId/members', authorize, (req, res) => res.status(200).json({ ok: true }));
   return app;
 }
 
@@ -167,6 +169,58 @@ describe('authorize (Requirement 13.7 logging)', () => {
     const res = await request(app).get('/api/widgets').set('X-Forwarded-For', TEST_IP);
 
     expect(res.status).toBe(200);
+    expect(mockWarn).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * BUG-015: `team:members:add` had no row-scoped resolver at all, so every
+ * non-global-manager team admin was denied with 403 on
+ * `POST /api/teams/:teamId/members` before the route's own
+ * `requireTeamAdmin` middleware ever ran. This suite mirrors the existing
+ * `team:update` coverage above to confirm the resolver added in
+ * `rowScopedResolvers['team:members:add']` (Global_Manager OR
+ * `Team.isAdmin(:teamId, req.user.userId)`) behaves correctly.
+ */
+describe('authorize (BUG-015: team:members:add row-scoped resolver)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('permits a team admin (Team.isAdmin true) to POST /api/teams/:teamId/members', async () => {
+    mockIsAdmin.mockResolvedValueOnce(true);
+    const app = buildApp({ userId: 1, is_global_manager: false });
+
+    const res = await request(app).post('/api/teams/42/members').set('X-Forwarded-For', TEST_IP);
+
+    expect(res.status).toBe(200);
+    expect(mockIsAdmin).toHaveBeenCalledWith('42', 1);
+    expect(mockWarn).not.toHaveBeenCalled();
+  });
+
+  it('denies a non-admin, non-global-manager user with 403 permission_denied', async () => {
+    mockIsAdmin.mockResolvedValueOnce(false);
+    const app = buildApp({ userId: 1, is_global_manager: false });
+
+    const res = await request(app).post('/api/teams/42/members').set('X-Forwarded-For', TEST_IP);
+
+    expect(res.status).toBe(403);
+    expect(mockWarn).toHaveBeenCalledTimes(1);
+    const [payload] = mockWarn.mock.calls[0];
+    expect(payload).toEqual({
+      ip: TEST_IP,
+      route: '/api/teams/42/members',
+      reason: 'permission_denied'
+    });
+  });
+
+  it('permits a Global_Manager regardless of Team.isAdmin', async () => {
+    const app = buildApp({ userId: 1, is_global_manager: true });
+
+    const res = await request(app).post('/api/teams/42/members').set('X-Forwarded-For', TEST_IP);
+
+    expect(res.status).toBe(200);
+    expect(mockIsAdmin).not.toHaveBeenCalled();
     expect(mockWarn).not.toHaveBeenCalled();
   });
 });

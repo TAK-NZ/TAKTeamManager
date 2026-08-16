@@ -294,6 +294,78 @@ describe('TeamMembershipService.addUserToTeam / removeUserFromTeam - task 58.4 (
   });
 });
 
+describe('TeamMembershipService.removeUserFromTeam - externally-provided client (BUG-016 / Requirement 17.5)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('uses the caller-provided client and does not call pool.connect, BEGIN, COMMIT, or release', async () => {
+    const externalClient = buildMockClient((sql) => {
+      if (sql.includes('SELECT c.authentik_group_id')) {
+        return Promise.resolve({ rows: [{ authentik_group_id: 'grp-team' }] });
+      }
+      if (sql.includes('SELECT COUNT(*) as count FROM team_memberships')) {
+        return Promise.resolve({ rows: [{ count: '1' }] }); // still has other teams
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    EventPublisher.publishOperation.mockResolvedValue('op-id');
+
+    const result = await TeamMembershipService.removeUserFromTeam(1, 9, externalClient);
+
+    expect(pool.connect).not.toHaveBeenCalled();
+    expect(externalClient.query).not.toHaveBeenCalledWith('BEGIN');
+    expect(externalClient.query).not.toHaveBeenCalledWith('COMMIT');
+    expect(externalClient.release).not.toHaveBeenCalled();
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'remove_user_from_group',
+      { target_user_id: 1, target_group_id: 'grp-team' },
+      9,
+      externalClient
+    );
+    expect(result).toEqual({ success: true, groupsQueued: 1 });
+  });
+
+  it('propagates a failure without issuing ROLLBACK or release, leaving transaction control to the caller (so a caller-level rollback also undoes the membership removal)', async () => {
+    const externalClient = buildMockClient((sql) => {
+      if (sql.includes('DELETE FROM team_memberships')) {
+        return Promise.reject(new Error('membership delete failed'));
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    EventPublisher.publishOperation.mockResolvedValue('op-id');
+
+    await expect(
+      TeamMembershipService.removeUserFromTeam(1, 9, externalClient)
+    ).rejects.toThrow('membership delete failed');
+
+    expect(externalClient.query).not.toHaveBeenCalledWith('BEGIN');
+    expect(externalClient.query).not.toHaveBeenCalledWith('ROLLBACK');
+    expect(externalClient.release).not.toHaveBeenCalled();
+  });
+
+  it('falls back to acquiring its own client (original behavior) when no external client is given', async () => {
+    const mockClient = buildMockClient((sql) => {
+      if (sql.includes('SELECT c.authentik_group_id')) {
+        return Promise.resolve({ rows: [] });
+      }
+      if (sql.includes('SELECT COUNT(*) as count FROM team_memberships')) {
+        return Promise.resolve({ rows: [{ count: '1' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    pool.connect.mockResolvedValue(mockClient);
+    EventPublisher.publishOperation.mockResolvedValue('op-id');
+
+    await TeamMembershipService.removeUserFromTeam(1, 9);
+
+    expect(pool.connect).toHaveBeenCalledTimes(1);
+    expect(mockClient.query).toHaveBeenCalledWith('BEGIN');
+    expect(mockClient.query).toHaveBeenCalledWith('COMMIT');
+    expect(mockClient.release).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('TeamMembershipService.removeUserFromTeam', () => {
   beforeEach(() => {
     jest.clearAllMocks();

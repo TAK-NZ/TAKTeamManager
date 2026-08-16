@@ -90,11 +90,34 @@ class TeamMembershipService {
     }
   }
 
-  static async removeUserFromTeam(userId, createdBy = null) {
-    const client = await pool.connect();
+  /**
+   * Requirement 17.5 / Requirement 18.2 (task 38.2): accepts an optional,
+   * already-connected, already-`BEGIN`-ed `externalClient`, mirroring
+   * `addUserToTeam`'s pattern. WHEN provided, every write in this method
+   * runs on that SAME client/transaction instead of acquiring a new one,
+   * so the membership removal commits or rolls back atomically with the
+   * caller's other writes. WHEN omitted (the default), this method
+   * preserves its original behavior of acquiring its own client and
+   * managing its own `BEGIN`/`COMMIT`/`ROLLBACK`, for backward
+   * compatibility with existing callers (`server/routes/users.js`) that
+   * have no open transaction of their own.
+   *
+   * @param {number} userId
+   * @param {number|null} [createdBy]
+   * @param {import('pg').PoolClient|null} [externalClient] - an
+   *   already-connected, already-`BEGIN`-ed client to reuse instead of
+   *   acquiring a new one. When provided, this method does NOT issue its
+   *   own `BEGIN`/`COMMIT`/`ROLLBACK`/`release()` -- the caller owns the
+   *   transaction lifecycle.
+   */
+  static async removeUserFromTeam(userId, createdBy = null, externalClient = null) {
+    const ownsTransaction = !externalClient;
+    const client = externalClient || await pool.connect();
     
     try {
-      await client.query('BEGIN');
+      if (ownsTransaction) {
+        await client.query('BEGIN');
+      }
       
       // Get current team channels before removal
       const currentChannels = await client.query(`
@@ -169,14 +192,20 @@ class TeamMembershipService {
         }
       }
       
-      await client.query('COMMIT');
+      if (ownsTransaction) {
+        await client.query('COMMIT');
+      }
       return { success: true, groupsQueued: currentChannels.rows.length };
       
     } catch (error) {
-      await client.query('ROLLBACK');
+      if (ownsTransaction) {
+        await client.query('ROLLBACK');
+      }
       throw error;
     } finally {
-      client.release();
+      if (ownsTransaction) {
+        client.release();
+      }
     }
   }
 

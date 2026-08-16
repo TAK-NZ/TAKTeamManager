@@ -197,7 +197,6 @@ class Channel {
           body: JSON.stringify({
             name: authentikGroupName,
             attributes: {
-              CN: fullChannelName,
               description: description
             }
           })
@@ -212,7 +211,6 @@ class Channel {
           body: JSON.stringify({
             name: `${authentikGroupName}_READ`,
             attributes: {
-              CN: `${fullChannelName} (Read Only)`,
               description: `${description} - Read Only`
             }
           })
@@ -227,7 +225,6 @@ class Channel {
           body: JSON.stringify({
             name: `${authentikGroupName}_WRITE`,
             attributes: {
-              CN: `${fullChannelName} (Write Only)`,
               description: `${description} - Write Only`
             }
           })

@@ -3,6 +3,7 @@ const EmailService = require('./EmailService');
 const UserProvisioningService = require('./UserProvisioningService');
 const TeamMembershipService = require('./TeamMembershipService');
 const UserAttributesService = require('./userAttributes');
+const EventPublisher = require('./EventPublisher');
 const { getLogger } = require('../middleware/requestContext');
 const crypto = require('crypto');
 
@@ -255,22 +256,55 @@ class RequestApprovalService {
       // `new_account` approval's local transaction fails AFTER the
       // Authentik user has already been created in Phase 1: that
       // Authentik user is now orphaned (no corresponding local `users`
-      // row/team membership was committed). Task 38.1's scope is
-      // narrower than task 36.2's (extracting `createAndAddUser` for
-      // reuse, not re-implementing the full synchronous-delete/queued-
-      // fallback compensating action here), so this logs the orphaned-
-      // user situation clearly -- using the same `{authentikUserId,
-      // failedStep, compensationOutcome}` shape as the create-and-add
-      // route -- rather than duplicating that route's delete/enqueue
-      // logic. See task 38.1's completion report for the rationale.
+      // row/team membership was committed). This mirrors the
+      // synchronous-delete-then-queued-fallback logic already built for
+      // `POST /api/users/create-and-add` (task 36.2, `server/routes/users.js`):
+      // attempt a SYNCHRONOUS delete of the orphaned Authentik user
+      // first; only if that delete attempt itself fails do we fall back
+      // to enqueueing a `cleanup_orphaned_authentik_user` Sync_Operation
+      // for the Sync_Worker to retry asynchronously. Either outcome --
+      // and the (rare) case where even the enqueue fails -- is logged
+      // via the structured logger with the exact `{authentikUserId,
+      // failedStep, compensationOutcome}` shape used by that route, for
+      // consistency.
       if (newAccountAuthentikUser) {
+        const failedStep = 'local_transaction';
+        let compensationOutcome;
+        try {
+          const deleteResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${newAccountAuthentikUser.pk}/`, {
+            method: 'DELETE',
+            headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }
+          });
+
+          if (deleteResponse.ok || deleteResponse.status === 404) {
+            compensationOutcome = 'deleted_synchronously';
+          } else {
+            throw new Error(`Authentik delete responded with status ${deleteResponse.status}`);
+          }
+        } catch (deleteError) {
+          getLogger().error(
+            { err: deleteError, authentikUserId: newAccountAuthentikUser.pk },
+            'Synchronous compensating Authentik user delete failed; falling back to a queued cleanup operation'
+          );
+          try {
+            await EventPublisher.publishOperation(
+              'cleanup_orphaned_authentik_user',
+              { authentik_user_id: newAccountAuthentikUser.pk },
+              adminId ?? null
+            );
+            compensationOutcome = 'cleanup_operation_queued';
+          } catch (enqueueError) {
+            getLogger().error(
+              { err: enqueueError, authentikUserId: newAccountAuthentikUser.pk },
+              'Failed to enqueue cleanup_orphaned_authentik_user compensating operation'
+            );
+            compensationOutcome = 'compensation_failed';
+          }
+        }
+
         getLogger().error(
-          {
-            authentikUserId: newAccountAuthentikUser.pk,
-            failedStep: 'local_transaction',
-            compensationOutcome: 'not_attempted'
-          },
-          'Access request approval: Authentik user created but local transaction failed; user is orphaned in Authentik'
+          { authentikUserId: newAccountAuthentikUser.pk, failedStep, compensationOutcome },
+          'Access request approval: Authentik user created but local transaction failed; orphaned Authentik user compensating action outcome'
         );
       }
 

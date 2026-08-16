@@ -22,34 +22,51 @@
  *     explicitly in its own NOTE -- and every route's own
  *     `authenticateToken`/`authorize` pair continues to run exactly as it
  *     did before that global middleware existed.
- *   - The same constraint applies here: `req.user` (set by
+ *   - The same constraint originally applied here: `req.user` (set by
  *     `authenticateToken`) is not yet populated at a global,
  *     ahead-of-every-route-mount position in the middleware chain, because
  *     nothing sets it until a specific route's own `authenticateToken`
- *     call runs, further down the chain, per route.
+ *     call runs, further down the chain, per route. Relying on `req.user`
+ *     being already set meant this middleware's global mount point was a
+ *     complete no-op in production (BUG-010): its own "skip if no
+ *     `req.user`" guard fired unconditionally, since nothing upstream of
+ *     it had ever set `req.user`, and the mandatory-agreement gate never
+ *     actually blocked anyone.
  *
- * Given that constraint, this module is written to be usable in BOTH of
- * the two positions design.md's sentence describes, and defensively
- * inert when `req.user` isn't present yet:
+ * BUG-010 fix: rather than depending on `req.user` having already been
+ * set by a downstream, not-yet-run middleware, this module now
+ * independently resolves the current user itself, via
+ * `server/middleware/auth.js`'s exported `resolveUserFromRequest` helper
+ * (the same JWT-verification + revocation-check + user-cache-lookup logic
+ * `authenticateToken` uses, extracted so both can share it). Critically,
+ * `resolveUserFromRequest` never rejects the request itself -- if there is
+ * no valid session (not logged in at all, expired token, etc.), this
+ * middleware has no signature to enforce for an unresolved user and calls
+ * `next()`, leaving `authenticateToken` (later in the per-route chain) as
+ * the sole place that actually rejects an unauthenticated/invalid-token
+ * request. This module is usable in BOTH of the two positions
+ * design.md's sentence describes:
  *
  *   1. Mounted globally in `server/index.js` (task 50.4's chosen mounting
- *      point here, matching `publicRouteBootstrap`'s existing precedent
- *      for a globally-mounted, "always runs" middleware in this exact
- *      position of the chain) -- where, today, `req.user` is never yet
- *      set, so step 1 of `requireCurrentAgreement()` below (skip when
- *      `req.user` is absent) applies to every request reaching this
- *      global mount point. This satisfies Req 33.2/Section 23's "always
- *      runs" framing and Requirement 28.6's requirement that the check be
- *      consulted centrally rather than duplicated ad hoc, without
- *      requiring an invasive, cross-cutting retrofit of every existing
- *      route file's per-route middleware chain (out of scope for this
- *      task; no task in this plan currently owns that retrofit).
+ *      point, matching `publicRouteBootstrap`'s existing precedent for a
+ *      globally-mounted, "always runs" middleware in this exact position
+ *      of the chain). `req.user` is not set yet at this point, so this
+ *      middleware resolves the user itself from the `tak_session` cookie
+ *      via `resolveUserFromRequest`, and enforces the gate against that
+ *      resolved user -- actually functional now, not a no-op. This
+ *      satisfies Req 33.2/Section 23's "always runs" framing and
+ *      Requirement 28.6's requirement that the check be consulted
+ *      centrally rather than duplicated ad hoc, without requiring an
+ *      invasive, cross-cutting retrofit of every existing route file's
+ *      per-route `authenticateToken` mount (out of scope for this fix;
+ *      see the BUG-010 analysis for why a full consolidation was not
+ *      chosen).
  *   2. Mounted per-route, immediately after `authenticateToken`/
  *      `authorize` (exactly as design.md's sentence describes), in any
  *      route -- including `server/routes/mou.js` (task 50.5) -- where
- *      `req.user` IS already populated by that point. This is where the
- *      gate is actually enforced today, and is the pattern task 50.5
- *      (and any future route needing this gate) should follow.
+ *      `req.user` IS already populated by that point. In that position,
+ *      `req.user` is used directly and `resolveUserFromRequest` is never
+ *      called a second time (see the `req.user` fast path below).
  *
  * Requirement 28 Criterion 6: "require every authenticated user who has
  * not recorded an MOU_Signature for the current version of that
@@ -74,6 +91,7 @@
 const pathToRegexp = require('path-to-regexp');
 const pool = require('../config/database');
 const logger = require('../config/logger').createLogger('requireCurrentAgreement');
+const { resolveUserFromRequest } = require('./auth');
 
 /**
  * Requirement 28 Criterion 6's explicit allow-list: "any route other than
@@ -123,18 +141,23 @@ function isBypassRoute(method, path) {
  * Behavior:
  *   1. Bypass routes (signature submission, logout) always call `next()`
  *      immediately, checked first, before any other branch.
- *   2. No `req.user` (unauthenticated, or this middleware is running
- *      ahead of `authenticateToken` in the chain -- see this file's
- *      header comment): calls `next()`, deferring entirely to whatever
- *      authentication/authorization already ran or will run for this
- *      request.
- *   3. Queries for the current mandatory SERVERWIDE agreement
+ *   2. Resolves the acting user: if `req.user` is already set (this
+ *      middleware mounted per-route, after `authenticateToken`), it is
+ *      used directly. Otherwise (this middleware mounted globally, ahead
+ *      of any per-route `authenticateToken`), the user is resolved
+ *      independently via `resolveUserFromRequest` (BUG-010 fix -- see
+ *      this file's header comment).
+ *   3. No resolved user at all (unauthenticated: no/invalid/expired
+ *      session): calls `next()` -- nothing to enforce for a user that
+ *      isn't logged in, and rejecting an invalid/missing session is
+ *      `authenticateToken`'s job, not this middleware's.
+ *   4. Queries for the current mandatory SERVERWIDE agreement
  *      (`is_current_agreement = true AND team_id IS NULL`). If none
  *      exists, calls `next()` -- nothing to enforce.
- *   4. If one exists, checks whether `req.user.userId` has an
+ *   5. If one exists, checks whether the resolved user's `userId` has an
  *      `mou_signatures` row referencing that exact document's id. If so,
  *      calls `next()`.
- *   5. Otherwise blocks the request with 403 and a
+ *   6. Otherwise blocks the request with 403 and a
  *      `{error, requiresSignature: true, documentId}` body, so a client
  *      can redirect the user to a signing UI for that specific document.
  *
@@ -155,10 +178,25 @@ async function requireCurrentAgreement(req, res, next) {
     return next();
   }
 
-  if (!req.user || req.user.userId == null) {
-    // Unauthenticated, or this middleware ran ahead of `authenticateToken`
-    // in the chain -- see this file's header comment. Defer to whatever
-    // already ran (or will run) before/after this point.
+  // Fast path: `req.user` is already populated when this middleware is
+  // mounted per-route, after `authenticateToken`/`authorize` (e.g.
+  // `server/routes/mou.js`). Otherwise (the global mount point in
+  // `server/index.js`, ahead of every route's own `authenticateToken`),
+  // resolve the user independently from the request's own session cookie
+  // -- the BUG-010 fix. `resolveUserFromRequest` never itself rejects the
+  // request; an unresolved user here just means there is no signature to
+  // enforce, and the request is left to whatever authentication already
+  // ran or will run downstream.
+  let user = req.user;
+  if (!user) {
+    const resolved = await resolveUserFromRequest(req);
+    user = resolved.user;
+  }
+
+  if (!user || user.userId == null) {
+    // Unauthenticated (no/invalid/expired session). Nothing to enforce --
+    // defer to `authenticateToken`, which is responsible for rejecting an
+    // unauthenticated request.
     return next();
   }
 
@@ -176,7 +214,7 @@ async function requireCurrentAgreement(req, res, next) {
 
     const signatureResult = await pool.query(
       'SELECT 1 FROM mou_signatures WHERE mou_document_id = $1 AND signer_user_id = $2 LIMIT 1',
-      [currentAgreement.id, req.user.userId]
+      [currentAgreement.id, user.userId]
     );
 
     if (signatureResult.rows.length > 0) {
@@ -190,7 +228,7 @@ async function requireCurrentAgreement(req, res, next) {
       documentId: currentAgreement.id
     });
   } catch (error) {
-    logger.error({ err: error, userId: req.user.userId }, 'Error checking current MOU agreement; blocking request');
+    logger.error({ err: error, userId: user.userId }, 'Error checking current MOU agreement; blocking request');
     return res.status(403).json({
       error: 'Unable to verify user agreement status'
     });

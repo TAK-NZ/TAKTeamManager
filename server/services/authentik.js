@@ -137,7 +137,6 @@ class AuthentikService {
     const response = await this.client.post('/core/groups/', {
       name: groupData.name,
       attributes: {
-        CN: groupData.displayName,
         description: groupData.description
       }
     });

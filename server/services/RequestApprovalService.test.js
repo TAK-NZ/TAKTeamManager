@@ -37,6 +37,10 @@ jest.mock('./userAttributes', () => ({
 
 jest.mock('./EmailService');
 
+jest.mock('./EventPublisher', () => ({
+  publishOperation: jest.fn()
+}));
+
 const mockLoggerError = jest.fn();
 jest.mock('../middleware/requestContext', () => ({
   getLogger: () => ({ error: mockLoggerError, info: jest.fn(), warn: jest.fn() })
@@ -47,6 +51,7 @@ const UserProvisioningService = require('./UserProvisioningService');
 const TeamMembershipService = require('./TeamMembershipService');
 const UserAttributesService = require('./userAttributes');
 const EmailService = require('./EmailService');
+const EventPublisher = require('./EventPublisher');
 const RequestApprovalService = require('./RequestApprovalService');
 
 const PENDING_NEW_ACCOUNT_REQUEST = {
@@ -160,12 +165,17 @@ describe('RequestApprovalService.approveRequest - new_account', () => {
     expect(UserProvisioningService.createAndAddUser).not.toHaveBeenCalled();
   });
 
-  it('rolls back and logs the orphaned Authentik user when the local transaction fails after the Authentik user was created', async () => {
-    mockAuthentikSuccess();
-
-    pool.query.mockResolvedValue({ rows: [PENDING_NEW_ACCOUNT_REQUEST] });
-
-    const mockClient = {
+  /**
+   * Requirement 17.2 (which Requirement 18.7 relies on): when the local
+   * transaction fails after the Authentik user was already created in
+   * Phase 1, `approveRequest` must attempt a synchronous compensating
+   * delete of that Authentik user first, falling back to enqueueing a
+   * `cleanup_orphaned_authentik_user` Sync_Operation if that delete
+   * itself fails. This mirrors the exact same pattern already built for
+   * `POST /api/users/create-and-add` (task 36.2, `server/routes/users.js`).
+   */
+  function buildRolledBackTransactionClient() {
+    return {
       query: jest.fn().mockImplementation((sql) => {
         if (sql === 'BEGIN' || sql === 'ROLLBACK') {
           return Promise.resolve();
@@ -187,6 +197,20 @@ describe('RequestApprovalService.approveRequest - new_account', () => {
       }),
       release: jest.fn()
     };
+  }
+
+  it('rolls back, synchronously deletes the orphaned Authentik user, and logs compensationOutcome: deleted_synchronously', async () => {
+    global.fetch = jest.fn()
+      // 1. existing-user-by-email lookup -> no results
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ results: [] }) })
+      // 2. create user
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ pk: 4242 }) })
+      // 3. compensating DELETE of the just-created Authentik user
+      .mockResolvedValueOnce({ ok: true, status: 204 });
+
+    pool.query.mockResolvedValue({ rows: [PENDING_NEW_ACCOUNT_REQUEST] });
+
+    const mockClient = buildRolledBackTransactionClient();
     pool.connect.mockResolvedValue(mockClient);
 
     UserProvisioningService.createAndAddUser.mockRejectedValue(new Error('duplicate key value violates unique constraint'));
@@ -198,11 +222,83 @@ describe('RequestApprovalService.approveRequest - new_account', () => {
     expect(mockClient.release).toHaveBeenCalledTimes(1);
     expect(service.emailService.sendApprovalEmail).not.toHaveBeenCalled();
 
+    // Third fetch call is the compensating DELETE against the exact
+    // Authentik user id created in Phase 1.
+    expect(global.fetch).toHaveBeenCalledTimes(3);
+    const [deleteUrl, deleteOptions] = global.fetch.mock.calls[2];
+    expect(deleteUrl).toContain('/core/users/4242/');
+    expect(deleteOptions.method).toBe('DELETE');
+
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+
     expect(mockLoggerError).toHaveBeenCalledWith(
       {
         authentikUserId: 4242,
         failedStep: 'local_transaction',
-        compensationOutcome: 'not_attempted'
+        compensationOutcome: 'deleted_synchronously'
+      },
+      expect.any(String)
+    );
+  });
+
+  it('falls back to enqueueing a cleanup_orphaned_authentik_user Sync_Operation when the synchronous delete fails, and logs compensationOutcome: cleanup_operation_queued', async () => {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ results: [] }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ pk: 4242 }) })
+      // 3. compensating DELETE fails (e.g. Authentik 5xx)
+      .mockResolvedValueOnce({ ok: false, status: 500, statusText: 'Internal Server Error' });
+
+    EventPublisher.publishOperation.mockResolvedValue(99);
+
+    pool.query.mockResolvedValue({ rows: [PENDING_NEW_ACCOUNT_REQUEST] });
+
+    const mockClient = buildRolledBackTransactionClient();
+    pool.connect.mockResolvedValue(mockClient);
+
+    UserProvisioningService.createAndAddUser.mockRejectedValue(new Error('duplicate key value violates unique constraint'));
+
+    await expect(service.approveRequest(1, 9)).rejects.toThrow('duplicate key value violates unique constraint');
+
+    expect(global.fetch).toHaveBeenCalledTimes(3);
+
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'cleanup_orphaned_authentik_user',
+      { authentik_user_id: 4242 },
+      9
+    );
+
+    expect(mockLoggerError).toHaveBeenCalledWith(
+      {
+        authentikUserId: 4242,
+        failedStep: 'local_transaction',
+        compensationOutcome: 'cleanup_operation_queued'
+      },
+      expect.any(String)
+    );
+  });
+
+  it('logs compensationOutcome: compensation_failed when both the synchronous delete and the fallback enqueue fail', async () => {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ results: [] }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ pk: 4242 }) })
+      .mockResolvedValueOnce({ ok: false, status: 500, statusText: 'Internal Server Error' });
+
+    EventPublisher.publishOperation.mockRejectedValue(new Error('database unreachable'));
+
+    pool.query.mockResolvedValue({ rows: [PENDING_NEW_ACCOUNT_REQUEST] });
+
+    const mockClient = buildRolledBackTransactionClient();
+    pool.connect.mockResolvedValue(mockClient);
+
+    UserProvisioningService.createAndAddUser.mockRejectedValue(new Error('duplicate key value violates unique constraint'));
+
+    await expect(service.approveRequest(1, 9)).rejects.toThrow('duplicate key value violates unique constraint');
+
+    expect(mockLoggerError).toHaveBeenCalledWith(
+      {
+        authentikUserId: 4242,
+        failedStep: 'local_transaction',
+        compensationOutcome: 'compensation_failed'
       },
       expect.any(String)
     );

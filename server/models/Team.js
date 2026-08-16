@@ -442,7 +442,6 @@ class Team {
           body: JSON.stringify({
             name: authentikGroupName,
             attributes: {
-              CN: channelName,
               description: description
             }
           })

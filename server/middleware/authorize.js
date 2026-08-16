@@ -112,6 +112,23 @@ const rowScopedResolvers = {
   },
 
   /**
+   * `team:members:add` — satisfied if the requesting user is a
+   * Global_Manager OR is an admin (per `Team.isAdmin`) of the specific
+   * team named by the `:teamId` route param. Adding a member to a team is
+   * the same authorization boundary as updating that team, so this
+   * mirrors `team:update` above exactly (BUG-015).
+   *
+   * @param {import('express').Request} req
+   * @returns {Promise<boolean>}
+   */
+  'team:members:add': async (req) => {
+    if (req.user && req.user.is_global_manager) {
+      return true;
+    }
+    return Team.isAdmin(req.params.teamId, req.user && req.user.userId);
+  },
+
+  /**
    * `team:create:root_or_sub` — covers both `POST /api/teams` cases:
    *   - Top-level team creation (no `parentTeamId` in the body): permitted
    *     only for a Global_Manager (Requirement 4.5).

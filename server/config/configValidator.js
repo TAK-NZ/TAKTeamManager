@@ -14,8 +14,12 @@
  * only applies WHERE `TAK_SERVER_URL` is configured; the Requirement 25.1/
  * 25.4 data-retention threshold checks for `SYNC_OPERATIONS_RETENTION_DAYS`
  * and `AUDIT_LOGS_RETENTION_DAYS` (see `collectRetentionConfigIssues`
- * below); and, when `NODE_ENV=production`, the secrets-manager gate
- * described in Requirement 6.4 (see `validateProductionSecrets` below).
+ * below); when `NODE_ENV=production`, the secrets-manager gate
+ * described in Requirement 6.4 (see `validateProductionSecrets` below);
+ * the Requirement 15.5 production database-TLS-certificate-validation
+ * warning (see `checkDatabaseTlsCertificateValidationWarning` below); and
+ * the Requirement 1 Criterion 5 startup assertion that a route module is
+ * mounted at `/api/auth` (see `assertAuthRouteMounted` below).
  */
 
 const { getSecretsProvider } = require('./secretsProvider');
@@ -363,6 +367,127 @@ function collectRetentionConfigIssues(env) {
 }
 
 /**
+ * Requirement 15.5: WHERE the App is started with `NODE_ENV=production`,
+ * `server/config/database.js`'s connection pool unconditionally sets
+ * `ssl: { rejectUnauthorized: false }` -- i.e. TLS certificate validation
+ * is disabled -- purely as a function of `NODE_ENV === 'production'`
+ * (there is no separate opt-in environment variable gating that setting).
+ * This predicate mirrors that exact condition so the warning logged by
+ * `validateConfig` below stays accurate to `database.js`'s actual
+ * behavior.
+ *
+ * `server/workers/syncWorker.js`'s own dedicated database pool
+ * configuration does not set `ssl: { rejectUnauthorized: false }` (or any
+ * `ssl` option at all) today, so there is no equivalent Sync_Worker-side
+ * condition to check here. This single, `NODE_ENV`-driven predicate is
+ * still evaluated at Sync_Worker startup (via `validateConfig`, called
+ * from both `server/index.js` and `server/workers/syncWorker.js`'s
+ * `require.main === module` block), satisfying Requirement 15.5's "at
+ * startup" for both processes.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {boolean}
+ */
+function isDatabaseTlsCertificateValidationDisabled(env) {
+  return env.NODE_ENV === 'production';
+}
+
+/**
+ * Requirement 15.5: WHEN `isDatabaseTlsCertificateValidationDisabled(env)`
+ * is true, logs a WARNING (never a hard failure -- this is informational,
+ * unlike every other check in this module, and MUST NOT cause
+ * `validateConfig` to `process.exit(1)`) identifying that TLS certificate
+ * validation is disabled for the database pool.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ */
+function warnIfDatabaseTlsCertificateValidationDisabled(env) {
+  if (isDatabaseTlsCertificateValidationDisabled(env)) {
+    logger.warn(
+      'TLS certificate validation is disabled for the database connection pool ' +
+        "(NODE_ENV=production causes server/config/database.js to set ssl: { rejectUnauthorized: false }). " +
+        'The database connection is encrypted but the server certificate is not verified, ' +
+        'making the connection vulnerable to a man-in-the-middle attack.'
+    );
+  }
+}
+
+/**
+ * Requirement 1 Criterion 5: recovers the mount path (e.g. `/api/auth`) a
+ * top-level router `Layer` was mounted at, from its compiled regexp.
+ * Mirrors `getMountPath` in
+ * `server/config/permissions.registry.completeness.test.js` -- Express 4's
+ * `path-to-regexp` compiles a string mount path like `/api/auth` into a
+ * regexp shaped like `^\/api\/auth\/?(?=\/|$)`; a router mounted at the
+ * app root (`/`) is instead flagged via `layer.regexp.fast_slash === true`
+ * and has no meaningful prefix to extract.
+ *
+ * @param {*} layer - an Express Router `Layer` instance.
+ * @returns {string|null} the recovered mount path, or `null` if none/root.
+ */
+function getLayerMountPath(layer) {
+  if (typeof layer.path === 'string') {
+    return layer.path;
+  }
+  if (!layer.regexp || layer.regexp.fast_slash) {
+    return null;
+  }
+  const match = layer.regexp.source.match(/^\^\\\/(.*?)\\\/\?/);
+  return match ? `/${match[1].replace(/\\\//g, '/')}` : null;
+}
+
+/**
+ * Requirement 1 Criterion 5: WHERE the App relies on correct
+ * `APP_URL`/`FRONTEND_URL` configuration as evidence that authentication
+ * is functional, this SHALL NOT be treated as sufficient on its own --
+ * this predicate additionally verifies that a route module (the single
+ * active OAuth2 authentication route module required by Criterion 1) is
+ * actually mounted at the `/api/auth` path on the given Express `app`.
+ *
+ * Walks the app's top-level `app._router.stack` (Express 4's internal
+ * middleware/router stack; see the same "no exported `buildApp()`, so
+ * walk router internals directly" rationale documented in
+ * `server/config/permissions.registry.completeness.test.js`) looking for
+ * a `Layer` whose recovered mount path is `/api/auth`. This only needs to
+ * confirm that SOMETHING is mounted at that path -- not recurse into its
+ * nested route table -- unlike the Permission_Registry completeness
+ * test's full recursive walk.
+ *
+ * @param {import('express').Application} app
+ * @returns {boolean}
+ */
+function isAuthRouteMounted(app) {
+  const stack = app && app._router && app._router.stack;
+  if (!Array.isArray(stack)) {
+    return false;
+  }
+
+  return stack.some((layer) => getLayerMountPath(layer) === '/api/auth');
+}
+
+/**
+ * Requirement 1 Criterion 5: asserts that `isAuthRouteMounted(app)` is
+ * true, logging a descriptive error and exiting with a non-zero status
+ * code (mirroring `validateConfig`'s fail-fast pattern) when it is not.
+ *
+ * MUST be called AFTER every route is mounted but BEFORE `app.listen()`
+ * in `server/index.js`, so that a correctly configured `APP_URL`/
+ * `FRONTEND_URL` with no functional `/api/auth` route never silently
+ * passes as compliant.
+ *
+ * @param {import('express').Application} app
+ */
+function assertAuthRouteMounted(app) {
+  if (!isAuthRouteMounted(app)) {
+    logger.error(
+      'Startup assertion failed: no route module is mounted at "/api/auth". ' +
+        'Authentication cannot function without this route mounted; refusing to start.'
+    );
+    process.exit(1);
+  }
+}
+
+/**
  * Runs every startup configuration check and returns a list of
  * human-readable issue descriptions. An empty array means configuration is
  * valid.
@@ -494,6 +619,9 @@ async function validateProductionSecrets(env = process.env) {
  *  - WHERE `NODE_ENV=production`, `AUTHENTIK_ADMIN_TOKEN`, `JWT_SECRET`,
  *    `DB_PASSWORD`, and the AWS credential variables resolve through the
  *    configured secrets provider (Criterion 6.4)
+ *  - WHERE `NODE_ENV=production`, logs an informational WARNING (never a
+ *    hard failure) identifying that TLS certificate validation is
+ *    disabled for the database pool (Criterion 15.5)
  *
  * IF any check fails, logs every specific invalid/missing variable name
  * and reason, and exits with a non-zero status code (Criteria 15.2, 3.5,
@@ -508,6 +636,11 @@ async function validateProductionSecrets(env = process.env) {
  */
 async function validateConfig(env = process.env) {
   const issues = collectConfigIssues(env);
+
+  // Requirement 15.5: informational only -- logged regardless of whether
+  // any other check below fails, and never contributes to `issues` or
+  // triggers `process.exit(1)` on its own.
+  warnIfDatabaseTlsCertificateValidationDisabled(env);
 
   // Requirement 6.4: only attempt the secrets-manager gate if the
   // synchronous checks above passed. If, say, JWT_SECRET is missing
@@ -539,6 +672,10 @@ module.exports = {
   isValidJwtExpiry,
   isPositiveIntegerValue,
   parseDurationMs,
+  isDatabaseTlsCertificateValidationDisabled,
+  warnIfDatabaseTlsCertificateValidationDisabled,
+  isAuthRouteMounted,
+  assertAuthRouteMounted,
   REQUIRED_VARS,
   URL_VARS,
   PRODUCTION_SECRET_VARS,
