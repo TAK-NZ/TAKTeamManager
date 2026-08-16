@@ -2,13 +2,15 @@ const express = require('express');
 const axios = require('axios');
 const { body, validationResult } = require('express-validator');
 const { authenticateToken } = require('../middleware/auth');
+const authorize = require('../middleware/authorize');
+const { getLogger } = require('../middleware/requestContext');
 const Channel = require('../models/Channel');
 const Team = require('../models/Team');
 const pool = require('../config/database');
 const router = express.Router();
 
 // Get channel descriptions for user's groups
-router.get('/descriptions', authenticateToken, async (req, res) => {
+router.get('/descriptions', authenticateToken, authorize, async (req, res) => {
   try {
     const userGroups = req.user.groups || [];
     const takGroups = userGroups.filter(groupName => groupName.startsWith('tak_'));
@@ -60,13 +62,13 @@ router.get('/descriptions', authenticateToken, async (req, res) => {
     const channelDescriptions = await Promise.all(groupDetailsPromises);
     res.json({ channels: channelDescriptions });
   } catch (error) {
-    console.error('Failed to fetch channel descriptions:', error);
+    getLogger().error({ err: error }, 'Failed to fetch channel descriptions');
     res.status(500).json({ error: 'Failed to fetch channel descriptions' });
   }
 });
 
 // Create custom channel
-router.post('/custom', authenticateToken, [
+router.post('/custom', authenticateToken, authorize, [
   body('teamId').isInt(),
   body('customSuffix').trim().isLength({ min: 1, max: 100 }),
   body('memberPermissions').isArray()
@@ -85,7 +87,14 @@ router.post('/custom', authenticateToken, [
       return res.status(404).json({ error: 'Team not found' });
     }
     
-    // Check channel limit (3 total including primary)
+    // Fast-path optimization only: this pre-check lets an obviously-over-the-limit
+    // request fail before the more expensive Authentik group-creation calls run.
+    // It is NOT the authoritative enforcement mechanism -- Channel.createCustomChannel
+    // re-validates the count itself inside a SERIALIZABLE transaction immediately
+    // before the INSERT (Requirement 16.6), which is what actually prevents a team
+    // from ending up with more than 3 channels under concurrent requests. This
+    // pre-check merely avoids unnecessary Authentik calls in the common,
+    // non-concurrent case; it must never be relied on for correctness.
     const channelCount = await Channel.getChannelCount(teamId);
     if (channelCount >= 3) {
       return res.status(400).json({ error: 'Maximum of 3 channels allowed per team' });
@@ -101,13 +110,16 @@ router.post('/custom', authenticateToken, [
     const channel = await Channel.createCustomChannel(teamId, customSuffix, memberPermissions);
     res.status(201).json({ channel });
   } catch (error) {
-    console.error('Failed to create custom channel:', error);
+    if (error instanceof Channel.ChannelLimitError) {
+      return res.status(400).json({ error: error.message });
+    }
+    getLogger().error({ err: error }, 'Failed to create custom channel');
     res.status(500).json({ error: 'Failed to create custom channel' });
   }
 });
 
 // Get channels for a team with member counts
-router.get('/team/:teamId', authenticateToken, async (req, res) => {
+router.get('/team/:teamId', authenticateToken, authorize, async (req, res) => {
   try {
     const { teamId } = req.params;
     
@@ -122,7 +134,7 @@ router.get('/team/:teamId', authenticateToken, async (req, res) => {
     
     res.json({ channels: result.rows });
   } catch (error) {
-    console.error('Failed to fetch channels:', error);
+    getLogger().error({ err: error }, 'Failed to fetch channels');
     res.status(500).json({ error: 'Failed to fetch channels' });
   }
 });

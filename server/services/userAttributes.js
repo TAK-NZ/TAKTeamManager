@@ -1,4 +1,5 @@
 const pool = require('../config/database');
+const logger = require('../config/logger').createLogger('userAttributes');
 
 class UserAttributesService {
   static splitFullName(fullName) {
@@ -24,6 +25,37 @@ class UserAttributesService {
       
       const user = userResult.rows[0];
       
+      return await this.computeCallsignAttributes(user.first_name, user.last_name, teamId);
+    } catch (error) {
+      logger.error({ err: error }, 'Error generating callsign');
+      return null;
+    }
+  }
+
+  /**
+   * Requirement 18.4 (task 38.4): the pure, name-values-in/attributes-out
+   * portion of `generateCallsign`'s logic, extracted so a caller that
+   * already has the user's (possibly not-yet-persisted) `firstName`/
+   * `lastName` values on hand -- e.g. `RequestApprovalService`'s
+   * `name_change` approval branch, which computes the new callsign
+   * BEFORE the corresponding `users` table write has been committed --
+   * can compute the callsign/color/role attributes without requiring a
+   * `users` table read for the name. This still reads the team hierarchy
+   * from the database (a read, not a write, so no transactional
+   * ordering concern applies here) but takes the name values as
+   * parameters instead.
+   *
+   * `generateCallsign` above is now a thin wrapper: it reads
+   * `first_name`/`last_name` from `users` for the given `userId` and
+   * delegates here.
+   *
+   * @param {string} firstNameInput
+   * @param {string} lastNameInput
+   * @param {number} teamId
+   * @returns {Promise<{callsign: string, color: string, role: string}|null>}
+   */
+  static async computeCallsignAttributes(firstNameInput, lastNameInput, teamId) {
+    try {
       // Get team hierarchy from root to target team
       const teamResult = await pool.query(`
         WITH RECURSIVE team_path AS (
@@ -68,8 +100,8 @@ class UserAttributesService {
       }
       
       // Format name based on root team setting (trim whitespace)
-      let firstName = user.first_name.trim();
-      let lastName = (user.last_name || '').trim();
+      let firstName = firstNameInput.trim();
+      let lastName = (lastNameInput || '').trim();
       
       // If last_name is empty, split the first_name
       if (!lastName && firstName.includes(' ')) {
@@ -106,7 +138,7 @@ class UserAttributesService {
         role: 'Team Member'
       };
     } catch (error) {
-      console.error('Error generating callsign:', error);
+      logger.error({ err: error }, 'Error generating callsign');
       return null;
     }
   }
@@ -121,7 +153,7 @@ class UserAttributesService {
         }
       };
       
-      console.log('Updating user attributes:', authentikUserId, payload);
+      logger.debug({ authentikUserId, payload }, 'Updating user attributes');
       
       const response = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
         method: 'PATCH',
@@ -138,7 +170,7 @@ class UserAttributesService {
       
       return true;
     } catch (error) {
-      console.error('Error updating user attributes in Authentik:', error);
+      logger.error({ err: error, authentikUserId }, 'Error updating user attributes in Authentik');
       return false;
     }
   }
@@ -180,7 +212,7 @@ class UserAttributesService {
       
       return true;
     } catch (error) {
-      console.error('Error clearing user attributes in Authentik:', error);
+      logger.error({ err: error, authentikUserId }, 'Error clearing user attributes in Authentik');
       return false;
     }
   }
@@ -207,25 +239,17 @@ class UserAttributesService {
         if (attributes) {
           await this.updateUserAttributes(user.authentik_user_id, attributes);
           
-          // Update user cache (handle column names gracefully)
-          try {
-            await pool.query(
-              'UPDATE user_cache SET takCallsign = $1, takColor = $2, takRole = $3 WHERE authentik_id = $4',
-              [attributes.callsign, attributes.color, attributes.role, user.authentik_user_id]
-            );
-          } catch (columnError) {
-            // Fallback for old column names
-            await pool.query(
-              'UPDATE user_cache SET tak_callsign = $1, tak_color = $2, tak_role = $3 WHERE authentik_id = $4',
-              [attributes.callsign, attributes.color, attributes.role, user.authentik_user_id]
-            );
-          }
+          // Update user cache
+          await pool.query(
+            'UPDATE user_cache SET tak_callsign = $1, tak_color = $2, tak_role = $3 WHERE authentik_id = $4',
+            [attributes.callsign, attributes.color, attributes.role, user.authentik_user_id]
+          );
         }
       }
       
       return true;
     } catch (error) {
-      console.error('Error updating team user attributes:', error);
+      logger.error({ err: error, teamId }, 'Error updating team user attributes');
       return false;
     }
   }

@@ -3,12 +3,39 @@ const EventPublisher = require('./EventPublisher');
 const GroupMembershipCalculator = require('./GroupMembershipCalculator');
 
 class TeamMembershipService {
-  static async addUserToTeam(userId, teamId, role = 'member', createdBy = null) {
-    const client = await pool.connect();
-    
+  /**
+   * Requirement 17.5 / Requirement 18.2 (task 38.2): accepts an optional,
+   * already-connected, already-`BEGIN`-ed `externalClient`. WHEN provided
+   * (e.g. by `RequestApprovalService.approveRequest`'s `team_change`
+   * branch), every write in this method runs on that SAME client/
+   * transaction instead of acquiring a new one, so the membership change
+   * commits or rolls back atomically with the caller's other writes (e.g.
+   * the access request's status update to `'approved'`). WHEN omitted
+   * (the default), this method preserves its original behavior of
+   * acquiring its own client and managing its own `BEGIN`/`COMMIT`/
+   * `ROLLBACK`, for backward compatibility with existing callers
+   * (`server/routes/users.js`, `server/workers/syncWorker.js`'s
+   * `bulkAddUserToTeam`) that have no open transaction of their own.
+   *
+   * @param {number} userId
+   * @param {number} teamId
+   * @param {string} [role]
+   * @param {number|null} [createdBy]
+   * @param {import('pg').PoolClient|null} [externalClient] - an
+   *   already-connected, already-`BEGIN`-ed client to reuse instead of
+   *   acquiring a new one. When provided, this method does NOT issue its
+   *   own `BEGIN`/`COMMIT`/`ROLLBACK`/`release()` -- the caller owns the
+   *   transaction lifecycle.
+   */
+  static async addUserToTeam(userId, teamId, role = 'member', createdBy = null, externalClient = null) {
+    const ownsTransaction = !externalClient;
+    const client = externalClient || await pool.connect();
+
     try {
-      await client.query('BEGIN');
-      
+      if (ownsTransaction) {
+        await client.query('BEGIN');
+      }
+
       // Remove user from current team if any
       await client.query('DELETE FROM team_memberships WHERE user_id = $1', [userId]);
       
@@ -38,22 +65,28 @@ class TeamMembershipService {
         await EventPublisher.publishOperation('add_user_to_group', {
           target_user_id: userId,
           target_group_id: channel.authentik_group_id
-        }, createdBy);
+        }, createdBy, client);
       }
       
       // Also ensure user is assigned to all global channels
       await EventPublisher.publishOperation('assign_user_to_global_channels', {
         target_user_id: userId
-      }, createdBy);
+      }, createdBy, client);
       
-      await client.query('COMMIT');
+      if (ownsTransaction) {
+        await client.query('COMMIT');
+      }
       return { success: true, groupsQueued: teamChannels.rows.length };
       
     } catch (error) {
-      await client.query('ROLLBACK');
+      if (ownsTransaction) {
+        await client.query('ROLLBACK');
+      }
       throw error;
     } finally {
-      client.release();
+      if (ownsTransaction) {
+        client.release();
+      }
     }
   }
 
@@ -86,7 +119,7 @@ class TeamMembershipService {
         await EventPublisher.publishOperation('remove_user_from_group', {
           target_user_id: userId,
           target_group_id: channel.authentik_group_id
-        }, createdBy);
+        }, createdBy, client);
       }
       
       // If user has no teams left, remove from all global channels too
@@ -104,14 +137,35 @@ class TeamMembershipService {
             await EventPublisher.publishOperation('remove_user_from_group', {
               target_user_id: userId,
               target_group_id: channel.read_group_id
-            }, createdBy);
+            }, createdBy, client);
           }
           if (channel.write_group_id) {
             await EventPublisher.publishOperation('remove_user_from_group', {
               target_user_id: userId,
               target_group_id: channel.write_group_id
-            }, createdBy);
+            }, createdBy, client);
           }
+        }
+
+        // Requirement 26.6 (task 48.4): a user with no teams left is
+        // exactly the "user is removed from all teams" trigger named in
+        // that criterion, alongside the existing "explicit revoke
+        // action" and "team disable/delete" enqueue sites implemented in
+        // `TakCertificateRevocationService`/`Team.delete`. `users.username`
+        // is the TAK username `TakServerService.findCertificatesForUser`
+        // matches against each certificate's `creatorDn` (the same field
+        // `DeviceEnrollmentService.generateEnrollmentQrCode` already
+        // treats as the TAK username for enrollment). Uses this SAME
+        // transactional client, per Requirement 17.5's pattern, so the
+        // enqueue commits/rolls back atomically with the membership
+        // removal above.
+        const userResult = await client.query('SELECT username FROM users WHERE id = $1', [userId]);
+        const takUsername = userResult.rows[0]?.username;
+        if (takUsername) {
+          await EventPublisher.publishOperation('revoke_tak_certificates', {
+            target_user_id: userId,
+            tak_usernames: [takUsername]
+          }, createdBy, client);
         }
       }
       

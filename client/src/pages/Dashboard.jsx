@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { UserGroupIcon, UsersIcon, ClipboardDocumentListIcon, ArrowUpRightIcon, ArrowDownLeftIcon, ArrowsRightLeftIcon, MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon, InformationCircleIcon, FolderIcon, FolderOpenIcon, ChevronRightIcon as ChevronRightSmall, ChevronDownIcon, ChevronUpIcon } from '@heroicons/react/24/outline'
 import { teamsAPI, requestsAPI } from '../services/api'
 import axios from 'axios'
+import { buildFolderTree } from '../utils/channelTree'
 
 export default function Dashboard({ user, refreshUser }) {
   const [stats, setStats] = useState({ requests: 0 })
@@ -68,33 +69,6 @@ export default function Dashboard({ user, refreshUser }) {
     return colorMappings[colorName] || colorName
   }
 
-  // Build folder tree from channels
-  const buildFolderTree = (channels) => {
-    const tree = { folders: {}, channels: [] }
-    
-    channels.forEach(channel => {
-      const parts = channel.display_name.split(folderSeparator)
-      if (parts.length === 1) {
-        tree.channels.push(channel)
-      } else {
-        let current = tree
-        for (let i = 0; i < parts.length - 1; i++) {
-          const folderName = parts[i].trim()
-          if (!current.folders[folderName]) {
-            current.folders[folderName] = { folders: {}, channels: [] }
-          }
-          current = current.folders[folderName]
-        }
-        current.channels.push({
-          ...channel,
-          display_name: parts[parts.length - 1].trim()
-        })
-      }
-    })
-    
-    return tree
-  }
-
   const toggleFolder = (folderPath) => {
     const newExpanded = new Set(expandedFolders)
     if (newExpanded.has(folderPath)) {
@@ -116,7 +90,7 @@ export default function Dashboard({ user, refreshUser }) {
   }
 
   const expandAllFolders = () => {
-    const allPaths = getAllFolderPaths(buildFolderTree(filteredChannels))
+    const allPaths = getAllFolderPaths(buildFolderTree(filteredChannels, folderSeparator))
     setExpandedFolders(new Set(allPaths))
   }
 
@@ -587,7 +561,7 @@ export default function Dashboard({ user, refreshUser }) {
             />
           </div>
           
-          {filteredChannels.length > 0 && Object.keys(buildFolderTree(filteredChannels).folders).length > 0 && (
+          {filteredChannels.length > 0 && Object.keys(buildFolderTree(filteredChannels, folderSeparator).folders).length > 0 && (
             <div className="flex items-center space-x-2">
               <button
                 onClick={expandAllFolders}
@@ -625,7 +599,7 @@ export default function Dashboard({ user, refreshUser }) {
         ) : (
           <>
             <div className="space-y-3">
-              {renderFolderTree(buildFolderTree(filteredChannels))}
+              {renderFolderTree(buildFolderTree(filteredChannels, folderSeparator))}
             </div>
 
           </>

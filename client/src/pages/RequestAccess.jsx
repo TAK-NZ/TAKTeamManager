@@ -2,9 +2,17 @@ import { useState, useEffect } from 'react'
 import { useForm, Controller } from 'react-hook-form'
 import { Link } from 'react-router-dom'
 import toast from 'react-hot-toast'
+import DOMPurify from 'dompurify'
 import { requestsAPI, teamsAPI, configAPI } from '../services/api'
 import { ThemeProvider } from '../contexts/ThemeContext'
 import { ChevronDownIcon, MagnifyingGlassIcon } from '@heroicons/react/24/outline'
+import { DOMPURIFY_OPTIONS } from '../utils/htmlSafeSubset'
+import { getRecaptchaToken } from '../utils/recaptcha'
+
+// Must exactly match RECAPTCHA_EXPECTED_ACTION in server/middleware/captcha.js
+// -- reCAPTCHA v3 scopes each generated token to the action it was minted
+// for, and the server rejects a token whose action does not match.
+const RECAPTCHA_ACTION = 'team_access_request'
 
 export default function RequestAccess() {
   const [submitted, setSubmitted] = useState(false)
@@ -60,10 +68,18 @@ export default function RequestAccess() {
 
   const onSubmit = async (data) => {
     try {
+      if (!config.recaptcha_site_key) {
+        toast.error('CAPTCHA is not configured. Please contact an administrator.')
+        return
+      }
+
+      const recaptchaToken = await getRecaptchaToken(config.recaptcha_site_key, RECAPTCHA_ACTION)
+
       const submitData = {
         ...data,
         teamId: selectedTeam?.id,
-        teamName: selectedTeam?.name
+        teamName: selectedTeam?.name,
+        'g-recaptcha-response': recaptchaToken
       }
       await requestsAPI.submitTeamAccess(submitData)
       setSubmitted(true)
@@ -266,7 +282,11 @@ export default function RequestAccess() {
             <div className="mt-6 p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md">
               <div 
                 className="text-sm text-blue-800 dark:text-blue-200"
-                dangerouslySetInnerHTML={{ __html: config.request_access_footer }}
+                dangerouslySetInnerHTML={{
+                  __html: typeof config.request_access_footer === 'string'
+                    ? DOMPurify.sanitize(config.request_access_footer, DOMPURIFY_OPTIONS)
+                    : ''
+                }}
               />
             </div>
           )}

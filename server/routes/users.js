@@ -1,67 +1,160 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const { authenticateToken, requireTeamAdmin } = require('../middleware/auth');
+const authorize = require('../middleware/authorize');
+const { paginationParams } = require('../middleware/pagination');
 const User = require('../models/User');
 const Team = require('../models/Team');
 const authentikService = require('../services/authentik');
 const UserAttributesService = require('../services/userAttributes');
 const TeamMembershipService = require('../services/TeamMembershipService');
+const UserProvisioningService = require('../services/UserProvisioningService');
+const EventPublisher = require('../services/EventPublisher');
 const pool = require('../config/database');
+const { getLogger } = require('../middleware/requestContext');
 const router = express.Router();
 
 // List all users
-router.get('/', authenticateToken, async (req, res) => {
+//
+// Requirement 11.3: team-name resolution for the full returned user list
+// runs as a single batched query, independent of the number of users
+// returned, instead of one recursive-CTE query per user (the previous
+// implementation's N+1 pattern via `Promise.all(authentikUsers.map(...))`).
+//
+// The `WITH RECURSIVE team_root` CTE below computes, for every team in the
+// (small, bounded) `teams` table, its root ancestor's `callsign_prefix`/
+// `name` exactly once per request -- not once per returned user -- by
+// walking every team's `parent_team_id` chain up to its root row
+// (`parent_team_id IS NULL`) in a single pass. The outer query then LEFT
+// JOINs `users` -> `team_memberships` (direct membership only, i.e.
+// `inherited_from_team_id IS NULL`, matching the prior per-user query's
+// filter exactly, now expressed as part of the JOIN condition rather than
+// the WHERE clause so a user with no direct team membership still produces
+// a row instead of being dropped) -> `teams` -> that precomputed root-team
+// result, filtered to `WHERE u.authentik_user_id = ANY($1)` for the full
+// batch of Authentik user ids at once. Cost is therefore bounded by the
+// size of the `teams` table, not by the number of users returned.
+//
+// Requirement 11.4: the shared `paginationParams` middleware validates
+// `page`/`pageSize` (rejecting out-of-range values with 400 before any
+// Authentik/DB call runs) and attaches `req.pagination`. The resolved
+// `page`/`pageSize` are passed straight through to
+// `authentikService.getUsers()`, which maps them onto Authentik's own
+// `page`/`page_size` query parameters (see that method's doc comment for
+// why this option was chosen over in-memory slicing of a full fetch) --
+// so only the requested page of users is fetched from Authentik at all,
+// and the batched team-name query's `ANY($1)` id array is scoped to that
+// same page.
+//
+// Requirement 27.9 (task 49.5): excludes every Team_Owned_Device
+// (`users.is_team_device = true`) from the response. The primary user
+// list here is sourced from AUTHENTIK (`authentikService.getUsers`), not
+// the local `users` table -- and a Team_Owned_Device's Authentik user IS
+// included in that Authentik-side result: `DeviceEnrollmentService
+// .createDevice` creates it via the same `authentikService.createUser`
+// path used for human users, which always sets `type: 'internal'`
+// (`server/services/authentik.js`), and `getUsers({page, pageSize})`
+// filters on `?type=internal` -- so a device is indistinguishable from a
+// human user on the Authentik side. `is_team_device` is a LOCAL-only flag
+// (added to `users`/`user_cache` by task 49.1's migration), so exclusion
+// must happen here, after the Authentik fetch, by cross-referencing the
+// local `users` table. The SAME single batched query already used for
+// team-name resolution above is extended to additionally select
+// `u.is_team_device`, keyed by `authentik_user_id`, avoiding a third
+// database round trip (Requirement 11.3's "1-2 queries" allowance).
+//
+// `pagination.total` is INTENTIONALLY left as Authentik's own
+// `count` (from its `type=internal` pagination envelope) rather than
+// adjusted downward by the number of excluded devices. Getting an
+// exactly-accurate adjusted total would require either (a) an additional,
+// page-independent `COUNT(*) FROM users WHERE is_team_device = true`
+// query run on every request regardless of page contents (a real, if
+// small, cost for a field that's advisory at best), or (b) filtering
+// Authentik's OWN result set by a criterion Authentik has no concept of.
+// Since a Team_Owned_Device is created with `type: 'internal'` (confirmed
+// above), there is no Authentik-side query parameter that could exclude
+// it upstream. Per this task's explicit allowance for a documented
+// compromise, `pagination.total` may therefore over-count by the number
+// of Team_Owned_Devices that exist; the returned `users` array itself is
+// always correctly filtered, which is the requirement's primary concern
+// (Requirement 27.9's "excludes every Team_Owned_Device from any
+// user-facing ... count").
+router.get('/', authenticateToken, authorize, paginationParams, async (req, res) => {
   try {
-    console.log('Fetching users from Authentik...');
-    // Fetch users from Authentik
-    const authentikUsers = await authentikService.getUsers();
-    console.log('Authentik users:', authentikUsers.length, 'users found');
-    
-    // Add team information to each user
-    const usersWithTeams = await Promise.all(authentikUsers.map(async (user) => {
-      try {
-        const teamResult = await pool.query(`
-          SELECT CASE 
-            WHEN t.parent_team_id IS NOT NULL THEN 
-              COALESCE(rt.callsign_prefix, rt.name, '') || ' - ' || t.name
-            ELSE t.name
-          END as team_name
-          FROM users u
-          JOIN team_memberships tm ON u.id = tm.user_id
-          JOIN teams t ON tm.team_id = t.id
-          LEFT JOIN teams rt ON rt.id = (
-            WITH RECURSIVE root_team AS (
-              SELECT id, name, callsign_prefix, parent_team_id FROM teams WHERE id = t.id
-              UNION ALL
-              SELECT p.id, p.name, p.callsign_prefix, p.parent_team_id 
-              FROM teams p JOIN root_team r ON p.id = r.parent_team_id
-            )
-            SELECT id FROM root_team WHERE parent_team_id IS NULL
-          )
-          WHERE u.authentik_user_id = $1 AND tm.inherited_from_team_id IS NULL
-        `, [user.pk]);
-        
-        return {
-          ...user,
-          team_name: teamResult.rows[0]?.team_name || null
-        };
-      } catch (error) {
-        return {
-          ...user,
-          team_name: null
-        };
+    const { page, pageSize } = req.pagination;
+    const { results: authentikUsers, count: totalUsers } = await authentikService.getUsers({ page, pageSize });
+
+    const authentikUserIds = authentikUsers.map((user) => user.pk);
+
+    // Map of authentik_user_id -> team_name, built from the single batched
+    // query below. Defaults to an empty map (all users get team_name: null)
+    // when there are no users to look up, avoiding an unnecessary query.
+    const teamNameByAuthentikUserId = new Map();
+    // Requirement 27.9: authentik_user_id -> is_team_device, built from the
+    // SAME batched query below, used to exclude Team_Owned_Device rows
+    // from the response after the map is built.
+    const isTeamDeviceByAuthentikUserId = new Map();
+
+    if (authentikUserIds.length > 0) {
+      const teamNameResult = await pool.query(`
+        WITH RECURSIVE team_root AS (
+          SELECT id AS team_id, id AS root_id, name AS root_name,
+                 callsign_prefix AS root_callsign_prefix, parent_team_id
+          FROM teams
+          UNION ALL
+          SELECT tr.team_id, p.id AS root_id, p.name AS root_name,
+                 p.callsign_prefix AS root_callsign_prefix, p.parent_team_id
+          FROM team_root tr
+          JOIN teams p ON p.id = tr.parent_team_id
+          WHERE tr.parent_team_id IS NOT NULL
+        )
+        SELECT u.authentik_user_id AS authentik_user_id,
+               u.is_team_device AS is_team_device,
+               CASE
+                 WHEN t.parent_team_id IS NOT NULL THEN
+                   COALESCE(root.root_callsign_prefix, root.root_name, '') || ' - ' || t.name
+                 ELSE t.name
+               END AS team_name
+        FROM users u
+        LEFT JOIN team_memberships tm ON u.id = tm.user_id AND tm.inherited_from_team_id IS NULL
+        LEFT JOIN teams t ON tm.team_id = t.id
+        LEFT JOIN team_root root ON root.team_id = t.id AND root.parent_team_id IS NULL
+        WHERE u.authentik_user_id = ANY($1)
+      `, [authentikUserIds]);
+
+      for (const row of teamNameResult.rows) {
+        teamNameByAuthentikUserId.set(row.authentik_user_id, row.team_name);
+        isTeamDeviceByAuthentikUserId.set(row.authentik_user_id, row.is_team_device === true);
       }
-    }));
-    
-    res.json({ users: usersWithTeams });
+    }
+
+    // No further async DB calls needed per user; attach each user's
+    // team_name synchronously from the lookup map built above (defaulting
+    // to null for a user with no direct team membership, matching the
+    // previous per-user fallback behavior), and drop any user whose local
+    // `users` row has `is_team_device = true` (Requirement 27.9). A user
+    // absent from the map (no corresponding local `users` row at all)
+    // defaults to `false` via the `=== true` comparison above and is
+    // therefore never excluded on that basis alone.
+    const usersWithTeams = authentikUsers
+      .filter((user) => !isTeamDeviceByAuthentikUserId.get(user.pk))
+      .map((user) => ({
+        ...user,
+        team_name: teamNameByAuthentikUserId.get(user.pk) ?? null
+      }));
+
+    res.json({
+      users: usersWithTeams,
+      pagination: { page, pageSize, total: totalUsers }
+    });
   } catch (error) {
-    console.error('Failed to fetch users:', error);
+    getLogger().error({ err: error }, 'Failed to fetch users');
     res.status(500).json({ error: 'Failed to fetch users' });
   }
 });
 
 // Get current user profile
-router.get('/me', authenticateToken, async (req, res) => {
+router.get('/me', authenticateToken, authorize, async (req, res) => {
   try {
     // Get user's direct team membership only (exclude inherited)
     const teamResult = await pool.query(`
@@ -111,7 +204,7 @@ router.get('/me', authenticateToken, async (req, res) => {
                 groupNames.push(group.name);
               }
             } catch (groupError) {
-              console.error('Failed to fetch group:', groupError);
+              getLogger().error({ err: groupError }, 'Failed to fetch group');
             }
           }
         }
@@ -125,7 +218,7 @@ router.get('/me', authenticateToken, async (req, res) => {
         };
       }
     } catch (error) {
-      console.error('Failed to fetch fresh user data:', error);
+      getLogger().error({ err: error }, 'Failed to fetch fresh user data');
     }
     
     res.json({
@@ -134,13 +227,13 @@ router.get('/me', authenticateToken, async (req, res) => {
       channels
     });
   } catch (error) {
-    console.error('Failed to fetch user profile:', error);
+    getLogger().error({ err: error }, 'Failed to fetch user profile');
     res.status(500).json({ error: 'Failed to fetch profile' });
   }
 });
 
 // Create new user in Authentik and local DB
-router.post('/', authenticateToken, [
+router.post('/', authenticateToken, authorize, [
   body('username').trim().isLength({ min: 1, max: 150 }),
   body('email').isEmail().normalizeEmail(),
   body('firstName').trim().isLength({ min: 1, max: 150 }),
@@ -155,12 +248,10 @@ router.post('/', authenticateToken, [
 
   try {
     const { username, email, firstName, lastName, password, teamId } = req.body;
-    
-    // Verify admin access to target team
-    const isAdmin = await Team.isAdmin(teamId, req.user.id);
-    if (!isAdmin) {
-      return res.status(403).json({ error: 'Team admin access required' });
-    }
+
+    // Authorization (team admin of teamId, or global manager) is enforced
+    // centrally by authorize.js via the 'POST /api/users': ['user:create:team_admin']
+    // Permission_Registry entry.
 
     // Create user in Authentik
     const authentikUser = await authentikService.createUser({
@@ -189,31 +280,20 @@ router.post('/', authenticateToken, [
       message: 'User created successfully'
     });
   } catch (error) {
-    console.error('User creation failed:', error);
+    getLogger().error({ err: error }, 'User creation failed');
     res.status(500).json({ error: 'Failed to create user' });
   }
 });
 
 // Move user to holding pen (remove from all teams)
-router.post('/:userId/holding-pen', authenticateToken, async (req, res) => {
+router.post('/:userId/holding-pen', authenticateToken, authorize, async (req, res) => {
   try {
     const { userId } = req.params;
-    
-    // Get user's current teams
-    const userTeams = await User.getTeamMemberships(userId);
-    
-    // Verify admin access to at least one of user's teams
-    let hasAdminAccess = false;
-    for (const team of userTeams) {
-      if (await Team.isAdmin(team.id, req.user.id)) {
-        hasAdminAccess = true;
-        break;
-      }
-    }
-    
-    if (!hasAdminAccess) {
-      return res.status(403).json({ error: 'Admin access required for user teams' });
-    }
+
+    // Authorization (admin of at least one of the target user's current
+    // teams, or global manager) is enforced centrally by authorize.js via
+    // the 'POST /api/users/:userId/holding-pen': ['user:holding_pen:team_admin']
+    // Permission_Registry entry.
 
     // Remove from all teams and channels
     await pool.query('DELETE FROM team_memberships WHERE user_id = $1', [userId]);
@@ -226,7 +306,7 @@ router.post('/:userId/holding-pen', authenticateToken, async (req, res) => {
 });
 
 // Search users
-router.get('/search', authenticateToken, async (req, res) => {
+router.get('/search', authenticateToken, authorize, async (req, res) => {
   try {
     const { q } = req.query;
     if (!q || q.length < 2) {
@@ -248,7 +328,7 @@ router.get('/search', authenticateToken, async (req, res) => {
 });
 
 // Get available users (not in any team)
-router.get('/available', authenticateToken, async (req, res) => {
+router.get('/available', authenticateToken, authorize, async (req, res) => {
   try {
     const { search } = req.query;
     let query = `
@@ -272,13 +352,26 @@ router.get('/available', authenticateToken, async (req, res) => {
     const result = await pool.query(query, params);
     res.json({ users: result.rows });
   } catch (error) {
-    console.error('Failed to fetch available users:', error);
+    getLogger().error({ err: error }, 'Failed to fetch available users');
     res.status(500).json({ error: 'Failed to fetch available users' });
   }
 });
 
 // Create new user in Authentik and add to team
-router.post('/create-and-add', authenticateToken, [
+//
+// Requirement 17.1: the Authentik-side user-creation call happens strictly
+// BEFORE any database transaction opens (an external HTTP call must never
+// be issued from inside an open DB transaction). Once the Authentik user
+// exists, exactly one client is acquired from the pool, `BEGIN` is issued,
+// and every local write (the `users` upsert, `team_memberships` inserts
+// including parent-team inheritance, and `channel_memberships` inserts) is
+// performed through `UserProvisioningService.createAndAddUser` using that
+// single client, followed by `COMMIT` -- or `ROLLBACK` if any local write
+// fails -- with the client released in a `finally` block. This route
+// handler is intentionally a thin wrapper: parse/validate the request,
+// call Authentik, acquire/BEGIN, delegate to the service, commit/rollback,
+// and respond.
+router.post('/create-and-add', authenticateToken, authorize, [
   body('email').isEmail(),
   body('firstName').trim().isLength({ min: 1, max: 150 }),
   body('lastName').trim().isLength({ min: 1, max: 150 }),
@@ -289,21 +382,21 @@ router.post('/create-and-add', authenticateToken, [
     return res.status(400).json({ errors: errors.array() });
   }
 
+  const { email, firstName, lastName, teamId } = req.body;
+  const username = email.split('@')[0];
+  let newUser;
+
+  // --- Phase 1: Authentik user creation (no open DB transaction). ---
   try {
-    const { email, firstName, lastName, teamId } = req.body;
-    
-    // Check if email already exists in Authentik
     const existingUserResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/?email=${encodeURIComponent(email)}`, {
       headers: { Authorization: `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }
     });
     const existingUsers = await existingUserResponse.json();
-    
+
     if (existingUsers.results && existingUsers.results.length > 0) {
       return res.status(400).json({ error: 'User with this email already exists' });
     }
-    
-    // Create user in Authentik
-    const username = email.split('@')[0];
+
     const createUserResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/`, {
       method: 'POST',
       headers: {
@@ -319,165 +412,123 @@ router.post('/create-and-add', authenticateToken, [
         is_active: true
       })
     });
-    
+
     if (!createUserResponse.ok) {
       const errorData = await createUserResponse.json();
       return res.status(400).json({ error: 'Failed to create user in Authentik', details: errorData });
     }
-    
-    const newUser = await createUserResponse.json();
-    
-    // Ensure user exists in users table
-    await pool.query(
-      'INSERT INTO users (authentik_user_id, username, email, first_name, last_name, is_active) VALUES ($1, $2, $3, $4, $5, true) ON CONFLICT (authentik_user_id) DO UPDATE SET username = $2, email = $3, first_name = $4, last_name = $5, is_active = true',
-      [newUser.pk, username, email, firstName, lastName]
-    );
-    
-    // Get the local user ID
-    const localUserResult = await pool.query(
-      'SELECT id FROM users WHERE authentik_user_id = $1',
-      [newUser.pk]
-    );
-    
-    const localUserId = localUserResult.rows[0].id;
-    
-    // Remove any existing inherited memberships for this user from this team
-    await pool.query(
-      'DELETE FROM team_memberships WHERE user_id = $1 AND inherited_from_team_id = $2',
-      [localUserId, teamId]
-    );
-    
-    // Add to team
-    await pool.query(
-      'INSERT INTO team_memberships (team_id, user_id, role) VALUES ($1, $2, $3)',
-      [teamId, localUserId, 'member']
-    );
-    
-    // Add to all parent teams with inherited role
-    const parentTeamsResult = await pool.query(`
-      WITH RECURSIVE parent_teams AS (
-        SELECT parent_team_id FROM teams WHERE id = $1 AND parent_team_id IS NOT NULL
-        UNION ALL
-        SELECT t.parent_team_id 
-        FROM teams t 
-        JOIN parent_teams pt ON t.id = pt.parent_team_id
-        WHERE t.parent_team_id IS NOT NULL
-      )
-      SELECT parent_team_id as team_id FROM parent_teams
-    `, [teamId]);
-    
-    for (const parentTeam of parentTeamsResult.rows) {
-      await pool.query(
-        'INSERT INTO team_memberships (team_id, user_id, role, inherited_from_team_id) VALUES ($1, $2, $3, $4)',
-        [parentTeam.team_id, localUserId, 'inherited', teamId]
-      );
-      
-      // Add to parent team's primary channel
-      const parentChannelResult = await pool.query(
-        'SELECT id, authentik_group_id FROM channels WHERE team_id = $1 AND is_primary = true',
-        [parentTeam.team_id]
-      );
-      
-      if (parentChannelResult.rows.length > 0) {
-        const parentChannel = parentChannelResult.rows[0];
-        
-        // Add to channel in database
-        await pool.query(
-          'INSERT INTO channel_memberships (channel_id, user_id, permission) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
-          [parentChannel.id, localUserId, 'read_write']
-        );
-        
-        // Add to Authentik group if group exists
-        if (parentChannel.authentik_group_id) {
-          try {
-            await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${parentChannel.authentik_group_id}/add_user/`, {
-              method: 'POST',
-              headers: {
-                'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
-                'Content-Type': 'application/json'
-              },
-              body: JSON.stringify({
-                pk: newUser.pk
-              })
-            });
-          } catch (authentikError) {
-            console.error('Failed to add user to parent team Authentik group:', authentikError);
-          }
-        }
-      }
-    }
-    
-    // Update user callsign and color
-    const attributes = await UserAttributesService.generateCallsign(localUserId, teamId);
-    if (attributes) {
-      await UserAttributesService.updateUserAttributes(newUser.pk, attributes);
-    }
-    
-    // Get team's primary channel
-    const channelResult = await pool.query(
-      'SELECT id, authentik_group_id FROM channels WHERE team_id = $1 AND is_primary = true',
-      [teamId]
-    );
-    
-    if (channelResult.rows.length > 0) {
-      const channel = channelResult.rows[0];
-      
-      // Add to channel in database
-      await pool.query(
-        'INSERT INTO channel_memberships (channel_id, user_id, permission) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
-        [channel.id, localUserId, 'read_write']
-      );
-      
-      // Add to Authentik group if group exists
-      if (channel.authentik_group_id) {
-        try {
-          await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${channel.authentik_group_id}/add_user/`, {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-              pk: newUser.pk
-            })
-          });
-        } catch (authentikError) {
-          console.error('Failed to add user to Authentik group:', authentikError);
-        }
-      }
-    }
-    
-    // Update user cache (handle column names gracefully)
-    try {
-      await pool.query(
-        'INSERT INTO user_cache (authentik_id, username, email, first_name, last_name, is_active, takCallsign, takColor, takRole) VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8) ON CONFLICT (authentik_id) DO UPDATE SET username = $2, email = $3, first_name = $4, last_name = $5, is_active = true, takCallsign = $6, takColor = $7, takRole = $8',
-        [newUser.pk, username, email, firstName, lastName, attributes?.callsign, attributes?.color, attributes?.role]
-      );
-    } catch (columnError) {
-      // Fallback for old column names
-      await pool.query(
-        'INSERT INTO user_cache (authentik_id, username, email, first_name, last_name, is_active, tak_callsign, tak_color, tak_role) VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8) ON CONFLICT (authentik_id) DO UPDATE SET username = $2, email = $3, first_name = $4, last_name = $5, is_active = true, tak_callsign = $6, tak_color = $7, tak_role = $8',
-        [newUser.pk, username, email, firstName, lastName, attributes?.callsign, attributes?.color, attributes?.role]
-      );
-    }
-    
-    res.status(201).json({ 
-      user: {
-        id: newUser.pk,
-        username,
-        email,
-        first_name: firstName,
-        last_name: lastName
-      }
-    });
+
+    newUser = await createUserResponse.json();
   } catch (error) {
-    console.error('Failed to create user:', error);
-    res.status(500).json({ error: 'Failed to create user' });
+    getLogger().error({ err: error }, 'Failed to create user in Authentik');
+    return res.status(500).json({ error: 'Failed to create user' });
   }
+
+  // --- Phase 2: single transaction for every local database write. ---
+  const client = await pool.connect();
+  let localUserId;
+  try {
+    await client.query('BEGIN');
+
+    const result = await UserProvisioningService.createAndAddUser(client, {
+      authentikUserId: newUser.pk,
+      username,
+      email,
+      firstName,
+      lastName,
+      teamId,
+      createdBy: req.user?.userId ?? null
+    });
+    localUserId = result.localUserId;
+
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    getLogger().error({ err: error, authentikUserId: newUser.pk }, 'Failed to provision user locally after Authentik user creation');
+
+    // --- Requirement 17.2 compensating action ---
+    // The Authentik user (newUser.pk) was already created in Phase 1,
+    // but every local write attempted in Phase 2 has just been rolled
+    // back, so that Authentik user is now orphaned (it exists in
+    // Authentik with no corresponding local `users` row,
+    // `team_memberships`, or `channel_memberships`). Attempt a
+    // SYNCHRONOUS delete of that Authentik user first; only if that
+    // delete attempt itself fails do we fall back to enqueueing a
+    // `cleanup_orphaned_authentik_user` Sync_Operation for the
+    // Sync_Worker to retry asynchronously. Either outcome -- and the
+    // (rare) case where even the enqueue fails -- is logged via the
+    // structured logger with the exact `{authentikUserId, failedStep,
+    // compensationOutcome}` shape called for by the task.
+    const failedStep = 'local_transaction';
+    let compensationOutcome;
+    try {
+      const deleteResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${newUser.pk}/`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }
+      });
+
+      if (deleteResponse.ok || deleteResponse.status === 404) {
+        compensationOutcome = 'deleted_synchronously';
+      } else {
+        throw new Error(`Authentik delete responded with status ${deleteResponse.status}`);
+      }
+    } catch (deleteError) {
+      getLogger().error(
+        { err: deleteError, authentikUserId: newUser.pk },
+        'Synchronous compensating Authentik user delete failed; falling back to a queued cleanup operation'
+      );
+      try {
+        await EventPublisher.publishOperation(
+          'cleanup_orphaned_authentik_user',
+          { authentik_user_id: newUser.pk },
+          req.user?.userId ?? null
+        );
+        compensationOutcome = 'cleanup_operation_queued';
+      } catch (enqueueError) {
+        getLogger().error(
+          { err: enqueueError, authentikUserId: newUser.pk },
+          'Failed to enqueue cleanup_orphaned_authentik_user compensating operation'
+        );
+        compensationOutcome = 'compensation_failed';
+      }
+    }
+
+    getLogger().error(
+      { authentikUserId: newUser.pk, failedStep, compensationOutcome },
+      'Orphaned Authentik user compensating action outcome'
+    );
+
+    return res.status(500).json({ error: 'Failed to create user' });
+  } finally {
+    client.release();
+  }
+
+  // --- Phase 3: best-effort callsign/attribute sync (Authentik call, run
+  // only after the local transaction has committed). ---
+  const attributes = await UserAttributesService.generateCallsign(localUserId, teamId);
+  if (attributes) {
+    await UserAttributesService.updateUserAttributes(newUser.pk, attributes);
+  }
+
+  // Update user cache
+  await pool.query(
+    'INSERT INTO user_cache (authentik_id, username, email, first_name, last_name, is_active, tak_callsign, tak_color, tak_role) VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8) ON CONFLICT (authentik_id) DO UPDATE SET username = $2, email = $3, first_name = $4, last_name = $5, is_active = true, tak_callsign = $6, tak_color = $7, tak_role = $8',
+    [newUser.pk, username, email, firstName, lastName, attributes?.callsign, attributes?.color, attributes?.role]
+  );
+
+  res.status(201).json({
+    user: {
+      id: newUser.pk,
+      username,
+      email,
+      first_name: firstName,
+      last_name: lastName
+    }
+  });
 });
 
 // Add existing user to team
-router.post('/add-to-team', authenticateToken, [
+router.post('/add-to-team', authenticateToken, authorize, [
   body('userId').notEmpty(),
   body('teamId').isInt()
 ], async (req, res) => {
@@ -541,19 +592,11 @@ router.post('/add-to-team', authenticateToken, [
     if (attributes) {
       await UserAttributesService.updateUserAttributes(user.authentik_id, attributes);
       
-      // Update user cache (handle column names gracefully)
-      try {
-        await pool.query(
-          'UPDATE user_cache SET takCallsign = $1, takColor = $2, takRole = $3 WHERE authentik_id = $4',
-          [attributes.callsign, attributes.color, attributes.role, user.authentik_id]
-        );
-      } catch (columnError) {
-        // Fallback for old column names
-        await pool.query(
-          'UPDATE user_cache SET tak_callsign = $1, tak_color = $2, tak_role = $3 WHERE authentik_id = $4',
-          [attributes.callsign, attributes.color, attributes.role, user.authentik_id]
-        );
-      }
+      // Update user cache
+      await pool.query(
+        'UPDATE user_cache SET tak_callsign = $1, tak_color = $2, tak_role = $3 WHERE authentik_id = $4',
+        [attributes.callsign, attributes.color, attributes.role, user.authentik_id]
+      );
     }
     
     res.json({ 
@@ -561,13 +604,13 @@ router.post('/add-to-team', authenticateToken, [
       operationsQueued: result.groupsQueued
     });
   } catch (error) {
-    console.error('Failed to add user to team:', error);
+    getLogger().error({ err: error }, 'Failed to add user to team');
     res.status(500).json({ error: 'Failed to add user to team' });
   }
 });
 
 // Remove user from team
-router.delete('/remove-from-team/:userId', authenticateToken, [
+router.delete('/remove-from-team/:userId', authenticateToken, authorize, [
   body('teamId').isInt()
 ], async (req, res) => {
   const errors = validationResult(req);
@@ -604,30 +647,18 @@ router.delete('/remove-from-team/:userId', authenticateToken, [
     // Clear TAK attributes in Authentik
     await UserAttributesService.clearUserAttributes(authentikUserId);
     
-    // Clear TAK callsign and color in user cache (handle missing columns gracefully)
-    try {
-      await pool.query(
-        'UPDATE user_cache SET takCallsign = NULL, takColor = NULL WHERE authentik_id = $1',
-        [authentikUserId]
-      );
-    } catch (columnError) {
-      // Fallback for old column names
-      try {
-        await pool.query(
-          'UPDATE user_cache SET tak_callsign = NULL, tak_color = NULL WHERE authentik_id = $1',
-          [authentikUserId]
-        );
-      } catch (fallbackError) {
-        console.error('Failed to clear TAK attributes:', fallbackError);
-      }
-    }
+    // Clear TAK callsign and color in user cache
+    await pool.query(
+      'UPDATE user_cache SET tak_callsign = NULL, tak_color = NULL WHERE authentik_id = $1',
+      [authentikUserId]
+    );
     
     res.json({ 
       message: 'User removed from team successfully',
       operationsQueued: result.groupsQueued
     });
   } catch (error) {
-    console.error('Failed to remove user from team:', error);
+    getLogger().error({ err: error }, 'Failed to remove user from team');
     res.status(500).json({ error: 'Failed to remove user from team' });
   }
 });

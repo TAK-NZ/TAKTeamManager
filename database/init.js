@@ -1,15 +1,41 @@
-const fs = require('fs');
-const path = require('path');
+const { runner } = require('node-pg-migrate');
 const pool = require('../server/config/database');
+const migrateConfig = require('./migrate-config');
+
+// Runs all pending migrations (database/migrations/*) up to the latest,
+// using the same connection config already defined in migrate-config.js
+// (which itself reads the DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD
+// environment variables), instead of executing schema.sql directly.
+//
+// node-pg-migrate resolves `dir` relative to process.cwd(), matching the
+// `database/migrations` value already used by the `migrate*` npm scripts
+// (which are run from the repository root).
+async function runMigrations() {
+  const { db } = migrateConfig;
+
+  await runner({
+    databaseUrl: {
+      user: db.user,
+      host: db.host,
+      database: db.database,
+      password: db.password,
+      port: db.port,
+      ssl: db.ssl
+    },
+    dir: db['migrations-dir'],
+    migrationsTable: db['migrations-table'] || 'pgmigrations',
+    direction: 'up',
+    verbose: false
+  });
+}
 
 async function initializeDatabase() {
   try {
     console.log('Initializing database...');
-    
-    const schemaSQL = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
-    await pool.query(schemaSQL);
-    
-    console.log('Database schema created successfully');
+
+    await runMigrations();
+
+    console.log('Database migrations applied successfully');
     
     // Create default holding pen team
     await pool.query(`

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { PlusIcon, KeyIcon, GlobeAltIcon, RadioIcon, PencilIcon, TrashIcon, FolderIcon, FolderOpenIcon, ChevronRightIcon, ChevronDownIcon, ChevronUpIcon } from '@heroicons/react/24/outline';
 import toast from 'react-hot-toast';
 import { globalChannelsAPI, configAPI } from '../services/api';
+import { buildFolderTree } from '../utils/channelTree';
 
 export default function GlobalChannels({ user }) {
   const [bchChannels, setBchChannels] = useState([]);
@@ -162,33 +163,6 @@ export default function GlobalChannels({ user }) {
     }
   };
 
-  // Build folder tree from channels
-  const buildFolderTree = (channels) => {
-    const tree = { folders: {}, channels: [] };
-    
-    channels.forEach(channel => {
-      const parts = channel.name.split(folderSeparator);
-      if (parts.length === 1) {
-        tree.channels.push(channel);
-      } else {
-        let current = tree;
-        for (let i = 0; i < parts.length - 1; i++) {
-          const folderName = parts[i].trim();
-          if (!current.folders[folderName]) {
-            current.folders[folderName] = { folders: {}, channels: [] };
-          }
-          current = current.folders[folderName];
-        }
-        current.channels.push({
-          ...channel,
-          name: parts[parts.length - 1].trim()
-        });
-      }
-    });
-    
-    return tree;
-  };
-
   const toggleFolder = (folderPath) => {
     const newExpanded = new Set(expandedFolders);
     if (newExpanded.has(folderPath)) {
@@ -210,7 +184,7 @@ export default function GlobalChannels({ user }) {
   };
 
   const expandAllFolders = (channels) => {
-    const allPaths = getAllFolderPaths(buildFolderTree(channels));
+    const allPaths = getAllFolderPaths(buildFolderTree(channels, folderSeparator, 'name'));
     setExpandedFolders(new Set(allPaths));
   };
 
@@ -394,7 +368,7 @@ export default function GlobalChannels({ user }) {
               BCH Channels (Broadcast/ETL)
             </h2>
           </div>
-          {bchChannels.length > 0 && Object.keys(buildFolderTree(bchChannels).folders).length > 0 && (
+          {bchChannels.length > 0 && Object.keys(buildFolderTree(bchChannels, folderSeparator, 'name').folders).length > 0 && (
             <div className="flex items-center space-x-2">
               <button
                 onClick={() => expandAllFolders(bchChannels)}
@@ -418,7 +392,7 @@ export default function GlobalChannels({ user }) {
           <p className="text-gray-500 dark:text-gray-400">No BCH channels configured.</p>
         ) : (
           <div className="space-y-3">
-            {renderFolderTree(buildFolderTree(bchChannels), '', 'bch')}
+            {renderFolderTree(buildFolderTree(bchChannels, folderSeparator, 'name'), '', 'bch')}
           </div>
         )}
       </div>
@@ -432,7 +406,7 @@ export default function GlobalChannels({ user }) {
               Region Channels
             </h2>
           </div>
-          {regionChannels.length > 0 && Object.keys(buildFolderTree(regionChannels).folders).length > 0 && (
+          {regionChannels.length > 0 && Object.keys(buildFolderTree(regionChannels, folderSeparator, 'name').folders).length > 0 && (
             <div className="flex items-center space-x-2">
               <button
                 onClick={() => expandAllFolders(regionChannels)}
@@ -456,7 +430,7 @@ export default function GlobalChannels({ user }) {
           <p className="text-gray-500 dark:text-gray-400">No region channels configured.</p>
         ) : (
           <div className="space-y-3">
-            {renderFolderTree(buildFolderTree(regionChannels), '', 'region')}
+            {renderFolderTree(buildFolderTree(regionChannels, folderSeparator, 'name'), '', 'region')}
           </div>
         )}
       </div>

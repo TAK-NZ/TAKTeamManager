@@ -1,0 +1,141 @@
+jest.mock('../config/database', () => ({
+  query: jest.fn()
+}));
+
+const pool = require('../config/database');
+const SiteConfig = require('./SiteConfig');
+
+describe('SiteConfig.update HTML sanitization', () => {
+  beforeEach(() => {
+    pool.query.mockReset();
+  });
+
+  function mockUpdateReturns(row) {
+    pool.query.mockResolvedValue({ rows: [row] });
+  }
+
+  test('strips <script> tags before persisting', async () => {
+    mockUpdateReturns({ config_key: 'request_access_footer', config_value: 'placeholder' });
+
+    await SiteConfig.update(
+      'request_access_footer',
+      '<p>Hello</p><script>alert(1)</script>',
+      1
+    );
+
+    const [, params] = pool.query.mock.calls[0];
+    const persistedValue = params[0];
+    expect(persistedValue).not.toMatch(/<script/i);
+    expect(persistedValue).toContain('<p>Hello</p>');
+  });
+
+  test('strips event-handler attributes (e.g. onclick, onerror)', async () => {
+    mockUpdateReturns({ config_key: 'request_access_footer', config_value: 'placeholder' });
+
+    await SiteConfig.update(
+      'request_access_footer',
+      '<p onclick="alert(1)">Click me</p><img src="x.png" onerror="alert(2)">',
+      1
+    );
+
+    const [, params] = pool.query.mock.calls[0];
+    const persistedValue = params[0];
+    expect(persistedValue).not.toMatch(/onclick/i);
+    expect(persistedValue).not.toMatch(/onerror/i);
+    // <img> is not in the allowed tag list, so it should be stripped entirely.
+    expect(persistedValue).not.toMatch(/<img/i);
+  });
+
+  test('strips javascript: scheme URLs in href', async () => {
+    mockUpdateReturns({ config_key: 'request_access_footer', config_value: 'placeholder' });
+
+    await SiteConfig.update(
+      'request_access_footer',
+      '<a href="javascript:alert(1)">link</a>',
+      1
+    );
+
+    const [, params] = pool.query.mock.calls[0];
+    const persistedValue = params[0];
+    expect(persistedValue).not.toMatch(/javascript:/i);
+  });
+
+  test('removes disallowed tags such as <iframe>, <object>, and <embed>', async () => {
+    mockUpdateReturns({ config_key: 'request_access_footer', config_value: 'placeholder' });
+
+    await SiteConfig.update(
+      'request_access_footer',
+      '<iframe src="https://evil.example"></iframe><object data="x"></object><embed src="x">',
+      1
+    );
+
+    const [, params] = pool.query.mock.calls[0];
+    const persistedValue = params[0];
+    expect(persistedValue).not.toMatch(/<iframe/i);
+    expect(persistedValue).not.toMatch(/<object/i);
+    expect(persistedValue).not.toMatch(/<embed/i);
+  });
+
+  test('preserves allowed tags and http(s)/relative hrefs', async () => {
+    mockUpdateReturns({ config_key: 'request_access_footer', config_value: 'placeholder' });
+
+    const input = '<p>Contact us <a href="https://tak.nz">here</a> or <a href="/support">here</a>.</p>' +
+      '<ul><li><strong>Bold</strong></li><li><em>Italic</em></li></ul><br>';
+
+    await SiteConfig.update('request_access_footer', input, 1);
+
+    const [, params] = pool.query.mock.calls[0];
+    const persistedValue = params[0];
+    expect(persistedValue).toContain('href="https://tak.nz"');
+    expect(persistedValue).toContain('href="/support"');
+    expect(persistedValue).toContain('<strong>Bold</strong>');
+    expect(persistedValue).toContain('<em>Italic</em>');
+  });
+
+  test('passes non-string values through without calling sanitizeHtml', async () => {
+    mockUpdateReturns({ config_key: 'some_flag', config_value: null });
+
+    await SiteConfig.update('some_flag', null, 1);
+
+    const [, params] = pool.query.mock.calls[0];
+    expect(params[0]).toBeNull();
+  });
+});
+
+describe('SiteConfig.getPublicConfig', () => {
+  const ORIGINAL_ENV = { ...process.env };
+
+  beforeEach(() => {
+    pool.query.mockReset();
+    pool.query.mockResolvedValue({ rows: [] });
+  });
+
+  afterEach(() => {
+    process.env = { ...ORIGINAL_ENV };
+  });
+
+  test('exposes recaptcha_site_key from RECAPTCHA_SITE_KEY when set', async () => {
+    process.env.RECAPTCHA_SITE_KEY = '6Ltest-site-key';
+
+    const config = await SiteConfig.getPublicConfig();
+
+    expect(config.recaptcha_site_key).toBe('6Ltest-site-key');
+  });
+
+  test('exposes recaptcha_site_key as null when RECAPTCHA_SITE_KEY is unset', async () => {
+    delete process.env.RECAPTCHA_SITE_KEY;
+
+    const config = await SiteConfig.getPublicConfig();
+
+    expect(config.recaptcha_site_key).toBeNull();
+  });
+
+  test('never exposes RECAPTCHA_SECRET under any key', async () => {
+    process.env.RECAPTCHA_SITE_KEY = '6Ltest-site-key';
+    process.env.RECAPTCHA_SECRET = '6Ltest-secret-key-should-never-appear';
+
+    const config = await SiteConfig.getPublicConfig();
+
+    expect(JSON.stringify(config)).not.toContain('6Ltest-secret-key-should-never-appear');
+  });
+});

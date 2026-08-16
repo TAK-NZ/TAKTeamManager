@@ -1,6 +1,16 @@
 const pool = require('../config/database');
 const EventPublisher = require('./EventPublisher');
 const crypto = require('crypto');
+const CredentialEncryptionService = require('./CredentialEncryptionService');
+const logger = require('../config/logger').createLogger('GlobalChannelService');
+
+// Frozen allow-list mapping a channelType to its backing table name.
+// Used to guard against SQL identifier interpolation from caller-controlled
+// values (Requirements 5.1, 5.2, 5.3).
+const CHANNEL_TABLE_ALLOWLIST = Object.freeze({
+  bch: 'bch_channels',
+  region: 'region_channels'
+});
 
 class GlobalChannelService {
   async createBchChannel(channelData, createdBy) {
@@ -12,7 +22,14 @@ class GlobalChannelService {
       // Generate service account credentials
       const serviceAccountUsername = `etl-${channelData.name.toLowerCase().replace(/\s+/g, '-')}`;
       const serviceAccountPassword = crypto.randomBytes(16).toString('hex');
-      
+
+      // Requirement 6.1: encrypt the password before it is persisted to the
+      // bch_channels.service_account_password column. Only the DATABASE
+      // COLUMN value is encrypted here — the plaintext serviceAccountPassword
+      // is still sent to Authentik (below, via EventPublisher.publishOperation)
+      // since Authentik needs the real password to create the service account.
+      const encryptedServiceAccountPassword = CredentialEncryptionService.encrypt(serviceAccountPassword);
+
       // Create BCH channel record
       const result = await client.query(`
         INSERT INTO bch_channels (
@@ -24,7 +41,7 @@ class GlobalChannelService {
         channelData.name,
         channelData.description,
         serviceAccountUsername,
-        serviceAccountPassword, // In production, this should be encrypted
+        encryptedServiceAccountPassword,
         createdBy
       ]);
       
@@ -200,8 +217,39 @@ class GlobalChannelService {
     if (result.rows.length === 0) {
       throw new Error('BCH channel not found');
     }
-    
-    return result.rows[0];
+
+    const credentials = result.rows[0];
+
+    // Requirement 6.2: decrypt only at response-build time (i.e. right
+    // before returning to the caller), never earlier and never logged.
+    try {
+      credentials.service_account_password = CredentialEncryptionService.decrypt(
+        credentials.service_account_password
+      );
+    } catch (err) {
+      // Requirement 6.3: on decrypt failure, do not leak the ciphertext or
+      // the underlying crypto error. Log the failure (without plaintext or
+      // ciphertext) and throw a generic error reusing the decrypt service's
+      // own generic message.
+      logger.error({
+        channelId,
+        actorId: requestingUserId,
+        event: 'credential_decrypt_failure'
+      }, 'Failed to decrypt BCH service account credentials');
+      throw new Error('Decryption failed');
+    }
+
+    // Requirement 6.2: log the access as an auditable event recording the
+    // requesting user's identifier, the accessed channel's identifier, and
+    // the access timestamp. The decrypted plaintext itself is never logged.
+    logger.info({
+      actorId: requestingUserId,
+      channelId,
+      event: 'credential_access',
+      accessedAt: new Date().toISOString()
+    }, 'BCH service account credentials accessed');
+
+    return credentials;
   }
 
   async updateBchChannel(channelId, channelData, updatedBy) {
@@ -265,12 +313,15 @@ class GlobalChannelService {
   }
 
   async deleteGlobalChannel(channelId, channelType, deletedBy) {
+    const table = CHANNEL_TABLE_ALLOWLIST[channelType];
+    if (!table) {
+      throw new Error('Invalid channel type');
+    }
+
     const client = await pool.connect();
     
     try {
       await client.query('BEGIN');
-      
-      const table = channelType === 'bch' ? 'bch_channels' : 'region_channels';
       
       // Delete channel
       await client.query(`DELETE FROM ${table} WHERE id = $1`, [channelId]);
@@ -314,12 +365,15 @@ class GlobalChannelService {
   }
 
   async deactivateGlobalChannel(channelId, channelType, deactivatedBy) {
+    const table = CHANNEL_TABLE_ALLOWLIST[channelType];
+    if (!table) {
+      throw new Error('Invalid channel type');
+    }
+
     const client = await pool.connect();
     
     try {
       await client.query('BEGIN');
-      
-      const table = channelType === 'bch' ? 'bch_channels' : 'region_channels';
       
       // Deactivate channel
       await client.query(`

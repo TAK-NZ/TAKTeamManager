@@ -45,3 +45,9 @@ Thumbs.db
 # Database
 *.sqlite
 *.db
+
+# Runtime-uploaded settings assets (Requirement 32.4): server-generated
+# logo/cert/key files written by server/routes/settings.js's atomic
+# upload endpoints, not source-controlled.
+server/uploads/
+server/certs/

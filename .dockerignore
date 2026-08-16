@@ -1,0 +1,51 @@
+# Git
+.git
+.gitignore
+
+# Dependencies (reinstalled fresh inside the build, via package*.json)
+node_modules
+client/node_modules
+
+# Build outputs (rebuilt fresh inside the multi-stage build)
+client/dist
+dist
+build
+
+# Environment / secrets - never bake these into a build context
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Coverage
+coverage
+
+# Editor / OS noise
+.vscode
+.idea
+*.swp
+*.swo
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Kiro spec/tasks tooling - irrelevant to the runtime image
+.kiro
+
+# Docs - not needed at runtime, marginal context-size reduction
+README.md
+ARCHITECTURE.md
+LICENSE
+
+# Runtime-uploaded settings assets - server-generated, not build inputs
+server/uploads
+server/certs

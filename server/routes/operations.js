@@ -1,10 +1,11 @@
 const express = require('express');
 const { authenticateToken } = require('../middleware/auth');
+const authorize = require('../middleware/authorize');
 const pool = require('../config/database');
 const router = express.Router();
 
 // Get operation status
-router.get('/status', authenticateToken, async (req, res) => {
+router.get('/status', authenticateToken, authorize, async (req, res) => {
   try {
     const stats = await pool.query(`
       SELECT 
@@ -34,7 +35,7 @@ router.get('/status', authenticateToken, async (req, res) => {
 });
 
 // Get recent operations
-router.get('/recent', authenticateToken, async (req, res) => {
+router.get('/recent', authenticateToken, authorize, async (req, res) => {
   try {
     const operations = await pool.query(`
       SELECT 
@@ -57,7 +58,7 @@ router.get('/recent', authenticateToken, async (req, res) => {
 });
 
 // Retry failed operations
-router.post('/retry-failed', authenticateToken, async (req, res) => {
+router.post('/retry-failed', authenticateToken, authorize, async (req, res) => {
   try {
     const result = await pool.query(`
       UPDATE sync_operations 

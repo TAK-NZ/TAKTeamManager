@@ -1,0 +1,139 @@
+name: CI
+
+# Runs on every push, every pull request, and on a weekly schedule (Requirement 20.2:
+# "no more than 7 days" between scheduled runs) so that newly disclosed vulnerabilities
+# in already-merged dependencies are still caught even without new code changes.
+on:
+  push:
+  pull_request:
+  schedule:
+    # Every Sunday at 00:00 UTC - a 7-day interval, satisfying Req 20.2's "no more than
+    # 7 days" recurrence requirement.
+    - cron: '0 0 * * 0'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # security-audit: Requirement 20.2, 20.3, 20.4
+  #
+  # Runs `npm ci` followed by `npm audit --audit-level=high` against both the root
+  # (server) dependency tree and the `client/` dependency tree, via a matrix so each
+  # tree gets its own isolated job run and its own pass/fail result.
+  #
+  # Exit-code note (Req 20.4 - "audit itself fails to complete" must also fail the
+  # build, not just "audit completed and found something"):
+  # `npm audit` is a normal npm CLI command. Per npm's own documentation
+  # (https://docs.npmjs.com/cli/v11/commands/npm-audit/), it exits non-zero whenever it
+  # finds a vulnerability at or above --audit-level. Separately, npm's CLI error handling
+  # is uniform across all subcommands: if the command cannot complete at all (registry
+  # unreachable, ECONNRESET, "does not support audit requests", timeout, etc.), npm prints
+  # an `npm ERR!` block and terminates the process with a non-zero exit code rather than
+  # exiting 0 - npm does not have a code path that swallows a network/transport failure
+  # and reports success. GitHub Actions' default shell for `run:` steps on Linux runners
+  # is `bash` invoked with `-e` and `-o pipefail` already active, so *any* non-zero exit
+  # from `npm audit` (found-vulnerability case OR incomplete-scan case) fails this step,
+  # and a failed step fails the job, with no extra flag or wrapping required. We
+  # deliberately do NOT add `continue-on-error: true` or `|| true` to this step, since
+  # doing so is the only way an incomplete/errored audit could be mistaken for a pass.
+  #
+  # Exceptions record: as of this workflow's creation, no documented/reviewed exceptions
+  # record exists anywhere in this repository (checked for "audit" / "exceptions" files
+  # at the repo root and in `.kiro/specs/production-hardening/design.md`; design.md's
+  # Dependency Hygiene section directs a straightforward `npm audit --audit-level=high`
+  # with no exceptions-file mechanism called for). Per Requirement 20.3, `npm audit
+  # --audit-level=high`'s own severity-threshold behavior is used directly: every
+  # high/critical finding fails the build unless a documented exceptions record is
+  # introduced in a future change, at which point this job would need updating to consult
+  # it before failing.
+  security-audit:
+    name: Dependency Audit (${{ matrix.tree }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - tree: root
+            directory: .
+          - tree: client
+            directory: client
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: npm ci (${{ matrix.tree }})
+        working-directory: ${{ matrix.directory }}
+        run: npm ci
+
+      - name: npm audit --audit-level=high (${{ matrix.tree }})
+        working-directory: ${{ matrix.directory }}
+        # Fails the job on:
+        #   - any high/critical severity finding (Req 20.3), reported by npm audit's own
+        #     human-readable output (package name, severity, and advisory/vulnerability id
+        #     per finding), or
+        #   - the audit itself failing to complete, e.g. a registry/network error (Req 20.4)
+        # See the job-level comment above for why no additional exit-code handling is needed.
+        run: npm audit --audit-level=high
+
+  # ---------------------------------------------------------------------------
+  # test: Requirement 12.6
+  #
+  # Kept as a separate job from security-audit. The coverage gate itself (60% statement
+  # coverage, treating exactly 60% as passing) is configured via the "jest" ->
+  # "coverageThreshold" -> "global" -> "statements" key in the root package.json; the
+  # `--coverage` flag below is what makes Jest actually compute coverage and enforce
+  # that threshold. Jest fails (non-zero exit) both when a test fails and when coverage
+  # is below the configured threshold, satisfying both halves of Req 12.6 with a single
+  # step.
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: npm ci (root)
+        run: npm ci
+
+      - name: Check pinned dependency versions (Req 20.5/20.6)
+        # Fails the build if jsonwebtoken, bcryptjs, helmet, or express-rate-limit are
+        # declared in package.json with a "^"/"~" range instead of an exact version.
+        run: npm run lint:pinned-deps
+
+      - name: npm test (root, with coverage gate)
+        # Requirement 12.6: fail the build if any test fails, or if overall statement
+        # coverage falls below 60% (exactly 60% is treated as passing). The 60%
+        # `coverageThreshold` lives in package.json's "jest" key; passing `--coverage`
+        # here is what makes Jest compute coverage and enforce that threshold - Jest
+        # exits non-zero on its own when actual coverage is below any configured
+        # threshold, so no extra scripting is needed here.
+        run: npm test -- --coverage
+
+  # ---------------------------------------------------------------------------
+  # client-test: Requirements 2.7, 2.8
+  #
+  # Runs the client's Vitest suite (currently `src/services/api.test.js`, covering
+  # the base-URL validation success/failure paths). Kept as its own job, separate
+  # from `test` (root/Jest) and `security-audit`, since it exercises a different
+  # runner against a different dependency tree.
+  client-test:
+    name: Client Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: npm ci (client)
+        working-directory: client
+        run: npm ci
+
+      - name: npm test (client)
+        working-directory: client
+        run: npm test

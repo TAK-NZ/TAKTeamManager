@@ -1,6 +1,8 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const { authenticateToken } = require('../middleware/auth');
+const authorize = require('../middleware/authorize');
+const { getLogger } = require('../middleware/requestContext');
 const SiteConfig = require('../models/SiteConfig');
 const router = express.Router();
 
@@ -10,13 +12,13 @@ router.get('/public', async (req, res) => {
     const config = await SiteConfig.getPublicConfig();
     res.json(config);
   } catch (error) {
-    console.error('Failed to fetch public config:', error);
+    getLogger().error({ err: error }, 'Failed to fetch public config');
     res.status(500).json({ error: 'Failed to fetch configuration' });
   }
 });
 
 // Get all config (admin only)
-router.get('/all', authenticateToken, async (req, res) => {
+router.get('/all', authenticateToken, authorize, async (req, res) => {
   try {
     if (!req.user.isAdmin) {
       return res.status(403).json({ error: 'Admin access required' });
@@ -25,13 +27,13 @@ router.get('/all', authenticateToken, async (req, res) => {
     const config = await SiteConfig.getAll();
     res.json({ config });
   } catch (error) {
-    console.error('Failed to fetch config:', error);
+    getLogger().error({ err: error }, 'Failed to fetch config');
     res.status(500).json({ error: 'Failed to fetch configuration' });
   }
 });
 
 // Get color mappings and role descriptions (legacy endpoint for admin page)
-router.get('/color-mappings', authenticateToken, async (req, res) => {
+router.get('/color-mappings', authenticateToken, authorize, async (req, res) => {
   try {
     if (!req.user.isAdmin) {
       return res.status(403).json({ error: 'Admin access required' });
@@ -69,13 +71,13 @@ router.get('/color-mappings', authenticateToken, async (req, res) => {
     
     res.json({ colorMappings, roleDescriptions });
   } catch (error) {
-    console.error('Failed to fetch color mappings:', error);
+    getLogger().error({ err: error }, 'Failed to fetch color mappings');
     res.status(500).json({ error: 'Failed to fetch configuration' });
   }
 });
 
 // Update config (admin only)
-router.put('/:key', authenticateToken, [
+router.put('/:key', authenticateToken, authorize, [
   body('value').trim().isLength({ min: 1 })
 ], async (req, res) => {
   const errors = validationResult(req);
@@ -98,7 +100,7 @@ router.put('/:key', authenticateToken, [
 
     res.json({ config: updatedConfig });
   } catch (error) {
-    console.error('Failed to update config:', error);
+    getLogger().error({ err: error }, 'Failed to update config');
     res.status(500).json({ error: 'Failed to update configuration' });
   }
 });

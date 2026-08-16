@@ -1,6 +1,9 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const { authenticateToken, requireTeamAdmin } = require('../middleware/auth');
+const authorize = require('../middleware/authorize');
+const { getLogger } = require('../middleware/requestContext');
+const { paginationParams } = require('../middleware/pagination');
 const Team = require('../models/Team');
 const pool = require('../config/database');
 const router = express.Router();
@@ -11,31 +14,46 @@ router.get('/joinable', async (req, res) => {
     const teams = await Team.getJoinableTeams();
     res.json({ teams });
   } catch (error) {
-    console.error('Failed to fetch joinable teams:', error);
+    getLogger().error({ err: error }, 'Failed to fetch joinable teams');
     res.status(500).json({ error: 'Failed to fetch joinable teams' });
   }
 });
 
 // Get user's teams
-router.get('/my-teams', authenticateToken, async (req, res) => {
+//
+// Requirement 11.4: the admin "all teams" branch (`Team.getAllTeams()`) is
+// the potentially-large, unbounded list this task scopes pagination to;
+// the regular-user branch (`Team.getUserTeams()`) is inherently bounded by
+// how many teams one user belongs to, so it is left unpaginated and simply
+// doesn't consume `req.pagination`. `paginationParams` still runs
+// unconditionally ahead of the handler -- it's a cheap query-param
+// validation step regardless of which branch ends up using it.
+router.get('/my-teams', authenticateToken, authorize, paginationParams, async (req, res) => {
   try {
     let teams;
+    let pagination;
     if (req.user.isAdmin) {
-      // Global admins see all teams
-      teams = await Team.getAllTeams();
+      // Global admins see all teams, paginated.
+      const { page, pageSize, offset } = req.pagination;
+      const [pagedTeams, total] = await Promise.all([
+        Team.getAllTeams(pageSize, offset),
+        Team.getTeamCount()
+      ]);
+      teams = pagedTeams;
+      pagination = { page, pageSize, total };
     } else {
-      // Regular users see only their teams
+      // Regular users see only their teams (inherently small; not paginated).
       teams = await Team.getUserTeams(req.user.id);
     }
-    res.json({ teams });
+    res.json(pagination ? { teams, pagination } : { teams });
   } catch (error) {
-    console.error('Failed to fetch teams:', error);
+    getLogger().error({ err: error }, 'Failed to fetch teams');
     res.status(500).json({ error: 'Failed to fetch teams' });
   }
 });
 
 // Create team
-router.post('/', authenticateToken, [
+router.post('/', authenticateToken, authorize, [
   body('name').trim().isLength({ min: 1, max: 255 }),
   body('description').optional().trim(),
   body('callsignPrefix').optional().trim(),
@@ -53,26 +71,24 @@ router.post('/', authenticateToken, [
 
   try {
     let { name, description, callsignPrefix, color, visibility, canJoin, parentTeamId, callsignSubteamDepth, callsignNameFormat } = req.body;
-    
-    // If creating top-level team, verify global admin access
-    if (!parentTeamId && !req.user.isAdmin) {
-      return res.status(403).json({ error: 'Global admin access required to create top-level teams' });
-    }
-    
+
+    // Authorization (root team requires Global_Manager, sub-team requires
+    // Global_Manager or parent-team admin) is enforced centrally by
+    // authorize.js via the 'POST /api/teams': ['team:create:root_or_sub']
+    // Permission_Registry entry.
+
     // If creating sub-team, inherit color from parent
     if (parentTeamId) {
-      console.log('Creating sub-team for parent:', parentTeamId, 'by user:', req.user.id);
+      getLogger().debug({ parentTeamId, actorId: req.user.id }, 'Creating sub-team for parent');
       const parentTeam = await Team.findById(parentTeamId);
       if (!parentTeam) {
         return res.status(400).json({ error: 'Parent team not found' });
       }
       // Sub-teams inherit color from parent
       color = parentTeam.color;
-      // For now, allow any authenticated user to create sub-teams
-      // TODO: Implement proper team admin checking when team memberships are set up
     }
 
-    console.log('Creating team with data:', {
+    getLogger().debug({
       name,
       description,
       callsign_prefix: callsignPrefix,
@@ -80,7 +96,7 @@ router.post('/', authenticateToken, [
       visibility: visibility || 'private',
       can_join: canJoin || false,
       parent_team_id: parentTeamId
-    });
+    }, 'Creating team with data');
     
     const team = await Team.create({
       name,
@@ -99,15 +115,13 @@ router.post('/', authenticateToken, [
 
     res.status(201).json({ team });
   } catch (error) {
-    console.error('Team creation error:', error);
-    console.error('Error details:', error.message);
-    console.error('Error stack:', error.stack);
+    getLogger().error({ err: error }, 'Team creation error');
     res.status(500).json({ error: 'Failed to create team', details: error.message });
   }
 });
 
 // Update team
-router.put('/:teamId', authenticateToken, [
+router.put('/:teamId', authenticateToken, authorize, [
   body('name').optional().trim().isLength({ min: 1, max: 255 }),
   body('description').optional().trim(),
   body('callsignPrefix').optional().trim(),
@@ -123,10 +137,9 @@ router.put('/:teamId', authenticateToken, [
   }
 
   try {
-    // Only global admins can update teams for now
-    if (!req.user.isAdmin) {
-      return res.status(403).json({ error: 'Admin access required to update teams' });
-    }
+    // Authorization (global admin or team admin) is enforced centrally by
+    // authorize.js via the 'PUT /api/teams/:teamId': ['team:update']
+    // Permission_Registry entry.
 
     const team = await Team.findById(req.params.teamId);
     if (!team) {
@@ -154,52 +167,52 @@ router.put('/:teamId', authenticateToken, [
 
     res.json({ team: updatedTeam });
   } catch (error) {
-    console.error('Failed to update team:', error);
+    getLogger().error({ err: error }, 'Failed to update team');
     res.status(500).json({ error: 'Failed to update team' });
   }
 });
 
 // Get team details
-router.get('/:teamId', authenticateToken, async (req, res) => {
+router.get('/:teamId', authenticateToken, authorize, async (req, res) => {
   try {
-    console.log('Fetching team details for ID:', req.params.teamId);
+    getLogger().debug({ teamId: req.params.teamId }, 'Fetching team details');
     
     const team = await Team.findById(req.params.teamId);
     if (!team) {
-      console.log('Team not found:', req.params.teamId);
+      getLogger().debug({ teamId: req.params.teamId }, 'Team not found');
       return res.status(404).json({ error: 'Team not found' });
     }
 
-    console.log('Team found:', team);
+    getLogger().debug({ team }, 'Team found');
     
     let members = [];
     let channels = [];
     try {
       members = await Team.getMembers(req.params.teamId);
-      console.log('Members fetched:', members?.length || 0);
+      getLogger().debug({ count: members?.length || 0 }, 'Members fetched');
     } catch (memberError) {
-      console.error('Error fetching members, continuing with empty array:', memberError);
+      getLogger().error({ err: memberError }, 'Error fetching members, continuing with empty array');
       members = [];
     }
 
     try {
       const channelResult = await pool.query('SELECT * FROM channels WHERE team_id = $1', [req.params.teamId]);
       channels = channelResult.rows;
-      console.log('Channels fetched:', channels?.length || 0);
+      getLogger().debug({ count: channels?.length || 0 }, 'Channels fetched');
     } catch (channelError) {
-      console.error('Error fetching channels, continuing with empty array:', channelError);
+      getLogger().error({ err: channelError }, 'Error fetching channels, continuing with empty array');
       channels = [];
     }
 
     res.json({ team, members: members || [], channels: channels || [] });
   } catch (error) {
-    console.error('Failed to fetch team details:', error);
+    getLogger().error({ err: error }, 'Failed to fetch team details');
     res.status(500).json({ error: 'Failed to fetch team', details: error.message });
   }
 });
 
 // Add member to team
-router.post('/:teamId/members', authenticateToken, requireTeamAdmin, [
+router.post('/:teamId/members', authenticateToken, authorize, requireTeamAdmin, [
   body('userId').isInt(),
   body('role').optional().isIn(['admin', 'member'])
 ], async (req, res) => {
@@ -218,7 +231,7 @@ router.post('/:teamId/members', authenticateToken, requireTeamAdmin, [
 });
 
 // Get team hierarchy
-router.get('/:teamId/hierarchy', authenticateToken, async (req, res) => {
+router.get('/:teamId/hierarchy', authenticateToken, authorize, async (req, res) => {
   try {
     const hierarchy = await Team.getTeamHierarchy(req.params.teamId);
     res.json({ hierarchy });
@@ -228,23 +241,22 @@ router.get('/:teamId/hierarchy', authenticateToken, async (req, res) => {
 });
 
 // Get sub-teams
-router.get('/:teamId/sub-teams', authenticateToken, async (req, res) => {
+router.get('/:teamId/sub-teams', authenticateToken, authorize, async (req, res) => {
   try {
     const subTeams = await Team.getSubTeams(req.params.teamId);
     res.json({ subTeams: subTeams || [] });
   } catch (error) {
-    console.error('Failed to fetch sub-teams:', error);
+    getLogger().error({ err: error }, 'Failed to fetch sub-teams');
     res.status(500).json({ error: 'Failed to fetch sub-teams' });
   }
 });
 
 // Delete team (global admin only)
-router.delete('/:teamId', authenticateToken, async (req, res) => {
+router.delete('/:teamId', authenticateToken, authorize, async (req, res) => {
   try {
-    // Only global admins can delete teams
-    if (!req.user.isAdmin) {
-      return res.status(403).json({ error: 'Global admin access required to delete teams' });
-    }
+    // Authorization (global admin only) is enforced centrally by
+    // authorize.js via the 'DELETE /api/teams/:teamId': ['team:delete:global']
+    // Permission_Registry entry.
 
     const team = await Team.findById(req.params.teamId);
     if (!team) {
@@ -259,10 +271,13 @@ router.delete('/:teamId', authenticateToken, async (req, res) => {
       });
     }
 
-    await Team.delete(req.params.teamId);
+    // req.user.userId is the local users.id (see server/middleware/auth.js),
+    // which is what Team.delete records as `created_by` on any
+    // remove_team_channel_group Sync_Operations it enqueues.
+    await Team.delete(req.params.teamId, req.user.userId);
     res.json({ message: 'Team deleted successfully' });
   } catch (error) {
-    console.error('Failed to delete team:', error);
+    getLogger().error({ err: error }, 'Failed to delete team');
     res.status(500).json({ error: 'Failed to delete team' });
   }
 });

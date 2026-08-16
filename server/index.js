@@ -1,97 +1,211 @@
+require('dotenv').config();
+
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
+const cookieParser = require('cookie-parser');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
-require('dotenv').config();
+
+const requestContext = require('./middleware/requestContext');
+const { getLogger } = requestContext;
+const logger = require('./config/logger');
+const pool = require('./config/database');
+const { createGracefulShutdown } = require('./utils/gracefulShutdown');
+const { validateConfig } = require('./config/configValidator');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Security middleware
-app.use(helmet({
-  contentSecurityPolicy: {
-    useDefaults: false,
-    directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      imgSrc: ["'self'", "data:", "https://www.gravatar.com"],
-      connectSrc: ["'self'"],
-      fontSrc: ["'self'"],
-      objectSrc: ["'none'"],
-      baseUri: ["'self'"],
-      formAction: ["'self'"],
-      frameAncestors: ["'self'"],
-    }
-  },
-  crossOriginResourcePolicy: { policy: 'same-site' },
-  crossOriginEmbedderPolicy: false
-}));
-app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
-  credentials: true
-}));
+// Requirement 15.2/6.4: validate required configuration -- including,
+// when NODE_ENV=production, resolving secrets through the configured
+// secrets provider -- before doing anything else. This must complete
+// before any Express app setup (middleware, routes, etc.) and before the
+// app binds to a port, so that a misconfigured environment or an
+// unreachable secrets manager fails fast with a clear error instead of
+// partially starting up. `validateConfig` is async (the production
+// secrets-manager gate makes an external call), so startup is wrapped in
+// an async IIFE that awaits it before doing anything else.
+(async () => {
+  await validateConfig();
 
-// Rate limiting
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 1000
-});
-app.use(limiter);
+  // Request correlation (Requirement 13.2/13.3): assign/propagate a
+  // correlation ID for the lifetime of each request, before any other
+  // middleware or route handler runs, so every log line produced while
+  // handling this request can be tied back to it.
+  app.use(requestContext);
 
-// Body parsing
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
+  // Security middleware
+  //
+  // scriptSrc/connectSrc additionally allow www.google.com/gstatic.com and
+  // frameSrc allows www.google.com/recaptcha.net, so the client-side
+  // reCAPTCHA v3 script (loaded on the team-access request page to call
+  // grecaptcha.execute()) can load and run. reCAPTCHA v3 has no visible
+  // widget/iframe of its own by default, but Google's script internally
+  // opens a hidden iframe for its own risk-analysis calls, so frameSrc
+  // must allow it too or the script fails silently.
+  app.use(helmet({
+    contentSecurityPolicy: {
+      useDefaults: false,
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'", "https://www.google.com", "https://www.gstatic.com"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", "data:", "https://www.gravatar.com"],
+        connectSrc: ["'self'", "https://www.google.com"],
+        fontSrc: ["'self'"],
+        objectSrc: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
+        frameSrc: ["'self'", "https://www.google.com", "https://recaptcha.net"],
+        frameAncestors: ["'self'"],
+      }
+    },
+    crossOriginResourcePolicy: { policy: 'same-site' },
+    crossOriginEmbedderPolicy: false
+  }));
+  app.use(cors({
+    origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+    credentials: true
+  }));
 
-// Serve static files from client build
-app.use(express.static(path.join(__dirname, '../client/dist')));
+  // Cookie parsing (Requirement 3.2): the JWT_Token is delivered as a
+  // `tak_session` httpOnly cookie (set in server/routes/auth.js) rather than
+  // via an Authorization header or URL param. Mounted before any route so
+  // `req.cookies` is available to `authenticateToken` on every request.
+  app.use(cookieParser());
 
-// Routes
-app.use('/api/auth', require('./routes/auth'));
-app.use('/api/teams', require('./routes/teams'));
-app.use('/api/users', require('./routes/users'));
-app.use('/api/channels', require('./routes/channels'));
-app.use('/api/requests', require('./routes/requests'));
-app.use('/api/config', require('./routes/config'));
-app.use('/api/sync', require('./routes/sync'));
-app.use('/api/operations', require('./routes/operations'));
-app.use('/api/global-channels', require('./routes/globalChannels'));
-
-// Health check
-app.get('/health', (req, res) => {
-  res.json({ status: 'OK', timestamp: new Date().toISOString() });
-});
-
-// Serve React app for all non-API routes
-app.get('*', (req, res) => {
-  if (!req.path.startsWith('/api') && !req.path.startsWith('/health')) {
-    res.sendFile(path.join(__dirname, '../client/dist/index.html'));
-  }
-});
-
-// Error handling
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({ 
-    error: 'Something went wrong!',
-    message: process.env.NODE_ENV === 'development' ? err.message : undefined
+  // Rate limiting
+  const limiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 1000
   });
-});
+  app.use(limiter);
 
-app.use('*', (req, res) => {
-  res.status(404).json({ error: 'Route not found' });
-});
+  // Body parsing
+  app.use(express.json({ limit: '10mb' }));
+  app.use(express.urlencoded({ extended: true }));
 
-app.listen(PORT, () => {
-  console.log(`TAK Team Manager server running on port ${PORT}`);
-  
-  // Start periodic sync service
-  const authentikSync = require('./services/authentikSync');
-  authentikSync.startPeriodicSync();
-  
-  // Start escalation service
-  const EscalationService = require('./services/EscalationService');
-  const escalationService = new EscalationService();
-  escalationService.startDailySchedule();
-});
+  // Serve static files from client build
+  app.use(express.static(path.join(__dirname, '../client/dist')));
+
+  // Serve uploaded branding assets (Requirement 32.4, task 54.4): the
+  // logo file `POST /api/settings/branding/logo` atomically writes into
+  // `UPLOADS_DIR` (server/routes/settings.js, default
+  // `server/uploads/branding`) needs to be reachable by the Client as a
+  // plain `<img src>` URL. Mounted at `/uploads`, distinct from the
+  // `client/dist` static mount above, and distinct from `CERTS_DIR` (TAK
+  // Server cert/key uploads), which is intentionally NEVER served over
+  // HTTP -- those files are only read directly off disk by
+  // `TakServerService`.
+  app.use('/uploads', express.static(process.env.UPLOADS_DIR || path.join(__dirname, 'uploads/branding')));
+
+  // Public_Route_Registry bootstrap (Requirement 33.2): consults the
+  // Public_Route_Registry (server/config/publicRoutes.js) against every
+  // incoming request's method + path before any route's own
+  // `authenticateToken` would otherwise apply, i.e. mounted ahead of every
+  // route mount below. Each individual route file still mounts
+  // `authenticateToken`/`authorize` itself (see server/middleware/
+  // authorize.js's header comment: `req.route` -- which `authorize.js`
+  // depends on -- is only populated by Express once a request has matched
+  // a specific route, not at this router-mount-level point in the chain).
+  // `publicRouteBootstrap` therefore always calls `next()` here; its
+  // purpose at this position is to satisfy Req 33.2's requirement that the
+  // Public_Route_Registry be consulted upstream of the authentication edge,
+  // and it is exercised by the Req 33.3/33.4 registry tests (tasks 55.3,
+  // 55.4).
+  app.use(require('./middleware/publicRouteBootstrap'));
+
+  // Login-time user agreement gate (Requirement 28 Criteria 6-7):
+  // mounted globally, mirroring `publicRouteBootstrap`'s "always runs"
+  // precedent immediately above. `req.user` is not yet populated at this
+  // router-mount-level point in the chain (each route file mounts its own
+  // `authenticateToken`/`authorize` pair further down, per `authorize.js`'s
+  // header comment), so `requireCurrentAgreement` defensively skips any
+  // request lacking `req.user` here -- see that file's header comment for
+  // the full reasoning. It is written to also be usable mounted per-route,
+  // immediately after `authenticateToken`/`authorize`, which is where the
+  // gate is actually enforced (task 50.5's `server/routes/mou.js`, and any
+  // future route needing this gate, should follow that pattern).
+  app.use(require('./middleware/requireCurrentAgreement'));
+
+  // Routes
+  app.use('/api/auth', require('./routes/auth'));
+  app.use('/api/teams', require('./routes/teams'));
+  app.use('/api/users', require('./routes/users'));
+  app.use('/api/channels', require('./routes/channels'));
+  app.use('/api/requests', require('./routes/requests'));
+  app.use('/api/channel-requests', require('./routes/channelRequests'));
+  app.use('/api/config', require('./routes/config'));
+  app.use('/api/sync', require('./routes/sync'));
+  app.use('/api/operations', require('./routes/operations'));
+  app.use('/api/global-channels', require('./routes/globalChannels'));
+  app.use('/api/vendor-channels', require('./routes/vendorChannels'));
+  app.use('/api/deployment-channels', require('./routes/deploymentChannels'));
+  app.use('/api/audit-logs', require('./routes/auditLogs'));
+  app.use('/api/settings', require('./routes/settings'));
+  app.use('/api/mou', require('./routes/mou'));
+  app.use('/api/communications', require('./routes/communications'));
+  app.use('/api/devices', require('./routes/devices'));
+  app.use('/api/bulk-import', require('./routes/bulkImport'));
+
+  // Health check (Requirement 14.1/14.2): GET /health verifies Database
+  // connectivity with a 2s-timeout SELECT 1, returning 200 {status:
+  // 'healthy'} on success or 503 {status: 'unhealthy', reason} otherwise.
+  app.use('/health', require('./routes/health'));
+
+  // Serve React app for all non-API routes
+  app.get('*', (req, res) => {
+    if (!req.path.startsWith('/api') && !req.path.startsWith('/health')) {
+      res.sendFile(path.join(__dirname, '../client/dist/index.html'));
+    }
+  });
+
+  // Error handling
+  app.use((err, req, res, next) => {
+    getLogger().error({ err }, err.message || 'Unhandled request error');
+    res.status(500).json({
+      error: 'Something went wrong!',
+      message: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
+  });
+
+  app.use('*', (req, res) => {
+    res.status(404).json({ error: 'Route not found' });
+  });
+
+  const server = app.listen(PORT, () => {
+    logger.info({ port: PORT }, 'TAK Team Manager server running');
+
+    // Start periodic sync service
+    const authentikSync = require('./services/authentikSync');
+    authentikSync.startPeriodicSync();
+
+    // Start escalation service
+    const EscalationService = require('./services/EscalationService');
+    const escalationService = new EscalationService();
+    escalationService.startDailySchedule();
+  });
+
+  // Requirement 8.4: graceful shutdown on SIGTERM, SIGINT, or a shutdown-
+  // requiring uncaughtException — stop accepting new connections, allow
+  // in-flight requests up to 30s to complete, close the DB pool, then exit.
+  const gracefulShutdown = createGracefulShutdown({ server, pool, logger });
+
+  // Requirement 8.1/8.2: log unhandledRejection via the structured logger and
+  // keep the process running (do not exit).
+  process.on('unhandledRejection', (reason, promise) => {
+    logger.error({ err: reason, promise }, 'Unhandled promise rejection');
+  });
+
+  // Requirement 8.1/8.3: log uncaughtException (with stack trace) via the
+  // structured logger and perform a controlled shutdown rather than
+  // continuing in a potentially corrupted state.
+  process.on('uncaughtException', (err) => {
+    logger.error({ err }, 'Uncaught exception');
+    gracefulShutdown('uncaughtException', { exitCode: 1 });
+  });
+
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+})();

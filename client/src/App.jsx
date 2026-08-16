@@ -1,6 +1,6 @@
 import { Routes, Route } from 'react-router-dom'
 import { useEffect, useState } from 'react'
-import { authAPI } from './services/api'
+import { authAPI, configAPI } from './services/api'
 import { ThemeProvider } from './contexts/ThemeContext'
 import Layout from './components/Layout'
 import Dashboard from './pages/Dashboard'
@@ -28,39 +28,43 @@ function App() {
   }
 
   useEffect(() => {
-    // Handle OAuth callback token
-    const urlParams = new URLSearchParams(window.location.search)
-    const tokenFromUrl = urlParams.get('token')
-    
-    if (tokenFromUrl) {
-      console.log('Setting token from URL:', tokenFromUrl.substring(0, 50))
-      localStorage.setItem('token', tokenFromUrl)
-      // Remove token from URL
-      window.history.replaceState({}, document.title, window.location.pathname)
-    }
-    
-    const token = localStorage.getItem('token')
-    if (token) {
-      authAPI.getProfile()
-        .then(response => setUser(response.data.user))
-        .catch(() => {
-          localStorage.removeItem('token')
-          setUser(null)
-        })
-        .finally(() => setLoading(false))
-    } else {
-      // Auto-login if coming from Authentik or auto_login parameter
-      const referrer = document.referrer
-      const autoLogin = urlParams.get('auto_login')
-      
-      if ((referrer && referrer.includes('account.test.tak.nz')) || autoLogin === 'true') {
-        // User came from Authentik, automatically start OAuth flow
-        authAPI.login()
-        return
-      }
-      
-      setLoading(false)
-    }
+    // Session state now lives exclusively in an httpOnly `tak_session` cookie
+    // set by the server (see server/routes/auth.js getSessionCookieOptions()).
+    // The client never receives a `?token=` URL param or stores a token in
+    // localStorage, so we check for an existing session directly instead of
+    // gating on that dead condition. The cookie is sent automatically by the
+    // axios instance's `withCredentials: true`.
+    authAPI.getProfile()
+      .then((response) => {
+        setUser(response.data.user)
+        setLoading(false)
+      })
+      .catch(() => {
+        // No existing session. Fall back to auto-login if coming from
+        // Authentik or via the auto_login parameter. The Authentik origin is
+        // read from the server-provided public config (sourced from
+        // AUTHENTIK_URL) instead of a hardcoded hostname.
+        const urlParams = new URLSearchParams(window.location.search)
+        const referrer = document.referrer
+        const autoLogin = urlParams.get('auto_login')
+
+        if (autoLogin === 'true') {
+          authAPI.login()
+          return
+        }
+
+        configAPI.getPublic()
+          .then((response) => {
+            const authentikOrigin = response.data?.authentik_origin
+            if (referrer && authentikOrigin && referrer.startsWith(authentikOrigin)) {
+              // User came from Authentik, automatically start OAuth flow
+              authAPI.login()
+              return
+            }
+            setLoading(false)
+          })
+          .catch(() => setLoading(false))
+      })
   }, [])
 
   if (loading) {

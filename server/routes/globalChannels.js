@@ -1,22 +1,21 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const { authenticateToken } = require('../middleware/auth');
+const authorize = require('../middleware/authorize');
+const { getLogger } = require('../middleware/requestContext');
 const GlobalChannelService = require('../services/GlobalChannelService');
 const pool = require('../config/database');
 const router = express.Router();
 
 const globalChannelService = new GlobalChannelService();
 
-// Middleware to check global manager access (Authentik TakTeamManager_Admin group)
-const requireGlobalManager = async (req, res, next) => {
-  if (!req.user.is_global_manager) {
-    return res.status(403).json({ error: 'Global manager access required' });
-  }
-  next();
-};
+// Global-manager-only authorization for the routes below is enforced
+// centrally by authorize.js via the Permission_Registry's
+// 'global_channel:manage'/'global_channel:credentials' entries
+// (resolved through roleDefaults.global_manager: ['*']).
 
 // Get all BCH channels
-router.get('/bch', authenticateToken, async (req, res) => {
+router.get('/bch', authenticateToken, authorize, async (req, res) => {
   try {
     const channels = await globalChannelService.getBchChannels();
     res.json({ channels });
@@ -26,7 +25,7 @@ router.get('/bch', authenticateToken, async (req, res) => {
 });
 
 // Get all region channels
-router.get('/region', authenticateToken, async (req, res) => {
+router.get('/region', authenticateToken, authorize, async (req, res) => {
   try {
     const channels = await globalChannelService.getRegionChannels();
     res.json({ channels });
@@ -36,7 +35,7 @@ router.get('/region', authenticateToken, async (req, res) => {
 });
 
 // Create BCH channel (global managers only)
-router.post('/bch', authenticateToken, requireGlobalManager, [
+router.post('/bch', authenticateToken, authorize, [
   body('name').trim().isLength({ min: 1, max: 100 }),
   body('description').optional().trim().isLength({ max: 500 })
 ], async (req, res) => {
@@ -65,13 +64,13 @@ router.post('/bch', authenticateToken, requireGlobalManager, [
       serviceAccount: result.serviceAccountUsername
     });
   } catch (error) {
-    console.error('BCH channel creation failed:', error);
+    getLogger().error({ err: error }, 'BCH channel creation failed');
     res.status(500).json({ error: 'Failed to create BCH channel' });
   }
 });
 
 // Create region channel (global managers only)
-router.post('/region', authenticateToken, requireGlobalManager, [
+router.post('/region', authenticateToken, authorize, [
   body('name').trim().isLength({ min: 1, max: 100 }),
   body('description').optional().trim().isLength({ max: 500 })
 ], async (req, res) => {
@@ -99,13 +98,13 @@ router.post('/region', authenticateToken, requireGlobalManager, [
       channelId: result.channelId
     });
   } catch (error) {
-    console.error('Region channel creation failed:', error);
+    getLogger().error({ err: error }, 'Region channel creation failed');
     res.status(500).json({ error: 'Failed to create region channel' });
   }
 });
 
 // Get BCH channel credentials (global managers only)
-router.get('/bch/:channelId/credentials', authenticateToken, requireGlobalManager, async (req, res) => {
+router.get('/bch/:channelId/credentials', authenticateToken, authorize, async (req, res) => {
   try {
     const { channelId } = req.params;
     
@@ -122,13 +121,13 @@ router.get('/bch/:channelId/credentials', authenticateToken, requireGlobalManage
     
     res.json({ credentials });
   } catch (error) {
-    console.error('Failed to get credentials:', error);
+    getLogger().error({ err: error }, 'Failed to get credentials');
     res.status(403).json({ error: error.message });
   }
 });
 
 // Assign all users to global channels (global managers only)
-router.post('/assign-all-users', authenticateToken, requireGlobalManager, async (req, res) => {
+router.post('/assign-all-users', authenticateToken, authorize, async (req, res) => {
   try {
     const result = await globalChannelService.assignAllUsersToGlobalChannels();
     
@@ -138,13 +137,13 @@ router.post('/assign-all-users', authenticateToken, requireGlobalManager, async 
       bulkOperationId: result.bulkOperationId
     });
   } catch (error) {
-    console.error('Failed to assign users to global channels:', error);
+    getLogger().error({ err: error }, 'Failed to assign users to global channels');
     res.status(500).json({ error: 'Failed to assign users to global channels' });
   }
 });
 
 // Update BCH channel (global managers only)
-router.put('/bch/:channelId', authenticateToken, requireGlobalManager, [
+router.put('/bch/:channelId', authenticateToken, authorize, [
   body('name').trim().isLength({ min: 1, max: 100 }),
   body('description').optional().trim().isLength({ max: 500 })
 ], async (req, res) => {
@@ -169,13 +168,13 @@ router.put('/bch/:channelId', authenticateToken, requireGlobalManager, [
     
     res.json({ message: 'BCH channel updated successfully' });
   } catch (error) {
-    console.error('Failed to update BCH channel:', error);
+    getLogger().error({ err: error }, 'Failed to update BCH channel');
     res.status(500).json({ error: 'Failed to update BCH channel' });
   }
 });
 
 // Update region channel (global managers only)
-router.put('/region/:channelId', authenticateToken, requireGlobalManager, [
+router.put('/region/:channelId', authenticateToken, authorize, [
   body('name').trim().isLength({ min: 1, max: 100 }),
   body('description').optional().trim().isLength({ max: 500 })
 ], async (req, res) => {
@@ -200,13 +199,13 @@ router.put('/region/:channelId', authenticateToken, requireGlobalManager, [
     
     res.json({ message: 'Region channel updated successfully' });
   } catch (error) {
-    console.error('Failed to update region channel:', error);
+    getLogger().error({ err: error }, 'Failed to update region channel');
     res.status(500).json({ error: 'Failed to update region channel' });
   }
 });
 
 // Sync existing channels from Authentik (global managers only)
-router.post('/sync-existing', authenticateToken, requireGlobalManager, async (req, res) => {
+router.post('/sync-existing', authenticateToken, authorize, async (req, res) => {
   try {
     const userResult = await pool.query(
       'SELECT id FROM users WHERE authentik_user_id = $1',
@@ -221,13 +220,13 @@ router.post('/sync-existing', authenticateToken, requireGlobalManager, async (re
       regionCount: result.regionCount
     });
   } catch (error) {
-    console.error('Failed to sync existing channels:', error);
+    getLogger().error({ err: error }, 'Failed to sync existing channels');
     res.status(500).json({ error: 'Failed to sync existing channels' });
   }
 });
 
 // Delete global channel (global managers only)
-router.delete('/:channelType/:channelId', authenticateToken, requireGlobalManager, async (req, res) => {
+router.delete('/:channelType/:channelId', authenticateToken, authorize, async (req, res) => {
   try {
     const { channelType, channelId } = req.params;
     
@@ -248,7 +247,7 @@ router.delete('/:channelType/:channelId', authenticateToken, requireGlobalManage
     
     res.json({ message: 'Global channel deleted successfully' });
   } catch (error) {
-    console.error('Failed to delete global channel:', error);
+    getLogger().error({ err: error }, 'Failed to delete global channel');
     res.status(500).json({ error: 'Failed to delete global channel' });
   }
 });

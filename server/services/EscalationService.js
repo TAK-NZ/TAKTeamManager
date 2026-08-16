@@ -1,5 +1,8 @@
 const pool = require('../config/database');
 const EmailService = require('./EmailService');
+const { createLogger } = require('../config/logger');
+
+const logger = createLogger('EscalationService');
 
 class EscalationService {
   constructor() {
@@ -8,7 +11,7 @@ class EscalationService {
 
   async processEscalations() {
     try {
-      console.log('Processing request escalations...');
+      logger.info('Processing request escalations');
       
       // Get requests that need escalation
       const escalationResult = await pool.query(`
@@ -25,10 +28,10 @@ class EscalationService {
         await this.escalateRequest(request);
       }
       
-      console.log(`Processed ${escalationResult.rows.length} escalations`);
-      
+      logger.info({ count: escalationResult.rows.length }, 'Processed escalations');
+
     } catch (error) {
-      console.error('Escalation processing failed:', error);
+      logger.error({ err: error }, 'Escalation processing failed');
     }
   }
 
@@ -77,7 +80,7 @@ class EscalationService {
           WHERE id = $4
         `, [nextLevel, newAdminId, nextEscalationTime, request.id]);
         
-        console.log(`Escalated request ${request.id} to level ${nextLevel}`);
+        logger.info({ requestId: request.id, escalationLevel: nextLevel }, 'Escalated request');
       } else {
         // No more escalation levels, mark as expired
         await client.query(`
@@ -86,7 +89,7 @@ class EscalationService {
           WHERE id = $1
         `, [request.id]);
         
-        console.log(`Request ${request.id} expired - no more escalation levels`);
+        logger.info({ requestId: request.id }, 'Request expired - no more escalation levels');
       }
       
       await client.query('COMMIT');
@@ -101,7 +104,7 @@ class EscalationService {
 
   async sendDailyDigests() {
     try {
-      console.log('Sending daily admin notification digests...');
+      logger.info('Sending daily admin notification digests');
       
       // Get admins with pending requests
       const adminResult = await pool.query(`
@@ -119,10 +122,10 @@ class EscalationService {
         await this.sendAdminDigest(admin);
       }
       
-      console.log(`Sent digests to ${adminResult.rows.length} admins`);
-      
+      logger.info({ count: adminResult.rows.length }, 'Sent digests to admins');
+
     } catch (error) {
-      console.error('Daily digest sending failed:', error);
+      logger.error({ err: error }, 'Daily digest sending failed');
     }
   }
 
@@ -153,7 +156,7 @@ class EscalationService {
       });
       
     } catch (error) {
-      console.error(`Failed to send digest to ${admin.email}:`, error);
+      logger.error({ err: error, adminEmail: admin.email }, 'Failed to send digest to admin');
     }
   }
 
@@ -183,20 +186,29 @@ class EscalationService {
   }
 
   startDailySchedule() {
-    // Run escalation check every hour
+    // Run escalation check every hour. processEscalations() already has its
+    // own internal try/catch, but setInterval's callback never awaits or
+    // catches the promise it returns, so this remains a fire-and-forget
+    // async invocation. The .catch() below is a defensive backstop per
+    // Requirement 8.7, routing any error that escapes the internal
+    // try/catch through the structured logger instead of going unhandled.
     setInterval(() => {
-      this.processEscalations();
+      this.processEscalations().catch(err =>
+        logger.error({ err }, 'Scheduled escalation processing failed')
+      );
     }, 60 * 60 * 1000);
-    
-    // Run daily digest at 9 AM
+
+    // Run daily digest at 9 AM. Same fire-and-forget reasoning applies.
     setInterval(() => {
       const now = new Date();
       if (now.getHours() === 9 && now.getMinutes() === 0) {
-        this.sendDailyDigests();
+        this.sendDailyDigests().catch(err =>
+          logger.error({ err }, 'Scheduled daily digest sending failed')
+        );
       }
     }, 60 * 1000);
-    
-    console.log('Escalation service scheduled');
+
+    logger.info('Escalation service scheduled');
   }
 }
 
