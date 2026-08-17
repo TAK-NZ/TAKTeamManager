@@ -254,6 +254,39 @@ function collectTakServerConfigIssues(env) {
 }
 
 /**
+ * WHERE `AUTHENTIK_LOGOUT_URL` is configured (non-empty after trimming),
+ * requires it to be a well-formed absolute http/https URL, mirroring the
+ * `TAK_SERVER_URL` optional-URL validation pattern above. `AUTHENTIK_LOGOUT_URL`
+ * is Authentik's OIDC end-session endpoint for this application, used by
+ * `server/routes/auth.js`'s `POST /api/auth/logout` to also end the
+ * Authentik SSO session after clearing the local `tak_session` cookie.
+ *
+ * IF `AUTHENTIK_LOGOUT_URL` is unset or empty, THEN this is optional and
+ * this function returns no issues -- logout falls back to redirecting to
+ * `FRONTEND_URL` instead (local session only).
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {string[]} human-readable issue descriptions; empty when unset
+ *   or well-formed.
+ */
+function collectAuthentikLogoutUrlConfigIssues(env) {
+  const logoutUrl = env.AUTHENTIK_LOGOUT_URL;
+  const isConfigured = typeof logoutUrl === 'string' && logoutUrl.trim().length > 0;
+
+  if (!isConfigured) {
+    return [];
+  }
+
+  if (!isWellFormedUrl(logoutUrl)) {
+    return [
+      `AUTHENTIK_LOGOUT_URL is not a well-formed URL (must be an absolute http/https URL with a host): "${logoutUrl}"`
+    ];
+  }
+
+  return [];
+}
+
+/**
  * Pure predicate: does `value` represent a positive integer (a whole
  * number greater than zero)? Accepts a plain positive-integer number, or
  * a string that -- after trimming -- consists only of digits and parses
@@ -547,6 +580,10 @@ function collectConfigIssues(env) {
   // Criteria 26.1/26.2: TAK Server mutual TLS credential gate, only
   // applicable when TAK_SERVER_URL is configured.
   issues.push(...collectTakServerConfigIssues(env));
+
+  // Optional AUTHENTIK_LOGOUT_URL well-formedness check, only applicable
+  // when configured.
+  issues.push(...collectAuthentikLogoutUrlConfigIssues(env));
 
   // Criteria 25.1/25.4: data retention threshold checks.
   issues.push(...collectRetentionConfigIssues(env));

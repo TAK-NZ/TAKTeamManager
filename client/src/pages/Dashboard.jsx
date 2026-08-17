@@ -1,8 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { UserGroupIcon, UsersIcon, ClipboardDocumentListIcon, ArrowUpRightIcon, ArrowDownLeftIcon, ArrowsRightLeftIcon, MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon, InformationCircleIcon, FolderIcon, FolderOpenIcon, ChevronRightIcon as ChevronRightSmall, ChevronDownIcon, ChevronUpIcon } from '@heroicons/react/24/outline'
-import { teamsAPI, requestsAPI } from '../services/api'
-import axios from 'axios'
+import { teamsAPI, requestsAPI, configAPI, usersAPI, channelsAPI } from '../services/api'
 import { buildFolderTree } from '../utils/channelTree'
 
 export default function Dashboard({ user, refreshUser }) {
@@ -48,11 +47,20 @@ export default function Dashboard({ user, refreshUser }) {
   useEffect(() => {
     const fetchConfig = async () => {
       try {
+        // Both raw axios.get calls here previously sent
+        // `Authorization: Bearer ${localStorage.getItem('token')}` -- but
+        // this app has never stored a token in localStorage (auth lives
+        // solely in the httpOnly `tak_session` cookie set by the server;
+        // see server/middleware/auth.js), so that header was always
+        // literally "Bearer null", and neither raw axios call set
+        // `withCredentials: true` either, so the real session cookie
+        // wasn't sent. Both calls have been failing with 401 the entire
+        // time. Using the shared `api`-backed configAPI wrapper (which
+        // has `withCredentials: true` and sends no dead Authorization
+        // header) fixes both.
         const [colorResponse, publicResponse] = await Promise.all([
-          axios.get('/api/config/color-mappings', {
-            headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
-          }),
-          axios.get('/api/config/public')
+          configAPI.getColorMappings(),
+          configAPI.getPublic()
         ])
         setColorMappings(colorResponse.data.colorMappings)
         setRoleDescriptions(colorResponse.data.roleDescriptions)
@@ -270,12 +278,16 @@ export default function Dashboard({ user, refreshUser }) {
 
   const fetchChannelData = async () => {
     try {
-      // Fetch user's team assignment
-      const userResponse = await axios.get('/api/users/me', {
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem('token')}`
-        }
-      })
+      // Fetch user's team assignment and channel descriptions in parallel
+      // (channel descriptions don't depend on the user response)
+      // Same dead-localStorage-token issue as fetchConfig above -- both
+      // calls were always sending "Bearer null" and never the real
+      // session cookie, so they always 401'd. usersAPI/channelsAPI go
+      // through the shared, correctly-configured `api` axios instance.
+      const [userResponse, channelDescResponse] = await Promise.all([
+        usersAPI.getMe(),
+        channelsAPI.getDescriptions()
+      ])
       
       setFreshUser(userResponse.data.user)
       
@@ -285,14 +297,7 @@ export default function Dashboard({ user, refreshUser }) {
         setUserTeam(null)
       }
       
-      // Fetch channel descriptions from API
-      const response = await axios.get('/api/channels/descriptions', {
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem('token')}`
-        }
-      })
-      
-      const channelDescriptions = response.data.channels
+      const channelDescriptions = channelDescResponse.data.channels
       
       // Process TAK channels and group by base name
       const takGroups = userResponse.data.user.groups?.filter(groupName => {
@@ -352,10 +357,7 @@ export default function Dashboard({ user, refreshUser }) {
   }
 
   useEffect(() => {
-    // Only fetch channel data after folder separator is set
-    if (folderSeparator) {
-      fetchChannelData()
-    }
+    fetchChannelData()
     
     // Listen for user assignment changes
     const handleUserAssignmentChanged = () => {
@@ -367,9 +369,7 @@ export default function Dashboard({ user, refreshUser }) {
     return () => {
       window.removeEventListener('userAssignmentChanged', handleUserAssignmentChanged)
     }
-  }, [user, folderSeparator])
-
-  // Remove old useEffect - now handled above
+  }, [user])
 
 
   // Filter channels based on search query
@@ -432,7 +432,7 @@ export default function Dashboard({ user, refreshUser }) {
             )}
             {freshUser.takColor && (
               <div>
-                <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">My Team</dt>
+                <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">My Organisation</dt>
                 <dd className="flex items-center text-sm text-gray-900 dark:text-gray-100">
                   <div 
                     className="w-4 h-4 rounded border border-gray-300 mr-2" 
@@ -471,7 +471,7 @@ export default function Dashboard({ user, refreshUser }) {
               <UserGroupIcon className="h-8 w-8 text-primary-600" />
             </div>
             <div className="ml-4">
-              <p className="text-sm font-medium text-gray-500 dark:text-gray-400">My Unit</p>
+              <p className="text-sm font-medium text-gray-500 dark:text-gray-400">My Team</p>
               <div className="flex items-center space-x-2">
                 <p className="text-lg font-bold text-gray-900 dark:text-gray-100">
                   {userTeam ? userTeam.display_name : 'Not assigned to a unit'}

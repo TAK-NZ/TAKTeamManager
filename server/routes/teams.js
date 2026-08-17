@@ -6,6 +6,8 @@ const { getLogger } = require('../middleware/requestContext');
 const { paginationParams } = require('../middleware/pagination');
 const Team = require('../models/Team');
 const pool = require('../config/database');
+const { isValidCallsignPrefix } = require('../utils/callsignValidation');
+const TeamVisibilityService = require('../services/TeamVisibilityService');
 const router = express.Router();
 
 // Get joinable teams (public endpoint)
@@ -28,8 +30,23 @@ router.get('/joinable', async (req, res) => {
 // doesn't consume `req.pagination`. `paginationParams` still runs
 // unconditionally ahead of the handler -- it's a cheap query-param
 // validation step regardless of which branch ends up using it.
+//
+// Requirement 6.6 (task 14.3): an optional `?scope=organisation` query
+// parameter is layered on top of the above, ADDITIVELY -- when present,
+// it takes over the response entirely (every Visible_Branch Team within
+// the caller's own Organisation, via `TeamVisibilityService.
+// filterVisibleBranches`), regardless of `req.user.isAdmin`, and returns
+// before either of the two existing branches runs. When ABSENT, the
+// existing admin-paginated-all-teams vs. regular-user-own-teams-only
+// behavior is completely unchanged.
 router.get('/my-teams', authenticateToken, authorize, paginationParams, async (req, res) => {
   try {
+    if (req.query.scope === 'organisation') {
+      const orgTeams = await resolveOwnOrganisationTeams(req.user);
+      const visibleTeams = await TeamVisibilityService.filterVisibleBranches(orgTeams, req.user);
+      return res.json({ teams: visibleTeams });
+    }
+
     let teams;
     let pagination;
     if (req.user.isAdmin) {
@@ -43,7 +60,9 @@ router.get('/my-teams', authenticateToken, authorize, paginationParams, async (r
       pagination = { page, pageSize, total };
     } else {
       // Regular users see only their teams (inherently small; not paginated).
-      teams = await Team.getUserTeams(req.user.id);
+      // req.user.userId is the local users.id -- team_memberships.user_id
+      // is a foreign key to that column, NOT the Authentik id (req.user.id).
+      teams = await Team.getUserTeams(req.user.userId);
     }
     res.json(pagination ? { teams, pagination } : { teams });
   } catch (error) {
@@ -52,17 +71,77 @@ router.get('/my-teams', authenticateToken, authorize, paginationParams, async (r
   }
 });
 
+// Requirement 6.6 (task 14.3): resolves the caller's OWN Organisation's
+// full Team hierarchy (every Team belonging to the same Organisation as
+// any of the caller's own team memberships, direct or inherited), for
+// `?scope=organisation` to filter through `TeamVisibilityService.
+// filterVisibleBranches`.
+//
+// Deliberately queries `team_memberships` directly (both direct AND
+// inherited rows, i.e. no `inherited_from_team_id IS NULL` filter),
+// rather than reusing `Team.getUserTeams` (which filters to direct
+// membership only) -- Requirement 6.6's "any of the caller's own team
+// memberships" is explicitly direct-or-inherited, matching the
+// Org_Member glossary definition.
+//
+// A caller's own memberships are all necessarily within a single
+// Organisation in practice (Requirement 6.2's Organisation-scoping), so
+// resolving the Organisation of the FIRST membership found is a
+// reasonable simplification -- this does not need to reconcile multiple
+// memberships that happen to resolve to different Organisations.
+//
+// A Global_Manager may hold no team membership of their own at all
+// (Requirement 6.4's visibility bypass does not require any membership),
+// so "their own Organisation" is ill-defined for them. This deliberately
+// takes the SIMPLER of the two possible interpretations documented in
+// this task: `scope=organisation` means "MY organisation", so a caller
+// with no resolvable Organisation of their own (Global_Manager or
+// otherwise) gets an empty list here, rather than falling back to every
+// Team across every Organisation.
+async function resolveOwnOrganisationTeams(user) {
+  const membershipResult = await pool.query(
+    'SELECT team_id FROM team_memberships WHERE user_id = $1 LIMIT 1',
+    [user.userId]
+  );
+  const membershipTeamId = membershipResult.rows[0]?.team_id;
+  if (!membershipTeamId) {
+    return [];
+  }
+  const ancestorChain = await Team.getAncestorChain(membershipTeamId);
+  if (!ancestorChain || ancestorChain.length === 0) {
+    return [];
+  }
+  const organisationId = ancestorChain[0].id;
+  return Team.getOrganisationTeams(organisationId);
+}
+
 // Create team
 router.post('/', authenticateToken, authorize, [
   body('name').trim().isLength({ min: 1, max: 255 }),
   body('description').optional().trim(),
-  body('callsignPrefix').optional().trim(),
+  body('callsignPrefix').optional().trim().custom(value => isValidCallsignPrefix(value))
+    .withMessage('callsignPrefix may only contain letters and digits'),
   body('color').optional().trim(),
   body('visibility').optional().isIn(['public', 'private']),
   body('canJoin').optional().isBoolean(),
-  body('parentTeamId').optional().isInt(),
-  body('callsignSubteamDepth').optional().isInt({ min: 0, max: 5 }),
-  body('callsignNameFormat').optional().isIn(['full_name', 'first_initial_last', 'first_last_initial'])
+  // .optional({ nullable: true }) (not plain .optional()) since the client
+  // always sends parentTeamId: null for a top-level team -- plain
+  // .optional() only skips validation when the field is ABSENT, not when
+  // it's present-but-null, so .isInt() was running against null and
+  // failing every top-level team creation with a 400. Same fix already
+  // applied elsewhere for this exact bug class (see deploymentChannels.js,
+  // mou.js, vendorChannels.js) and the PUT /:teamId route just below,
+  // which already handles this correctly via a custom validator.
+  body('parentTeamId').optional({ nullable: true }).isInt(),
+  body('callsignNameFormat').optional().isIn(['full_name', 'first_initial_last', 'first_last_initial', 'first_initial_dot_last', 'user_defined']),
+  // Requirement 5.1/5.2 (task 8.2): basic request-shape validation only
+  // (an array of integers) -- the actual 1..MAX_TEAM_DEPTH range check and
+  // the Sub_Team-rejection rule (Requirement 5.6) are enforced by
+  // `Team.create` itself (task 8.1) and mapped to their specific 400
+  // messages in this route's catch block below, not duplicated here.
+  body('callsignLevelSelection').optional().isArray()
+    .custom(value => value === undefined || (Array.isArray(value) && value.every(v => Number.isInteger(v))))
+    .withMessage('callsignLevelSelection must be an array of integers')
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -70,22 +149,26 @@ router.post('/', authenticateToken, authorize, [
   }
 
   try {
-    let { name, description, callsignPrefix, color, visibility, canJoin, parentTeamId, callsignSubteamDepth, callsignNameFormat } = req.body;
+    let { name, description, callsignPrefix, color, visibility, canJoin, parentTeamId, callsignNameFormat, callsignLevelSelection } = req.body;
 
     // Authorization (root team requires Global_Manager, sub-team requires
     // Global_Manager or parent-team admin) is enforced centrally by
     // authorize.js via the 'POST /api/teams': ['team:create:root_or_sub']
     // Permission_Registry entry.
 
-    // If creating sub-team, inherit color from parent
+    // Requirement 3.2 (task 6.1): the actual inherited color/
+    // callsign_name_format VALUES are now resolved by `Team.create` itself
+    // (from the Sub_Team's Organisation, not necessarily its immediate
+    // parent), so this route no longer sets `color` from `parentTeam.color`
+    // here -- doing so would be redundant with, and could conflict with,
+    // `Team.create`'s own inheritance logic. This lookup is kept only for
+    // its existing "Parent team not found" 400 validation.
     if (parentTeamId) {
-      getLogger().debug({ parentTeamId, actorId: req.user.id }, 'Creating sub-team for parent');
+      getLogger().debug({ parentTeamId, actorId: req.user.userId }, 'Creating sub-team for parent');
       const parentTeam = await Team.findById(parentTeamId);
       if (!parentTeam) {
         return res.status(400).json({ error: 'Parent team not found' });
       }
-      // Sub-teams inherit color from parent
-      color = parentTeam.color;
     }
 
     getLogger().debug({
@@ -107,14 +190,32 @@ router.post('/', authenticateToken, authorize, [
       can_join: canJoin || false,
       parent_team_id: parentTeamId,
       created_by: null, // Skip created_by for now since user ID is string
-      callsign_subteam_depth: !parentTeamId ? callsignSubteamDepth : null,
-      callsign_name_format: !parentTeamId ? callsignNameFormat : null
+      callsign_name_format: !parentTeamId ? callsignNameFormat : null,
+      callsign_level_selection: callsignLevelSelection
     });
 
     // Skip adding creator as admin for now since user ID is string
 
     res.status(201).json({ team });
   } catch (error) {
+    // Requirement 2.3 (task 5.2): Team.create throws this BEFORE any
+    // INSERT is attempted when the requested Sub_Team would sit deeper
+    // than MAX_TEAM_DEPTH, so no team is created in this branch.
+    if (error instanceof Team.TeamDepthExceededError) {
+      return res.status(400).json({ error: error.message });
+    }
+    // Requirement 5.2 (task 8.2): Team.create throws this BEFORE any
+    // INSERT is attempted when a supplied callsignLevelSelection value is
+    // out of the 1..MAX_TEAM_DEPTH range.
+    if (error instanceof Team.CallsignLevelSelectionRangeError) {
+      return res.status(400).json({ error: error.message });
+    }
+    // Requirement 5.6 (task 8.2): Team.create throws this BEFORE any
+    // INSERT is attempted when callsignLevelSelection is supplied on a
+    // Sub_Team creation request (parentTeamId present).
+    if (error instanceof Team.CallsignLevelSelectionSubTeamError) {
+      return res.status(400).json({ error: error.message });
+    }
     getLogger().error({ err: error }, 'Team creation error');
     res.status(500).json({ error: 'Failed to create team', details: error.message });
   }
@@ -124,12 +225,21 @@ router.post('/', authenticateToken, authorize, [
 router.put('/:teamId', authenticateToken, authorize, [
   body('name').optional().trim().isLength({ min: 1, max: 255 }),
   body('description').optional().trim(),
-  body('callsignPrefix').optional().trim(),
+  body('callsignPrefix').optional().trim().custom(value => isValidCallsignPrefix(value))
+    .withMessage('callsignPrefix may only contain letters and digits'),
+  body('color').optional().trim(),
   body('visibility').optional().isIn(['public', 'private']),
   body('canJoin').optional().isBoolean(),
   body('parentTeamId').optional().custom(value => value === null || Number.isInteger(Number(value))),
-  body('callsignSubteamDepth').optional().isInt({ min: 0, max: 5 }),
-  body('callsignNameFormat').optional().isIn(['full_name', 'first_initial_last', 'first_last_initial'])
+  body('callsignNameFormat').optional().isIn(['full_name', 'first_initial_last', 'first_last_initial', 'first_initial_dot_last', 'user_defined']),
+  // Requirement 5.1/5.2 (task 8.2): basic request-shape validation only
+  // (an array of integers) -- the actual 1..MAX_TEAM_DEPTH range check and
+  // the Sub_Team-rejection rule (Requirement 5.6) are enforced by
+  // `Team.update` itself (task 8.1) and mapped to their specific 400
+  // messages in this route's catch block below, not duplicated here.
+  body('callsignLevelSelection').optional().isArray()
+    .custom(value => value === undefined || (Array.isArray(value) && value.every(v => Number.isInteger(v))))
+    .withMessage('callsignLevelSelection must be an array of integers')
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -146,27 +256,50 @@ router.put('/:teamId', authenticateToken, authorize, [
       return res.status(404).json({ error: 'Team not found' });
     }
 
-    const { name, description, callsignPrefix, visibility, canJoin, parentTeamId, callsignSubteamDepth, callsignNameFormat } = req.body;
-    
+    const { name, description, callsignPrefix, color, visibility, canJoin, parentTeamId, callsignNameFormat, callsignLevelSelection } = req.body;
+
+    // Requirement 3.3 (task 6.1): `color`/`callsignNameFormat` are passed
+    // straight through to `Team.update`, which silently ignores them
+    // (preserving the team's existing stored values, never rejecting the
+    // request) when `teamId` is a Sub_Team. An Organisation's own
+    // `color`/`callsignNameFormat` remain freely updatable here.
     const updatedTeam = await Team.update(req.params.teamId, {
       name,
       description,
+      color,
       visibility,
       can_join: canJoin,
       parent_team_id: parentTeamId,
-      callsign_subteam_depth: callsignSubteamDepth,
-      callsign_name_format: callsignNameFormat
-      // Note: color is intentionally excluded - cannot be changed after creation
+      callsign_name_format: callsignNameFormat,
+      callsign_level_selection: callsignLevelSelection
     });
 
-    // Update user attributes if callsign settings changed
+    // Update user attributes if callsign settings changed. Requirement
+    // 5.12 (task 11.6): a Callsign_Level_Selection change must also
+    // trigger this regeneration, consistent with the existing
+    // callsignNameFormat-change trigger. `updateTeamUserAttributes` ->
+    // `generateCallsign` -> `computeCallsignAttributes` only ever READS
+    // the user's stored `callsign_suffix` (never recomputes/writes it,
+    // per task 11.1), so this regeneration cannot alter it.
     const UserAttributesService = require('../services/userAttributes');
-    if (callsignSubteamDepth !== undefined || callsignNameFormat !== undefined) {
+    if (callsignNameFormat !== undefined || callsignLevelSelection !== undefined) {
       await UserAttributesService.updateTeamUserAttributes(req.params.teamId);
     }
 
     res.json({ team: updatedTeam });
   } catch (error) {
+    // Requirement 5.2 (task 8.2): Team.update throws this BEFORE any
+    // UPDATE is attempted when a supplied callsignLevelSelection value is
+    // out of the 1..MAX_TEAM_DEPTH range.
+    if (error instanceof Team.CallsignLevelSelectionRangeError) {
+      return res.status(400).json({ error: error.message });
+    }
+    // Requirement 5.6 (task 8.2): Team.update throws this BEFORE any
+    // UPDATE is attempted when callsignLevelSelection is supplied on a
+    // Sub_Team update request.
+    if (error instanceof Team.CallsignLevelSelectionSubTeamError) {
+      return res.status(400).json({ error: error.message });
+    }
     getLogger().error({ err: error }, 'Failed to update team');
     res.status(500).json({ error: 'Failed to update team' });
   }
@@ -240,11 +373,37 @@ router.get('/:teamId/hierarchy', authenticateToken, authorize, async (req, res) 
   }
 });
 
+// Get callsign level options (Requirement 5.8-5.11, task 8.3): the flat
+// { team_depth, callsign_prefix } rows Team.getSubTeamsForCallsignLevel
+// returns for :teamId's whole hierarchy, used by the Client to label each
+// Callsign_Level_Selection toggle. Authorization ('team:read') is enforced
+// centrally by authorize.js, matching the sibling GET /:teamId,
+// /:teamId/hierarchy, and /:teamId/sub-teams routes above.
+router.get('/:teamId/callsign-level-options', authenticateToken, authorize, async (req, res) => {
+  try {
+    const options = await Team.getSubTeamsForCallsignLevel(req.params.teamId);
+    res.json({ options });
+  } catch (error) {
+    getLogger().error({ err: error }, 'Failed to fetch callsign level options');
+    res.status(500).json({ error: 'Failed to fetch callsign level options' });
+  }
+});
+
 // Get sub-teams
+//
+// Requirement 6.5 (task 14.2): this route's OWN access to `:teamId` is
+// already gated by the `'team:read'` row-scoped Visible_Branch check
+// (enforced centrally via `authorize`, task 14.1) -- by the time this
+// handler runs, the caller is already confirmed able to see `:teamId`
+// itself. What's filtered here is the CHILDREN in the returned list:
+// some of `:teamId`'s direct sub-teams may themselves be private (or
+// have a private ancestor of their own), and those must be excluded
+// from the returned list rather than causing the whole request to 404.
 router.get('/:teamId/sub-teams', authenticateToken, authorize, async (req, res) => {
   try {
     const subTeams = await Team.getSubTeams(req.params.teamId);
-    res.json({ subTeams: subTeams || [] });
+    const visibleSubTeams = await TeamVisibilityService.filterVisibleBranches(subTeams || [], req.user);
+    res.json({ subTeams: visibleSubTeams });
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to fetch sub-teams');
     res.status(500).json({ error: 'Failed to fetch sub-teams' });

@@ -37,6 +37,11 @@ jest.mock('../models/Team', () => ({
 
 jest.mock('../config/database', () => ({ query: jest.fn() }));
 
+const mockIsVisibleBranch = jest.fn();
+jest.mock('../services/TeamVisibilityService', () => ({
+  isVisibleBranch: (...args) => mockIsVisibleBranch(...args)
+}));
+
 jest.mock('../config/permissions.registry', () => {
   // Minimal, self-contained stand-in for the real `resolveAccess`, matching
   // its deny-by-default / wildcard-satisfies-everything behavior so this
@@ -57,7 +62,8 @@ jest.mock('../config/permissions.registry', () => {
     routes: {
       'GET /api/widgets': ['widget:read'],
       'PUT /api/teams/:teamId': ['team:update'],
-      'POST /api/teams/:teamId/members': ['team:members:add']
+      'POST /api/teams/:teamId/members': ['team:members:add'],
+      'GET /api/teams/:teamId': ['team:read']
     },
     roleDefaults: {
       global_manager: ['*'],
@@ -84,6 +90,7 @@ function buildApp(user) {
   app.get('/api/widgets', authorize, (req, res) => res.status(200).json({ ok: true }));
   app.put('/api/teams/:teamId', authorize, (req, res) => res.status(200).json({ ok: true }));
   app.post('/api/teams/:teamId/members', authorize, (req, res) => res.status(200).json({ ok: true }));
+  app.get('/api/teams/:teamId', authorize, (req, res) => res.status(200).json({ ok: true }));
   return app;
 }
 
@@ -222,5 +229,104 @@ describe('authorize (BUG-015: team:members:add row-scoped resolver)', () => {
     expect(res.status).toBe(200);
     expect(mockIsAdmin).not.toHaveBeenCalled();
     expect(mockWarn).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Task 14.1 (Requirement 6.1-6.4): the `'team:read'` row-scoped resolver,
+ * backed by `TeamVisibilityService.isVisibleBranch`, and the targeted
+ * 404-instead-of-403 mapping for a `'team:read'` denial specifically.
+ *
+ * `'team:read'` backs `GET /api/teams/:teamId`,
+ * `GET /api/teams/:teamId/hierarchy`, `GET /api/teams/:teamId/sub-teams`,
+ * and `GET /api/teams/:teamId/callsign-level-options` -- this suite only
+ * mounts `GET /api/teams/:teamId` since every one of those routes shares
+ * the exact same registry entry (`['team:read']`) and resolver, so testing
+ * one is representative of all four.
+ */
+describe('authorize (task 14.1: team:read row-scoped Visible_Branch resolver)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('responds 404 (not 403) when TeamVisibilityService.isVisibleBranch returns false', async () => {
+    mockIsVisibleBranch.mockResolvedValueOnce(false);
+    const app = buildApp({ userId: 1, is_global_manager: false });
+
+    const res = await request(app).get('/api/teams/42').set('X-Forwarded-For', TEST_IP);
+
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'Team not found' });
+    expect(mockIsVisibleBranch).toHaveBeenCalledWith('42', expect.objectContaining({ userId: 1 }));
+    // Requirement 13.7 logging still fires (with the underlying
+    // 'permission_denied' reason) even though the HTTP response is 404
+    // rather than 403 -- only the response status/body changed, not the
+    // logging behavior.
+    expect(mockWarn).toHaveBeenCalledTimes(1);
+    const [payload] = mockWarn.mock.calls[0];
+    expect(payload).toEqual({
+      ip: TEST_IP,
+      route: '/api/teams/42',
+      reason: 'permission_denied'
+    });
+  });
+
+  it('calls next() (200) when TeamVisibilityService.isVisibleBranch returns true', async () => {
+    mockIsVisibleBranch.mockResolvedValueOnce(true);
+    const app = buildApp({ userId: 1, is_global_manager: false });
+
+    const res = await request(app).get('/api/teams/42').set('X-Forwarded-For', TEST_IP);
+
+    expect(res.status).toBe(200);
+    expect(mockWarn).not.toHaveBeenCalled();
+  });
+
+  it('bypasses the resolver entirely for a Global_Manager (wildcard short-circuit)', async () => {
+    const app = buildApp({ userId: 1, is_global_manager: true });
+
+    const res = await request(app).get('/api/teams/42').set('X-Forwarded-For', TEST_IP);
+
+    expect(res.status).toBe(200);
+    expect(mockIsVisibleBranch).not.toHaveBeenCalled();
+    expect(mockWarn).not.toHaveBeenCalled();
+  });
+
+  it('still responds 403 (not 404) for a DIFFERENT permission denial (team:update), confirming the 404 mapping is not applied generally', async () => {
+    mockIsAdmin.mockResolvedValueOnce(false);
+    const app = buildApp({ userId: 1, is_global_manager: false });
+
+    const res = await request(app).put('/api/teams/42').set('X-Forwarded-For', TEST_IP);
+
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: 'Forbidden' });
+    expect(mockIsVisibleBranch).not.toHaveBeenCalled();
+  });
+
+  it('denies (fail closed) when the resolver throws; per this implementation, a team:read resolver exception maps to 404, documented explicitly here', async () => {
+    mockIsVisibleBranch.mockRejectedValueOnce(new Error('db connection lost'));
+    const app = buildApp({ userId: 1, is_global_manager: false });
+
+    const res = await request(app).get('/api/teams/42').set('X-Forwarded-For', TEST_IP);
+
+    // Design choice (see authorize.js's inline comment on this branch):
+    // a resolver exception for 'team:read' is treated the same as any
+    // other 'team:read' denial (404), rather than the generic 403 used
+    // for every other permission's resolver exception, so the client
+    // still cannot distinguish "doesn't exist" from "exists but errored
+    // checking access".
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'Team not found' });
+    expect(mockWarn).toHaveBeenCalledTimes(1);
+    const [payload] = mockWarn.mock.calls[0];
+    expect(payload).toEqual({
+      ip: TEST_IP,
+      route: '/api/teams/42',
+      reason: 'resolver_exception'
+    });
+    expect(mockError).toHaveBeenCalledTimes(1);
+    expect(mockError.mock.calls[0][0]).toMatchObject({
+      errorCategory: 'authorization_check_exception',
+      permission: 'team:read'
+    });
   });
 });

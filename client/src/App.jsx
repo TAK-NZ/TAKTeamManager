@@ -1,6 +1,7 @@
 import { Routes, Route } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import { authAPI, configAPI } from './services/api'
+import { isPublicOnlyPath } from './utils/publicPaths'
 import { ThemeProvider } from './contexts/ThemeContext'
 import Layout from './components/Layout'
 import Dashboard from './pages/Dashboard'
@@ -13,6 +14,7 @@ import VerifyRequest from './pages/VerifyRequest'
 import GlobalChannels from './pages/GlobalChannels'
 import Login from './pages/Login'
 import Admin from './pages/Admin'
+import AuditLogs from './pages/AuditLogs'
 
 function App() {
   const [user, setUser] = useState(null)
@@ -28,6 +30,18 @@ function App() {
   }
 
   useEffect(() => {
+    // /request-access and /verify-request must be fully usable by a
+    // completely anonymous visitor with no session cookie. Skip the
+    // authenticated GET /auth/me check entirely on these paths -- calling
+    // it here would 401 for every anonymous visitor, and that 401 (via
+    // services/api.js's response interceptor) used to force-navigate to
+    // /login, which re-mounts this same effect and 401s again, producing
+    // an endless redirect loop instead of ever rendering the public page.
+    if (isPublicOnlyPath(window.location.pathname)) {
+      setLoading(false)
+      return
+    }
+
     // Session state now lives exclusively in an httpOnly `tak_session` cookie
     // set by the server (see server/routes/auth.js getSessionCookieOptions()).
     // The client never receives a `?token=` URL param or stores a token in
@@ -97,6 +111,7 @@ function App() {
           <Route path="/requests" element={<Requests />} />
           <Route path="/global-channels" element={<GlobalChannels user={user} />} />
           <Route path="/admin" element={<Admin user={user} />} />
+          <Route path="/audit-logs" element={<AuditLogs user={user} />} />
         </Routes>
       </Layout>
     </ThemeProvider>

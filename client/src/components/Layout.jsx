@@ -21,7 +21,7 @@ const getNavigation = (user) => {
   ]
   
   if (user?.isAdmin || user?.is_global_manager) {
-    baseNavigation.push({ name: 'Teams', href: '/teams', icon: UserGroupIcon })
+    baseNavigation.push({ name: 'Orgs & Teams', href: '/teams', icon: UserGroupIcon })
     baseNavigation.push({ name: 'Users', href: '/users', icon: UsersIcon })
   }
   
@@ -31,6 +31,7 @@ const getNavigation = (user) => {
   
   if (user?.is_global_manager) {
     baseNavigation.push({ name: 'Global Channels', href: '/global-channels', icon: GlobeAltIcon })
+    baseNavigation.push({ name: 'Audit Log', href: '/audit-logs', icon: ClipboardDocumentListIcon })
   }
   
   if (user?.isAdmin) {
@@ -40,6 +41,34 @@ const getNavigation = (user) => {
   return baseNavigation
 }
 
+// A nav item is "active" for its own path AND any sub-path beneath it
+// (e.g. /teams/123, /teams/123/anything), not just an exact match -- so
+// selecting a specific Org/Team from the Teams list (which navigates to
+// /teams/:teamId) keeps the "Orgs & Teams" item highlighted instead of
+// losing its active state the moment the path is no longer exactly
+// "/teams". Guards against a false-positive prefix match (e.g. a
+// hypothetical "/teams-archive" matching "/teams") by requiring the
+// character right after the prefix to be "/".
+function isNavItemActive(pathname, href) {
+  return pathname === href || pathname.startsWith(`${href}/`)
+}
+
+// Derives the human-readable app permission role label for the top bar,
+// mirroring the exact precedence already used by getNavigation() above:
+// is_global_manager > isAdmin (team admin) > plain member. There is no
+// single boolean/enum already carrying this label anywhere in `user`, so
+// it's computed here from the same two flags every other permission
+// check in this file already relies on.
+function getUserRoleLabel(user) {
+  if (user?.is_global_manager) {
+    return 'Global Admin'
+  }
+  if (user?.isAdmin) {
+    return 'Team Admin'
+  }
+  return 'Member'
+}
+
 export default function Layout({ children, user }) {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const location = useLocation()
@@ -47,11 +76,24 @@ export default function Layout({ children, user }) {
   const { theme, toggleTheme } = useTheme()
 
   const handleLogout = async () => {
+    // The local tak_session cookie is always cleared server-side by
+    // authAPI.logout() regardless of outcome (see server/routes/auth.js).
+    // WHERE the server has AUTHENTIK_LOGOUT_URL configured, it returns
+    // that URL as `redirectUrl` in the response body; navigating there
+    // (instead of to the local /login page) also ends the user's
+    // Authentik SSO session, not just the local App session -- otherwise
+    // the next SSO login would silently re-authenticate without
+    // prompting, since Authentik itself would still consider the user
+    // logged in.
+    let redirectUrl = '/login'
     try {
-      await authAPI.logout()
+      const response = await authAPI.logout()
+      if (response?.data?.redirectUrl) {
+        redirectUrl = response.data.redirectUrl
+      }
     } finally {
       localStorage.removeItem('token')
-      window.location.href = '/login'
+      window.location.href = redirectUrl
     }
   }
 
@@ -77,7 +119,7 @@ export default function Layout({ children, user }) {
                 key={item.name}
                 to={item.href}
                 className={`group flex items-center px-2 py-2 text-sm font-medium rounded-md ${
-                  location.pathname === item.href
+                  isNavItemActive(location.pathname, item.href)
                     ? 'bg-primary-100 dark:bg-primary-900 text-primary-700 dark:text-primary-300'
                     : 'text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 hover:text-gray-900 dark:hover:text-gray-100'
                 }`}
@@ -107,7 +149,7 @@ export default function Layout({ children, user }) {
                 key={item.name}
                 to={item.href}
                 className={`group flex items-center px-2 py-2 text-sm font-medium rounded-md ${
-                  location.pathname === item.href
+                  isNavItemActive(location.pathname, item.href)
                     ? 'bg-primary-100 dark:bg-primary-900 text-primary-700 dark:text-primary-300'
                     : 'text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 hover:text-gray-900 dark:hover:text-gray-100'
                 }`}
@@ -143,8 +185,13 @@ export default function Layout({ children, user }) {
                   <MoonIcon className="h-5 w-5" />
                 )}
               </button>
-              <span className="text-sm text-gray-700 dark:text-gray-300">
-                {user?.first_name} {user?.last_name}
+              <span className="text-sm text-left leading-tight">
+                <span className="block text-gray-700 dark:text-gray-300">
+                  {user?.first_name} {user?.last_name}
+                </span>
+                <span className="block text-xs text-gray-500 dark:text-gray-400">
+                  {getUserRoleLabel(user)}
+                </span>
               </span>
               <button
                 onClick={handleLogout}

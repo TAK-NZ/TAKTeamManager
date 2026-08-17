@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { PlusIcon, MagnifyingGlassIcon } from '@heroicons/react/24/outline'
 import { usersAPI } from '../services/api'
+import { formatDate } from '../utils/dateFormat'
 
 export default function Users() {
   const [searchQuery, setSearchQuery] = useState('')
@@ -119,7 +120,7 @@ export default function Users() {
                       </span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                      {user.last_login ? new Date(user.last_login).toLocaleDateString() : 'Never'}
+                      {user.last_login ? formatDate(user.last_login) : 'Never'}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                       <button className="text-primary-600 hover:text-primary-900">

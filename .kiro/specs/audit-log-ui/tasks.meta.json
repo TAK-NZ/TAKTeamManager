@@ -1,0 +1,327 @@
+{
+  "pbtResults": {},
+  "executionHistory": {
+    "1.1 Confirm `fast-check` is present in `client/package.json` devDependencies (already added by the production-hardening spec); add it if for any reason it is missing": [
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855436396
+      },
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855472948
+      },
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855640320
+      }
+    ],
+    "1.2 Implement `auditLogsAPI.getAuditLogs(filters, pageParams)` and `auditLogsAPI.buildExportUrl(filters)` in `client/src/services/api.js`, reusing the existing `joinBaseAndPath`/`validatedBase` helpers for `buildExportUrl`": [
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855438200
+      },
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855473691
+      },
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855641806
+      }
+    ],
+    "2. Checkpoint - Ensure all tests pass, ask the user if questions arise.": [
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855439924
+      },
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855853200
+      }
+    ],
+    "3.1 Add an \"Audit Log\" entry to `getNavigation(user)` in `client/src/components/Layout.jsx`, gated on `user.is_global_manager`, placed directly after the \"Global Channels\" entry inside the existing `if` block": [
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855441620
+      },
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855474388
+      },
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855643872
+      }
+    ],
+    "4.1 Create `client/src/pages/AuditLogs.jsx` with the component skeleton, the internal state described in design.md (`auditLogs`, `pagination`, `loading`, `error`, `filters`, `appliedFilters`, `teams`), and a client-side not-authorized guard that renders instead of fetching when `user.is_global_manager` is falsy": [
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855443347
+      },
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855476485
+      },
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855644856
+      }
+    ],
+    "4.2 Add the `/audit-logs` route to `client/src/App.jsx`, importing `AuditLogs` and passing `user` the same way `GlobalChannels`/`Admin` already receive it": [
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855444963
+      },
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855655159
+      },
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855787541
+      }
+    ],
+    "5. Checkpoint - Ensure all tests pass, ask the user if questions arise.": [
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855446088
+      },
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855853858
+      }
+    ],
+    "6.1 On mount, fetch `teamsAPI.getMyTeams()` with `pageSize: 200` and populate the Team_Filter_Dropdown with one option per returned team labeled by `name`; wire selecting an option to set `filters.teamId` to the selected team's `id`": [
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855447862
+      },
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855655840
+      },
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855786743
+      }
+    ],
+    "7.1 Render the Filter_Form fields (`userId`, `action`, `resourceType`, `teamId`, `startDate`, `endDate`), rendering `action`/`resourceType` as free-text inputs rather than fixed `<select>` options, with field edits updating only the draft `filters` state and issuing no request; implement \"Apply Filters\" (set `appliedFilters` from `filters`, reset page to 1, fetch) and \"Clear Filters\" (reset both `filters` and `appliedFilters` to empty, reset page to 1, fetch), submitting `startDate`/`endDate` unchanged with no cross-field validation error": [
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855449056
+      },
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855875407
+      },
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855976220
+      }
+    ],
+    "8. Checkpoint - Ensure all tests pass, ask the user if questions arise.": [
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855450248
+      },
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855991952
+      }
+    ],
+    "9.1 Wire a fetch effect that calls `auditLogsAPI.getAuditLogs(appliedFilters, { page, pageSize })` whenever `appliedFilters` or `pagination.page` changes (including the initial mount, using an empty `appliedFilters`), and render the Results_Table: `id`, `user_id` (displayed as the literal identifier, not resolved to a username), `action`, `resource_type`, `resource_id`, `details` (pretty-printed JSON), and `created_at`, in the order returned by the endpoint; render an empty-results message in place of the table when a successful response contains zero rows": [
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855451591
+      },
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855994686
+      },
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786856118280
+      }
+    ],
+    "10.1 Compute the total page count as `Math.max(1, Math.ceil(pagination.total / pagination.pageSize))`; disable \"Previous\" when the current page is 1 and \"Next\" when the current page equals the computed total; wire enabled clicks to request the corresponding page using the current `appliedFilters` and update the Results_Table": [
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855453066
+      },
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786856126431
+      },
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786856221941
+      }
+    ],
+    "11. Checkpoint - Ensure all tests pass, ask the user if questions arise.": [
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855454705
+      },
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786856237076
+      }
+    ],
+    "12.1 Render the Export_Action while `user.is_global_manager` is true; wire its click handler to build the export URL via `auditLogsAPI.buildExportUrl(appliedFilters)` and open it with `window.open(url, '_blank')` so the `/audit-logs` tab itself never navigates away": [
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855455920
+      },
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786856238587
+      },
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786856296675
+      }
+    ],
+    "13.1 Catch `getAuditLogs` rejections: set an `error` message, stop the loading indicator, and retain any previously rendered rows instead of clearing them; keep the Filter_Form and pagination controls interactive while `error` is set; clear `error` on the next successful request triggered by re-applying filters or changing the page": [
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855457192
+      },
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786856297806
+      },
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786856386515
+      }
+    ],
+    "14. Checkpoint - Ensure all tests pass, ask the user if questions arise.": [
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855458431
+      },
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786856405176
+      }
+    ],
+    "16. Final checkpoint - Ensure all tests pass, ask the user if questions arise.": [
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855459757
+      },
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786856432437
+      }
+    ],
+    "1. Add `auditLogsAPI` to `client/src/services/api.js`": [
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855642921
+      }
+    ],
+    "3. Add \"Audit Log\" navigation entry": [
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855645645
+      }
+    ],
+    "6. Team filter dropdown": [
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855788155
+      }
+    ],
+    "4. Scaffold the `AuditLogs` page, route, and access guard": [
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855788729
+      }
+    ],
+    "7. Filter form and Applied Filters submission flow": [
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786855978194
+      }
+    ],
+    "9. Results table and list-fetch wiring": [
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786856119737
+      }
+    ],
+    "10. Pagination controls": [
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786856223322
+      }
+    ],
+    "12. CSV export action": [
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786856298696
+      }
+    ],
+    "13. List-fetch error handling": [
+      {
+        "executionId": "3084706d-5b68-4df3-b82d-488e72036bf0",
+        "chatSessionId": "sess_a53b2c69-51ae-4988-bc3b-79cf1ed1dc7b",
+        "timestamp": 1786856387956
+      }
+    ]
+  }
+}

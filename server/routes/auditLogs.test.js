@@ -107,7 +107,7 @@ describe('GET /api/audit-logs filtering and pagination', () => {
     expect(res.body.auditLogs).toEqual(rows);
     expect(res.body.pagination).toEqual({ page: 1, pageSize: 50, total: 1 });
 
-    const dataCall = pool.query.mock.calls.find(([sql]) => sql.includes('SELECT id, user_id'));
+    const dataCall = pool.query.mock.calls.find(([sql]) => sql.includes('FROM audit_logs') && !sql.includes('COUNT'));
     expect(dataCall[0]).not.toContain('WHERE');
     expect(dataCall[1]).toEqual([50, 0]);
   });
@@ -117,7 +117,7 @@ describe('GET /api/audit-logs filtering and pagination', () => {
 
     await request(app).get('/api/audit-logs').query({ userId: 7 });
 
-    const dataCall = pool.query.mock.calls.find(([sql]) => sql.includes('SELECT id, user_id'));
+    const dataCall = pool.query.mock.calls.find(([sql]) => sql.includes('FROM audit_logs') && !sql.includes('COUNT'));
     expect(dataCall[0]).toContain('user_id = $1');
     expect(dataCall[1]).toEqual(['7', 50, 0]);
   });
@@ -127,7 +127,7 @@ describe('GET /api/audit-logs filtering and pagination', () => {
 
     await request(app).get('/api/audit-logs').query({ action: 'vendor_channel_grant_created' });
 
-    const dataCall = pool.query.mock.calls.find(([sql]) => sql.includes('SELECT id, user_id'));
+    const dataCall = pool.query.mock.calls.find(([sql]) => sql.includes('FROM audit_logs') && !sql.includes('COUNT'));
     expect(dataCall[0]).toContain('action = $1');
     expect(dataCall[1]).toEqual(['vendor_channel_grant_created', 50, 0]);
   });
@@ -137,7 +137,7 @@ describe('GET /api/audit-logs filtering and pagination', () => {
 
     await request(app).get('/api/audit-logs').query({ resourceType: 'vendor_channel_grant' });
 
-    const dataCall = pool.query.mock.calls.find(([sql]) => sql.includes('SELECT id, user_id'));
+    const dataCall = pool.query.mock.calls.find(([sql]) => sql.includes('FROM audit_logs') && !sql.includes('COUNT'));
     expect(dataCall[0]).toContain('resource_type = $1');
     expect(dataCall[1]).toEqual(['vendor_channel_grant', 50, 0]);
   });
@@ -147,9 +147,9 @@ describe('GET /api/audit-logs filtering and pagination', () => {
 
     await request(app).get('/api/audit-logs').query({ teamId: 3 });
 
-    const dataCall = pool.query.mock.calls.find(([sql]) => sql.includes('SELECT id, user_id'));
-    expect(dataCall[0]).toContain("resource_type = 'team' AND resource_id = $1");
-    expect(dataCall[0]).toContain("resource_type = 'channel' AND resource_id IN");
+    const dataCall = pool.query.mock.calls.find(([sql]) => sql.includes('FROM audit_logs') && !sql.includes('COUNT'));
+    expect(dataCall[0]).toContain("audit_logs.resource_type = 'team' AND audit_logs.resource_id = $1");
+    expect(dataCall[0]).toContain("audit_logs.resource_type = 'channel' AND audit_logs.resource_id IN");
     expect(dataCall[1]).toEqual(['3', '3', 50, 0]);
   });
 
@@ -158,7 +158,7 @@ describe('GET /api/audit-logs filtering and pagination', () => {
 
     await request(app).get('/api/audit-logs').query({ startDate: '2024-01-01', endDate: '2024-01-31' });
 
-    const dataCall = pool.query.mock.calls.find(([sql]) => sql.includes('SELECT id, user_id'));
+    const dataCall = pool.query.mock.calls.find(([sql]) => sql.includes('FROM audit_logs') && !sql.includes('COUNT'));
     expect(dataCall[0]).toContain('created_at >= $1');
     expect(dataCall[0]).toContain('created_at <= $2');
     expect(dataCall[1]).toEqual(['2024-01-01', '2024-01-31', 50, 0]);
@@ -175,7 +175,7 @@ describe('GET /api/audit-logs filtering and pagination', () => {
       endDate: '2024-01-31'
     });
 
-    const dataCall = pool.query.mock.calls.find(([sql]) => sql.includes('SELECT id, user_id'));
+    const dataCall = pool.query.mock.calls.find(([sql]) => sql.includes('FROM audit_logs') && !sql.includes('COUNT'));
     expect(dataCall[0]).toContain('user_id = $1');
     expect(dataCall[0]).toContain('action = $2');
     expect(dataCall[0]).toContain('resource_type = $3');
@@ -197,7 +197,7 @@ describe('GET /api/audit-logs filtering and pagination', () => {
 
     await request(app).get('/api/audit-logs').query({ page: 3, pageSize: 10 });
 
-    const dataCall = pool.query.mock.calls.find(([sql]) => sql.includes('SELECT id, user_id'));
+    const dataCall = pool.query.mock.calls.find(([sql]) => sql.includes('FROM audit_logs') && !sql.includes('COUNT'));
     // page=3, pageSize=10 -> offset = (3-1)*10 = 20
     expect(dataCall[1]).toEqual([10, 20]);
   });
@@ -301,8 +301,8 @@ describe('GET /api/audit-logs/export.csv headers and content', () => {
     await request(app).get('/api/audit-logs/export.csv').query({ teamId: 3 });
 
     const dataCall = pool.query.mock.calls.find(([sql]) => sql.includes('SELECT id, user_id'));
-    expect(dataCall[0]).toContain("resource_type = 'team' AND resource_id = $1");
-    expect(dataCall[0]).toContain("resource_type = 'channel' AND resource_id IN");
+    expect(dataCall[0]).toContain("audit_logs.resource_type = 'team' AND audit_logs.resource_id = $1");
+    expect(dataCall[0]).toContain("audit_logs.resource_type = 'channel' AND audit_logs.resource_id IN");
     // teamId param twice, then chunk LIMIT/OFFSET.
     expect(dataCall[1]).toEqual(['3', '3', 500, 0]);
   });
@@ -317,9 +317,9 @@ describe('GET /api/audit-logs/export.csv headers and content', () => {
     });
 
     const dataCall = pool.query.mock.calls.find(([sql]) => sql.includes('SELECT id, user_id'));
-    expect(dataCall[0]).toContain('user_id = $1');
-    expect(dataCall[0]).toContain('action = $2');
-    expect(dataCall[0]).toContain('resource_type = $3');
+    expect(dataCall[0]).toContain('audit_logs.user_id = $1');
+    expect(dataCall[0]).toContain('audit_logs.action = $2');
+    expect(dataCall[0]).toContain('audit_logs.resource_type = $3');
     expect(dataCall[1]).toEqual(['7', 'vendor_channel_grant_created', 'vendor_channel_grant', 500, 0]);
   });
 

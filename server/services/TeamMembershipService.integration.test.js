@@ -130,14 +130,11 @@ describe('Property 15: Team membership add/remove is a round trip (Requirements 
       await pool.query('DELETE FROM users WHERE id = ANY($1)', [createdUserIds]);
     }
     await pool.query('DELETE FROM teams WHERE id = ANY($1)', [[teamAId, teamBId]]);
-
-    await pool.end();
-
-    process.env.DB_HOST = ORIGINAL_ENV.DB_HOST;
-    process.env.DB_PORT = ORIGINAL_ENV.DB_PORT;
-    process.env.DB_NAME = ORIGINAL_ENV.DB_NAME;
-    process.env.DB_USER = ORIGINAL_ENV.DB_USER;
-    process.env.DB_PASSWORD = ORIGINAL_ENV.DB_PASSWORD;
+    // Note: pool.end() and env-var restoration are deferred to this
+    // file's single top-level afterAll (below both describe blocks), not
+    // done here -- the second describe block (channel_memberships
+    // regression test) still needs a live pool after this block's tests
+    // finish.
   });
 
   /**
@@ -224,4 +221,90 @@ describe('Property 15: Team membership add/remove is a round trip (Requirements 
       }
     }
   );
+});
+
+/**
+ * Regression test: `addUserToTeam` previously left the team's own primary
+ * channel's member count stuck at 0 even after a real user was added
+ * (visible on the team detail page, whose displayed count is
+ * `COUNT(channel_memberships.user_id)` -- see `GET /channels/team/:teamId`
+ * in `server/routes/channels.js`) because no `channel_memberships` row
+ * was ever inserted. This test seeds a REAL team WITH a real primary
+ * channel row (unlike Property 15's teams above, which have none) and
+ * proves, against real Postgres, that adding a user creates the
+ * corresponding `channel_memberships` row.
+ */
+describe('addUserToTeam creates a channel_memberships row for the team\'s real primary channel, against a real Postgres database', () => {
+  let teamId;
+  let channelId;
+  let userId;
+
+  beforeAll(async () => {
+    await pool.query('SELECT 1');
+
+    const team = await pool.query(
+      `INSERT INTO teams (name, callsign_prefix) VALUES ($1, $2) RETURNING id`,
+      ['ChannelMembershipRegression Team', 'CMR']
+    );
+    teamId = team.rows[0].id;
+
+    // A real primary channel row for this team, mirroring what
+    // Team.createTeamChannel would create (minus the Authentik call --
+    // authentik_group_id is left NULL here, which also exercises the
+    // "channel with no group id yet still gets its local row" branch of
+    // the fix).
+    const channel = await pool.query(
+      `INSERT INTO channels (name, display_name, team_id, is_primary) VALUES ($1, $2, $3, true) RETURNING id`,
+      ['cmr-team-channel', 'CMR Team Channel', teamId]
+    );
+    channelId = channel.rows[0].id;
+
+    const username = `cmr-${crypto.randomUUID()}`;
+    const user = await pool.query(
+      `INSERT INTO users (username, email) VALUES ($1, $2) RETURNING id`,
+      [username, `${username}@example.invalid`]
+    );
+    userId = user.rows[0].id;
+  });
+
+  afterAll(async () => {
+    await pool.query('DELETE FROM channel_memberships WHERE user_id = $1', [userId]);
+    await pool.query('DELETE FROM team_memberships WHERE user_id = $1', [userId]);
+    await pool.query('DELETE FROM users WHERE id = $1', [userId]);
+    await pool.query('DELETE FROM channels WHERE id = $1', [channelId]);
+    await pool.query('DELETE FROM teams WHERE id = $1', [teamId]);
+  });
+
+  it('inserts a channel_memberships row, so the channel\'s member count (COUNT query) is 1, not 0', async () => {
+    await TeamMembershipService.addUserToTeam(userId, teamId, 'member', userId);
+
+    const membershipRow = await pool.query(
+      'SELECT * FROM channel_memberships WHERE channel_id = $1 AND user_id = $2',
+      [channelId, userId]
+    );
+    expect(membershipRow.rows).toHaveLength(1);
+    expect(membershipRow.rows[0].permission).toBe('read_write');
+
+    // Exact query used by GET /channels/team/:teamId to compute the
+    // displayed member_count.
+    const countResult = await pool.query(
+      `SELECT c.id, COUNT(cm.user_id) as member_count
+       FROM channels c
+       LEFT JOIN channel_memberships cm ON c.id = cm.channel_id
+       WHERE c.id = $1
+       GROUP BY c.id`,
+      [channelId]
+    );
+    expect(Number(countResult.rows[0].member_count)).toBe(1);
+  });
+});
+
+afterAll(async () => {
+  await pool.end();
+
+  process.env.DB_HOST = ORIGINAL_ENV.DB_HOST;
+  process.env.DB_PORT = ORIGINAL_ENV.DB_PORT;
+  process.env.DB_NAME = ORIGINAL_ENV.DB_NAME;
+  process.env.DB_USER = ORIGINAL_ENV.DB_USER;
+  process.env.DB_PASSWORD = ORIGINAL_ENV.DB_PASSWORD;
 });

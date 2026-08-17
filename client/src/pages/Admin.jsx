@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { UserGroupIcon, UsersIcon, CogIcon, PencilIcon, CheckIcon, XMarkIcon } from '@heroicons/react/24/outline'
-import axios from 'axios'
-import { configAPI } from '../services/api'
+import { configAPI, usersAPI, teamsAPI, syncAPI } from '../services/api'
+import { formatDateTime } from '../utils/dateFormat'
 
 export default function Admin({ user }) {
   const [organizationMappings, setOrganizationMappings] = useState({})
@@ -14,13 +14,21 @@ export default function Admin({ user }) {
   const [tempConfigValue, setTempConfigValue] = useState('')
   
   useEffect(() => {
+    // Every raw axios.* call in this file previously sent
+    // `Authorization: Bearer ${localStorage.getItem('token')}` -- but this
+    // app has never stored a token in localStorage (auth lives solely in
+    // the httpOnly `tak_session` cookie set by the server; see
+    // server/middleware/auth.js), so that header was always literally
+    // "Bearer null", and none of these raw calls set
+    // `withCredentials: true` either, so the real session cookie was never
+    // sent. Every one of these calls has been failing with 401 the entire
+    // time -- which is why the whole page's stats cards and the Color
+    // Mappings/Role Descriptions tabs never actually loaded real data.
+    // Replaced throughout with the shared, correctly-configured `api`
+    // axios instance via its API wrapper functions.
     const fetchConfig = async () => {
       try {
-        const response = await axios.get('/api/config/color-mappings', {
-          headers: {
-            Authorization: `Bearer ${localStorage.getItem('token')}`
-          }
-        })
+        const response = await configAPI.getColorMappings()
         setOrganizationMappings(response.data.colorMappings)
         setRoleDescriptions(response.data.roleDescriptions)
       } catch (error) {
@@ -30,16 +38,18 @@ export default function Admin({ user }) {
 
     const fetchStats = async () => {
       try {
-        const usersResponse = await axios.get('/api/users', {
-          headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
-        })
-        const teamsResponse = await axios.get('/api/teams/my-teams', {
-          headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
-        })
+        const [usersResponse, teamsResponse] = await Promise.all([
+          usersAPI.getAll(),
+          teamsAPI.getMyTeams()
+        ])
         
+        // Both endpoints are paginated (default pageSize 50 -- see
+        // server/middleware/pagination.js) -- use pagination.total, not
+        // the returned array's .length, so this stat doesn't silently
+        // undercount once there are more than one page of users/teams.
         setStats({
-          totalUsers: usersResponse.data.users?.length || 0,
-          totalTeams: teamsResponse.data.teams?.length || 0
+          totalUsers: usersResponse.data.pagination?.total ?? usersResponse.data.users?.length ?? 0,
+          totalTeams: teamsResponse.data.pagination?.total ?? teamsResponse.data.teams?.length ?? 0
         })
       } catch (error) {
         console.error('Failed to fetch stats:', error)
@@ -48,9 +58,7 @@ export default function Admin({ user }) {
 
     const fetchSyncStatus = async () => {
       try {
-        const response = await axios.get('/api/sync/status', {
-          headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
-        })
+        const response = await syncAPI.getStatus()
         setSyncStatus(response.data)
       } catch (error) {
         console.error('Failed to fetch sync status:', error)
@@ -138,14 +146,10 @@ export default function Admin({ user }) {
   const triggerManualSync = async () => {
     setSyncing(true)
     try {
-      await axios.post('/api/sync/users', {}, {
-        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
-      })
+      await syncAPI.triggerUserSync()
       // Refresh sync status after a short delay
       setTimeout(async () => {
-        const response = await axios.get('/api/sync/status', {
-          headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
-        })
+        const response = await syncAPI.getStatus()
         setSyncStatus(response.data)
         setSyncing(false)
       }, 2000)
@@ -225,7 +229,7 @@ export default function Admin({ user }) {
                   </p>
                   {syncStatus?.last_sync && !syncing && (
                     <p className="text-xs text-gray-500 dark:text-gray-400">
-                      {new Date(syncStatus.last_sync).toLocaleTimeString()}
+                      {formatDateTime(syncStatus.last_sync)}
                     </p>
                   )}
                 </div>

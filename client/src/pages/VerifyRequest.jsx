@@ -1,11 +1,19 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
+import { configAPI } from '../services/api';
 
 export default function VerifyRequest() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const [status, setStatus] = useState('verifying');
   const [message, setMessage] = useState('');
+  const [authentikOrigin, setAuthentikOrigin] = useState(null);
+
+  useEffect(() => {
+    configAPI.getPublic()
+      .then((response) => setAuthentikOrigin(response.data?.authentik_origin || null))
+      .catch(() => setAuthentikOrigin(null));
+  }, []);
 
   useEffect(() => {
     const token = searchParams.get('token');
@@ -17,6 +25,18 @@ export default function VerifyRequest() {
 
     verifyToken(token);
   }, [searchParams]);
+
+  // Navigates to Authentik's login page (the real sign-in destination) when
+  // known, falling back to the app's own "/" route -- which renders the
+  // Login page for an unauthenticated visitor -- if the public config
+  // hasn't loaded/failed to load.
+  const goToLogin = () => {
+    if (authentikOrigin) {
+      window.location.href = authentikOrigin;
+    } else {
+      navigate('/');
+    }
+  };
 
   const verifyToken = async (token) => {
     try {
@@ -63,7 +83,7 @@ export default function VerifyRequest() {
               <h3 className="mt-4 text-lg font-medium text-gray-900">Verification Successful</h3>
               <p className="mt-2 text-sm text-gray-600">{message}</p>
               <button
-                onClick={() => navigate('/')}
+                onClick={goToLogin}
                 className="mt-4 w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
               >
                 Return to Home
@@ -81,7 +101,7 @@ export default function VerifyRequest() {
               <h3 className="mt-4 text-lg font-medium text-gray-900">Verification Failed</h3>
               <p className="mt-2 text-sm text-gray-600">{message}</p>
               <button
-                onClick={() => navigate('/')}
+                onClick={goToLogin}
                 className="mt-4 w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-gray-600 hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500"
               >
                 Return to Home

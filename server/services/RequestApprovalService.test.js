@@ -30,11 +30,6 @@ jest.mock('./TeamMembershipService', () => ({
   addUserToTeam: jest.fn()
 }));
 
-jest.mock('./userAttributes', () => ({
-  computeCallsignAttributes: jest.fn(),
-  updateUserAttributes: jest.fn()
-}));
-
 jest.mock('./EmailService');
 
 jest.mock('./EventPublisher', () => ({
@@ -49,7 +44,6 @@ jest.mock('../middleware/requestContext', () => ({
 const pool = require('../config/database');
 const UserProvisioningService = require('./UserProvisioningService');
 const TeamMembershipService = require('./TeamMembershipService');
-const UserAttributesService = require('./userAttributes');
 const EmailService = require('./EmailService');
 const EventPublisher = require('./EventPublisher');
 const RequestApprovalService = require('./RequestApprovalService');
@@ -631,14 +625,14 @@ describe('RequestApprovalService.approveRequest - team_change end-to-end transac
 
 /**
  * Unit tests for `RequestApprovalService.processApprovedRequest`'s
- * `name_change` branch (Requirement 18.4 / task 38.4): performs ONLY
- * local database writes (`users`/`user_cache`) on the already-open
- * transactional `client`. The Authentik name/callsign PATCH calls are
- * NOT made here -- they already happened in Phase 1, via
- * `updateAuthentikNameAndCallsignForNameChange`, before this transaction
- * opened. The precomputed `nameChangeCallsignAttributes` (from Phase 1)
- * is passed in via the options object, mirroring how
- * `newAccountAuthentikUser` is threaded through for `new_account`.
+ * `name_change` branch (Requirement 18.4 / task 38.4, updated by task
+ * 11.1 / Requirement 11.8): performs ONLY local database writes
+ * (`users`/`user_cache`) on the already-open transactional `client`. The
+ * Authentik name PATCH call is NOT made here -- it already happened in
+ * Phase 1, via `updateAuthentikNameForNameChange`, before this
+ * transaction opened. Per Requirement 11.8, a name change no longer
+ * regenerates any callsign/color/role attributes, so this branch never
+ * touches `tak_callsign`/`tak_color`/`tak_role` on `user_cache`.
  */
 describe('RequestApprovalService.processApprovedRequest - name_change', () => {
   let service;
@@ -648,7 +642,7 @@ describe('RequestApprovalService.processApprovedRequest - name_change', () => {
     service = new RequestApprovalService();
   });
 
-  it('updates users and user_cache (incl. callsign attributes) on the open transactional client, without any Authentik call', async () => {
+  it('updates users and user_cache name fields on the open transactional client, without any Authentik call or callsign regeneration', async () => {
     const client = {
       query: jest.fn().mockResolvedValue({ rowCount: 1, rows: [{ authentik_user_id: 4242 }] })
     };
@@ -665,10 +659,7 @@ describe('RequestApprovalService.processApprovedRequest - name_change', () => {
           requested_first_name: 'Jane',
           requested_last_name: 'Doe'
         },
-        {
-          adminId: 9,
-          nameChangeCallsignAttributes: { callsign: 'ALPHA-J Doe', color: '#3B82F6', role: 'Team Member' }
-        }
+        { adminId: 9 }
       );
 
       expect(client.query).toHaveBeenCalledWith(
@@ -676,35 +667,13 @@ describe('RequestApprovalService.processApprovedRequest - name_change', () => {
         ['Jane', 'Doe', 42]
       );
       expect(client.query).toHaveBeenCalledWith(
-        expect.stringContaining('UPDATE user_cache SET first_name = $1, last_name = $2, tak_callsign = $3, tak_color = $4, tak_role = $5'),
-        ['Jane', 'Doe', 'ALPHA-J Doe', '#3B82F6', 'Team Member', 4242]
+        expect.stringContaining('UPDATE user_cache SET first_name = $1, last_name = $2 WHERE authentik_id = $3'),
+        ['Jane', 'Doe', 4242]
       );
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
       global.fetch = originalFetch;
     }
-  });
-
-  it('updates only name fields on user_cache when no callsign attributes were computed (user has no team)', async () => {
-    const client = {
-      query: jest.fn().mockResolvedValue({ rowCount: 1, rows: [{ authentik_user_id: 4242 }] })
-    };
-
-    await service.processApprovedRequest(
-      client,
-      {
-        request_type: 'name_change',
-        existing_user_id: 42,
-        requested_first_name: 'Jane',
-        requested_last_name: 'Doe'
-      },
-      { adminId: 9, nameChangeCallsignAttributes: null }
-    );
-
-    expect(client.query).toHaveBeenCalledWith(
-      expect.stringContaining('UPDATE user_cache SET first_name = $1, last_name = $2 WHERE authentik_id = $3'),
-      ['Jane', 'Doe', 4242]
-    );
   });
 
   it('throws when the users UPDATE affects zero rows (user not found), so the caller rolls back', async () => {
@@ -721,19 +690,21 @@ describe('RequestApprovalService.processApprovedRequest - name_change', () => {
           requested_first_name: 'Jane',
           requested_last_name: 'Doe'
         },
-        { adminId: 9, nameChangeCallsignAttributes: null }
+        { adminId: 9 }
       )
     ).rejects.toThrow(/user 999 not found/);
   });
 });
 
 /**
- * Unit tests for `RequestApprovalService.updateAuthentikNameAndCallsignForNameChange`
- * (Requirement 18.4 / task 38.4): the Phase 1 (no open transaction)
- * helper that performs the Authentik name PATCH and, if the user has a
- * team, computes and pushes the regenerated callsign attributes.
+ * Unit tests for `RequestApprovalService.updateAuthentikNameForNameChange`
+ * (Requirement 18.4 / task 38.4, updated by task 11.1 / Requirement
+ * 11.8): the Phase 1 (no open transaction) helper that performs ONLY the
+ * Authentik DISPLAY-name PATCH -- a name change never computes or pushes
+ * a regenerated callsign/color/role, since none of those attributes
+ * derive from the live name anymore.
  */
-describe('RequestApprovalService.updateAuthentikNameAndCallsignForNameChange', () => {
+describe('RequestApprovalService.updateAuthentikNameForNameChange', () => {
   let service;
   let originalFetch;
 
@@ -753,28 +724,19 @@ describe('RequestApprovalService.updateAuthentikNameAndCallsignForNameChange', (
     requested_last_name: 'Doe'
   };
 
-  it('PATCHes the Authentik user name, then computes and pushes the regenerated callsign when the user has a team', async () => {
+  it('PATCHes the Authentik user name and does nothing else', async () => {
     global.fetch = jest.fn().mockResolvedValueOnce({ ok: true, json: async () => ({}) });
 
     pool.query.mockImplementation((sql) => {
       if (sql.includes('SELECT authentik_user_id FROM users')) {
         return Promise.resolve({ rows: [{ authentik_user_id: 4242 }] });
       }
-      if (sql.includes('SELECT team_id FROM team_memberships')) {
-        return Promise.resolve({ rows: [{ team_id: 7 }] });
-      }
       return Promise.resolve({ rows: [] });
     });
 
-    UserAttributesService.computeCallsignAttributes.mockResolvedValue({
-      callsign: 'ALPHA-J Doe',
-      color: '#3B82F6',
-      role: 'Team Member'
-    });
-    UserAttributesService.updateUserAttributes.mockResolvedValue(true);
+    await service.updateAuthentikNameForNameChange(NAME_CHANGE_REQUEST);
 
-    const result = await service.updateAuthentikNameAndCallsignForNameChange(NAME_CHANGE_REQUEST);
-
+    expect(global.fetch).toHaveBeenCalledTimes(1);
     expect(global.fetch).toHaveBeenCalledWith(
       expect.stringContaining('/api/v3/core/users/4242/'),
       expect.objectContaining({
@@ -782,33 +744,6 @@ describe('RequestApprovalService.updateAuthentikNameAndCallsignForNameChange', (
         body: JSON.stringify({ name: 'Jane Doe', first_name: 'Jane', last_name: 'Doe' })
       })
     );
-    expect(UserAttributesService.computeCallsignAttributes).toHaveBeenCalledWith('Jane', 'Doe', 7);
-    expect(UserAttributesService.updateUserAttributes).toHaveBeenCalledWith(4242, {
-      callsign: 'ALPHA-J Doe',
-      color: '#3B82F6',
-      role: 'Team Member'
-    });
-    expect(result).toEqual({ callsign: 'ALPHA-J Doe', color: '#3B82F6', role: 'Team Member' });
-  });
-
-  it('skips callsign computation/push when the user has no team, returning null', async () => {
-    global.fetch = jest.fn().mockResolvedValueOnce({ ok: true, json: async () => ({}) });
-
-    pool.query.mockImplementation((sql) => {
-      if (sql.includes('SELECT authentik_user_id FROM users')) {
-        return Promise.resolve({ rows: [{ authentik_user_id: 4242 }] });
-      }
-      if (sql.includes('SELECT team_id FROM team_memberships')) {
-        return Promise.resolve({ rows: [] });
-      }
-      return Promise.resolve({ rows: [] });
-    });
-
-    const result = await service.updateAuthentikNameAndCallsignForNameChange(NAME_CHANGE_REQUEST);
-
-    expect(result).toBeNull();
-    expect(UserAttributesService.computeCallsignAttributes).not.toHaveBeenCalled();
-    expect(UserAttributesService.updateUserAttributes).not.toHaveBeenCalled();
   });
 
   it('throws without calling fetch when the user cannot be resolved', async () => {
@@ -821,7 +756,7 @@ describe('RequestApprovalService.updateAuthentikNameAndCallsignForNameChange', (
     global.fetch = jest.fn();
 
     await expect(
-      service.updateAuthentikNameAndCallsignForNameChange(NAME_CHANGE_REQUEST)
+      service.updateAuthentikNameForNameChange(NAME_CHANGE_REQUEST)
     ).rejects.toThrow(/user 42 not found/);
 
     expect(global.fetch).not.toHaveBeenCalled();
@@ -838,7 +773,7 @@ describe('RequestApprovalService.updateAuthentikNameAndCallsignForNameChange', (
     });
 
     await expect(
-      service.updateAuthentikNameAndCallsignForNameChange(NAME_CHANGE_REQUEST)
+      service.updateAuthentikNameForNameChange(NAME_CHANGE_REQUEST)
     ).rejects.toThrow('Failed to update user name in Authentik');
   });
 });
@@ -846,13 +781,13 @@ describe('RequestApprovalService.updateAuthentikNameAndCallsignForNameChange', (
 /**
  * Integration-style test (still using mocked `pool`/`client`, per this
  * file's existing pattern) verifying `approveRequest`'s `name_change`
- * path end-to-end: BOTH Authentik calls (name PATCH + callsign PATCH)
- * happen in Phase 1, strictly before `pool.connect()` is called; the
- * local `users`/`user_cache` writes happen inside Phase 2's transaction
- * and commit together with the status update; and a Phase 1 failure
- * (the Authentik name update) causes `approveRequest` to reject cleanly
- * without ever opening a transaction, while a Phase 2 failure rolls
- * back.
+ * path end-to-end: the Authentik name PATCH happens in Phase 1, strictly
+ * before `pool.connect()` is called; the local `users`/`user_cache`
+ * writes happen inside Phase 2's transaction and commit together with
+ * the status update; and a Phase 1 failure (the Authentik name update)
+ * causes `approveRequest` to reject cleanly without ever opening a
+ * transaction, while a Phase 2 failure rolls back. No callsign
+ * regeneration occurs anywhere in this flow (Requirement 11.8).
  */
 describe('RequestApprovalService.approveRequest - name_change end-to-end Phase 1 / Phase 2 split', () => {
   let service;
@@ -879,7 +814,7 @@ describe('RequestApprovalService.approveRequest - name_change end-to-end Phase 1
     global.fetch = originalFetch;
   });
 
-  it('performs both Authentik calls before BEGIN, then commits the local writes inside the transaction', async () => {
+  it('performs the Authentik name PATCH before BEGIN, then commits the local writes inside the transaction', async () => {
     global.fetch = jest.fn().mockResolvedValueOnce({ ok: true, json: async () => ({}) });
 
     pool.query.mockImplementation((sql) => {
@@ -889,18 +824,8 @@ describe('RequestApprovalService.approveRequest - name_change end-to-end Phase 1
       if (sql.includes('SELECT authentik_user_id FROM users')) {
         return Promise.resolve({ rows: [{ authentik_user_id: 4242 }] });
       }
-      if (sql.includes('SELECT team_id FROM team_memberships')) {
-        return Promise.resolve({ rows: [{ team_id: 7 }] });
-      }
       return Promise.resolve({ rows: [] });
     });
-
-    UserAttributesService.computeCallsignAttributes.mockResolvedValue({
-      callsign: 'ALPHA-J Doe',
-      color: '#3B82F6',
-      role: 'Team Member'
-    });
-    UserAttributesService.updateUserAttributes.mockResolvedValue(true);
 
     const mockClient = {
       query: jest.fn().mockImplementation((sql) => {
@@ -940,8 +865,8 @@ describe('RequestApprovalService.approveRequest - name_change end-to-end Phase 1
       ['Jane', 'Doe', 42]
     );
     expect(mockClient.query).toHaveBeenCalledWith(
-      expect.stringContaining('UPDATE user_cache SET first_name = $1, last_name = $2, tak_callsign = $3, tak_color = $4, tak_role = $5'),
-      ['Jane', 'Doe', 'ALPHA-J Doe', '#3B82F6', 'Team Member', 4242]
+      expect.stringContaining('UPDATE user_cache SET first_name = $1, last_name = $2 WHERE authentik_id = $3'),
+      ['Jane', 'Doe', 4242]
     );
     expect(mockClient.query).toHaveBeenCalledWith('COMMIT');
     expect(mockClient.release).toHaveBeenCalledTimes(1);
@@ -975,9 +900,6 @@ describe('RequestApprovalService.approveRequest - name_change end-to-end Phase 1
       }
       if (sql.includes('SELECT authentik_user_id FROM users')) {
         return Promise.resolve({ rows: [{ authentik_user_id: 4242 }] });
-      }
-      if (sql.includes('SELECT team_id FROM team_memberships')) {
-        return Promise.resolve({ rows: [] }); // no team -> null callsign attributes
       }
       return Promise.resolve({ rows: [] });
     });

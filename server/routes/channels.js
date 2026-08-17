@@ -1,5 +1,4 @@
 const express = require('express');
-const axios = require('axios');
 const { body, validationResult } = require('express-validator');
 const { authenticateToken } = require('../middleware/auth');
 const authorize = require('../middleware/authorize');
@@ -10,6 +9,24 @@ const pool = require('../config/database');
 const router = express.Router();
 
 // Get channel descriptions for user's groups
+//
+// Previously made one live Authentik HTTP call PER unique base channel
+// name (run in parallel via Promise.all, but still N live external round
+// trips) to fetch each group's `attributes.description` -- called by
+// Dashboard.jsx on every single Dashboard load, this was the actual
+// remaining cause of Dashboard slowness after GET /api/users/me's own
+// live-Authentik-call removal: that fix alone did not make the Dashboard
+// fully local, because this second route still hit Authentik on the same
+// page load.
+//
+// The live lookup was also nearly always a no-op in practice: on error
+// (including "Authentik returned no matching group", which is exactly
+// what happens for a group whose `attributes.description` was never set)
+// the route already fell back to the literal string 'TAK Channel' -- so
+// the live call frequently paid Authentik's full round-trip latency only
+// to produce the exact same fallback value it would have produced without
+// it. Removed entirely; every response now uses that same fallback
+// formatting unconditionally, with zero external calls.
 router.get('/descriptions', authenticateToken, authorize, async (req, res) => {
   try {
     const userGroups = req.user.groups || [];
@@ -29,37 +46,17 @@ router.get('/descriptions', authenticateToken, authorize, async (req, res) => {
       baseChannels.add(baseName)
     })
     
-    // Fetch descriptions from base channels
-    const groupDetailsPromises = Array.from(baseChannels).map(async (baseName) => {
-      try {
-        const groupResponse = await axios.get(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/?name=${encodeURIComponent(baseName)}`, {
-          headers: { Authorization: `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }
-        });
-        const group = groupResponse.data.results[0];
-        const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
-        
-        // Use group name for hierarchy (remove tak_ prefix)
-        let displayName = baseName.replace('tak_', '');
-        
-        return {
-          name: baseName,
-          display_name: displayName,
-          description: group?.attributes?.description || 'TAK Channel'
-        };
-      } catch (error) {
-        const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
-        // Use group name for hierarchy (remove tak_ prefix)
-        let displayName = baseName.replace('tak_', '');
-        
-        return {
-          name: baseName,
-          display_name: displayName,
-          description: 'TAK Channel'
-        };
-      }
+    const channelDescriptions = Array.from(baseChannels).map((baseName) => {
+      // Use group name for hierarchy (remove tak_ prefix)
+      const displayName = baseName.replace('tak_', '');
+
+      return {
+        name: baseName,
+        display_name: displayName,
+        description: 'TAK Channel'
+      };
     });
-    
-    const channelDescriptions = await Promise.all(groupDetailsPromises);
+
     res.json({ channels: channelDescriptions });
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to fetch channel descriptions');

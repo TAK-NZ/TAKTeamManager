@@ -4,7 +4,6 @@ const { authenticateToken } = require('../middleware/auth');
 const authorize = require('../middleware/authorize');
 const { getLogger } = require('../middleware/requestContext');
 const GlobalChannelService = require('../services/GlobalChannelService');
-const pool = require('../config/database');
 const router = express.Router();
 
 const globalChannelService = new GlobalChannelService();
@@ -47,16 +46,14 @@ router.post('/bch', authenticateToken, authorize, [
   try {
     const { name, description } = req.body;
     
-    // Get local user ID
-    const userResult = await pool.query(
-      'SELECT id FROM users WHERE authentik_user_id = $1',
-      [req.user.id]
-    );
-    
+    // req.user.userId is already the local users.id (see
+    // server/middleware/auth.js) -- no separate lookup by Authentik id is
+    // needed. The prior code looked this up via `req.user.id` (the
+    // Authentik id), which is a different id space entirely.
     const result = await globalChannelService.createBchChannel({
       name,
       description
-    }, userResult.rows[0].id);
+    }, req.user.userId);
     
     res.status(201).json({
       message: 'BCH channel created successfully',
@@ -82,16 +79,12 @@ router.post('/region', authenticateToken, authorize, [
   try {
     const { name, description } = req.body;
     
-    // Get local user ID
-    const userResult = await pool.query(
-      'SELECT id FROM users WHERE authentik_user_id = $1',
-      [req.user.id]
-    );
-    
+    // req.user.userId is already the local users.id -- see comment on the
+    // BCH create route above.
     const result = await globalChannelService.createRegionChannel({
       name,
       description
-    }, userResult.rows[0].id);
+    }, req.user.userId);
     
     res.status(201).json({
       message: 'Region channel created successfully',
@@ -108,15 +101,11 @@ router.get('/bch/:channelId/credentials', authenticateToken, authorize, async (r
   try {
     const { channelId } = req.params;
     
-    // Get local user ID
-    const userResult = await pool.query(
-      'SELECT id FROM users WHERE authentik_user_id = $1',
-      [req.user.id]
-    );
-    
+    // req.user.userId is already the local users.id -- see comment on the
+    // BCH create route above.
     const credentials = await globalChannelService.getBchChannelCredentials(
       channelId,
-      userResult.rows[0].id
+      req.user.userId
     );
     
     res.json({ credentials });
@@ -156,15 +145,12 @@ router.put('/bch/:channelId', authenticateToken, authorize, [
     const { channelId } = req.params;
     const { name, description } = req.body;
     
-    const userResult = await pool.query(
-      'SELECT id FROM users WHERE authentik_user_id = $1',
-      [req.user.id]
-    );
-    
+    // req.user.userId is already the local users.id -- see comment on the
+    // BCH create route above.
     await globalChannelService.updateBchChannel(channelId, {
       name,
       description
-    }, userResult.rows[0].id);
+    }, req.user.userId);
     
     res.json({ message: 'BCH channel updated successfully' });
   } catch (error) {
@@ -187,15 +173,12 @@ router.put('/region/:channelId', authenticateToken, authorize, [
     const { channelId } = req.params;
     const { name, description } = req.body;
     
-    const userResult = await pool.query(
-      'SELECT id FROM users WHERE authentik_user_id = $1',
-      [req.user.id]
-    );
-    
+    // req.user.userId is already the local users.id -- see comment on the
+    // BCH create route above.
     await globalChannelService.updateRegionChannel(channelId, {
       name,
       description
-    }, userResult.rows[0].id);
+    }, req.user.userId);
     
     res.json({ message: 'Region channel updated successfully' });
   } catch (error) {
@@ -207,12 +190,9 @@ router.put('/region/:channelId', authenticateToken, authorize, [
 // Sync existing channels from Authentik (global managers only)
 router.post('/sync-existing', authenticateToken, authorize, async (req, res) => {
   try {
-    const userResult = await pool.query(
-      'SELECT id FROM users WHERE authentik_user_id = $1',
-      [req.user.id]
-    );
-    
-    const result = await globalChannelService.syncExistingChannels(userResult.rows[0].id);
+    // req.user.userId is already the local users.id -- see comment on the
+    // BCH create route above.
+    const result = await globalChannelService.syncExistingChannels(req.user.userId);
     
     res.json({
       message: 'Existing channels synced successfully',
@@ -234,15 +214,12 @@ router.delete('/:channelType/:channelId', authenticateToken, authorize, async (r
       return res.status(400).json({ error: 'Invalid channel type' });
     }
     
-    const userResult = await pool.query(
-      'SELECT id FROM users WHERE authentik_user_id = $1',
-      [req.user.id]
-    );
-    
+    // req.user.userId is already the local users.id -- see comment on the
+    // BCH create route above.
     await globalChannelService.deleteGlobalChannel(
       channelId,
       channelType,
-      userResult.rows[0].id
+      req.user.userId
     );
     
     res.json({ message: 'Global channel deleted successfully' });

@@ -1,5 +1,8 @@
 const pool = require('../config/database');
 const logger = require('../config/logger').createLogger('userAttributes');
+const Team = require('../models/Team');
+const CallsignService = require('./CallsignService');
+const { MAX_TEAM_DEPTH } = require('../config/constants');
 
 class UserAttributesService {
   static splitFullName(fullName) {
@@ -13,146 +16,160 @@ class UserAttributesService {
     };
   }
 
-  static async generateCallsign(userId, teamId) {
-    try {
-      // Get user info
-      const userResult = await pool.query(
-        'SELECT first_name, last_name FROM users WHERE id = $1',
-        [userId]
-      );
-      
-      if (userResult.rows.length === 0) return null;
-      
-      const user = userResult.rows[0];
-      
-      return await this.computeCallsignAttributes(user.first_name, user.last_name, teamId);
-    } catch (error) {
-      logger.error({ err: error }, 'Error generating callsign');
-      return null;
-    }
-  }
-
   /**
-   * Requirement 18.4 (task 38.4): the pure, name-values-in/attributes-out
-   * portion of `generateCallsign`'s logic, extracted so a caller that
-   * already has the user's (possibly not-yet-persisted) `firstName`/
-   * `lastName` values on hand -- e.g. `RequestApprovalService`'s
-   * `name_change` approval branch, which computes the new callsign
-   * BEFORE the corresponding `users` table write has been committed --
-   * can compute the callsign/color/role attributes without requiring a
-   * `users` table read for the name. This still reads the team hierarchy
-   * from the database (a read, not a write, so no transactional
-   * ordering concern applies here) but takes the name values as
-   * parameters instead.
+   * Requirement 11.2/3.4/5.4/5.5/8.4 (task 11.1): thin, stable wrapper
+   * kept for backward compatibility with its existing callers
+   * (`server/routes/users.js`'s two call sites,
+   * `updateTeamUserAttributes` below). Since `computeCallsignAttributes`
+   * now takes `(userId, teamId)` directly and does its own `users`
+   * lookup (including the "user not found -> null" behavior), this is a
+   * direct delegation with no additional logic of its own.
    *
-   * `generateCallsign` above is now a thin wrapper: it reads
-   * `first_name`/`last_name` from `users` for the given `userId` and
-   * delegates here.
-   *
-   * @param {string} firstNameInput
-   * @param {string} lastNameInput
+   * @param {number} userId
    * @param {number} teamId
    * @returns {Promise<{callsign: string, color: string, role: string}|null>}
    */
-  static async computeCallsignAttributes(firstNameInput, lastNameInput, teamId) {
+  static async generateCallsign(userId, teamId) {
+    return this.computeCallsignAttributes(userId, teamId);
+  }
+
+  /**
+   * Requirement 3.4, 5.4, 5.5, 8.4 (task 11.1): computes a user's
+   * callsign/color/role attributes from their Ancestor_Chain.
+   *
+   * Per Requirement 8.4/11.2, the Name segment of a generated callsign is
+   * ALWAYS that user's STORED `callsign_suffix` value -- never computed
+   * live from a name. This function therefore takes a `userId` (not name
+   * strings) and looks up the stored `callsign_suffix` itself.
+   *
+   * Steps:
+   * 1. Look up the user's stored `callsign_suffix` (Requirement 11.2). If
+   *    no user row is found, return `null`.
+   * 2. Resolve the Ancestor_Chain via `Team.getAncestorChain(teamId)`. If
+   *    empty (team not found), return `null`.
+   * 3. The Organisation is `ancestorChain[0]` (depth 0, root-first per
+   *    `getAncestorChain`'s contract). Its `callsign_level_selection`
+   *    defaults to `[1..MAX_TEAM_DEPTH]` when null/undefined
+   *    (Requirement 5.3).
+   * 4. Filter the ancestor chain's `depth >= 1` rows to those whose
+   *    `depth` is a member of the resolved Callsign_Level_Selection AND
+   *    whose `callsign_prefix` is non-empty (Requirement 5.4/5.5) -- a
+   *    selected depth absent from the chain (a shallower branch) is
+   *    simply skipped, without error.
+   * 5. Assemble the callsign via `CallsignService.assembleCallsign`.
+   * 6. Return `{ callsign, color: ancestorChain[0].color, role: 'Team
+   *    Member' }` -- color continues to come from the Organisation
+   *    (Requirement 3.4); the `role` hardcoding is pre-existing behavior
+   *    this task does not touch (Requirement 13's TAK_Role work is a
+   *    separate later phase).
+   *
+   * This function no longer reads `callsign_subteam_depth` or
+   * `callsign_name_format` at generation time (Requirement 3.4/8.4).
+   *
+   * @param {number} userId
+   * @param {number} teamId
+   * @returns {Promise<{callsign: string, color: string, role: string}|null>}
+   */
+  static async computeCallsignAttributes(userId, teamId) {
     try {
-      // Get team hierarchy from root to target team
-      const teamResult = await pool.query(`
-        WITH RECURSIVE team_path AS (
-          -- Start from target team and go up to root
-          SELECT id, name, callsign_prefix, parent_team_id,
-                 callsign_subteam_depth, callsign_name_format, color,
-                 ARRAY[id] as path
-          FROM teams WHERE id = $1
-          UNION ALL
-          SELECT t.id, t.name, t.callsign_prefix, t.parent_team_id,
-                 t.callsign_subteam_depth, t.callsign_name_format, t.color,
-                 t.id || tp.path
-          FROM teams t
-          JOIN team_path tp ON t.id = tp.parent_team_id
-        ),
-        root_team AS (
-          SELECT * FROM team_path WHERE parent_team_id IS NULL
+      const userResult = await pool.query(
+        'SELECT callsign_suffix FROM users WHERE id = $1',
+        [userId]
+      );
+
+      if (userResult.rows.length === 0) return null;
+
+      const { callsign_suffix: callsignSuffix } = userResult.rows[0];
+
+      const ancestorChain = await Team.getAncestorChain(teamId);
+
+      if (ancestorChain.length === 0) return null;
+
+      const organisation = ancestorChain[0];
+
+      const callsignLevelSelection =
+        organisation.callsign_level_selection == null
+          ? Array.from({ length: MAX_TEAM_DEPTH }, (_, i) => i + 1)
+          : organisation.callsign_level_selection;
+
+      const teamSegmentPrefixes = ancestorChain
+        .filter(
+          (team) =>
+            team.depth >= 1 &&
+            callsignLevelSelection.includes(team.depth) &&
+            !!team.callsign_prefix
         )
-        SELECT t.id, t.name, t.callsign_prefix, t.parent_team_id,
-               rt.callsign_subteam_depth, rt.callsign_name_format, rt.color,
-               array_position(rt.path, t.id) as position
-        FROM root_team rt,
-             unnest(rt.path) WITH ORDINALITY AS u(team_id, pos)
-        JOIN teams t ON t.id = u.team_id
-        ORDER BY u.pos
-      `, [teamId]);
-      
-      if (teamResult.rows.length === 0) return null;
-      
-      const rootTeam = teamResult.rows[0];
-      const teamPath = teamResult.rows;
-      
-      // Build callsign parts
-      const parts = [];
-      
-      // Add team prefixes based on depth setting
-      const depth = rootTeam.callsign_subteam_depth || 1;
-      for (let i = 0; i < Math.min(teamPath.length, depth + 1); i++) {
-        if (teamPath[i].callsign_prefix) {
-          parts.push(teamPath[i].callsign_prefix);
-        }
-      }
-      
-      // Format name based on root team setting (trim whitespace)
-      let firstName = firstNameInput.trim();
-      let lastName = (lastNameInput || '').trim();
-      
-      // If last_name is empty, split the first_name
-      if (!lastName && firstName.includes(' ')) {
-        const splitName = this.splitFullName(firstName);
-        firstName = splitName.firstName;
-        lastName = splitName.lastName;
-      }
-      
-      let nameFormat;
-      switch (rootTeam.callsign_name_format) {
-        case 'first_initial_last':
-          if (lastName) {
-            nameFormat = `${firstName.charAt(0)} ${lastName}`;
-          } else {
-            nameFormat = firstName;
-          }
-          break;
-        case 'first_last_initial':
-          if (lastName) {
-            nameFormat = `${firstName} ${lastName.charAt(0)}`;
-          } else {
-            nameFormat = firstName;
-          }
-          break;
-        default:
-          nameFormat = `${firstName} ${lastName}`.trim();
-      }
-      
-      parts.push(nameFormat);
-      
+        .map((team) => team.callsign_prefix);
+
+      const callsign = CallsignService.assembleCallsign({
+        organisationPrefix: organisation.callsign_prefix,
+        teamSegmentPrefixes,
+        nameSegment: callsignSuffix
+      });
+
       return {
-        callsign: parts.join('-').trim(),
-        color: rootTeam.color,
+        callsign,
+        color: organisation.color,
         role: 'Team Member'
       };
     } catch (error) {
-      logger.error({ err: error }, 'Error generating callsign');
+      logger.error({ err: error, userId, teamId }, 'Error generating callsign');
       return null;
     }
   }
   
+  /**
+   * Requirements 13.6, 13.8 (task 11.4, Flagged Design Decision 2):
+   * fetch-current-Authentik-attributes-then-merge-supplied-keys-then-PATCH,
+   * replacing the previous blind full-object PATCH.
+   *
+   * `attributes` may be a PARTIAL object containing any subset of
+   * `{callsign, color, role}`. Only keys ACTUALLY PRESENT on `attributes`
+   * (checked via `!== undefined`, not a falsy check, so an explicit empty
+   * string is honored) are mapped to their Authentik attribute names
+   * (`callsign` -> `takCallsign`, `color` -> `takColor`, `role` ->
+   * `takRole`) and overlaid onto the user's CURRENT Authentik attributes
+   * before PATCHing -- so a partial call (e.g. only `{callsign, color}`)
+   * can no longer clobber an existing `takRole` (or any other existing
+   * attribute) that it didn't supply.
+   *
+   * Mirrors `clearUserAttributes`'s existing GET-then-PATCH fetch shape
+   * and error-handling convention below.
+   *
+   * @param {string} authentikUserId
+   * @param {{callsign?: string, color?: string, role?: string}} attributes
+   * @returns {Promise<boolean>}
+   */
   static async updateUserAttributes(authentikUserId, attributes) {
     try {
-      const payload = {
-        attributes: {
-          takCallsign: attributes.callsign,
-          takColor: attributes.color,
-          takRole: attributes.role
+      // Fetch the user's CURRENT Authentik attributes first, so the PATCH
+      // below is a merge, never a wholesale replace.
+      const getUserResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
+        headers: {
+          'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`
         }
-      };
-      
+      });
+
+      if (!getUserResponse.ok) {
+        throw new Error(`Failed to get user: ${getUserResponse.statusText}`);
+      }
+
+      const user = await getUserResponse.json();
+      const currentAttributes = user.attributes || {};
+
+      const mergedAttributes = { ...currentAttributes };
+      if (attributes.callsign !== undefined) {
+        mergedAttributes.takCallsign = attributes.callsign;
+      }
+      if (attributes.color !== undefined) {
+        mergedAttributes.takColor = attributes.color;
+      }
+      if (attributes.role !== undefined) {
+        mergedAttributes.takRole = attributes.role;
+      }
+
+      const payload = { attributes: mergedAttributes };
+
       logger.debug({ authentikUserId, payload }, 'Updating user attributes');
       
       const response = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {

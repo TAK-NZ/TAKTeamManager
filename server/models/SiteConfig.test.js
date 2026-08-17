@@ -138,4 +138,45 @@ describe('SiteConfig.getPublicConfig', () => {
 
     expect(JSON.stringify(config)).not.toContain('6Ltest-secret-key-should-never-appear');
   });
+
+  test('exposes recaptcha_disabled: true when RECAPTCHA_DISABLED=true and NODE_ENV is not production', async () => {
+    process.env.NODE_ENV = 'test';
+    process.env.RECAPTCHA_DISABLED = 'true';
+
+    const config = await SiteConfig.getPublicConfig();
+
+    expect(config.recaptcha_disabled).toBe(true);
+  });
+
+  test('exposes recaptcha_disabled: false when RECAPTCHA_DISABLED is unset', async () => {
+    process.env.NODE_ENV = 'test';
+    delete process.env.RECAPTCHA_DISABLED;
+
+    const config = await SiteConfig.getPublicConfig();
+
+    expect(config.recaptcha_disabled).toBe(false);
+  });
+
+  test('exposes recaptcha_disabled: false when NODE_ENV=production, even if RECAPTCHA_DISABLED=true', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.RECAPTCHA_DISABLED = 'true';
+
+    const config = await SiteConfig.getPublicConfig();
+
+    expect(config.recaptcha_disabled).toBe(false);
+  });
+
+  // Requirements 2.4, 2.5, 5.7 (task 8.4): the Client's Add-Sub-team/
+  // Parent-dropdown disable logic and the Callsign_Level_Selection
+  // toggle count both read `maxTeamDepth` from this response rather than
+  // hardcoding 5, so it must be sourced from the same MAX_TEAM_DEPTH
+  // constant `Team.create` enforces server-side.
+  test('exposes maxTeamDepth sourced from the MAX_TEAM_DEPTH constant', async () => {
+    const { MAX_TEAM_DEPTH } = require('../config/constants');
+
+    const config = await SiteConfig.getPublicConfig();
+
+    expect(config.maxTeamDepth).toBe(MAX_TEAM_DEPTH);
+    expect(config.maxTeamDepth).toBe(5);
+  });
 });

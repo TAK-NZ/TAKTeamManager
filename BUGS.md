@@ -138,7 +138,7 @@ call (e.g. curl/Postman) with a valid session cookie.
 - **Expected:** A Global_Manager can search, filter, and export the audit log from the web app (this is the specific gap the user originally flagged).
 - **Actual:** Backend fully implemented (filtering, pagination, CSV streaming export, correctly Global_Manager-gated, retention-window-aware). Zero client UI anywhere.
 - **Severity:** major
-- **Status:** open
+- **Status:** fixed — new `client/src/pages/AuditLogs.jsx` page at `/audit-logs`, gated on `user.is_global_manager` with a matching nav entry, built via a dedicated design-first spec at `.kiro/specs/audit-log-ui/`. Adds filter form (actor, action, resource type, team, date range), Apply/Clear Filters, a paginated results table, an Export CSV action (direct browser navigation to the export endpoint), and error handling that preserves stale results on a failed refetch. No backend changes — integrates against the existing `server/routes/auditLogs.js` as-is.
 
 ## BUG-014: Requirement 32 (In-App Settings) — Admin.jsx UI is non-functional and reads the wrong backend, rest is missing entirely
 - **Where:** `client/src/pages/Admin.jsx`; backend at `server/routes/settings.js`
@@ -196,3 +196,56 @@ call (e.g. curl/Postman) with a valid session cookie.
 - **Actual:** No such tests exist anywhere. Existing real-DB `*.integration.test.js` files cover health, audit logs, the channel 3-limit race, `TeamMembershipService` round-trip, retention cleanup, expiry sweep, and schema consistency — but none exercise `POST /api/teams`, a membership "not-found" case, or `RequestApprovalService.approveRequest`/`denyRequest` against a real DB. `server/routes/teams.test.js` and `requests.test.js` are unit tests with a fully mocked `pool`/`Team`.
 - **Severity:** minor (test-coverage gap, not a runtime bug — but the task was marked done incorrectly)
 - **Status:** fixed — added `server/routes/teams.integration.test.js` (`POST /api/teams` success/validation-failure/authorization-failure; `POST /api/teams/:teamId/members` success and not-found for both target user and team) and `server/routes/requests.approval.integration.test.js` (`POST /api/requests/:requestId/approve`/`deny` success and already-processed-request rejection), both run via `supertest` against the real, mounted Express routers and a real Postgres test database (`tak_migration_test_501`, same connection convention as every other `*.integration.test.js` file in this repo). All 11 new tests pass against that database; verified no leftover rows remain afterward and that the pre-existing mocked unit test files (`teams.test.js`, `RequestApprovalService.test.js`) still pass unmodified.
+
+## BUG-021: `GET /api/audit-logs` returned a 400 for the Audit Log page's default "Apply Filters" click (empty fields)
+- **Where:** `client/src/services/api.js`, `auditLogsAPI.getAuditLogs`/`buildExportUrl`
+- **Expected:** Clicking "Apply Filters" with every field left blank returns the full unfiltered result set.
+- **Actual:** `getAuditLogs` passed `{...filters, ...pageParams}` straight to axios's `params`. Axios serializes an empty string as `key=` (present-but-empty), not omitted. The server's `express-validator` `.optional()` chains only skip validation when a field is fully ABSENT from the querystring; a present-but-empty value still runs `.isInt()`/`.isISO8601()` and fails, producing 400. The design doc's claim that "axios's params serialization omits empty-string values" was never actually tested and was false.
+- **Severity:** blocker (the page's primary action was broken on first use)
+- **Status:** fixed — added a shared `stripEmptyParams` helper (removes `''`/`null`/`undefined` values) used by both `getAuditLogs` and `buildExportUrl` (the latter already had equivalent inline filtering; now shares the same helper).
+
+## BUG-022: Admin → Site Content tab — every save throws 500, no edits ever persist
+- **Where:** `server/routes/config.js`, `PUT /:key`
+- **Expected:** Editing and saving any Site Content field (`request_access_title`/`subtitle`/`footer`) persists the change.
+- **Actual:** `SiteConfig.update(key, value, req.user.id)` passed the Authentik id (`req.user.id`) into `site_config.updated_by`, which is a foreign key to the LOCAL `users.id` (`req.user.userId`). No local user row exists with that id (Authentik ids and local ids are different, unrelated numbering — confirmed against the live DB: admin's Authentik id is 14, local id is 2), so every save violates the FK constraint and throws, caught and surfaced as a generic 500.
+- **Severity:** blocker
+- **Status:** fixed — changed to `req.user.userId`.
+
+## BUG-023: Same Authentik-id/local-id confusion as BUG-015, present in 6 more places
+- **Where:** `server/routes/users.js` (`GET /me`'s channel-membership lookup, add/remove-from-team requester-id lookups), `server/routes/requests.js` (pending/approve/deny), `server/routes/teams.js` (`GET /my-teams` for non-admin users), `server/routes/globalChannels.js` (create/update BCH+region, get credentials, sync-existing, delete — 6 call sites querying `SELECT id FROM users WHERE authentik_user_id = req.user.id` where `req.user.userId` was already available and correct)
+- **Expected:** Every route resolving "the acting user's local id" uses `req.user.userId` (already resolved by `authenticateToken` — see `server/middleware/auth.js`), not `req.user.id` (the Authentik id) or a redundant DB round-trip to convert one to the other.
+- **Actual:** Same bug class as BUG-015/BUG-022, just not yet swept across the whole codebase. Several of these silently returned wrong/no data (e.g. `channel_memberships`/`team_memberships` lookups keyed on the wrong id space return zero rows rather than throwing, so the bug manifested as "empty list" rather than a crash) rather than a hard error, making it easy to miss in ad-hoc testing.
+- **Severity:** major (data-correctness bug, not just crashes — some of these silently returned incomplete/empty data rather than erroring)
+- **Status:** fixed — all 6 sites switched to `req.user.userId` directly; the `globalChannels.js` sites' now-redundant `SELECT id FROM users WHERE authentik_user_id = $1` lookups were removed entirely (no lookup needed once using the already-resolved local id), which also let the now-unused `pool` import be dropped from that file.
+
+## BUG-024: Audit Log "User ID" column showed a raw internal database id instead of a username
+- **Where:** `client/src/pages/AuditLogs.jsx`, `server/routes/auditLogs.js`
+- **Expected:** An admin reviewing the audit log sees the acting user's username/email, not an opaque internal id they'd have to look up separately.
+- **Actual:** The column rendered `row.user_id` verbatim (a bare integer, the local `users.id` — not even the Authentik id). The design doc explicitly called for "a best-effort resolved username" but the implementation shipped without it, with an inline comment rationalizing the omission as intentional.
+- **Severity:** minor (usability, not a crash) — but reinforces the broader point that internal ids (Authentik or local) are implementation details and must never be surfaced to a human reviewing the app.
+- **Status:** fixed — `GET /api/audit-logs` now `LEFT JOIN`s `users` on `user_id` and returns `username`/`email`; the client renders `username || email || user_id || '—'`, falling back to the numeric id only if the actor's user row was later deleted (LEFT JOIN keeps the row, just with null username/email in that case).
+
+## BUG-025: Dashboard's `/api/users/me` made 1+N sequential Authentik HTTP calls on every load
+- **Where:** `server/routes/users.js`, `GET /me`
+- **Expected:** Loading the Dashboard should be fast — it only needs locally-cached data plus a live user/group lookup.
+- **Actual:** After fetching the user's own record from Authentik, the route resolved each of the user's group names with a separate, sequential (`for` loop with `await` inside, not parallelized) call to Authentik's groups API — one full external HTTP round trip per group membership, all blocking the response.
+- **Severity:** major (perceived performance — this was the actual server-side cause of the reported "Dashboard loads so slowly" complaint, on top of the already-fixed client-side request waterfall)
+- **Status:** fixed — group name lookups now run in parallel via `Promise.all`; a failed individual group lookup still only drops that one group's name (matching prior per-group error handling) instead of serializing the whole set.
+
+## BUG-026: `Users.jsx` — "Create User" and "Manage" buttons have no click handler
+- **Where:** `client/src/pages/Users.jsx`
+- **Expected:** Clicking "Create User" opens a create-user flow; clicking "Manage" on a user row opens that user's management view (team assignment etc. — `TeamDetail.jsx` already has an equivalent "Add Member"/"Create & Add User" flow that could be reused/linked to).
+- **Actual:** Both buttons render with no `onClick` at all — clicking them does nothing, with no error and no console output. Distinct from the other bugs in this file: these are simply unfinished, not regressed.
+- **Severity:** major (visible, always-present dead controls on a core admin page)
+- **Status:** open — needs a design decision (standalone create-user page vs. reusing `TeamDetail.jsx`'s existing add-member dialog) before implementing; flagged rather than guessed at.
+
+## BUG-027: `TeamDetail.jsx` — "Add Admin" button has no click handler
+- **Where:** `client/src/pages/TeamDetail.jsx`, team header action buttons
+- **Expected:** Clicking "Add Admin" opens a flow to promote an existing team member (or add a new user directly as) admin, mirroring the existing "Add Member" dialog.
+- **Actual:** Button renders with no `onClick` — inert. `handleAddExistingUser`/`handleCreateNewUser` currently always add as `role: 'member'` (server-side default); there is no way to add/promote a team admin through the UI at all.
+- **Severity:** major
+- **Status:** open — likely fix is a `role` parameter threaded through the existing Add Member dialog/API call rather than a wholly separate flow, but needs confirming against `server/routes/teams.js`'s member-add route before implementing.
+
+## Correction to NOTE-002
+- **Where:** `client/src/pages/Dashboard.jsx`, `client/src/pages/Admin.jsx`
+- **Correction:** Confirmed via code fix + build/test verification (not just re-reading) that this dead `localStorage`/`Authorization: Bearer` code was, as NOTE-002 already correctly said, harmless in practice — same-origin requests carry cookies automatically regardless of the (always-null) `Authorization` header or missing `withCredentials`. It was NOT the cause of any reported 401. Fixed anyway as cleanup: replaced with the shared `configAPI`/`usersAPI`/`channelsAPI`/`syncAPI` wrappers (added `configAPI.getColorMappings`, `syncAPI`, `usersAPI.getMe`, `channelsAPI.getDescriptions`), and fixed a real bug found in the same code path — `Admin.jsx`'s stats cards counted the paginated response array's `.length` (capped at 50) instead of `pagination.total`, silently undercounting once user/team counts exceed one page.

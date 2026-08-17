@@ -119,9 +119,11 @@ describe('GlobalChannelService.createBchChannel', () => {
     );
     expect(insertCall).toBeDefined();
     const insertParams = insertCall[1];
-    // service_account_password is the 4th positional parameter ($4)
-    expect(insertParams[3]).toBe(`encrypted(${plaintextPassword})`);
-    expect(insertParams[3]).not.toBe(plaintextPassword);
+    // service_account_password is the 5th positional parameter ($5) --
+    // name, display_name, description, service_account_username,
+    // service_account_password, created_by.
+    expect(insertParams[4]).toBe(`encrypted(${plaintextPassword})`);
+    expect(insertParams[4]).not.toBe(plaintextPassword);
   });
 
   it('still publishes the plaintext password in the sync operation payload', async () => {

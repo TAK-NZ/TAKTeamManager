@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { CheckIcon, XMarkIcon, ClockIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import { requestsAPI } from '../services/api'
+import { formatDate } from '../utils/dateFormat'
 
 export default function Requests() {
   const [requests, setRequests] = useState([])
@@ -87,7 +88,7 @@ export default function Requests() {
                   <div className="space-y-2 text-sm text-gray-600 dark:text-gray-400">
                     <p><span className="font-medium">Email:</span> {request.email}</p>
                     <p><span className="font-medium">Requested Team:</span> {request.team_name}</p>
-                    <p><span className="font-medium">Submitted:</span> {new Date(request.created_at).toLocaleDateString()}</p>
+                    <p><span className="font-medium">Submitted:</span> {formatDate(request.created_at)}</p>
                   </div>
                   
                   <div className="mt-4">

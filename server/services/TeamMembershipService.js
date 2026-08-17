@@ -45,7 +45,13 @@ class TeamMembershipService {
         [userId, teamId, role]
       );
       
-      // Get team hierarchy and their channels
+      // Get team hierarchy and their primary channels. Selects every
+      // ancestor's primary channel regardless of whether it has an
+      // Authentik group id yet (unlike the old query, which filtered on
+      // `authentik_group_id IS NOT NULL` and so skipped a channel whose
+      // Authentik group creation hadn't completed) -- the local
+      // channel_memberships row below should still be created either way;
+      // only the Authentik sync enqueue needs a non-null group id.
       const teamChannels = await client.query(`
         WITH RECURSIVE team_hierarchy AS (
           SELECT id, parent_team_id FROM teams WHERE id = $1
@@ -54,18 +60,33 @@ class TeamMembershipService {
           FROM teams t 
           JOIN team_hierarchy th ON t.id = th.parent_team_id
         )
-        SELECT c.authentik_group_id 
+        SELECT c.id, c.authentik_group_id 
         FROM team_hierarchy th
         JOIN channels c ON th.id = c.team_id AND c.is_primary = true
-        WHERE c.authentik_group_id IS NOT NULL
       `, [teamId]);
       
-      // Queue operations to add user to team channels
+      // Requirement (matching UserProvisioningService.createAndAddUser's
+      // established pattern): a local channel_memberships row must be
+      // created for each of these channels, not just the Authentik-side
+      // sync operation queued below -- the team detail page's displayed
+      // channel member count (GET /channels/team/:teamId) is computed
+      // strictly from channel_memberships, so without this insert a user
+      // added via this method would show up in team_memberships but the
+      // team's channel would still show 0 members.
+      let groupsQueued = 0;
       for (const channel of teamChannels.rows) {
-        await EventPublisher.publishOperation('add_user_to_group', {
-          target_user_id: userId,
-          target_group_id: channel.authentik_group_id
-        }, createdBy, client);
+        await client.query(
+          'INSERT INTO channel_memberships (channel_id, user_id, permission) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+          [channel.id, userId, 'read_write']
+        );
+
+        if (channel.authentik_group_id) {
+          await EventPublisher.publishOperation('add_user_to_group', {
+            target_user_id: userId,
+            target_group_id: channel.authentik_group_id
+          }, createdBy, client);
+          groupsQueued++;
+        }
       }
       
       // Also ensure user is assigned to all global channels
@@ -76,7 +97,7 @@ class TeamMembershipService {
       if (ownsTransaction) {
         await client.query('COMMIT');
       }
-      return { success: true, groupsQueued: teamChannels.rows.length };
+      return { success: true, groupsQueued };
       
     } catch (error) {
       if (ownsTransaction) {
@@ -145,13 +166,17 @@ class TeamMembershipService {
         }, createdBy, client);
       }
       
-      // If user has no teams left, remove from all global channels too
+      // If user has no teams left, remove from all global channels too.
+      // BCH channels have a read/write group pair (read_group_id/
+      // write_group_id); region channels are a SINGLE Authentik group per
+      // channel (only a group_id column -- no read/write pair, confirmed
+      // against the baseline schema and live Authentik groups).
       if (remainingTeams.rows[0].count === 0) {
         // Get all global channel group IDs
         const globalChannels = await client.query(`
           SELECT read_group_id, write_group_id FROM bch_channels WHERE is_active = true AND read_group_id IS NOT NULL
           UNION ALL
-          SELECT read_group_id, group_id as write_group_id FROM region_channels WHERE is_active = true AND (read_group_id IS NOT NULL OR group_id IS NOT NULL)
+          SELECT NULL as read_group_id, group_id as write_group_id FROM region_channels WHERE is_active = true AND group_id IS NOT NULL
         `);
         
         // Queue removal from global channels

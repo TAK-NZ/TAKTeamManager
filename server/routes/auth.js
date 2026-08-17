@@ -300,7 +300,24 @@ router.post('/logout', async (req, res) => {
   const { maxAge, ...clearOptions } = getSessionCookieOptions();
   res.clearCookie('tak_session', clearOptions);
 
-  res.json({ message: 'Logged out successfully' });
+  // WHERE AUTHENTIK_LOGOUT_URL is configured (Authentik's OIDC
+  // end-session endpoint for this application), return it as
+  // `redirectUrl` so the client can navigate the browser there after this
+  // call resolves -- ending the Authentik SSO session too, not just the
+  // local App session. This is a plain JSON response to an axios POST
+  // (client/src/services/api.js's authAPI.logout()), not a page
+  // navigation, so an HTTP redirect here would never be followed by the
+  // browser; the client is responsible for the actual navigation (see
+  // client/src/components/Layout.jsx's handleLogout). IF
+  // AUTHENTIK_LOGOUT_URL is unset, `redirectUrl` is omitted and the
+  // client falls back to its existing local-only behavior.
+  const logoutUrl = process.env.AUTHENTIK_LOGOUT_URL;
+  const response = { message: 'Logged out successfully' };
+  if (typeof logoutUrl === 'string' && logoutUrl.trim().length > 0) {
+    response.redirectUrl = logoutUrl;
+  }
+
+  res.json(response);
 });
 
 // Get current user

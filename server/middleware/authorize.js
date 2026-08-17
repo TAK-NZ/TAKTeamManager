@@ -45,6 +45,7 @@ const Team = require('../models/Team');
 const User = require('../models/User');
 const pool = require('../config/database');
 const { getLogger } = require('./requestContext');
+const TeamVisibilityService = require('../services/TeamVisibilityService');
 
 /**
  * Requirement 13.7: "IF a request to the App fails authorization (403) or
@@ -277,8 +278,62 @@ const rowScopedResolvers = {
     }
 
     return Team.isAdmin(result.rows[0].team_id, req.user && req.user.userId);
-  }
+  },
+
+  /**
+   * `team:read` — Requirement 6 (Organisation-Scoped and
+   * Private-Branch-Cascading Visibility): satisfied only if the `:teamId`
+   * route param names a Team that is a Visible_Branch for the requesting
+   * user, per `TeamVisibilityService.isVisibleBranch`. Backs
+   * `GET /api/teams/:teamId`, `GET /api/teams/:teamId/hierarchy`,
+   * `GET /api/teams/:teamId/sub-teams`, and
+   * `GET /api/teams/:teamId/callsign-level-options` (task 8.3) — all four
+   * routes inherit this row-scoped Visible_Branch check automatically via
+   * this single resolver, with no change to those route files themselves.
+   *
+   * `TeamVisibilityService.isVisibleBranch` already returns `true`
+   * unconditionally for a Global_Manager (Requirement 6.4), so this
+   * resolver never needs its own `is_global_manager` short-circuit —
+   * unlike the resolvers above, which check it explicitly to skip a
+   * `Team.isAdmin` call entirely. Note also that `authorize()`'s own
+   * `isSatisfiedWithRowScopedChecks` loop already short-circuits on
+   * `heldPermissions.has('*')` before ever consulting ANY row-scoped
+   * resolver, so a Global_Manager (who holds the wildcard via
+   * `roleDefaults.global_manager`) never reaches this resolver in
+   * practice either.
+   *
+   * A `false` result here is mapped to a 404 (never the generic 403) by
+   * `authorize()` below, per Requirement 6.2/6.3's "respond as though
+   * that Team does not exist" — see `PERMISSION_DENIALS_MAPPED_TO_404`.
+   *
+   * @param {import('express').Request} req
+   * @returns {Promise<boolean>}
+   */
+  'team:read': async (req) => TeamVisibilityService.isVisibleBranch(req.params.teamId, req.user)
 };
+
+/**
+ * Permission identifiers whose denial must respond 404 ("as though the
+ * resource does not exist") instead of `authorize()`'s generic 403
+ * `{error: 'Forbidden'}'.
+ *
+ * Requirement 6.2/6.3: a non-member must not be able to distinguish "this
+ * Team doesn't exist" from "this Team exists but you can't see it", so a
+ * `'team:read'` denial (whether because no row-scoped resolver was ever
+ * consulted at all — i.e. `'team:read'` was neither held nor resolvable —
+ * or because `TeamVisibilityService.isVisibleBranch` explicitly returned
+ * `false`, or because the resolver threw and was fail-closed-denied) is
+ * treated identically here: all three are "you can't see this team" from
+ * the client's perspective, so all three map to 404.
+ *
+ * This is a small, targeted set keyed on the permission identifier, per
+ * design.md's "this design changes `authorize.js` for this one permission
+ * only" framing — every OTHER permission identifier's denial (including a
+ * denial on a route that requires BOTH `'team:read'` and some other
+ * permission, when the OTHER permission is the one that actually failed)
+ * continues to respond 403 unchanged.
+ */
+const PERMISSION_DENIALS_MAPPED_TO_404 = new Set(['team:read']);
 
 /**
  * Determines whether every permission identifier required by a registry
@@ -308,16 +363,28 @@ const rowScopedResolvers = {
  * normal 403 `{error: 'Forbidden'}` — no internal error details are
  * exposed in the HTTP response, only in the log line.
  *
- * Returns `{ permitted, reason }` rather than a plain boolean so that
- * `authorize()` can log the specific 403 reason exactly once (Requirement
- * 13.7) without either double-logging (once here, once in `authorize()`)
- * or losing the more specific `resolver_exception` reason in favor of a
- * generic `permission_denied` fallback.
+ * Returns `{ permitted, reason, failedPermission }` rather than a plain
+ * boolean so that `authorize()` can log the specific 403 reason exactly
+ * once (Requirement 13.7) without either double-logging (once here, once
+ * in `authorize()`) or losing the more specific `resolver_exception`
+ * reason in favor of a generic `permission_denied` fallback.
+ *
+ * `failedPermission` names the SPECIFIC required permission identifier
+ * that was not satisfied (task 14.1, Requirement 6.2/6.3): a route may
+ * require multiple permissions, and `authorize()` needs to know exactly
+ * which one failed in order to decide whether this denial should map to a
+ * 404 (currently only `'team:read'`, see
+ * `PERMISSION_DENIALS_MAPPED_TO_404`) rather than the generic 403. Every
+ * denial branch below — "not held and no resolver exists", "resolver
+ * returned false", and "resolver threw" — reports `failedPermission`
+ * consistently, since all three represent the same "this permission is
+ * not satisfied for this request" outcome from `authorize()`'s
+ * perspective.
  *
  * @param {string[]} requiredPermissions
  * @param {Set<string>} heldPermissions
  * @param {import('express').Request} req
- * @returns {Promise<{permitted: boolean, reason?: string}>}
+ * @returns {Promise<{permitted: boolean, reason?: string, failedPermission?: string}>}
  */
 async function isSatisfiedWithRowScopedChecks(requiredPermissions, heldPermissions, req) {
   if (heldPermissions.has('*')) {
@@ -331,7 +398,7 @@ async function isSatisfiedWithRowScopedChecks(requiredPermissions, heldPermissio
 
     const resolver = rowScopedResolvers[permission];
     if (!resolver) {
-      return { permitted: false };
+      return { permitted: false, failedPermission: permission };
     }
 
     let resolverResult;
@@ -348,11 +415,23 @@ async function isSatisfiedWithRowScopedChecks(requiredPermissions, heldPermissio
         },
         'Authorization resolver threw; treating permission as denied (fail closed)'
       );
-      return { permitted: false, reason: 'resolver_exception' };
+      // Design note (task 14.1): a resolver exception is already
+      // fail-closed treated as "permission not satisfied" regardless of
+      // which permission it was checking. For `'team:read'` specifically,
+      // mapping this case to 404 (the same as any other `'team:read'`
+      // denial) rather than 403 is the more consistent choice, since a
+      // resolver failure here still means the client cannot distinguish
+      // "this Team doesn't exist" from "this Team exists but an error
+      // occurred checking your access to it" — both should look like
+      // "not found" rather than leaking that the resource exists. This is
+      // a deliberate judgement call (design.md does not explicitly address
+      // this sub-case); `reason: 'resolver_exception'` is preserved
+      // unchanged for logging purposes either way.
+      return { permitted: false, reason: 'resolver_exception', failedPermission: permission };
     }
 
     if (!resolverResult) {
-      return { permitted: false };
+      return { permitted: false, failedPermission: permission };
     }
   }
 
@@ -465,10 +544,28 @@ async function authorize(req, res, next) {
   }
 
   const heldPermissions = userPermissions instanceof Set ? userPermissions : new Set(userPermissions || []);
-  const { permitted, reason } = await isSatisfiedWithRowScopedChecks(requiredPermissions, heldPermissions, req);
+  const { permitted, reason, failedPermission } = await isSatisfiedWithRowScopedChecks(
+    requiredPermissions,
+    heldPermissions,
+    req
+  );
 
   if (!permitted) {
     logAuthzFailure(req, reason || 'permission_denied');
+
+    // Requirement 6.2/6.3 (task 14.1): a `'team:read'` denial responds
+    // 404 instead of the generic 403, so a non-member cannot distinguish
+    // "this Team doesn't exist" from "this Team exists but you can't see
+    // it". This is a targeted branch keyed on the SPECIFIC failing
+    // permission identifier, not a general behaviour change to
+    // `authorize()` — every other permission's denial (including a
+    // denial on a route requiring `'team:read'` alongside some other
+    // permission, when that OTHER permission is the one that actually
+    // failed) still responds 403 below, unchanged.
+    if (failedPermission && PERMISSION_DENIALS_MAPPED_TO_404.has(failedPermission)) {
+      return res.status(404).json({ error: 'Team not found' });
+    }
+
     return res.status(403).json({ error: 'Forbidden' });
   }
 

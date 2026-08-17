@@ -32,10 +32,10 @@ describe('TeamMembershipService.addUserToTeam', () => {
     jest.clearAllMocks();
   });
 
-  it('passes the open transactional client through to every publishOperation call', async () => {
+  it('passes the open transactional client through to every publishOperation call, and inserts a channel_memberships row for the same channel', async () => {
     mockClient = buildMockClient((sql) => {
-      if (sql.includes('SELECT c.authentik_group_id')) {
-        return Promise.resolve({ rows: [{ authentik_group_id: 'grp-team' }] });
+      if (sql.includes('SELECT c.id, c.authentik_group_id')) {
+        return Promise.resolve({ rows: [{ id: 55, authentik_group_id: 'grp-team' }] });
       }
       return Promise.resolve({ rows: [] });
     });
@@ -56,13 +56,23 @@ describe('TeamMembershipService.addUserToTeam', () => {
       9,
       mockClient
     );
+
+    // The local channel_memberships row (what the team detail page's
+    // displayed member count actually reads) must be created too, not
+    // just the Authentik-side sync operation.
+    const channelMembershipInsert = mockClient.query.mock.calls.find(([sql]) =>
+      sql.includes('INSERT INTO channel_memberships')
+    );
+    expect(channelMembershipInsert).toBeDefined();
+    expect(channelMembershipInsert[1]).toEqual([55, 1, 'read_write']);
+
     expect(mockClient.query).toHaveBeenCalledWith('COMMIT');
   });
 
   it('rolls back the membership change when the sync_operations insert (publishOperation) fails', async () => {
     mockClient = buildMockClient((sql) => {
-      if (sql.includes('SELECT c.authentik_group_id')) {
-        return Promise.resolve({ rows: [{ authentik_group_id: 'grp-team' }] });
+      if (sql.includes('SELECT c.id, c.authentik_group_id')) {
+        return Promise.resolve({ rows: [{ id: 55, authentik_group_id: 'grp-team' }] });
       }
       return Promise.resolve({ rows: [] });
     });
@@ -105,8 +115,8 @@ describe('TeamMembershipService.addUserToTeam - externally-provided client (Requ
 
   it('uses the caller-provided client and does not call pool.connect, BEGIN, COMMIT, or release', async () => {
     const externalClient = buildMockClient((sql) => {
-      if (sql.includes('SELECT c.authentik_group_id')) {
-        return Promise.resolve({ rows: [{ authentik_group_id: 'grp-team' }] });
+      if (sql.includes('SELECT c.id, c.authentik_group_id')) {
+        return Promise.resolve({ rows: [{ id: 55, authentik_group_id: 'grp-team' }] });
       }
       return Promise.resolve({ rows: [] });
     });
@@ -146,7 +156,7 @@ describe('TeamMembershipService.addUserToTeam - externally-provided client (Requ
 
   it('falls back to acquiring its own client (original behavior) when no external client is given', async () => {
     const mockClient = buildMockClient((sql) => {
-      if (sql.includes('SELECT c.authentik_group_id')) {
+      if (sql.includes('SELECT c.id, c.authentik_group_id')) {
         return Promise.resolve({ rows: [] });
       }
       return Promise.resolve({ rows: [] });
@@ -197,7 +207,7 @@ describe('TeamMembershipService.addUserToTeam / removeUserFromTeam - task 58.4 (
 
   it('"no-parent add": inserts exactly one direct team_memberships row, with no inherited_from_team_id column involved', async () => {
     const mockClient = buildMockClient((sql) => {
-      if (sql.includes('SELECT c.authentik_group_id')) {
+      if (sql.includes('SELECT c.id, c.authentik_group_id')) {
         // Team has no parent (and no primary channel either) -- the
         // recursive CTE's base case is the only row and yields nothing.
         return Promise.resolve({ rows: [] });
@@ -217,6 +227,56 @@ describe('TeamMembershipService.addUserToTeam / removeUserFromTeam - task 58.4 (
     const [insertSql, insertParams] = membershipInsertCalls[0];
     expect(insertSql).not.toContain('inherited_from_team_id');
     expect(insertParams).toEqual([5, 20, 'member']);
+  });
+
+  /**
+   * Regression test: `addUserToTeam` previously queued only an
+   * Authentik-side `add_user_to_group` sync operation for each team-
+   * hierarchy primary channel, without ever writing a local
+   * `channel_memberships` row. Since the team detail page's displayed
+   * channel member count (`GET /channels/team/:teamId`) is computed
+   * strictly via `COUNT(channel_memberships.user_id)`, a user added
+   * through this method showed up correctly in `team_memberships` but
+   * the team's own channel kept showing 0 members. This verifies the fix
+   * inserts a `channel_memberships` row for every channel found (via
+   * `ON CONFLICT DO NOTHING`, matching `UserProvisioningService
+   * .createAndAddUser`'s established pattern), and that a channel with
+   * no Authentik group id yet still gets its local row (only the
+   * Authentik sync enqueue is skipped for that channel).
+   */
+  it('inserts a channel_memberships row for every team-hierarchy primary channel, even one with no authentik_group_id yet', async () => {
+    const mockClient = buildMockClient((sql) => {
+      if (sql.includes('SELECT c.id, c.authentik_group_id')) {
+        return Promise.resolve({
+          rows: [
+            { id: 55, authentik_group_id: 'grp-team' },
+            { id: 56, authentik_group_id: null }
+          ]
+        });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    pool.connect.mockResolvedValue(mockClient);
+    EventPublisher.publishOperation.mockResolvedValue('op-id');
+
+    const result = await TeamMembershipService.addUserToTeam(5, 20, 'member', 9);
+
+    const channelMembershipInserts = mockClient.query.mock.calls.filter(([sql]) =>
+      sql.includes('INSERT INTO channel_memberships')
+    );
+    expect(channelMembershipInserts).toHaveLength(2);
+    expect(channelMembershipInserts[0][1]).toEqual([55, 5, 'read_write']);
+    expect(channelMembershipInserts[0][0]).toContain('ON CONFLICT DO NOTHING');
+    expect(channelMembershipInserts[1][1]).toEqual([56, 5, 'read_write']);
+
+    // Only the channel with a real Authentik group id gets a sync
+    // operation enqueued; the other channel still gets its local row.
+    const addUserToGroupCalls = EventPublisher.publishOperation.mock.calls.filter(
+      ([opType]) => opType === 'add_user_to_group'
+    );
+    expect(addUserToGroupCalls).toHaveLength(1);
+    expect(addUserToGroupCalls[0][1]).toEqual({ target_user_id: 5, target_group_id: 'grp-team' });
+    expect(result.groupsQueued).toBe(1);
   });
 
   /**

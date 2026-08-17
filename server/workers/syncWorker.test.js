@@ -1139,6 +1139,198 @@ describe('SyncWorker Authentik failure classification wiring', () => {
   });
 
   /**
+   * Regression test: `createRegionChannelGroup` previously tried to create
+   * a read/write GROUP PAIR for a region channel (mirroring BCH channels)
+   * and then UPDATE region_channels.read_group_id/group_id -- but
+   * region_channels only ever had a single `group_id` column (confirmed
+   * against the baseline schema and live Authentik data: none of the real
+   * `tak_Regions - *` groups have a `_READ` counterpart). That UPDATE
+   * crashed every single invocation with "column read_group_id does not
+   * exist". This verifies the fix creates exactly ONE group and updates
+   * only `group_id`.
+   */
+  describe('createRegionChannelGroup', () => {
+    const baseOperation = {
+      id: 'op-region-group-1',
+      operation_type: 'create_region_channel_group',
+      retry_count: 0,
+      max_retries: 48,
+      correlation_id: 'corr-region-group-1',
+      payload: {
+        channel_name: 'Auckland',
+        region_channel_id: 9
+      }
+    };
+
+    beforeEach(() => {
+      worker.pool.query = jest.fn().mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT description FROM region_channels')) {
+          return Promise.resolve({ rows: [{ description: 'Activities in Auckland' }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+    });
+
+    it('creates exactly one Authentik group (no read/write pair) and updates only region_channels.group_id', async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 201,
+        json: () => Promise.resolve({ pk: 'grp-auckland' })
+      });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/core/groups/'),
+        expect.objectContaining({ method: 'POST' })
+      );
+
+      const updateCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('UPDATE region_channels')
+      );
+      expect(updateCall).toBeDefined();
+      expect(updateCall[0]).not.toContain('read_group_id');
+      expect(updateCall[0]).toContain('group_id');
+      expect(updateCall[1]).toEqual(['grp-auckland', 9]);
+    });
+
+    it('results in a markPermanentlyFailed-style UPDATE on a 4xx response from the group-creation call', async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        statusText: 'Bad Request',
+        text: () => Promise.resolve('Bad Request')
+      });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      const failCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('failure_category')
+      );
+      expect(failCall).toBeDefined();
+      expect(failCall[1][0]).toBe('failed');
+      expect(failCall[1][1]).toBe('permanent');
+    });
+
+    it('results in the existing handleOperationError retryable path on a 5xx response', async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 503,
+        statusText: 'Service Unavailable',
+        text: () => Promise.resolve('Service Unavailable')
+      });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      const retryCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('next_retry_at')
+      );
+      expect(retryCall).toBeDefined();
+      expect(retryCall[1][0]).toBe('pending');
+    });
+  });
+
+  /**
+   * Regression test: `syncExistingGlobalChannels` previously fetched only
+   * a single page (`?page_size=1000`) of Authentik groups, so any
+   * BCH/Region group landing on page 2+ of a larger Authentik group list
+   * was silently never imported. This verifies the fix follows
+   * `pagination.next` (mirroring `authentikSync.js`'s `fetchGroupMap`)
+   * across multiple pages before scanning for BCH/Region groups.
+   */
+  describe('syncExistingGlobalChannels pagination', () => {
+    const separator = ' - ';
+    const originalSeparator = process.env.CHANNEL_FOLDER_SEPARATOR;
+
+    beforeEach(() => {
+      process.env.CHANNEL_FOLDER_SEPARATOR = separator;
+      worker.pool.query = jest.fn().mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT id FROM bch_channels')) {
+          return Promise.resolve({ rows: [] });
+        }
+        if (typeof sql === 'string' && sql.includes('SELECT id FROM region_channels')) {
+          return Promise.resolve({ rows: [] });
+        }
+        if (typeof sql === 'string' && sql.includes('INSERT INTO bch_channels')) {
+          return Promise.resolve({ rows: [{ id: 1 }] });
+        }
+        if (typeof sql === 'string' && sql.includes('INSERT INTO region_channels')) {
+          return Promise.resolve({ rows: [{ id: 2 }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+    });
+
+    afterEach(() => {
+      process.env.CHANNEL_FOLDER_SEPARATOR = originalSeparator;
+    });
+
+    it('follows pagination.next across multiple pages and imports a BCH group found only on page 2', async () => {
+      // Region channels are a SINGLE Authentik group per channel (no
+      // "_READ" pair like BCH channels have -- see the region-matching
+      // fix in syncExistingGlobalChannels).
+      const page1Groups = [
+        { pk: 'g1', name: `tak_Regions${separator}North`, attributes: {} }
+      ];
+      const page2Groups = [
+        { pk: 'g3', name: `tak_BCH${separator}Alpha_READ`, attributes: {} },
+        { pk: 'g4', name: `tak_BCH${separator}Alpha`, attributes: {} }
+      ];
+
+      global.fetch = jest.fn().mockImplementation((url) => {
+        if (url.includes('page=2')) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({ results: page2Groups, pagination: { next: null } })
+          });
+        }
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ results: page1Groups, pagination: { next: 2 } })
+        });
+      });
+
+      await worker.syncExistingGlobalChannels({ synced_by: 1 });
+
+      // Fetched exactly two pages.
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+      expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('page=1'), expect.anything());
+      expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('page=2'), expect.anything());
+
+      // The BCH group from page 2 was imported despite being absent from page 1.
+      const insertCalls = worker.pool.query.mock.calls.filter(
+        ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO bch_channels')
+      );
+      expect(insertCalls).toHaveLength(1);
+      expect(insertCalls[0][1]).toEqual(expect.arrayContaining(['Alpha']));
+
+      // The Region group from page 1 was also imported.
+      const regionInsertCalls = worker.pool.query.mock.calls.filter(
+        ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO region_channels')
+      );
+      expect(regionInsertCalls).toHaveLength(1);
+      expect(regionInsertCalls[0][1]).toEqual(expect.arrayContaining(['North']));
+    });
+
+    it('stops paginating once pagination.next is absent (single-page case still works)', async () => {
+      const groups = [
+        { pk: 'g1', name: `tak_BCH${separator}Solo_READ`, attributes: {} },
+        { pk: 'g2', name: `tak_BCH${separator}Solo`, attributes: {} }
+      ];
+
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: groups, pagination: {} })
+      });
+
+      await worker.syncExistingGlobalChannels({ synced_by: 1 });
+
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  /**
    * Requirement 21.10 (task 40.1): `createVendorChannelGroup` creates a
    * single Authentik `VND` group for the `vendor_channels` row
    * identified by `payload.vendor_channel_id` (unlike BCH/region

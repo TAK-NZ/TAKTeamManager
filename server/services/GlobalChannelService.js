@@ -30,14 +30,17 @@ class GlobalChannelService {
       // since Authentik needs the real password to create the service account.
       const encryptedServiceAccountPassword = CredentialEncryptionService.encrypt(serviceAccountPassword);
 
-      // Create BCH channel record
+      // Create BCH channel record. display_name is NOT NULL with no
+      // default (see baseline schema) -- mirrors name, same as every other
+      // channel-like table's name/display_name pair.
       const result = await client.query(`
         INSERT INTO bch_channels (
-          name, description, service_account_username, 
+          name, display_name, description, service_account_username, 
           service_account_password, created_by
-        ) VALUES ($1, $2, $3, $4, $5)
+        ) VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING id
       `, [
+        channelData.name,
         channelData.name,
         channelData.description,
         serviceAccountUsername,
@@ -89,13 +92,16 @@ class GlobalChannelService {
     try {
       await client.query('BEGIN');
       
-      // Create region channel record
+      // Create region channel record. display_name is NOT NULL with no
+      // default (see baseline schema) -- mirrors name, same as every other
+      // channel-like table's name/display_name pair.
       const result = await client.query(`
         INSERT INTO region_channels (
-          name, description, created_by
-        ) VALUES ($1, $2, $3)
+          name, display_name, description, created_by
+        ) VALUES ($1, $2, $3, $4)
         RETURNING id
       `, [
+        channelData.name,
         channelData.name,
         channelData.description,
         createdBy
@@ -109,20 +115,20 @@ class GlobalChannelService {
         channel_name: channelData.name
       }, createdBy);
       
-      // Add group membership rules for read and write access
+      // Add a group membership rule for read-write access. Region channels
+      // are a SINGLE Authentik group per channel (region_channels has only
+      // a `group_id` column, no read/write pair like BCH channels) -- there
+      // is no "_READ" counterpart group for regions in Authentik.
       const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
       await client.query(`
         INSERT INTO group_membership_rules (
           rule_name, rule_type, source_type, source_id, 
           target_group_pattern, permission_type, priority
         ) VALUES 
-        ($1, 'region_channels', 'region_channel', $2, $3, 'read', 60),
-        ($4, 'region_channels', 'region_channel', $2, $5, 'write', 61)
+        ($1, 'region_channels', 'region_channel', $2, $3, 'write', 61)
       `, [
-        `Region ${channelData.name} Read Access`,
+        `Region ${channelData.name} Read-Write Access`,
         channelId,
-        `tak_Regions${separator}${channelData.name}_READ`,
-        `Region ${channelData.name} Write Access`,
         `tak_Regions${separator}${channelData.name}`
       ]);
       

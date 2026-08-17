@@ -40,6 +40,7 @@ const Team = require('../models/Team');
 const authentikService = require('./authentik');
 const UserProvisioningService = require('./UserProvisioningService');
 const BulkImportService = require('./BulkImportService');
+const { buildImportGraph } = BulkImportService;
 
 function buildMockClient() {
   return {

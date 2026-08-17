@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { isPublicOnlyPath } from '../utils/publicPaths';
 
 // --- Backend base URL configuration (Requirements 2.1, 2.2, 2.3, 2.7, 2.8) ---
 //
@@ -94,13 +95,29 @@ const api = axios.create({
   },
 });
 
+// Whether a 401 response, observed while the browser is at `pathname`,
+// should force-navigate to /login. Exported as a standalone pure function
+// (rather than inlined in the interceptor below) so its exclusion logic
+// can be unit tested directly without needing to simulate a full axios
+// error/response cycle.
+//
+// Exclusions, to avoid an endless redirect loop: never force-navigate
+// away from a page that's intentionally usable by an anonymous visitor
+// (/request-access, /verify-request -- see utils/publicPaths.js), and
+// never force-navigate when already on /login itself (a 401 there is
+// expected/normal, not a session that just expired mid-use).
+export function shouldRedirectToLogin(status, pathname) {
+  return status === 401 && pathname !== '/login' && !isPublicOnlyPath(pathname);
+}
+
 // Handle auth errors. Auth state now lives in an httpOnly cookie the client
 // can never read/write directly, so there is no localStorage token to clear
-// here; on a 401 we simply redirect to the login page.
+// here; on a 401 we simply redirect to the login page (subject to the
+// exclusions in shouldRedirectToLogin above).
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error.response?.status === 401) {
+    if (shouldRedirectToLogin(error.response?.status, window.location.pathname)) {
       window.location.href = '/login';
     }
     return Promise.reject(error);
@@ -162,7 +179,12 @@ export const authAPI = {
 };
 
 export const teamsAPI = {
-  getMyTeams: () => api.get('/teams/my-teams'),
+  // params: { page?, pageSize? } -- optional pagination query params for
+  // the admin "all teams" branch of GET /teams/my-teams (see
+  // server/routes/teams.js); omitted entirely for existing callers that
+  // don't need pagination (Teams.jsx, TeamDetail.jsx), matching the
+  // regular-user branch which ignores pagination anyway.
+  getMyTeams: (params = {}) => api.get('/teams/my-teams', { params }),
   getJoinable: () => api.get('/teams/joinable'),
   create: (data) => api.post('/teams', data),
   update: (id, data) => api.put(`/teams/${id}`, data),
@@ -175,6 +197,7 @@ export const teamsAPI = {
 
 export const usersAPI = {
   getAll: () => api.get('/users'),
+  getMe: () => api.get('/users/me'),
   create: (data) => api.post('/users', data),
   search: (query) => api.get(`/users/search?q=${query}`),
   getAvailable: (search) => api.get(`/users/available${search ? `?search=${encodeURIComponent(search)}` : ''}`),
@@ -187,6 +210,7 @@ export const usersAPI = {
 
 export const channelsAPI = {
   getByTeam: (teamId) => api.get(`/channels/team/${teamId}`),
+  getDescriptions: () => api.get('/channels/descriptions'),
   create: (data) => api.post('/channels', data),
   createCustom: (teamId, customSuffix, memberPermissions) => 
     api.post('/channels/custom', { teamId, customSuffix, memberPermissions }),
@@ -206,7 +230,13 @@ export const requestsAPI = {
 export const configAPI = {
   getPublic: () => api.get('/config/public'),
   getAll: () => api.get('/config/all'),
+  getColorMappings: () => api.get('/config/color-mappings'),
   update: (key, data) => api.put(`/config/${key}`, data),
+};
+
+export const syncAPI = {
+  getStatus: () => api.get('/sync/status'),
+  triggerUserSync: () => api.post('/sync/users'),
 };
 
 export const globalChannelsAPI = {
@@ -220,6 +250,41 @@ export const globalChannelsAPI = {
   assignAllUsers: () => api.post('/global-channels/assign-all-users'),
   deleteChannel: (channelType, channelId) => api.delete(`/global-channels/${channelType}/${channelId}`),
   syncExistingChannels: () => api.post('/global-channels/sync-existing'),
+};
+
+// Removes any filter key whose value is '', null, or undefined, so an
+// unset filter field is never sent to the server at all. This matters
+// because axios's `params` serialization does NOT omit empty strings --
+// `{ userId: '' }` is sent as the literal querystring `userId=` (present,
+// just empty), not left off entirely. The server's `express-validator`
+// `.optional()` chains (see server/routes/auditLogs.js) only skip
+// validation when a field is fully ABSENT from the querystring; an
+// empty-but-present value still runs through `.isInt()`/`.isISO8601()`
+// and fails, producing a 400. Both `getAuditLogs` and `buildExportUrl`
+// below must filter through this before handing filters to axios/
+// URLSearchParams, so this one fix cannot be bypassed by a future caller
+// that forgets to filter itself.
+function stripEmptyParams(params = {}) {
+  return Object.fromEntries(
+    Object.entries(params).filter(([, v]) => v !== '' && v != null)
+  );
+}
+
+export const auditLogsAPI = {
+  // filters: { userId?, action?, resourceType?, teamId?, startDate?, endDate? }
+  // pageParams: { page, pageSize }
+  getAuditLogs: (filters = {}, pageParams = {}) =>
+    api.get('/audit-logs', { params: stripEmptyParams({ ...filters, ...pageParams }) }),
+
+  // Builds the absolute export URL (including the same base-URL handling
+  // used by authAPI.login()) rather than making an axios call, since the
+  // caller navigates the browser directly to this URL for the file
+  // download (see design.md "CSV Export Flow").
+  buildExportUrl: (filters = {}) => {
+    const params = new URLSearchParams(stripEmptyParams(filters));
+    const query = params.toString();
+    return joinBaseAndPath(validatedBase, `/api/audit-logs/export.csv${query ? `?${query}` : ''}`);
+  },
 };
 
 export default api;

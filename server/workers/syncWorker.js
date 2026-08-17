@@ -1148,14 +1148,19 @@ class SyncWorker {
     `, [serviceAccount.pk, readGroup.pk, writeGroup.pk, bch_channel_id]);
   }
 
+  // Region channels are a SINGLE Authentik group per channel (see the
+  // `region_channels` table -- only a `group_id` column, no read/write
+  // pair like BCH channels have). There is no "_READ" counterpart group
+  // for regions in Authentik; confirmed against the live schema and
+  // Authentik's actual `tak_Regions - *` groups, none of which have a
+  // `_READ` sibling.
   async createRegionChannelGroup(payload) {
     const { channel_name, region_channel_id } = payload;
     
     const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
-    const readGroupName = `tak_Regions${separator}${channel_name}_READ`;
-    const writeGroupName = `tak_Regions${separator}${channel_name}`;
+    const groupName = `tak_Regions${separator}${channel_name}`;
     
-    logger.debug({ region_channel_id, readGroupName, writeGroupName }, 'Creating region channel groups');
+    logger.debug({ region_channel_id, groupName }, 'Creating region channel group');
     
     // Get channel description from database
     const channelResult = await this.pool.query(
@@ -1166,63 +1171,41 @@ class SyncWorker {
     const description = channelResult.rows[0]?.description || channel_name;
     const authentikDescription = `${description} (Bi-directional location sharing)`;
     
-    // Create read group
-    const readGroupResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
+    const groupResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        name: readGroupName,
+        name: groupName,
         attributes: { 
           channel_type: 'region',
-          permission: 'read',
           description: authentikDescription
         }
       })
     });
     
-    // Create write group
-    const writeGroupResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        name: writeGroupName,
-        attributes: { 
-          channel_type: 'region',
-          permission: 'write',
-          description: authentikDescription
-        }
-      })
-    });
-    
-    if (!readGroupResponse.ok || !writeGroupResponse.ok) {
-      const readError = !readGroupResponse.ok ? await readGroupResponse.text() : null;
-      const writeError = !writeGroupResponse.ok ? await writeGroupResponse.text() : null;
+    if (!groupResponse.ok) {
+      const errorText = await groupResponse.text();
       logger.error(
-        { region_channel_id, readStatus: readGroupResponse.status, writeStatus: writeGroupResponse.status, readError, writeError },
-        'Failed to create region channel groups'
+        { region_channel_id, status: groupResponse.status, err: errorText },
+        'Failed to create region channel group'
       );
-      const failedStatus = !readGroupResponse.ok ? readGroupResponse.status : writeGroupResponse.status;
-      const classification = classifyFailure(failedStatus);
-      throw new AuthentikApiError('Failed to create region channel groups', classification);
+      const classification = classifyFailure(groupResponse.status);
+      throw new AuthentikApiError('Failed to create region channel group', classification);
     }
     
-    const readGroup = await readGroupResponse.json();
-    const writeGroup = await writeGroupResponse.json();
+    const group = await groupResponse.json();
     
-    logger.debug({ region_channel_id, readGroupId: readGroup.pk, writeGroupId: writeGroup.pk }, 'Created region channel groups');
+    logger.debug({ region_channel_id, groupId: group.pk }, 'Created region channel group');
     
-    // Update database with group IDs
+    // Update database with the group ID
     await this.pool.query(`
       UPDATE region_channels 
-      SET read_group_id = $1, group_id = $2
-      WHERE id = $3
-    `, [readGroup.pk, writeGroup.pk, region_channel_id]);
+      SET group_id = $1
+      WHERE id = $2
+    `, [group.pk, region_channel_id]);
   }
 
   async updateBchChannelGroup(payload) {
@@ -1946,21 +1929,38 @@ class SyncWorker {
     let regionCount = 0;
     
     try {
-      // Get all groups from Authentik
-      const groupsResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/?page_size=1000`, {
-        headers: {
-          'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
-          'Content-Type': 'application/json'
+      // Get all groups from Authentik, following pagination -- a single
+      // page (even at page_size=1000) is not guaranteed to cover every
+      // group once teams, BCH, and Region groups are all counted
+      // together, and any BCH/Region group landing past the first page
+      // would otherwise be silently skipped. Mirrors the pagination loop
+      // in server/services/authentikSync.js's fetchGroupMap().
+      let groups = [];
+      let currentPage = 1;
+      let hasMorePages = true;
+
+      while (hasMorePages) {
+        const groupsResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/?page_size=1000&page=${currentPage}`, {
+          headers: {
+            'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+            'Content-Type': 'application/json'
+          }
+        });
+
+        if (!groupsResponse.ok) {
+          const classification = classifyFailure(groupsResponse.status);
+          throw new AuthentikApiError(`Failed to fetch groups from Authentik: ${groupsResponse.statusText}`, classification);
         }
-      });
-      
-      if (!groupsResponse.ok) {
-        const classification = classifyFailure(groupsResponse.status);
-        throw new AuthentikApiError(`Failed to fetch groups from Authentik: ${groupsResponse.statusText}`, classification);
+
+        const groupsData = await groupsResponse.json();
+        groups = groups.concat(groupsData.results);
+
+        if (groupsData.pagination && groupsData.pagination.next) {
+          currentPage = groupsData.pagination.next;
+        } else {
+          hasMorePages = false;
+        }
       }
-      
-      const groupsData = await groupsResponse.json();
-      const groups = groupsData.results;
       
       logger.debug({ groupCount: groups.length }, 'Found groups in Authentik');
       
@@ -1990,13 +1990,16 @@ class SyncWorker {
           if (existingResult.rows.length === 0) {
             logger.debug({ channelName }, 'Importing BCH channel');
             
-            // Create channel in database
+            // Create channel in database. display_name is NOT NULL with no
+            // default (see baseline schema) -- mirrors channelName, same as
+            // every other channel-like table's name/display_name pair.
             const insertResult = await this.pool.query(`
               INSERT INTO bch_channels (
-                name, description, read_group_id, write_group_id, created_by
-              ) VALUES ($1, $2, $3, $4, $5)
+                name, display_name, description, read_group_id, write_group_id, created_by
+              ) VALUES ($1, $2, $3, $4, $5, $6)
               RETURNING id
             `, [
+              channelName,
               channelName,
               description,
               group.pk,
@@ -2026,24 +2029,22 @@ class SyncWorker {
         }
       }
       
-      // Process Region channels (groups starting with 'tak_Regions')
+      // Process Region channels (groups starting with 'tak_Regions'). Unlike
+      // BCH channels, region channels are a SINGLE Authentik group per
+      // channel -- region_channels has only a `group_id` column, no
+      // `read_group_id`/write-pair (confirmed against the baseline schema
+      // and live DB; there is no "_READ" counterpart group for regions in
+      // Authentik). Every group matching the prefix is its own channel.
       const regionPrefix = `tak_Regions${separator}`;
       
       for (const group of groups) {
-        if (group.name.startsWith(regionPrefix) && group.name.endsWith('_READ')) {
-          // Extract channel name from read group
-          const channelName = group.name.replace(regionPrefix, '').replace('_READ', '');
+        if (group.name.startsWith(regionPrefix)) {
+          const channelName = group.name.replace(regionPrefix, '');
           
-          // Find corresponding write group (without _READ suffix)
-          const writeGroupName = `tak_Regions${separator}${channelName}`;
-          const writeGroup = groups.find(g => g.name === writeGroupName);
-          
-          // Use write group's description if available, otherwise fall back to read group
           let description = channelName;
-          const sourceGroup = writeGroup || group;
-          if (sourceGroup.attributes?.description) {
+          if (group.attributes?.description) {
             // Remove the "(Bi-directional location sharing)" suffix if present
-            description = sourceGroup.attributes.description.replace(' (Bi-directional location sharing)', '');
+            description = group.attributes.description.replace(' (Bi-directional location sharing)', '');
           }
           
           // Check if this channel already exists in database
@@ -2055,38 +2056,39 @@ class SyncWorker {
           if (existingResult.rows.length === 0) {
             logger.debug({ channelName }, 'Importing Region channel');
             
-            // Create channel in database
+            // Create channel in database. display_name is NOT NULL with no
+            // default (see baseline schema) -- mirrors channelName, same as
+            // every other channel-like table's name/display_name pair.
             const insertResult = await this.pool.query(`
               INSERT INTO region_channels (
-                name, description, read_group_id, group_id, created_by
+                name, display_name, description, group_id, created_by
               ) VALUES ($1, $2, $3, $4, $5)
               RETURNING id
             `, [
               channelName,
+              channelName,
               description,
               group.pk,
-              writeGroup?.pk || null,
               payload.synced_by
             ]);
             
             regionCount++;
             logger.debug({ channelName, regionChannelId: insertResult.rows[0].id }, 'Created Region channel');
           } else {
-            // Update existing channel with correct description and group IDs
+            // Update existing channel with correct description and group id
             logger.debug({ channelName }, 'Updating existing Region channel');
             
             await this.pool.query(`
               UPDATE region_channels 
-              SET description = $1, read_group_id = $2, group_id = $3
-              WHERE name ILIKE $4
+              SET description = $1, group_id = $2
+              WHERE name ILIKE $3
             `, [
               description,
               group.pk,
-              writeGroup?.pk || null,
               channelName
             ]);
             
-            logger.debug({ channelName }, 'Updated Region channel with correct description and group IDs');
+            logger.debug({ channelName }, 'Updated Region channel with correct description and group id');
           }
         }
       }

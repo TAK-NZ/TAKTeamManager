@@ -172,6 +172,26 @@ describe('POST /api/teams against a real Postgres database (Requirement 12.5, ta
     expect(dbRow.rows[0].name).toBe(teamName);
   });
 
+  it('regression: creating a top-level team with an explicit parentTeamId: null (the real Client\'s exact request shape) succeeds instead of 400', async () => {
+    // The Client's create-team form always sends parentTeamId explicitly
+    // (null for a top-level team, an integer for a sub-team) -- never
+    // omits the field. Plain `.optional()` on an express-validator chain
+    // only skips validation when the field is ABSENT, not when it's
+    // present-but-null, so `.isInt()` used to run against `null` and fail
+    // every top-level team creation from the real Client with a 400, even
+    // though the test above (which omits parentTeamId entirely) passed.
+    const teamName = `IntegrationTest Null Parent ${crypto.randomUUID()}`;
+
+    const res = await request(app)
+      .post('/api/teams')
+      .send({ name: teamName, description: 'Top-level team', parentTeamId: null });
+
+    expect(res.status).toBe(201);
+    expect(res.body.team).toBeDefined();
+    expect(res.body.team.parent_team_id).toBeNull();
+    createdTeamIds.push(res.body.team.id);
+  });
+
   it('validation-failure: a missing required "name" field is rejected with 400 and creates no row', async () => {
     const beforeCount = (await pool.query('SELECT COUNT(*) FROM teams')).rows[0].count;
 

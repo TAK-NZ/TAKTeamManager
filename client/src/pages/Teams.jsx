@@ -1,8 +1,29 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { PlusIcon, UserGroupIcon, XMarkIcon, TrashIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, ChevronRightIcon, EyeSlashIcon, ArrowRightOnRectangleIcon, PencilIcon } from '@heroicons/react/24/outline'
+import { PlusIcon, UserGroupIcon, XMarkIcon, TrashIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, ChevronRightIcon, EyeSlashIcon, ArrowLeftOnRectangleIcon, PencilIcon, LockClosedIcon, LockOpenIcon } from '@heroicons/react/24/outline'
 import { teamsAPI } from '../services/api'
 import api from '../services/api'
+
+// Small inline indicator shown next to a form field's label, making it
+// unambiguous at a glance whether a field can still be changed once the
+// team exists: a green OPEN padlock for a field that remains editable
+// after creation, or a red CLOSED padlock for a field that is locked
+// after creation. A native title tooltip on hover explains why -- same
+// `title=""` tooltip convention already used throughout this page (e.g.
+// the "Cannot delete team with sub-teams" trash icon).
+function FieldLockIndicator({ locked, lockedReason, editableReason = 'Editable at any time' }) {
+  return locked ? (
+    <LockClosedIcon
+      className="h-4 w-4 text-red-500 inline-block ml-1.5 align-text-top"
+      title={lockedReason}
+    />
+  ) : (
+    <LockOpenIcon
+      className="h-4 w-4 text-green-500 inline-block ml-1.5 align-text-top"
+      title={editableReason}
+    />
+  )
+}
 
 export default function Teams({ user }) {
   const [teams, setTeams] = useState([])
@@ -194,7 +215,7 @@ export default function Teams({ user }) {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Teams</h1>
+          <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Orgs & Teams</h1>
           <p className="text-gray-600 dark:text-gray-400">Manage your team memberships and create new teams.</p>
         </div>
         {isGlobalAdmin && (
@@ -324,7 +345,7 @@ export default function Teams({ user }) {
                             <EyeSlashIcon className="h-4 w-4 text-red-500" title="Private team" />
                           )}
                           {team.can_join && (
-                            <ArrowRightOnRectangleIcon className="h-4 w-4 text-green-500" title="Joinable team" />
+                            <ArrowLeftOnRectangleIcon className="h-4 w-4 text-green-500" title="Joinable team" />
                           )}
                         </div>
                         {team.description && (
@@ -477,7 +498,11 @@ export default function Teams({ user }) {
                 <div className="space-y-6">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                      {formData.parentTeamId ? 'Team Name *' : 'Team Name *'}
+                      Team Name *
+                      <FieldLockIndicator
+                        locked={false}
+                        editableReason="Editable at any time, before or after creation"
+                      />
                     </label>
                     <input
                       type="text"
@@ -496,13 +521,18 @@ export default function Teams({ user }) {
                   
                   <div>
                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                      Prefix {!editingTeamId && <span className="text-green-500">(EDITABLE)</span>}
+                      Prefix
+                      <FieldLockIndicator
+                        locked={true}
+                        lockedReason="Cannot be changed after the team is created"
+                      />
                     </label>
                     <input
                       type="text"
                       value={formData.callsignPrefix}
-                      onChange={(e) => setFormData({...formData, callsignPrefix: e.target.value})}
-                      className="input w-full"
+                      onChange={editingTeamId ? undefined : (e) => setFormData({...formData, callsignPrefix: e.target.value})}
+                      className={`input w-full ${editingTeamId ? 'bg-gray-100 dark:bg-gray-600 text-gray-500' : ''}`}
+                      disabled={!!editingTeamId}
                       placeholder={formData.parentTeamId ? "STL, CHC, etc." : "FENZ, DOC, etc."}
                     />
                     <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
@@ -515,6 +545,10 @@ export default function Teams({ user }) {
                   <div>
                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                       Parent Team
+                      <FieldLockIndicator
+                        locked={false}
+                        editableReason="Editable at any time, before or after creation"
+                      />
                     </label>
                     <select
                       value={formData.parentTeamId || ''}
@@ -546,6 +580,10 @@ export default function Teams({ user }) {
                       <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                           Callsign Sub-team Depth
+                          <FieldLockIndicator
+                            locked={false}
+                            editableReason="Editable at any time, before or after creation"
+                          />
                         </label>
                         <select
                           value={formData.callsignSubteamDepth}
@@ -567,6 +605,10 @@ export default function Teams({ user }) {
                       <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                           Callsign Name Format
+                          <FieldLockIndicator
+                            locked={false}
+                            editableReason="Editable at any time, before or after creation"
+                          />
                         </label>
                         <select
                           value={formData.callsignNameFormat}
@@ -587,6 +629,10 @@ export default function Teams({ user }) {
                   <div>
                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                       TAK Color
+                      <FieldLockIndicator
+                        locked={true}
+                        lockedReason={formData.parentTeamId ? 'Sub-teams always inherit TAK color from their parent team' : 'Cannot be changed after the team is created'}
+                      />
                     </label>
                     <select
                       value={formData.color}
@@ -633,6 +679,10 @@ export default function Teams({ user }) {
                   <div>
                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                       Description
+                      <FieldLockIndicator
+                        locked={false}
+                        editableReason="Editable at any time, before or after creation"
+                      />
                     </label>
                     <textarea
                       value={formData.description}
@@ -646,6 +696,10 @@ export default function Teams({ user }) {
                   <div>
                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                       Visibility
+                      <FieldLockIndicator
+                        locked={false}
+                        editableReason="Editable at any time, before or after creation"
+                      />
                     </label>
                     <select
                       value={formData.visibility}
@@ -660,6 +714,10 @@ export default function Teams({ user }) {
                   <div className="space-y-3">
                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
                       Team Settings
+                      <FieldLockIndicator
+                        locked={false}
+                        editableReason="Editable at any time, before or after creation"
+                      />
                     </label>
                     <div className="flex items-start">
                       <input

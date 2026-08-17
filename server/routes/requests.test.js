@@ -17,7 +17,8 @@ jest.mock('../config/database', () => ({
 }));
 
 jest.mock('../models/Team', () => ({
-  findById: jest.fn()
+  findById: jest.fn(),
+  getJoinableTeams: jest.fn()
 }));
 
 jest.mock('axios');
@@ -94,7 +95,7 @@ describe('POST /api/requests/team-access field sanitization', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     requestAccessLimiterStore.resetAll();
-    Team.findById.mockResolvedValue({ id: 1, can_join: true, visibility: 'public' });
+    Team.getJoinableTeams.mockResolvedValue([{ id: 1, name: 'Team', visibility: 'public' }]);
     mockCreateAccessRequest.mockResolvedValue({ requestId: 42, token: 'tok' });
     // Default: no existing email_rate_tracking window, so emailWindowLimiter
     // inserts a fresh row and calls next() for every test in this describe
@@ -185,6 +186,69 @@ describe('POST /api/requests/team-access field sanitization', () => {
 });
 
 /**
+ * Integration tests for the joinable-team check on
+ * `POST /api/requests/team-access` (Requirement 7.4).
+ *
+ * The route resolves joinability via `Team.getJoinableTeams()` (the same
+ * method Requirement 7.1/7.2 use to exclude a private-branch-cascaded
+ * Team) rather than a plain `Team.findById` lookup, so a Team that is
+ * `can_join`/`public` on its own row but has a `private` ancestor is
+ * rejected identically to a Team that is not found at all.
+ */
+describe('POST /api/requests/team-access joinable-team check (Requirement 7.4)', () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    requestAccessLimiterStore.resetAll();
+    mockCreateAccessRequest.mockResolvedValue({ requestId: 42, token: 'tok' });
+    pool.connect.mockResolvedValue(buildMockEmailWindowClient());
+    axios.post.mockResolvedValue({
+      data: { success: true, action: 'team_access_request', score: 0.9 }
+    });
+    app = buildApp();
+  });
+
+  it('rejects with 400 "Team is not available for joining" when the target team has a private ancestor (excluded from getJoinableTeams even though can_join/public on its own row)', async () => {
+    // Regression test: `Team.getJoinableTeams()` already excludes this
+    // Team (per its own private-ancestor `NOT EXISTS` clause), so it
+    // simply never appears in the list returned here - the route must
+    // not fall back to a plain `findById`-style own-row check that would
+    // incorrectly accept it.
+    Team.getJoinableTeams.mockResolvedValue([]);
+
+    const res = await request(app).post('/api/requests/team-access').send(VALID_BODY);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Team is not available for joining');
+    expect(mockCreateAccessRequest).not.toHaveBeenCalled();
+  });
+
+  it('rejects with 400 "Team is not available for joining" when the target team does not exist at all', async () => {
+    Team.getJoinableTeams.mockResolvedValue([
+      { id: 999, name: 'Some other team', visibility: 'public' }
+    ]);
+
+    const res = await request(app).post('/api/requests/team-access').send(VALID_BODY);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Team is not available for joining');
+    expect(mockCreateAccessRequest).not.toHaveBeenCalled();
+  });
+
+  it('succeeds when the target team is present in getJoinableTeams (genuinely joinable, no private ancestor)', async () => {
+    Team.getJoinableTeams.mockResolvedValue([
+      { id: 1, name: 'Joinable Team', visibility: 'public' }
+    ]);
+
+    const res = await request(app).post('/api/requests/team-access').send(VALID_BODY);
+
+    expect(res.status).toBe(200);
+    expect(mockCreateAccessRequest).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
  * Integration tests for `requestAccessLimiter` (Requirement 7.1, 20
  * requests/IP/15min) and `emailWindowLimiter` (Requirement 7.2, 5
  * requests/submitted-email/60min) mounted on
@@ -196,7 +260,7 @@ describe('requestAccessLimiter and emailWindowLimiter (Requirements 7.1, 7.2)', 
   beforeEach(() => {
     jest.clearAllMocks();
     requestAccessLimiterStore.resetAll();
-    Team.findById.mockResolvedValue({ id: 1, can_join: true, visibility: 'public' });
+    Team.getJoinableTeams.mockResolvedValue([{ id: 1, name: 'Team', visibility: 'public' }]);
     mockCreateAccessRequest.mockResolvedValue({ requestId: 42, token: 'tok' });
     pool.connect.mockResolvedValue(buildMockEmailWindowClient());
     axios.post.mockResolvedValue({
@@ -316,7 +380,7 @@ describe('verifyCaptcha (reCAPTCHA v3) on POST /team-access (Requirements 7.3, 7
   beforeEach(() => {
     jest.clearAllMocks();
     requestAccessLimiterStore.resetAll();
-    Team.findById.mockResolvedValue({ id: 1, can_join: true, visibility: 'public' });
+    Team.getJoinableTeams.mockResolvedValue([{ id: 1, name: 'Team', visibility: 'public' }]);
     mockCreateAccessRequest.mockResolvedValue({ requestId: 42, token: 'tok' });
     pool.connect.mockResolvedValue(buildMockEmailWindowClient());
     app = buildApp();
@@ -394,5 +458,89 @@ describe('verifyCaptcha (reCAPTCHA v3) on POST /team-access (Requirements 7.3, 7
 
     expect(res.status).toBe(200);
     expect(mockCreateAccessRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it('every rejection path returns a specific, non-generic error message (not just "CAPTCHA verification failed")', async () => {
+    const { 'g-recaptcha-response': _omit, ...bodyWithoutToken } = VALID_BODY;
+    const missingTokenRes = await request(app).post('/api/requests/team-access').send(bodyWithoutToken);
+    expect(missingTokenRes.body.error).toMatch(/no CAPTCHA challenge was submitted/i);
+
+    axios.post.mockResolvedValue({ data: { success: false } });
+    const failedRes = await request(app).post('/api/requests/team-access').send(VALID_BODY);
+    expect(failedRes.body.error).toMatch(/reload the page/i);
+
+    axios.post.mockResolvedValue({ data: { success: true, action: 'wrong_action', score: 0.9 } });
+    const actionRes = await request(app).post('/api/requests/team-access').send(VALID_BODY);
+    expect(actionRes.body.error).toMatch(/does not match this form/i);
+
+    axios.post.mockResolvedValue({ data: { success: true, action: 'team_access_request', score: 0.1 } });
+    const scoreRes = await request(app).post('/api/requests/team-access').send(VALID_BODY);
+    expect(scoreRes.body.error).toMatch(/flagged as likely automated/i);
+
+    axios.post.mockRejectedValue(new Error('timeout of 10000ms exceeded'));
+    const timeoutRes = await request(app).post('/api/requests/team-access').send(VALID_BODY);
+    expect(timeoutRes.body.error).toMatch(/could not reach the CAPTCHA verification service/i);
+  });
+});
+
+/**
+ * Regression tests for the RECAPTCHA_DISABLED testing-only bypass
+ * (isRecaptchaDisabledForTesting in server/middleware/captcha.js).
+ * Verifies the bypass actually skips the CAPTCHA check end-to-end on the
+ * mounted route, AND -- most importantly -- that it is HARD-DISABLED
+ * whenever NODE_ENV=production regardless of the RECAPTCHA_DISABLED
+ * value, so it can never accidentally leave the production CAPTCHA check
+ * disabled.
+ */
+describe('RECAPTCHA_DISABLED testing-only bypass on POST /team-access', () => {
+  let app;
+  const ORIGINAL_ENV = { NODE_ENV: process.env.NODE_ENV, RECAPTCHA_DISABLED: process.env.RECAPTCHA_DISABLED };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    requestAccessLimiterStore.resetAll();
+    Team.getJoinableTeams.mockResolvedValue([{ id: 1, name: 'Team', visibility: 'public' }]);
+    mockCreateAccessRequest.mockResolvedValue({ requestId: 42, token: 'tok' });
+    pool.connect.mockResolvedValue(buildMockEmailWindowClient());
+    app = buildApp();
+  });
+
+  afterEach(() => {
+    process.env.NODE_ENV = ORIGINAL_ENV.NODE_ENV;
+    process.env.RECAPTCHA_DISABLED = ORIGINAL_ENV.RECAPTCHA_DISABLED;
+  });
+
+  it('skips the CAPTCHA check entirely (no token required, no verify API call) when RECAPTCHA_DISABLED=true and NODE_ENV is not production', async () => {
+    process.env.NODE_ENV = 'test';
+    process.env.RECAPTCHA_DISABLED = 'true';
+    const { 'g-recaptcha-response': _omit, ...bodyWithoutToken } = VALID_BODY;
+
+    const res = await request(app).post('/api/requests/team-access').send(bodyWithoutToken);
+
+    expect(res.status).toBe(200);
+    expect(axios.post).not.toHaveBeenCalled();
+    expect(mockCreateAccessRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it('still enforces the CAPTCHA check when NODE_ENV=production, even if RECAPTCHA_DISABLED=true', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.RECAPTCHA_DISABLED = 'true';
+    const { 'g-recaptcha-response': _omit, ...bodyWithoutToken } = VALID_BODY;
+
+    const res = await request(app).post('/api/requests/team-access').send(bodyWithoutToken);
+
+    expect(res.status).toBe(400);
+    expect(mockCreateAccessRequest).not.toHaveBeenCalled();
+  });
+
+  it('still enforces the CAPTCHA check when RECAPTCHA_DISABLED is unset/false, regardless of NODE_ENV', async () => {
+    process.env.NODE_ENV = 'test';
+    delete process.env.RECAPTCHA_DISABLED;
+    const { 'g-recaptcha-response': _omit, ...bodyWithoutToken } = VALID_BODY;
+
+    const res = await request(app).post('/api/requests/team-access').send(bodyWithoutToken);
+
+    expect(res.status).toBe(400);
+    expect(mockCreateAccessRequest).not.toHaveBeenCalled();
   });
 });

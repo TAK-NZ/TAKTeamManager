@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react'
 import React from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { PlusIcon, UsersIcon, UserPlusIcon, ShieldCheckIcon, BuildingOfficeIcon, FolderPlusIcon, HashtagIcon, XMarkIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, TrashIcon, PencilIcon, CheckIcon } from '@heroicons/react/24/outline'
-import { teamsAPI, channelsAPI, usersAPI } from '../services/api'
+import { PlusIcon, UsersIcon, UserPlusIcon, ShieldCheckIcon, BuildingOfficeIcon, FolderPlusIcon, HashtagIcon, XMarkIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, TrashIcon, PencilIcon, CheckIcon, ArrowLeftOnRectangleIcon } from '@heroicons/react/24/outline'
+import { teamsAPI, channelsAPI, usersAPI, configAPI } from '../services/api'
 import api from '../services/api'
 
 export default function TeamDetail({ refreshUser }) {
@@ -67,6 +67,7 @@ export default function TeamDetail({ refreshUser }) {
   })
   const [updating, setUpdating] = useState(false)
   const [colorMappings, setColorMappings] = useState({})
+  const [folderSeparator, setFolderSeparator] = useState(' - ')
   const [showChannelDialog, setShowChannelDialog] = useState(false)
   const [channelFormData, setChannelFormData] = useState({
     customSuffix: '',
@@ -351,18 +352,24 @@ export default function TeamDetail({ refreshUser }) {
           setParentTeam(null)
         }
         
-        // Fetch sub-teams, all teams, and color mappings
+        // Fetch sub-teams, all teams, color mappings, and the configured
+        // channel folder separator (used to build the custom-channel name
+        // preview below, matching the real separator
+        // Channel.createCustomChannel uses server-side -- see
+        // CHANNEL_FOLDER_SEPARATOR).
         if (!isCancelled) {
           try {
-            const [subTeamsResponse, allTeamsResponse, configResponse] = await Promise.all([
+            const [subTeamsResponse, allTeamsResponse, configResponse, publicConfigResponse] = await Promise.all([
               teamsAPI.getSubTeams(teamId),
               teamsAPI.getMyTeams(),
-              api.get('/config/color-mappings')
+              api.get('/config/color-mappings'),
+              configAPI.getPublic()
             ])
             if (!isCancelled) {
               setSubTeams(subTeamsResponse.data.subTeams || [])
               setAllTeams(allTeamsResponse.data.teams || [])
               setColorMappings(configResponse.data.colorMappings || {})
+              setFolderSeparator(publicConfigResponse.data.channel_folder_separator || ' - ')
             }
           } catch (err) {
             console.error('Failed to fetch teams:', err)
@@ -534,6 +541,9 @@ export default function TeamDetail({ refreshUser }) {
                   style={{ backgroundColor: getColorValue(team.color) }}
                   title={team.color}
                 ></div>
+              )}
+              {team.can_join && (
+                <ArrowLeftOnRectangleIcon className="h-4 w-4 text-green-500" title="Joinable team" />
               )}
             </div>
             {team.parent_team_id && (
@@ -1445,8 +1455,8 @@ export default function TeamDetail({ refreshUser }) {
                   <h4 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Channel Name Preview:</h4>
                   <p className="text-sm text-gray-900 dark:text-gray-100">
                     {team.parent_team_id 
-                      ? `Teams / ${parentTeam?.callsign_prefix || parentTeam?.name || 'Root'} / ${team.name}`
-                      : `Teams / ${team.callsign_prefix || team.name}`
+                      ? `Teams${folderSeparator}${parentTeam?.callsign_prefix || parentTeam?.name || 'Root'}${folderSeparator}${team.name}`
+                      : `Teams${folderSeparator}${team.callsign_prefix || team.name}`
                     }
                     {channelFormData.customSuffix && ` - ${channelFormData.customSuffix}`}
                   </p>

@@ -68,12 +68,22 @@ export default function RequestAccess() {
 
   const onSubmit = async (data) => {
     try {
-      if (!config.recaptcha_site_key) {
-        toast.error('CAPTCHA is not configured. Please contact an administrator.')
-        return
-      }
+      let recaptchaToken
 
-      const recaptchaToken = await getRecaptchaToken(config.recaptcha_site_key, RECAPTCHA_ACTION)
+      // config.recaptcha_disabled mirrors the server's own
+      // RECAPTCHA_DISABLED bypass (non-production only -- see
+      // server/middleware/captcha.js's isRecaptchaDisabledForTesting).
+      // When active, the server won't call Google's verify API at all,
+      // so there's no point loading the script / generating a token
+      // here either -- and doing so would otherwise block the form on a
+      // missing site key.
+      if (!config.recaptcha_disabled) {
+        if (!config.recaptcha_site_key) {
+          toast.error('CAPTCHA is not configured. Please contact an administrator.')
+          return
+        }
+        recaptchaToken = await getRecaptchaToken(config.recaptcha_site_key, RECAPTCHA_ACTION)
+      }
 
       const submitData = {
         ...data,
@@ -85,7 +95,11 @@ export default function RequestAccess() {
       setSubmitted(true)
       toast.success('Access request submitted successfully!')
     } catch (error) {
-      toast.error('Failed to submit request. Please try again.')
+      // Surface the server's specific rejection reason (e.g. the
+      // improved CAPTCHA failure messages from server/middleware/
+      // captcha.js) instead of a generic message, when one is available.
+      const serverMessage = error.response?.data?.error
+      toast.error(serverMessage || 'Failed to submit request. Please try again.')
     }
   }
 
@@ -110,9 +124,15 @@ export default function RequestAccess() {
               <p className="text-gray-600 dark:text-gray-400 mb-6">
                 Your team access request has been submitted. A team administrator will review your request and contact you via email.
               </p>
-              <Link to="/" className="btn-primary">
-                Back to Login
-              </Link>
+              {config.authentik_origin ? (
+                <a href={config.authentik_origin} className="btn-primary">
+                  Back to Login
+                </a>
+              ) : (
+                <Link to="/" className="btn-primary">
+                  Back to Login
+                </Link>
+              )}
             </div>
           </div>
         </div>
@@ -292,9 +312,18 @@ export default function RequestAccess() {
           )}
 
           <div className="text-center mt-6">
-            <Link to="/" className="text-sm text-primary-600 hover:text-primary-500">
-              Already have an account? Sign in
-            </Link>
+            {config.authentik_origin ? (
+              <a
+                href={config.authentik_origin}
+                className="text-sm text-primary-600 hover:text-primary-500"
+              >
+                Already have an account? Sign in
+              </a>
+            ) : (
+              <Link to="/" className="text-sm text-primary-600 hover:text-primary-500">
+                Already have an account? Sign in
+              </Link>
+            )}
           </div>
           </div>
         </div>

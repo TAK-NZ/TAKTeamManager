@@ -180,49 +180,26 @@ router.get('/me', authenticateToken, authorize, async (req, res) => {
     `, [req.user.id]);
     
     const teams = teamResult.rows;
-    const channels = await User.getChannelMemberships(req.user.id);
+    // channel_memberships.user_id is a foreign key to the local users.id,
+    // NOT the Authentik id -- req.user.userId, not req.user.id.
+    const channels = await User.getChannelMemberships(req.user.userId);
     
-    // Get fresh user data from Authentik
-    let freshUserData = req.user;
-    try {
-      const authentikResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${req.user.id}/`, {
-        headers: { Authorization: `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }
-      });
-      if (authentikResponse.ok) {
-        const authentikUser = await authentikResponse.json();
-        
-        // Fetch group names for the user's groups
-        const groupNames = [];
-        if (authentikUser.groups && authentikUser.groups.length > 0) {
-          for (const groupId of authentikUser.groups) {
-            try {
-              const groupResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${groupId}/`, {
-                headers: { Authorization: `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }
-              });
-              if (groupResponse.ok) {
-                const group = await groupResponse.json();
-                groupNames.push(group.name);
-              }
-            } catch (groupError) {
-              getLogger().error({ err: groupError }, 'Failed to fetch group');
-            }
-          }
-        }
-        
-        freshUserData = {
-          ...req.user,
-          groups: groupNames,
-          takCallsign: authentikUser.attributes?.takCallsign,
-          takColor: authentikUser.attributes?.takColor,
-          takRole: authentikUser.attributes?.takRole
-        };
-      }
-    } catch (error) {
-      getLogger().error({ err: error }, 'Failed to fetch fresh user data');
-    }
-    
+    // req.user is already populated from user_cache by
+    // resolveUserFromRequest/authenticateToken (server/middleware/auth.js),
+    // including groups/takCallsign/takColor/takRole -- and user_cache is
+    // kept current by the periodic Authentik sync (authentikSync.js,
+    // every SYNC_INTERVAL_MINUTES, default 10). This route previously
+    // ALSO made a live call to Authentik's /users/:id/ endpoint, then one
+    // more live call PER group membership to resolve group names, on
+    // every single call to this route -- entirely redundant with data
+    // already sitting in req.user, and the actual cause of the Dashboard
+    // (which calls this route on every load) feeling slow: every load
+    // paid for 1+N sequential/parallel external HTTP round trips to
+    // Authentik just to re-fetch data that was already available locally,
+    // at most ~10 minutes staler. Removed entirely -- req.user is used
+    // as-is, no live Authentik call.
     res.json({
-      user: freshUserData,
+      user: req.user,
       teams,
       channels
     });
@@ -576,13 +553,10 @@ router.post('/add-to-team', authenticateToken, authorize, [
       return res.status(400).json({ error: 'User is already a member of another team' });
     }
     
-    // Get the local user ID for the requesting user
-    const requestingUserResult = await pool.query(
-      'SELECT id FROM users WHERE authentik_user_id = $1',
-      [req.user.id]
-    );
-    
-    const requestingUserId = requestingUserResult.rows[0]?.id;
+    // req.user.userId is already the local users.id (see
+    // server/middleware/auth.js) -- no separate lookup by Authentik id is
+    // needed here.
+    const requestingUserId = req.user.userId;
     
     // Use new service layer for team assignment
     const result = await TeamMembershipService.addUserToTeam(localUserId, teamId, 'member', requestingUserId);
@@ -633,13 +607,9 @@ router.delete('/remove-from-team/:userId', authenticateToken, authorize, [
     
     const authentikUserId = userResult.rows[0].authentik_user_id;
     
-    // Get the local user ID for the requesting user
-    const requestingUserResult = await pool.query(
-      'SELECT id FROM users WHERE authentik_user_id = $1',
-      [req.user.id]
-    );
-    
-    const requestingUserId = requestingUserResult.rows[0]?.id;
+    // req.user.userId is already the local users.id -- see comment on the
+    // add-to-team route above.
+    const requestingUserId = req.user.userId;
     
     // Use new service layer for team removal
     const result = await TeamMembershipService.removeUserFromTeam(userId, requestingUserId);

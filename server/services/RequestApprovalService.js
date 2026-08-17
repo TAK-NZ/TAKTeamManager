@@ -2,7 +2,6 @@ const pool = require('../config/database');
 const EmailService = require('./EmailService');
 const UserProvisioningService = require('./UserProvisioningService');
 const TeamMembershipService = require('./TeamMembershipService');
-const UserAttributesService = require('./userAttributes');
 const EventPublisher = require('./EventPublisher');
 const { getLogger } = require('../middleware/requestContext');
 const crypto = require('crypto');
@@ -123,21 +122,15 @@ class RequestApprovalService {
    * -- so the Authentik user can be created (for `new_account` requests
    * only) ahead of the transactional section that follows.
    *
-   * Requirement 18.4 (task 38.4): `request_type === 'name_change'` has
-   * the exact same constraint -- updating the Authentik user's name is
-   * an external HTTP call (a PATCH), and so is the follow-on
-   * `UserAttributesService.updateUserAttributes` call needed to push the
-   * regenerated callsign. Both must happen here in Phase 1, before any
-   * transactional client is acquired. The new callsign is computed via
-   * `UserAttributesService.computeCallsignAttributes` using the
-   * request's `requested_first_name`/`requested_last_name` values
-   * directly (NOT by writing the new name to `users` first and then
-   * calling the DB-reading `generateCallsign` -- that would require a
-   * write to `users` outside of Phase 2's transaction, breaking
-   * atomicity). The user's current team is looked up via a read-only
-   * `pool.query` (safe outside a transaction, since it performs no
-   * write) so `computeCallsignAttributes` has a `teamId` to resolve the
-   * team-hierarchy callsign prefix/format from.
+   * Requirement 18.4 (task 38.4), updated by task 11.1 (Requirement
+   * 11.8): `request_type === 'name_change'` has the exact same
+   * constraint -- updating the Authentik user's DISPLAY name is an
+   * external HTTP call (a PATCH) and must happen here in Phase 1, before
+   * any transactional client is acquired. Per Requirement 11.8 (a stored
+   * `callsign_suffix` is NEVER recomputed by a name correction), this
+   * PATCH is the only Authentik call a name change makes -- it no
+   * longer computes or pushes a regenerated callsign/color/role, since
+   * none of those attributes derive from the live name anymore.
    *
    * The transactional section re-fetches the row with
    * `AND status = 'pending'` (as before) so a request that was approved/
@@ -146,8 +139,8 @@ class RequestApprovalService {
    */
   async approveRequest(requestId, adminId, additionalDetails = '') {
     // --- Phase 1: pre-fetch (no open transaction) + Authentik user
-    // creation for new_account requests, and Authentik name/callsign
-    // updates for name_change requests. ---
+    // creation for new_account requests, and the Authentik display-name
+    // update for name_change requests. ---
     const preFetchResult = await pool.query(
       'SELECT * FROM access_requests WHERE id = $1 AND status = $2',
       [requestId, 'pending']
@@ -159,14 +152,13 @@ class RequestApprovalService {
 
     const preFetchedRequest = preFetchResult.rows[0];
     let newAccountAuthentikUser = null;
-    let nameChangeCallsignAttributes = null;
 
     if (preFetchedRequest.request_type === 'new_account') {
       newAccountAuthentikUser = await this.createAuthentikUserForNewAccount(preFetchedRequest);
     }
 
     if (preFetchedRequest.request_type === 'name_change') {
-      nameChangeCallsignAttributes = await this.updateAuthentikNameAndCallsignForNameChange(preFetchedRequest);
+      await this.updateAuthentikNameForNameChange(preFetchedRequest);
     }
 
     // --- Phase 2: single transaction for the status update + the
@@ -231,7 +223,6 @@ class RequestApprovalService {
       // Process the request based on type
       await this.processApprovedRequest(client, request, {
         newAccountAuthentikUser,
-        nameChangeCallsignAttributes,
         adminId
       });
       
@@ -365,23 +356,25 @@ class RequestApprovalService {
   }
 
   /**
-   * Requirement 18.4 (task 38.4): performs BOTH external Authentik calls
-   * needed for a `name_change` approval -- the name-metadata PATCH and
-   * the regenerated-callsign attributes PATCH -- strictly before any
-   * transactional client is acquired (mirroring `new_account`'s Phase 1/
-   * Phase 2 split). Runs against the PRE-FETCHED request row (i.e.
-   * before Phase 2's transaction re-reads it), using
-   * `request.requested_first_name`/`requested_last_name` as the new
-   * name values and `request.existing_user_id` to resolve the user's
-   * Authentik id and current team.
+   * Requirement 18.4 (task 38.4), updated by task 11.1 (Requirement
+   * 11.8): performs the Authentik DISPLAY-name PATCH needed for a
+   * `name_change` approval, strictly before any transactional client is
+   * acquired (mirroring `new_account`'s Phase 1/Phase 2 split). Runs
+   * against the PRE-FETCHED request row (i.e. before Phase 2's
+   * transaction re-reads it), using
+   * `request.requested_first_name`/`requested_last_name` as the new name
+   * values and `request.existing_user_id` to resolve the user's
+   * Authentik id.
+   *
+   * Per Requirement 11.8, a stored `callsign_suffix` is NEVER
+   * recomputed by a name correction, so a name change no longer implies
+   * any callsign/color/role regeneration -- this function performs only
+   * the Authentik name-metadata PATCH and nothing else.
    *
    * @param {object} request - the pre-fetched `access_requests` row.
-   * @returns {Promise<{callsign: string, color: string, role: string}|null>}
-   *   the callsign attributes that were computed and pushed to
-   *   Authentik (null if the user has no team, in which case no
-   *   callsign exists to compute/push).
+   * @returns {Promise<void>}
    */
-  async updateAuthentikNameAndCallsignForNameChange(request) {
+  async updateAuthentikNameForNameChange(request) {
     const firstName = request.requested_first_name;
     const lastName = request.requested_last_name;
 
@@ -416,30 +409,6 @@ class RequestApprovalService {
       error.details = errorData;
       throw error;
     }
-
-    // Resolve the user's current team (a read, safe outside a
-    // transaction) so the regenerated callsign reflects the correct
-    // team-hierarchy prefix/format. A direct (non-inherited) membership
-    // row is used since that is the user's actual team assignment.
-    const teamResult = await pool.query(
-      'SELECT team_id FROM team_memberships WHERE user_id = $1 AND inherited_from_team_id IS NULL',
-      [request.existing_user_id]
-    );
-
-    if (teamResult.rows.length === 0) {
-      // No team assigned -- nothing to compute/push a callsign against.
-      return null;
-    }
-
-    const teamId = teamResult.rows[0].team_id;
-
-    const callsignAttributes = await UserAttributesService.computeCallsignAttributes(firstName, lastName, teamId);
-
-    if (callsignAttributes) {
-      await UserAttributesService.updateUserAttributes(authentikUserId, callsignAttributes);
-    }
-
-    return callsignAttributes;
   }
 
   async denyRequest(requestId, adminId, denialReason) {
@@ -491,7 +460,7 @@ class RequestApprovalService {
     }
   }
 
-  async processApprovedRequest(client, request, { newAccountAuthentikUser, nameChangeCallsignAttributes, adminId } = {}) {
+  async processApprovedRequest(client, request, { newAccountAuthentikUser, adminId } = {}) {
     switch (request.request_type) {
       case 'new_account': {
         // Requirement 18.1 (task 38.1): the Authentik user was already
@@ -569,16 +538,17 @@ class RequestApprovalService {
         break;
       }
       case 'name_change': {
-        // Requirement 18.4 (task 38.4): BOTH external Authentik calls
-        // (the name PATCH and the callsign-attributes PATCH) already
-        // happened in Phase 1, via `updateAuthentikNameAndCallsignForNameChange`
-        // -- before this transaction opened. This branch performs ONLY
-        // local database writes on this transaction's already-open
-        // `client`, so it commits/rolls back atomically with the
-        // request's status update (Requirement 18.6/18.7): update
-        // `users.first_name`/`last_name`, and mirror the same values
-        // (plus the regenerated callsign attributes, if one was
-        // computed in Phase 1) onto `user_cache`.
+        // Requirement 18.4 (task 38.4), updated by task 11.1
+        // (Requirement 11.8): the Authentik DISPLAY-name PATCH already
+        // happened in Phase 1, via `updateAuthentikNameForNameChange` --
+        // before this transaction opened. A name change no longer
+        // implies any callsign/color/role regeneration (a stored
+        // `callsign_suffix` is never recomputed by a name correction),
+        // so this branch performs ONLY local database writes on this
+        // transaction's already-open `client`, so it commits/rolls back
+        // atomically with the request's status update (Requirement
+        // 18.6/18.7): update `users.first_name`/`last_name`, and mirror
+        // the same values onto `user_cache`.
         const firstName = request.requested_first_name;
         const lastName = request.requested_last_name;
 
@@ -593,24 +563,10 @@ class RequestApprovalService {
 
         const authentikUserId = updatedUserResult.rows[0].authentik_user_id;
 
-        if (nameChangeCallsignAttributes) {
-          await client.query(
-            'UPDATE user_cache SET first_name = $1, last_name = $2, tak_callsign = $3, tak_color = $4, tak_role = $5 WHERE authentik_id = $6',
-            [
-              firstName,
-              lastName,
-              nameChangeCallsignAttributes.callsign,
-              nameChangeCallsignAttributes.color,
-              nameChangeCallsignAttributes.role,
-              authentikUserId
-            ]
-          );
-        } else {
-          await client.query(
-            'UPDATE user_cache SET first_name = $1, last_name = $2 WHERE authentik_id = $3',
-            [firstName, lastName, authentikUserId]
-          );
-        }
+        await client.query(
+          'UPDATE user_cache SET first_name = $1, last_name = $2 WHERE authentik_id = $3',
+          [firstName, lastName, authentikUserId]
+        );
         break;
       }
     }

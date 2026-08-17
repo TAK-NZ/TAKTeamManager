@@ -1,6 +1,8 @@
 const pool = require('../config/database');
 const sanitizeHtml = require('sanitize-html');
 const { SANITIZE_HTML_OPTIONS } = require('../config/htmlSafeSubset');
+const { MAX_TEAM_DEPTH } = require('../config/constants');
+const { isRecaptchaDisabledForTesting } = require('../middleware/captcha');
 
 class SiteConfig {
   static async getAll() {
@@ -63,6 +65,21 @@ class SiteConfig {
     // server/middleware/captcha.js's siteverify call) is never exposed
     // here or anywhere else.
     config.recaptcha_site_key = process.env.RECAPTCHA_SITE_KEY || null;
+
+    // Expose whether the server-side reCAPTCHA check is currently
+    // bypassed for testing (RECAPTCHA_DISABLED=true, non-production
+    // only -- see captcha.js's isRecaptchaDisabledForTesting). The Client
+    // uses this to skip loading Google's script / generating a token
+    // entirely rather than blocking the form on a missing site key when
+    // the server won't actually verify one.
+    config.recaptcha_disabled = isRecaptchaDisabledForTesting();
+
+    // Expose the system-wide Max_Team_Depth constant (Requirements 2.4,
+    // 2.5, 5.7) so the Client's Add-Sub-team/Parent-dropdown disable logic
+    // and the Callsign_Level_Selection toggle count never hardcode this
+    // value a second time. Sourced from the same constant `Team.create`
+    // enforces server-side, so it can never drift from the enforced limit.
+    config.maxTeamDepth = MAX_TEAM_DEPTH;
 
     return config;
   }

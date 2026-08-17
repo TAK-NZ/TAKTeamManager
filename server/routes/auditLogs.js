@@ -114,19 +114,29 @@ function buildAuditLogFilters(filters = {}) {
   const conditions = [];
   const params = [];
 
+  // Every fragment below is qualified with `audit_logs.` -- valid whether
+  // or not the caller's query joins another table (a bare table-name
+  // prefix works fine even with no join/alias present, e.g. in the
+  // export.csv route and the COUNT(*) query below), and REQUIRED now that
+  // `GET /api/audit-logs` LEFT JOINs `users` to resolve a display name
+  // for `user_id` (Requirement 31 Criterion 1 update) -- `users` has its
+  // own `id`/`created_at` columns, so an unqualified `user_id`/
+  // `created_at` reference became ambiguous the moment that join was
+  // added. `channels.id` inside the teamId subquery below is unambiguous
+  // (only `channels` is referenced there) and stays unqualified.
   if (userId !== undefined && userId !== null && userId !== '') {
     params.push(userId);
-    conditions.push(`user_id = $${params.length}`);
+    conditions.push(`audit_logs.user_id = $${params.length}`);
   }
 
   if (action) {
     params.push(action);
-    conditions.push(`action = $${params.length}`);
+    conditions.push(`audit_logs.action = $${params.length}`);
   }
 
   if (resourceType) {
     params.push(resourceType);
-    conditions.push(`resource_type = $${params.length}`);
+    conditions.push(`audit_logs.resource_type = $${params.length}`);
   }
 
   if (teamId !== undefined && teamId !== null && teamId !== '') {
@@ -141,8 +151,8 @@ function buildAuditLogFilters(filters = {}) {
 
     conditions.push(
       `(
-        (resource_type = 'team' AND resource_id = $${teamIdParamIndex})
-        OR (resource_type = 'channel' AND resource_id IN (
+        (audit_logs.resource_type = 'team' AND audit_logs.resource_id = $${teamIdParamIndex})
+        OR (audit_logs.resource_type = 'channel' AND audit_logs.resource_id IN (
           SELECT id FROM channels WHERE team_id = $${channelTeamIdParamIndex}
         ))
       )`
@@ -151,12 +161,12 @@ function buildAuditLogFilters(filters = {}) {
 
   if (startDate) {
     params.push(startDate);
-    conditions.push(`created_at >= $${params.length}`);
+    conditions.push(`audit_logs.created_at >= $${params.length}`);
   }
 
   if (endDate) {
     params.push(endDate);
-    conditions.push(`created_at <= $${params.length}`);
+    conditions.push(`audit_logs.created_at <= $${params.length}`);
   }
 
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -196,12 +206,25 @@ router.get('/', authenticateToken, authorize, paginationParams, [
     const limitParamIndex = params.length + 1;
     const offsetParamIndex = params.length + 2;
 
+    // LEFT JOIN users to resolve the acting user's username/email for
+    // display -- a bare numeric user_id is meaningless to an admin
+    // reviewing the log (Authentik/local ids are internal implementation
+    // details, never something a human should have to look up manually).
+    // LEFT (not INNER) so a row whose actor was later deleted still
+    // appears, with username/email as null. `audit_logs.id` must be
+    // qualified since `users.id` also exists and would otherwise be
+    // ambiguous; every other selected column is unique to `audit_logs` and
+    // stays unqualified to match buildAuditLogFilters' unqualified WHERE
+    // fragments.
     const [rowsResult, countResult] = await Promise.all([
       pool.query(
-        `SELECT id, user_id, action, resource_type, resource_id, details, created_at
+        `SELECT audit_logs.id, audit_logs.user_id, audit_logs.action, audit_logs.resource_type,
+                audit_logs.resource_id, audit_logs.details, audit_logs.created_at,
+                users.username, users.email
          FROM audit_logs
+         LEFT JOIN users ON users.id = audit_logs.user_id
          ${whereClause}
-         ORDER BY created_at DESC
+         ORDER BY audit_logs.created_at DESC
          LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}`,
         dataParams
       ),

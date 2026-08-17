@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isValidBaseUrl } from './api.js';
+import { isValidBaseUrl, shouldRedirectToLogin } from './api.js';
 
 // Validates: Requirements 2.7, 2.8
 //
@@ -61,5 +61,35 @@ describe('isValidBaseUrl', () => {
     it('rejects a malformed absolute http:// URL with no host', () => {
       expect(isValidBaseUrl('http://')).toBe(false);
     });
+  });
+});
+
+// Regression coverage for the /request-access <-> /login endless redirect
+// loop: an anonymous visitor's GET /auth/me (or any other API call) 401s
+// on a page that's intentionally public, and the interceptor must not
+// force-navigate to /login in that case -- doing so used to reload the
+// SPA, remount App.jsx's auth check, 401 again, and loop forever.
+describe('shouldRedirectToLogin', () => {
+  it('redirects on a 401 from an ordinary authenticated page', () => {
+    expect(shouldRedirectToLogin(401, '/dashboard')).toBe(true);
+    expect(shouldRedirectToLogin(401, '/teams')).toBe(true);
+  });
+
+  it('does not redirect on a 401 while already on /login (expected/normal there, not a mid-use expiry)', () => {
+    expect(shouldRedirectToLogin(401, '/login')).toBe(false);
+  });
+
+  it('does not redirect on a 401 while on /request-access', () => {
+    expect(shouldRedirectToLogin(401, '/request-access')).toBe(false);
+  });
+
+  it('does not redirect on a 401 while on /verify-request', () => {
+    expect(shouldRedirectToLogin(401, '/verify-request')).toBe(false);
+  });
+
+  it('does not redirect on a non-401 status, regardless of path', () => {
+    expect(shouldRedirectToLogin(500, '/dashboard')).toBe(false);
+    expect(shouldRedirectToLogin(403, '/dashboard')).toBe(false);
+    expect(shouldRedirectToLogin(undefined, '/dashboard')).toBe(false);
   });
 });

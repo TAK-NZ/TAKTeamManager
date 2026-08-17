@@ -43,6 +43,160 @@ class BulkImportAuthorizationError extends Error {
   }
 }
 
+/**
+ * Reads a row field, trimmed, treating `undefined`/`null` the same as an
+ * empty string. Used throughout `buildImportGraph` (task 17.1) for the
+ * optional `rowId`/`parentRowRef`/`parentTeamName`/`parentTeamId`
+ * columns, none of which are required.
+ *
+ * @param {Record<string, string>} row
+ * @param {string} field
+ * @returns {string}
+ */
+function readOptionalField(row, field) {
+  const value = row[field];
+  if (value === undefined || value === null) {
+    return '';
+  }
+  return String(value).trim();
+}
+
+/**
+ * Requirements 9.1-9.3, 9.5 (design.md's Phase 1, task 17.1): builds an
+ * in-memory dependency graph from a whole file's already-parsed CSV
+ * rows, PURE logic only -- no I/O, no DB access, no async. This is a
+ * pre-step of the two-phase CSV team-import pipeline (`importTeams`);
+ * it does not create any team, resolve `parentTeamName`/`parentTeamId`
+ * against the database, detect cycles (task 17.2), detect a dangling
+ * `parentRowRef` (task 17.3), or compute a creation order (task 17.3).
+ *
+ * Node keying: a row's `rowKey` is its own (trimmed) `rowId` when
+ * present and non-empty, else a synthetic `` `__row_${index + 1}` ``
+ * key derived from the row's 1-based position in `rows` (mirroring the
+ * `rowNumber++` convention already used for error-reporting elsewhere
+ * in this file). A row with no `rowId` still becomes a graph node --
+ * it just cannot be referenced by any other row's `parentRowRef`.
+ *
+ * Whole-file rejections (Requirements 9.2, 9.5), both recorded as
+ * entries in the returned `wholeFileErrors` array rather than as a
+ * per-row failure, consistent with `design.md`'s Phase 1 description
+ * (both are grouped there under "Rejects the WHOLE import if..."):
+ *   - A non-empty `rowId` value that appears on more than one row (one
+ *     `wholeFileErrors` entry per distinct duplicated value, naming
+ *     that value, so multiple independently-duplicated values are all
+ *     reported rather than only the first one found).
+ *   - A row supplying both `parentRowRef` and `parentTeamName`/
+ *     `parentTeamId` (one entry per offending row, naming that row's
+ *     `rowKey`).
+ *
+ * Edge resolution (recorded per node, not yet validated/resolved
+ * against anything -- later tasks own that):
+ *   - `parentRowRef` present (and no combo violation on this row): the
+ *     referenced value is recorded as-is on `resolvedParentKey`. This
+ *     task does NOT check that the reference actually resolves to a
+ *     node in `nodes` (task 17.3's dangling-reference job) or that it
+ *     does not form a cycle (task 17.2's job).
+ *   - `parentTeamName`/`parentTeamId` present (and no `parentRowRef`):
+ *     this is NOT an in-file reference at all, so the raw value is
+ *     recorded on `parentTeamNameRef`/`parentTeamIdRef` respectively
+ *     (not `resolvedParentKey`) for a later pipeline step to resolve
+ *     against the database. `resolvedParentTeamId` (named in
+ *     `design.md`'s node shape) is left `undefined` here -- it is
+ *     populated once that later DB lookup actually happens.
+ *   - Neither present: this row has no in-file or existing-team parent
+ *     at all. This is not an error -- it is a valid root/Organisation
+ *     row.
+ *
+ * @param {Array<Record<string, string>>} rows - already-parsed CSV
+ *   rows (e.g. via `csv-parse`'s `columns: true`), in file order. Row
+ *   `i`'s 1-based position (`i + 1`) is used as its synthetic-key line
+ *   number; callers do not need to attach a separate line-number field.
+ * @returns {{
+ *   nodes: Map<string, {
+ *     row: Record<string, string>,
+ *     resolvedParentKey: string|undefined,
+ *     parentTeamNameRef: string|undefined,
+ *     parentTeamIdRef: string|undefined,
+ *     resolvedParentTeamId: number|undefined,
+ *     teamId: number|undefined,
+ *     status: string|undefined
+ *   }>,
+ *   wholeFileErrors: Array<{error: string, rowIds?: string[]}>,
+ *   creationOrder: string[]
+ * }}
+ */
+function buildImportGraph(rows) {
+  const wholeFileErrors = [];
+
+  // --- Pass 1: count every non-empty rowId value across the whole
+  // file, so a value duplicated 3+ times is still reported once (naming
+  // that value), and multiple distinct duplicated values are each
+  // reported (Requirement 9.2). ---
+  const rowIdCounts = new Map();
+  rows.forEach((row) => {
+    const rowId = readOptionalField(row, 'rowId');
+    if (rowId !== '') {
+      rowIdCounts.set(rowId, (rowIdCounts.get(rowId) || 0) + 1);
+    }
+  });
+  for (const [rowId, count] of rowIdCounts.entries()) {
+    if (count > 1) {
+      wholeFileErrors.push({ error: `Duplicate rowId: ${rowId}`, rowIds: [rowId] });
+    }
+  }
+
+  // --- Pass 2: build one node per row, keyed by rowId (else a
+  // synthetic __row_N key), resolving each row's parent reference and
+  // flagging any parentRowRef + parentTeamName/parentTeamId combo
+  // violation (Requirement 9.5) as it goes. ---
+  const nodes = new Map();
+  rows.forEach((row, index) => {
+    const rowId = readOptionalField(row, 'rowId');
+    const rowKey = rowId !== '' ? rowId : `__row_${index + 1}`;
+
+    const parentRowRef = readOptionalField(row, 'parentRowRef');
+    const parentTeamName = readOptionalField(row, 'parentTeamName');
+    const parentTeamId = readOptionalField(row, 'parentTeamId');
+
+    const hasParentRowRef = parentRowRef !== '';
+    const hasExistingTeamRef = parentTeamName !== '' || parentTeamId !== '';
+
+    if (hasParentRowRef && hasExistingTeamRef) {
+      wholeFileErrors.push({
+        error: `Row ${rowKey} supplies both parentRowRef and parentTeamName/parentTeamId; only one parent-reference method may be used per row`,
+        rowIds: [rowKey]
+      });
+    }
+
+    const node = {
+      row,
+      resolvedParentKey: undefined,
+      parentTeamNameRef: undefined,
+      parentTeamIdRef: undefined,
+      resolvedParentTeamId: undefined,
+      teamId: undefined,
+      status: undefined
+    };
+
+    if (hasParentRowRef && !hasExistingTeamRef) {
+      node.resolvedParentKey = parentRowRef;
+    } else if (!hasParentRowRef && hasExistingTeamRef) {
+      if (parentTeamId !== '') {
+        node.parentTeamIdRef = parentTeamId;
+      } else {
+        node.parentTeamNameRef = parentTeamName;
+      }
+    }
+    // else: neither reference is present (valid root row), or both are
+    // present (already flagged above as a whole-file error) -- either
+    // way, no parent reference is recorded on the node.
+
+    nodes.set(rowKey, node);
+  });
+
+  return { nodes, wholeFileErrors, creationOrder: [] };
+}
+
 function getRequiredField(row, field) {
   const value = row[field];
   if (value === undefined || value === null || String(value).trim() === '') {
@@ -348,3 +502,4 @@ class BulkImportService {
 module.exports = BulkImportService;
 module.exports.BulkImportRowError = BulkImportRowError;
 module.exports.BulkImportAuthorizationError = BulkImportAuthorizationError;
+module.exports.buildImportGraph = buildImportGraph;

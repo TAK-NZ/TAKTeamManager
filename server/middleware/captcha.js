@@ -52,6 +52,26 @@ const { getLogger } = require('./requestContext');
 const RECAPTCHA_VERIFY_URL = 'https://www.google.com/recaptcha/api/siteverify';
 const RECAPTCHA_VERIFY_TIMEOUT_MS = 10000;
 
+/**
+ * Testing-only bypass for the reCAPTCHA v3 check on
+ * `POST /api/requests/team-access`.
+ *
+ * Honored ONLY when `RECAPTCHA_DISABLED=true` AND `NODE_ENV` is anything
+ * other than `production` -- this second condition is unconditional and
+ * cannot be overridden, so this bypass can never take effect in a
+ * production deployment even if `RECAPTCHA_DISABLED` were left set by
+ * mistake. Intended for local/dev/test environments where a real
+ * reCAPTCHA site key is impractical to obtain or domain-restricted away
+ * from the environment's actual origin.
+ *
+ * @param {NodeJS.ProcessEnv} [env] defaults to `process.env`; overridable
+ *   for testing.
+ * @returns {boolean}
+ */
+function isRecaptchaDisabledForTesting(env = process.env) {
+  return env.NODE_ENV !== 'production' && String(env.RECAPTCHA_DISABLED).toLowerCase() === 'true';
+}
+
 // The `action` name the client-side `grecaptcha.execute(siteKey, {action})`
 // call must have used when generating a token for this endpoint. reCAPTCHA
 // v3 returns this back in the verify response so a token minted for an
@@ -83,12 +103,22 @@ function getMinScore() {
  * @param {import('express').NextFunction} next
  */
 async function verifyCaptcha(req, res, next) {
+  if (isRecaptchaDisabledForTesting()) {
+    getLogger().warn(
+      'reCAPTCHA verification is DISABLED (RECAPTCHA_DISABLED=true, non-production) -- ' +
+        'this must never be set in a production deployment.'
+    );
+    return next();
+  }
+
   const token = req.body && req.body['g-recaptcha-response'];
 
   // Requirement 7.4: a missing token is rejected immediately, without
   // calling the reCAPTCHA verify API at all.
   if (!token || typeof token !== 'string' || token.trim().length === 0) {
-    return res.status(400).json({ error: 'CAPTCHA challenge is required' });
+    return res.status(400).json({
+      error: 'CAPTCHA verification failed: no CAPTCHA challenge was submitted. Please reload the page and try again.'
+    });
   }
 
   try {
@@ -109,7 +139,14 @@ async function verifyCaptcha(req, res, next) {
     const result = verifyResponse.data;
 
     if (!result || result.success !== true) {
-      return res.status(400).json({ error: 'CAPTCHA verification failed' });
+      getLogger().warn(
+        { errorCodes: result?.['error-codes'] },
+        'reCAPTCHA verification failed (success: false)'
+      );
+      return res.status(400).json({
+        error: 'CAPTCHA verification failed. This can happen if the page was open for a long time, or if the ' +
+          'CAPTCHA is misconfigured for this site (e.g. an invalid domain). Please reload the page and try again.'
+      });
     }
 
     if (result.action !== RECAPTCHA_EXPECTED_ACTION) {
@@ -117,13 +154,18 @@ async function verifyCaptcha(req, res, next) {
         { expected: RECAPTCHA_EXPECTED_ACTION, actual: result.action },
         'reCAPTCHA action mismatch'
       );
-      return res.status(400).json({ error: 'CAPTCHA verification failed' });
+      return res.status(400).json({
+        error: 'CAPTCHA verification failed: the challenge does not match this form. Please reload the page and try again.'
+      });
     }
 
     const minScore = getMinScore();
     if (typeof result.score !== 'number' || result.score < minScore) {
       getLogger().warn({ score: result.score, minScore }, 'reCAPTCHA score below threshold');
-      return res.status(400).json({ error: 'CAPTCHA verification failed' });
+      return res.status(400).json({
+        error: 'CAPTCHA verification failed: this submission was flagged as likely automated. ' +
+          'If you believe this is a mistake, please try again or contact an administrator.'
+      });
     }
 
     return next();
@@ -132,8 +174,16 @@ async function verifyCaptcha(req, res, next) {
     // failed challenge (Requirement 7.4), not as an unhandled error -- the
     // request never hangs indefinitely waiting on reCAPTCHA's API.
     getLogger().error({ err: error.response?.data || error.message }, 'reCAPTCHA verification error');
-    return res.status(400).json({ error: 'CAPTCHA verification failed' });
+    return res.status(400).json({
+      error: 'CAPTCHA verification failed: could not reach the CAPTCHA verification service. Please try again shortly.'
+    });
   }
 }
 
-module.exports = { verifyCaptcha, RECAPTCHA_EXPECTED_ACTION, DEFAULT_MIN_SCORE, getMinScore };
+module.exports = {
+  verifyCaptcha,
+  RECAPTCHA_EXPECTED_ACTION,
+  DEFAULT_MIN_SCORE,
+  getMinScore,
+  isRecaptchaDisabledForTesting
+};

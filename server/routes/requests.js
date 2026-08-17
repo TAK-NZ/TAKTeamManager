@@ -71,9 +71,26 @@ router.post('/team-access', requestAccessLimiter, verifyCaptcha, [
   const { email, firstName, lastName, teamId, reason } = req.body;
   
   try {
-    // Verify team exists and is joinable
-    const team = await Team.findById(teamId);
-    if (!team || !team.can_join || team.visibility !== 'public') {
+    // Verify team exists and is joinable.
+    //
+    // Requirement 7.4: this must reject a Team excluded by
+    // `Team.getJoinableTeams`'s own definition of "joinable" (Requirement
+    // 7.1/7.2 -- `can_join`/`public` on its own row AND no `private`
+    // ancestor anywhere in its Ancestor_Chain). A plain `Team.findById`
+    // lookup only sees the team's own row and would incorrectly accept a
+    // Team that is `can_join`/`public` on its own row but has a `private`
+    // ancestor several levels up.
+    //
+    // Reusing `getJoinableTeams()` directly (rather than duplicating its
+    // "has a private ancestor" query here) guarantees this check can never
+    // drift from that method's own definition of joinable. Fetching the
+    // whole joinable-teams list just to check one id is a deliberate
+    // tradeoff: this is a public-facing, low-traffic form submission, not
+    // a hot path, so the extra cost is negligible next to the risk of two
+    // divergent definitions of "joinable".
+    const joinableTeams = await Team.getJoinableTeams();
+    const team = joinableTeams.find(t => t.id === Number(teamId));
+    if (!team) {
       return res.status(400).json({ error: 'Team is not available for joining' });
     }
 
@@ -100,7 +117,9 @@ router.post('/team-access', requestAccessLimiter, verifyCaptcha, [
 // Get pending requests for team admin
 router.get('/pending', authenticateToken, authorize, async (req, res) => {
   try {
-    const userTeams = await User.getTeamMemberships(req.user.id);
+    // req.user.userId is the local users.id -- team_memberships.user_id
+    // is a foreign key to that column, NOT the Authentik id (req.user.id).
+    const userTeams = await User.getTeamMemberships(req.user.userId);
     const adminTeams = userTeams.filter(t => t.role === 'admin');
     
     if (adminTeams.length === 0) {
@@ -139,7 +158,9 @@ router.post('/:requestId/approve', authenticateToken, authorize, [
     const { requestId } = req.params;
     const { additionalDetails } = req.body;
     
-    await requestService.approveRequest(requestId, req.user.id, additionalDetails);
+    // req.user.userId is the local users.id -- access_requests.processed_by
+    // is a foreign key to that column, NOT the Authentik id (req.user.id).
+    await requestService.approveRequest(requestId, req.user.userId, additionalDetails);
     res.json({ message: 'Request approved successfully' });
   } catch (error) {
     getLogger().error({ err: error }, 'Approval failed');
@@ -160,7 +181,9 @@ router.post('/:requestId/deny', authenticateToken, authorize, [
     const { requestId } = req.params;
     const { denialReason } = req.body;
     
-    await requestService.denyRequest(requestId, req.user.id, denialReason);
+    // req.user.userId is the local users.id -- see comment on the approve
+    // route above.
+    await requestService.denyRequest(requestId, req.user.userId, denialReason);
     res.json({ message: 'Request denied successfully' });
   } catch (error) {
     getLogger().error({ err: error }, 'Denial failed');

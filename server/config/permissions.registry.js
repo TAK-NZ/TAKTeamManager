@@ -53,6 +53,14 @@ const routes = {
   'POST /api/teams/:teamId/members': ['team:members:add'],
   'GET /api/teams/:teamId/hierarchy': ['team:read'],
   'GET /api/teams/:teamId/sub-teams': ['team:read'],
+  // Requirement 5.8-5.11 (task 8.3): thin wrapper route around
+  // Team.getSubTeamsForCallsignLevel, reusing the existing 'team:read'
+  // identifier -- same scoping as the sibling :teamId/:teamId/hierarchy/
+  // :teamId/sub-teams routes above. 'team:read' is now a row-scoped
+  // Visible_Branch check (via TeamVisibilityService, see task 14.1's
+  // resolver in server/middleware/authorize.js), which this route
+  // inherits automatically with no change here.
+  'GET /api/teams/:teamId/callsign-level-options': ['team:read'],
   'DELETE /api/teams/:teamId': ['team:delete:global'],
 
   // --- /api/users (server/routes/users.js) ---
@@ -315,7 +323,6 @@ const roleDefaults = {
     'user:read:own',
     'user:read',
     'team:read:own',
-    'team:read',
     'channel:read',
     'channel:subscribe:deployment',
     'global_channel:read',
