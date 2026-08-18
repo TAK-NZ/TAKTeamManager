@@ -38,22 +38,43 @@ class AuthentikSyncService {
       );
 
       let allUsers = [];
-      let nextUrl = `${process.env.AUTHENTIK_URL}/api/v3/core/users/`;
-      
-      // Fetch all users with pagination
-      while (nextUrl) {
-        const response = await axios.get(nextUrl, {
-          headers: { Authorization: `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` },
-          timeout: 30000
-        });
+      let currentPage = 1;
+      let hasMorePages = true;
+
+      // Fetch all users with pagination. Authentik's pagination metadata
+      // lives under `response.data.pagination.next` (a page NUMBER), not
+      // a top-level `response.data.next` URL -- the same shape
+      // `fetchGroupMap` below already handles correctly. This loop
+      // previously read the wrong field, which is always `undefined`, so
+      // it silently terminated after page 1 every run: with the default
+      // page_size of 20 and this Authentik instance now having 24+
+      // users, any user beyond the first page (e.g. a normal, active,
+      // non-admin user alphabetically/insertion-ordered past the first
+      // 20) was NEVER written to user_cache, causing their every login
+      // attempt to hit the "not found in cache" path indefinitely -- not
+      // just a delay until the next sync, since that next sync had the
+      // exact same bug.
+      while (hasMorePages) {
+        const response = await axios.get(
+          `${process.env.AUTHENTIK_URL}/api/v3/core/users/?page=${currentPage}`,
+          {
+            headers: { Authorization: `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` },
+            timeout: 30000
+          }
+        );
 
         allUsers = allUsers.concat(response.data.results);
-        nextUrl = response.data.next;
 
         logger.debug(
           { fetchedCount: response.data.results.length, totalFetched: allUsers.length },
           'Fetched a page of Authentik users'
         );
+
+        if (response.data.pagination && response.data.pagination.next) {
+          currentPage = response.data.pagination.next;
+        } else {
+          hasMorePages = false;
+        }
       }
 
       logger.info({ totalUsers: allUsers.length }, 'Total users to sync');
@@ -188,20 +209,72 @@ class AuthentikSyncService {
       // need a `users` row for team-membership/audit-trail purposes, so
       // they're only kept in `user_cache` below (which has no such
       // constraint).
+      // Requirement 13.7/13.8 (task 29.1): keep users.tak_role in sync
+      // with Authentik's `takRole` attribute -- Authentik is authoritative
+      // once a value has been pushed to it by a Member_List edit (task
+      // 28.1 pushes synchronously in the same request; this periodic sync
+      // then keeps `users.tak_role` consistent with it, exactly mirroring
+      // how `tak_callsign`/`tak_color` already flow FROM Authentik below).
+      // This is a ONE-WAY sync: `users.tak_role` is only ever updated FROM
+      // Authentik's value, never the reverse.
+      //
+      // `users.tak_role` is NOT NULL (default 'Team Member'), unlike
+      // `user_cache.tak_role` (which has no such constraint and is
+      // unconditionally overwritten from EXCLUDED, including to
+      // null/undefined, in the upsert below). Authentik has no `takRole`
+      // attribute at all for some users (the attribute is sparse), so a
+      // raw unconditional overwrite here would either violate the NOT
+      // NULL constraint or silently clobber a real Team_Admin/
+      // Global_Manager edit (task 28.1) with null -- a regression of
+      // Requirement 13.8 ("THE App SHALL NOT recompute or otherwise
+      // modify that value as a side effect of any other change"). The
+      // COALESCE guards below fall back to `'Team Member'` on initial
+      // insert and to the existing stored value on conflict whenever
+      // Authentik's attribute is absent/undefined, so an unset Authentik
+      // attribute never overwrites an established local value.
+      const takRoleFromAuthentik = user.attributes?.takRole ?? null;
+
+      // first_name/last_name authority: Authentik only ever stores a single
+      // `name` field per user (no real separate first/last name split), so
+      // `user.first_name`/`user.last_name` below are effectively always
+      // undefined and this expression falls through to splitting/using
+      // `user.name`/`user.username` instead. Meanwhile, the local `users`
+      // table IS the authoritative source of a real first/last name split,
+      // set directly by UserProvisioningService.createAndAddUser (initial
+      // provisioning) and by the Member_List inline-edit route
+      // (PATCH /api/teams/:teamId/members/:userId in server/routes/teams.js).
+      // Exactly like the `tak_role` one-way-sync above (Requirement 13.8:
+      // "SHALL NOT recompute or otherwise modify that value as a side
+      // effect of any other change"), first_name/last_name must flow FROM
+      // Authentik only as a best-effort seed on the very first INSERT of a
+      // brand-new local row -- never as an overwrite of an existing row.
+      // So first_name/last_name are included in the INSERT ... VALUES
+      // list (to seed a new row) but deliberately omitted from the
+      // ON CONFLICT DO UPDATE SET list below, so a periodic sync can never
+      // clobber a value already established locally.
       if (user.email) {
         await db.query(
-          'INSERT INTO users (authentik_user_id, username, email, first_name, last_name, is_active) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (authentik_user_id) DO UPDATE SET username = $2, email = $3, first_name = $4, last_name = $5, is_active = $6',
+          'INSERT INTO users (authentik_user_id, username, email, first_name, last_name, is_active, tak_role) VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, \'Team Member\')) ON CONFLICT (authentik_user_id) DO UPDATE SET username = $2, email = $3, is_active = $6, tak_role = COALESCE($7, tak_role)',
           [
             user.pk,
             user.username,
             user.email,
             user.first_name || user.name || user.username,
             user.last_name || '',
-            user.is_active
+            user.is_active,
+            takRoleFromAuthentik
           ]
         );
       }
 
+      // user_cache.first_name/last_name: same one-way-sync direction as
+      // above, kept consistent with the `users` table so that downstream
+      // consumers of user_cache (e.g. POST /api/users/add-to-team in
+      // server/routes/users.js, which re-derives `users.first_name`/
+      // `last_name` from this cached row) don't reintroduce the same
+      // clobbering bug via a second code path. Omitted from
+      // ON CONFLICT DO UPDATE SET for the same reason: only seed on first
+      // insert, never overwrite an existing cached row.
       await db.query(`
         INSERT INTO user_cache (
           authentik_id, username, email, first_name, last_name, 
@@ -210,8 +283,6 @@ class AuthentikSyncService {
         ON CONFLICT (authentik_id) DO UPDATE SET
           username = EXCLUDED.username,
           email = EXCLUDED.email,
-          first_name = EXCLUDED.first_name,
-          last_name = EXCLUDED.last_name,
           is_active = EXCLUDED.is_active,
           tak_role = EXCLUDED.tak_role,
           tak_color = EXCLUDED.tak_color,

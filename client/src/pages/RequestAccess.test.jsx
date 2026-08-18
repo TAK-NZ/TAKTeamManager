@@ -1,0 +1,39 @@
+import { describe, it, expect } from 'vitest';
+import { shouldShowCallsignSuffixInput } from './RequestAccess.jsx';
+
+// Validates: Requirements 11.9, 11.10
+//
+// RequestAccess.jsx conditionally renders a required "Preferred Callsign
+// Suffix" input only when the selected joinable-team row's
+// `callsignNameFormat` (a field added to GET /api/teams/joinable's response
+// shape by server/models/Team.js's `getJoinableTeams`, per task 34.1) is
+// `user_defined`. No component-render test harness (e.g.
+// @testing-library/react) is set up in this project -- see
+// Requests.test.jsx and TeamDetail.test.jsx, which both test extracted pure
+// logic rather than rendering a component -- so this file follows that same
+// convention and tests the pure helper RequestAccess.jsx uses to decide
+// whether to render the input.
+
+describe('shouldShowCallsignSuffixInput', () => {
+  it('renders the input when the selected team\'s Organisation format is user_defined (Req 11.9)', () => {
+    const team = { id: 1, name: 'Station 40', callsignNameFormat: 'user_defined' };
+
+    expect(shouldShowCallsignSuffixInput(team)).toBe(true);
+  });
+
+  it('does not render the input for any other callsignNameFormat value (Req 11.10)', () => {
+    expect(shouldShowCallsignSuffixInput({ callsignNameFormat: 'full_name' })).toBe(false);
+    expect(shouldShowCallsignSuffixInput({ callsignNameFormat: 'first_initial_last' })).toBe(false);
+    expect(shouldShowCallsignSuffixInput({ callsignNameFormat: 'first_last_initial' })).toBe(false);
+    expect(shouldShowCallsignSuffixInput({ callsignNameFormat: 'first_initial_dot_last' })).toBe(false);
+  });
+
+  it('does not render the input when callsignNameFormat is absent', () => {
+    expect(shouldShowCallsignSuffixInput({ id: 1, name: 'Some Team' })).toBe(false);
+  });
+
+  it('does not render the input when no team is selected', () => {
+    expect(shouldShowCallsignSuffixInput(null)).toBe(false);
+    expect(shouldShowCallsignSuffixInput(undefined)).toBe(false);
+  });
+});

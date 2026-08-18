@@ -14,6 +14,25 @@ import { getRecaptchaToken } from '../utils/recaptcha'
 // for, and the server rejects a token whose action does not match.
 const RECAPTCHA_ACTION = 'team_access_request'
 
+// Requirement 11.3/11.9/11.10 (task 34.1): mirrors
+// server/utils/callsignValidation.js's `isValidCallsignSuffix` character
+// class (letters, digits, `-`, `.`) as an HTML `pattern`, so an invalid
+// `callsignSuffix` is rejected at the point of entry rather than only by
+// the server's own POST /api/requests/team-access validation.
+const CALLSIGN_SUFFIX_PATTERN = '[A-Za-z0-9.-]*'
+const CALLSIGN_SUFFIX_REGEX = /^[A-Za-z0-9.-]*$/
+
+// Requirement 11.9/11.10 (task 34.1): pure helper deciding whether the
+// "Preferred Callsign Suffix" input should render for the currently
+// selected joinable-team row -- extracted (rather than inlined in the JSX
+// condition) so this decision can be unit tested without a component-render
+// harness, matching this project's existing convention (see Requests.test.jsx
+// and TeamDetail.test.jsx, which test extracted pure logic rather than
+// rendering a component).
+export function shouldShowCallsignSuffixInput(team) {
+  return team?.callsignNameFormat === 'user_defined'
+}
+
 export default function RequestAccess() {
   const [submitted, setSubmitted] = useState(false)
   const [teams, setTeams] = useState([])
@@ -270,6 +289,30 @@ export default function RequestAccess() {
                 <p className="text-amber-600 text-sm mt-1">Please select a team from the dropdown</p>
               )}
             </div>
+
+            {shouldShowCallsignSuffixInput(selectedTeam) && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Preferred Callsign Suffix
+                </label>
+                <input
+                  type="text"
+                  className="input"
+                  pattern={CALLSIGN_SUFFIX_PATTERN}
+                  title="Only letters, digits, - and . are allowed"
+                  {...register('callsignSuffix', {
+                    required: 'Preferred callsign suffix is required for this team',
+                    pattern: {
+                      value: CALLSIGN_SUFFIX_REGEX,
+                      message: 'Only letters, digits, - and . are allowed'
+                    }
+                  })}
+                />
+                {errors.callsignSuffix && (
+                  <p className="text-red-600 text-sm mt-1">{errors.callsignSuffix.message}</p>
+                )}
+              </div>
+            )}
 
             <div>
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">

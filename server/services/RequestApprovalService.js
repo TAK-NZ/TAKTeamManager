@@ -3,6 +3,10 @@ const EmailService = require('./EmailService');
 const UserProvisioningService = require('./UserProvisioningService');
 const TeamMembershipService = require('./TeamMembershipService');
 const EventPublisher = require('./EventPublisher');
+const UserAttributesService = require('./userAttributes');
+const Team = require('../models/Team');
+const CallsignService = require('./CallsignService');
+const { checkCallsignSuffixUniqueness, CallsignSuffixConflictError } = require('./CallsignSuffixUniquenessService');
 const { getLogger } = require('../middleware/requestContext');
 const crypto = require('crypto');
 
@@ -26,13 +30,20 @@ class RequestApprovalService {
       const escalatesAt = await this.calculateEscalationTime();
       
       // Insert request
+      //
+      // Requirement 11.9: `callsign_suffix` stores whatever the requester
+      // submitted (or `null` if omitted) -- this is the same "accept an
+      // optional field" behavior regardless of the target Team's
+      // Organisation's `callsign_name_format`; only the REQUIRED-ness of
+      // supplying it is format-conditional, enforced by the caller
+      // (`POST /api/requests/team-access`), not here.
       const result = await client.query(`
         INSERT INTO access_requests (
           request_type, requester_email, requester_first_name, requester_last_name,
           existing_user_id, target_team_id, current_team_id, requested_role,
-          requested_first_name, requested_last_name, justification,
+          requested_first_name, requested_last_name, justification, callsign_suffix,
           email_verification_token, email_verification_expires_at, escalates_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
         RETURNING id
       `, [
         requestData.request_type,
@@ -46,6 +57,7 @@ class RequestApprovalService {
         requestData.requested_first_name || null,
         requestData.requested_last_name || null,
         requestData.justification,
+        requestData.callsign_suffix || null,
         token,
         expiresAt,
         escalatesAt
@@ -136,8 +148,31 @@ class RequestApprovalService {
    * `AND status = 'pending'` (as before) so a request that was approved/
    * denied concurrently between the pre-fetch and this point is still
    * correctly rejected.
+   *
+   * Requirement 11.12/11.13/11.15/11.16 (task 24.3): `callsignSuffixOverride`
+   * is a NEW, optional 4th parameter used ONLY for a `new_account`
+   * request -- the sole request type that creates a brand-new user, and
+   * therefore the only one that resolves/stores an initial
+   * `callsign_suffix` at approval time at all. `team_change`/
+   * `role_change`/`name_change` requests operate on an EXISTING user
+   * whose `callsign_suffix` was already resolved at their own original
+   * creation time (Requirement 11.8: never silently recomputed), so a
+   * `callsignSuffixOverride` supplied on an approval for one of those
+   * other types is simply ignored -- never applied, never an error.
+   *
+   * For `new_account`, the effective value (override > the request's own
+   * stored `callsign_suffix` > the computed default, matching task
+   * 24.2's exact computation) is resolved and uniqueness-checked via
+   * `checkCallsignSuffixUniqueness` EARLY -- before
+   * `createAuthentikUserForNewAccount` is ever called below -- so a
+   * `CallsignSuffixConflictError` here never results in an orphaned
+   * Authentik user needing compensation (the same reasoning already
+   * applied in task 22.2 for the other creation entry points). This
+   * check is a pure DB read (via `Team.getFullMemberList`), so it can
+   * safely run before Phase 1's Authentik call without risk of a
+   * partially-committed side effect.
    */
-  async approveRequest(requestId, adminId, additionalDetails = '') {
+  async approveRequest(requestId, adminId, additionalDetails = '', callsignSuffixOverride = null) {
     // --- Phase 1: pre-fetch (no open transaction) + Authentik user
     // creation for new_account requests, and the Authentik display-name
     // update for name_change requests. ---
@@ -152,8 +187,13 @@ class RequestApprovalService {
 
     const preFetchedRequest = preFetchResult.rows[0];
     let newAccountAuthentikUser = null;
+    let resolvedCallsignSuffix = null;
 
     if (preFetchedRequest.request_type === 'new_account') {
+      resolvedCallsignSuffix = await this.resolveAndCheckCallsignSuffixForApproval(
+        preFetchedRequest,
+        callsignSuffixOverride
+      );
       newAccountAuthentikUser = await this.createAuthentikUserForNewAccount(preFetchedRequest);
     }
 
@@ -221,9 +261,10 @@ class RequestApprovalService {
       `, [requestId, adminId]);
       
       // Process the request based on type
-      await this.processApprovedRequest(client, request, {
+      const processResult = await this.processApprovedRequest(client, request, {
         newAccountAuthentikUser,
-        adminId
+        adminId,
+        resolvedCallsignSuffix
       });
       
       // Send approval email
@@ -238,6 +279,47 @@ class RequestApprovalService {
       );
       
       await client.query('COMMIT');
+
+      // --- Phase 3 (new_account only): eagerly upsert user_cache, same
+      // as POST /api/users/create-and-add's own Phase 3
+      // (server/routes/users.js). Without this, a newly-approved user
+      // only appears in user_cache once the next periodic Authentik sync
+      // runs (authentikSync.js, every SYNC_INTERVAL_MINUTES, default 10
+      // minutes) -- authenticateToken/GET /api/auth/me's
+      // authentikSync.getUserFromCache lookup would return nothing for
+      // that user in the meantime, and the OAuth2 callback would
+      // redirect with ?error=user_not_synced on their very first login
+      // attempt right after approval. Best-effort: runs strictly after
+      // COMMIT (an Authentik call must never run inside an open
+      // transaction), and its own failure must not undo the already-
+      // committed approval.
+      if (request.request_type === 'new_account' && newAccountAuthentikUser && processResult?.localUserId) {
+        try {
+          const email = request.requester_email;
+          const firstName = request.requested_first_name || request.requester_first_name;
+          const lastName = request.requested_last_name || request.requester_last_name;
+          const username = email.split('@')[0];
+
+          const attributes = await UserAttributesService.generateCallsign(processResult.localUserId, request.target_team_id);
+          if (attributes) {
+            await UserAttributesService.updateUserAttributes(newAccountAuthentikUser.pk, attributes);
+          }
+
+          await pool.query(
+            'INSERT INTO user_cache (authentik_id, username, email, first_name, last_name, is_active, tak_callsign, tak_color, tak_role) VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8) ON CONFLICT (authentik_id) DO UPDATE SET username = $2, email = $3, first_name = $4, last_name = $5, is_active = true, tak_callsign = $6, tak_color = $7, tak_role = $8',
+            [newAccountAuthentikUser.pk, username, email, firstName, lastName, attributes?.callsign, attributes?.color, attributes?.role]
+          );
+        } catch (postCommitError) {
+          // Logged, not thrown: the approval itself already committed
+          // successfully. Worst case, this user_cache row still gets
+          // populated by the next periodic Authentik sync.
+          getLogger().error(
+            { err: postCommitError, authentikUserId: newAccountAuthentikUser.pk },
+            'Access request approval: post-commit user_cache upsert failed; user will remain unable to log in until the next periodic Authentik sync'
+          );
+        }
+      }
+
       return { success: true };
       
     } catch (error) {
@@ -303,6 +385,61 @@ class RequestApprovalService {
     } finally {
       client.release();
     }
+  }
+
+  /**
+   * Requirement 11.12, 11.13, 11.15, 11.16 (task 24.3): resolves the
+   * effective `callsign_suffix` value for a `new_account` request's
+   * approval, and checks it for a per-Team uniqueness collision BEFORE
+   * anything else in `approveRequest` runs (Requirement 11.16 -- reject
+   * before committing ANYTHING).
+   *
+   * Resolution order (Requirement 11.13):
+   *   1. `callsignSuffixOverride`, the reviewer's override supplied on
+   *      THIS approve request, when non-empty.
+   *   2. Else the request's own originally-submitted
+   *      `callsign_suffix` (Requirement 11.9's submission), when
+   *      non-empty.
+   *   3. Else the computed default via
+   *      `CallsignService.computeDefaultCallsignSuffix`, using the
+   *      target Organisation's `callsign_name_format` (resolved via
+   *      `Team.getAncestorChain(request.target_team_id)`'s root row) --
+   *      the exact same computation task 24.2 already performs for
+   *      display purposes.
+   *
+   * The effective value is then checked via
+   * `checkCallsignSuffixUniqueness(request.target_team_id, effectiveValue)`
+   * (Requirement 11.15) -- no `excludeUserId`, since this is a brand-new
+   * user with no existing membership. Throws `CallsignSuffixConflictError`
+   * on a collision (Requirement 11.16), which propagates naturally out of
+   * `approveRequest` at this point -- before Phase 1/Phase 2 have done
+   * anything at all, so nothing needs rolling back.
+   *
+   * @param {object} request - the pre-fetched `access_requests` row.
+   * @param {string|null} callsignSuffixOverride - the reviewer's
+   *   optional override supplied on this approve request.
+   * @returns {Promise<string|null>} the resolved, uniqueness-checked
+   *   effective `callsign_suffix` value.
+   */
+  async resolveAndCheckCallsignSuffixForApproval(request, callsignSuffixOverride) {
+    const trimmedOverride = callsignSuffixOverride ? callsignSuffixOverride.trim() : '';
+
+    let effectiveValue;
+    if (trimmedOverride) {
+      effectiveValue = trimmedOverride;
+    } else if (request.callsign_suffix) {
+      effectiveValue = request.callsign_suffix;
+    } else {
+      const firstName = request.requested_first_name || request.requester_first_name;
+      const lastName = request.requested_last_name || request.requester_last_name;
+      const ancestorChain = await Team.getAncestorChain(request.target_team_id);
+      const organisation = ancestorChain[0];
+      effectiveValue = CallsignService.computeDefaultCallsignSuffix(firstName, lastName, organisation?.callsign_name_format);
+    }
+
+    await checkCallsignSuffixUniqueness(request.target_team_id, effectiveValue);
+
+    return effectiveValue;
   }
 
   /**
@@ -460,7 +597,7 @@ class RequestApprovalService {
     }
   }
 
-  async processApprovedRequest(client, request, { newAccountAuthentikUser, adminId } = {}) {
+  async processApprovedRequest(client, request, { newAccountAuthentikUser, adminId, resolvedCallsignSuffix = null } = {}) {
     switch (request.request_type) {
       case 'new_account': {
         // Requirement 18.1 (task 38.1): the Authentik user was already
@@ -475,16 +612,25 @@ class RequestApprovalService {
         const lastName = request.requested_last_name || request.requester_last_name;
         const username = email.split('@')[0];
 
-        await UserProvisioningService.createAndAddUser(client, {
+        // Requirement 11.13 (task 24.3): `resolvedCallsignSuffix` was
+        // already resolved and uniqueness-checked in Phase 1 (see
+        // `resolveAndCheckCallsignSuffixForApproval`), before the
+        // Authentik user was even created -- passed through here to be
+        // persisted on the new user's row.
+        //
+        // Returned so the caller (approveRequest) can run Phase 3 (the
+        // post-commit user_cache upsert below) -- see that method's
+        // comment for why this is necessary.
+        return await UserProvisioningService.createAndAddUser(client, {
           authentikUserId: newAccountAuthentikUser.pk,
           username,
           email,
           firstName,
           lastName,
           teamId: request.target_team_id,
+          callsign_suffix: resolvedCallsignSuffix,
           createdBy: adminId ?? null
         });
-        break;
       }
       case 'team_change':
         // Requirement 18.2 (task 38.2): moves the user identified by

@@ -5,8 +5,11 @@ const authorize = require('../middleware/authorize');
 const { getLogger } = require('../middleware/requestContext');
 const { paginationParams } = require('../middleware/pagination');
 const Team = require('../models/Team');
+const User = require('../models/User');
 const pool = require('../config/database');
-const { isValidCallsignPrefix } = require('../utils/callsignValidation');
+const { isValidCallsignPrefix, isValidCallsignSuffix } = require('../utils/callsignValidation');
+const { TAK_ROLE_VALUES } = require('./settings');
+const { checkCallsignSuffixUniqueness, CallsignSuffixConflictError } = require('../services/CallsignSuffixUniquenessService');
 const TeamVisibilityService = require('../services/TeamVisibilityService');
 const router = express.Router();
 
@@ -196,6 +199,15 @@ router.post('/', authenticateToken, authorize, [
 
     // Skip adding creator as admin for now since user ID is string
 
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'team.create', 'team', team.id, JSON.stringify({ name: team.name, parentTeamId: team.parent_team_id })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
     res.status(201).json({ team });
   } catch (error) {
     // Requirement 2.3 (task 5.2): Team.create throws this BEFORE any
@@ -286,6 +298,15 @@ router.put('/:teamId', authenticateToken, authorize, [
       await UserAttributesService.updateTeamUserAttributes(req.params.teamId);
     }
 
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'team.update', 'team', parseInt(req.params.teamId, 10), JSON.stringify({ name: updatedTeam.name })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
     res.json({ team: updatedTeam });
   } catch (error) {
     // Requirement 5.2 (task 8.2): Team.update throws this BEFORE any
@@ -357,9 +378,125 @@ router.post('/:teamId/members', authenticateToken, authorize, requireTeamAdmin, 
   try {
     const { userId, role = 'member' } = req.body;
     const membership = await Team.addMember(req.params.teamId, userId, role);
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'team.member_add', 'team', parseInt(req.params.teamId, 10), JSON.stringify({ addedUserId: userId, role })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
     res.status(201).json({ membership });
   } catch (error) {
     res.status(500).json({ error: 'Failed to add member' });
+  }
+});
+
+// Edit a Member_List member's name, TAK_Role, and/or callsign_suffix
+// (Requirements 11.4, 11.16, 13.2, 13.3, 13.4, 13.5, 13.6, 13.9, task 28.1).
+//
+// All body fields are optional -- only the fields actually present are
+// written. `email` is intentionally NOT an accepted field: if present in
+// the body it is silently ignored (Requirement 13.3's defense-in-depth;
+// the Client never sends it, but this route independently never applies
+// it even if sent directly).
+//
+// Authorization ('team:members:edit') is enforced centrally by
+// authorize.js via the Permission_Registry entry added alongside this
+// route (task 28.2 implements the resolver itself; until then this
+// route simply references the permission identifier).
+router.patch('/:teamId/members/:userId', authenticateToken, authorize, [
+  body('firstName').optional().trim().isLength({ min: 1, max: 150 }),
+  body('lastName').optional().trim().isLength({ min: 1, max: 150 }),
+  body('takRole').optional().isIn(TAK_ROLE_VALUES)
+    .withMessage('Invalid takRole value'),
+  body('callsignSuffix').optional().trim().custom(value => isValidCallsignSuffix(value))
+    .withMessage('callsignSuffix may only contain letters, digits, "-", and "."')
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
+  try {
+    const { teamId, userId } = req.params;
+    const { firstName, lastName, takRole, callsignSuffix } = req.body;
+
+    // Requirement 11.16: validate callsign_suffix uniqueness BEFORE any
+    // write, so a conflicting value never reaches the database. Excludes
+    // the user being edited (`userId`) from the comparison set, so a
+    // user's own unchanged callsign_suffix never spuriously conflicts
+    // with itself.
+    if (callsignSuffix !== undefined) {
+      try {
+        await checkCallsignSuffixUniqueness(teamId, callsignSuffix, parseInt(userId, 10));
+      } catch (conflictError) {
+        if (conflictError instanceof CallsignSuffixConflictError) {
+          return res.status(400).json({ error: conflictError.message });
+        }
+        throw conflictError;
+      }
+    }
+
+    const targetUser = await User.findById(userId);
+    if (!targetUser) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const updateFields = {};
+    if (firstName !== undefined) {
+      updateFields.first_name = firstName;
+    }
+    if (lastName !== undefined) {
+      updateFields.last_name = lastName;
+    }
+    if (callsignSuffix !== undefined) {
+      updateFields.callsign_suffix = callsignSuffix;
+    }
+    if (takRole !== undefined) {
+      updateFields.tak_role = takRole;
+    }
+
+    const updatedUser = await User.update(userId, updateFields);
+
+    // Requirement 11.4 dual-write: callsign_suffix mirrors to user_cache,
+    // keyed by authentik_id (not the local users.id).
+    if (callsignSuffix !== undefined) {
+      await pool.query(
+        'UPDATE user_cache SET callsign_suffix = $1 WHERE authentik_id = $2',
+        [callsignSuffix, targetUser.authentik_user_id]
+      );
+    }
+
+    // Requirement 13.6: takRole writes dual-write to user_cache and push
+    // to Authentik via the fetch-merge-PATCH updateUserAttributes (task
+    // 11.4), so this write cannot clobber, and cannot be clobbered by, a
+    // concurrent callsign regeneration.
+    if (takRole !== undefined) {
+      await pool.query(
+        'UPDATE user_cache SET tak_role = $1 WHERE authentik_id = $2',
+        [takRole, targetUser.authentik_user_id]
+      );
+
+      const UserAttributesService = require('../services/userAttributes');
+      await UserAttributesService.updateUserAttributes(targetUser.authentik_user_id, { role: takRole });
+    }
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'team.member_edit', 'team', parseInt(teamId, 10), JSON.stringify({ editedUserId: parseInt(userId, 10) })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
+    res.json({ member: updatedUser });
+  } catch (error) {
+    getLogger().error({ err: error }, 'Failed to update team member');
+    res.status(500).json({ error: 'Failed to update team member' });
   }
 });
 
@@ -434,6 +571,16 @@ router.delete('/:teamId', authenticateToken, authorize, async (req, res) => {
     // which is what Team.delete records as `created_by` on any
     // remove_team_channel_group Sync_Operations it enqueues.
     await Team.delete(req.params.teamId, req.user.userId);
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'team.delete', 'team', parseInt(req.params.teamId, 10), null]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
     res.json({ message: 'Team deleted successfully' });
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to delete team');

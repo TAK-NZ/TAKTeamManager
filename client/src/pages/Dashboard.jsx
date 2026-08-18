@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { UserGroupIcon, UsersIcon, ClipboardDocumentListIcon, ArrowUpRightIcon, ArrowDownLeftIcon, ArrowsRightLeftIcon, MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon, InformationCircleIcon, FolderIcon, FolderOpenIcon, ChevronRightIcon as ChevronRightSmall, ChevronDownIcon, ChevronUpIcon } from '@heroicons/react/24/outline'
+import { UserGroupIcon, UsersIcon, ClipboardDocumentListIcon, ArrowUpRightIcon, ArrowDownLeftIcon, ArrowsRightLeftIcon, MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon, InformationCircleIcon, FolderIcon, FolderOpenIcon, ChevronRightIcon as ChevronRightSmall, ChevronDownIcon, ChevronUpIcon, ArrowPathIcon } from '@heroicons/react/24/outline'
 import { teamsAPI, requestsAPI, configAPI, usersAPI, channelsAPI } from '../services/api'
 import { buildFolderTree } from '../utils/channelTree'
 
@@ -347,7 +347,14 @@ export default function Dashboard({ user, refreshUser }) {
       })).sort((a, b) => a.display_name.localeCompare(b.display_name))
       
       setUserChannels(takChannels)
-      setStats({ requests: 0 })
+
+      // Fetch pending request count for admins
+      try {
+        const pendingResponse = await requestsAPI.getPending()
+        setStats({ requests: pendingResponse.data.requests?.length || 0 })
+      } catch (e) {
+        setStats({ requests: 0 })
+      }
     } catch (error) {
       console.error('Failed to fetch channel data:', error)
       setStats({ requests: 0 })
@@ -540,7 +547,7 @@ export default function Dashboard({ user, refreshUser }) {
               className="text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300"
               title="Refresh channels"
             >
-              Refresh
+              <ArrowPathIcon className="h-4 w-4" />
             </button>
             <span className="text-sm text-gray-500 dark:text-gray-400">
               {filteredChannels.length} of {userChannels.length} channels

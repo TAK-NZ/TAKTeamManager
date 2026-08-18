@@ -130,6 +130,41 @@ const rowScopedResolvers = {
   },
 
   /**
+   * `team:members:edit` — Requirements 4 and 13.10 (task 28.2): satisfied
+   * if the requesting user is a Global_Manager OR is an admin (per
+   * `Team.isAdmin`, which already walks the Ancestor_Chain per
+   * Requirement 4's inherited admin status) of the specific team named by
+   * the `:teamId` route param AND that team is a Visible_Branch for the
+   * requesting user (per `TeamVisibilityService.isVisibleBranch`,
+   * Requirement 13.10). Backs
+   * `PATCH /api/teams/:teamId/members/:userId` (the Member_List
+   * name/TAK_Role/callsign_suffix edit route, task 28.1).
+   *
+   * Unlike `team:members:add` above, this resolver ALSO consults
+   * `TeamVisibilityService` even for a Team_Admin: a Team_Admin whose
+   * administered team is itself hidden behind a private ancestor branch
+   * they cannot see must still be denied (Requirement 13.10 layers the
+   * Visible_Branch restriction on top of the existing admin-editing
+   * boundary described in Requirement 13).
+   *
+   * A `false` result here is NOT added to
+   * `PERMISSION_DENIALS_MAPPED_TO_404` — that mapping is reserved
+   * specifically for `'team:read'` denials (Requirement 6.2/6.3); a denied
+   * Member_List edit continues to respond with the standard 403.
+   *
+   * @param {import('express').Request} req
+   * @returns {Promise<boolean>}
+   */
+  'team:members:edit': async (req) => {
+    if (req.user && req.user.is_global_manager) {
+      return true;
+    }
+    const isTeamAdmin = await Team.isAdmin(req.params.teamId, req.user && req.user.userId);
+    const isVisible = await TeamVisibilityService.isVisibleBranch(req.params.teamId, req.user);
+    return isTeamAdmin && isVisible;
+  },
+
+  /**
    * `team:create:root_or_sub` — covers both `POST /api/teams` cases:
    *   - Top-level team creation (no `parentTeamId` in the body): permitted
    *     only for a Global_Manager (Requirement 4.5).

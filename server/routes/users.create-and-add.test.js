@@ -57,10 +57,27 @@ jest.mock('../services/EventPublisher', () => ({
   publishOperation: jest.fn()
 }));
 
+// Requirement 11.6, 11.7, 11.14, 11.15 (task 22.2): `createAndAddUser`
+// is left as the REAL implementation (the pre-existing tests above rely
+// on it issuing specific `client.query` calls), but
+// `resolveCallsignSuffixForNewUser` is mocked so the pre-existing tests
+// (which don't care about callsign_suffix resolution) resolve to a
+// benign default, while the dedicated tests below override this mock
+// per-case. Note: `actual` is a CLASS, whose static methods are
+// non-enumerable, so `{...actual}` would silently drop
+// `createAndAddUser` -- assigning the mocked method directly onto
+// `actual` instead preserves every other static method unchanged.
+jest.mock('../services/UserProvisioningService', () => {
+  const actual = jest.requireActual('../services/UserProvisioningService');
+  actual.resolveCallsignSuffixForNewUser = jest.fn().mockResolvedValue(null);
+  return actual;
+});
+
 const express = require('express');
 const request = require('supertest');
 const pool = require('../config/database');
 const EventPublisher = require('../services/EventPublisher');
+const UserProvisioningService = require('../services/UserProvisioningService');
 const usersRouter = require('./users');
 
 function buildApp() {
@@ -159,9 +176,15 @@ describe('POST /api/users/create-and-add (Requirement 17.1)', () => {
     expect(mockClient.query).not.toHaveBeenCalledWith('COMMIT');
     expect(mockClient.release).toHaveBeenCalledTimes(1);
 
-    // No user-cache write should occur after a rolled-back local
-    // transaction.
-    expect(pool.query).not.toHaveBeenCalled();
+    // No user_cache write should occur after a rolled-back local
+    // transaction (pool.query IS legitimately called earlier, during the
+    // Phase 0 callsign_suffix resolution step -- task 22.2 -- via
+    // Team.getAncestorChain/getFullMemberList, which run on the shared
+    // pool rather than the transactional client).
+    expect(pool.query).not.toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO user_cache'),
+      expect.anything()
+    );
   });
 
   it('does not acquire a database client at all when the Authentik user-creation call fails', async () => {
@@ -310,5 +333,94 @@ describe('POST /api/users/create-and-add compensating action (Requirement 17.2)'
       },
       expect.any(String)
     );
+  });
+});
+
+/**
+ * Requirements 11.6, 11.7, 11.14, 11.15 (task 22.2): callsign_suffix
+ * resolution runs EARLY, before Phase 1's Authentik user-creation call,
+ * so a `CallsignSuffixRequiredError`/`CallsignSuffixConflictError` is
+ * returned as a 400 WITHOUT ever calling Authentik (avoiding the
+ * orphaned-Authentik-user compensating-action path for what is
+ * fundamentally a request-validation failure).
+ */
+describe('POST /api/users/create-and-add callsign_suffix resolution (task 22.2)', () => {
+  let app;
+  let originalFetch;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    app = buildApp();
+    originalFetch = global.fetch;
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it('resolves callsign_suffix and passes it through to createAndAddUser on a successful creation', async () => {
+    UserProvisioningService.resolveCallsignSuffixForNewUser.mockResolvedValue('J.Doe');
+    mockAuthentikSuccess();
+
+    const mockClient = {
+      query: jest.fn().mockImplementation((sql) => {
+        if (sql.includes('SELECT id FROM users WHERE authentik_user_id')) {
+          return Promise.resolve({ rows: [{ id: 55 }] });
+        }
+        return Promise.resolve({ rows: [] });
+      }),
+      release: jest.fn()
+    };
+    pool.connect.mockResolvedValue(mockClient);
+    pool.query.mockResolvedValue({ rows: [] });
+
+    const res = await request(app).post('/api/users/create-and-add').send(VALID_BODY);
+
+    expect(res.status).toBe(201);
+    expect(UserProvisioningService.resolveCallsignSuffixForNewUser).toHaveBeenCalledWith(null, {
+      firstName: 'New',
+      lastName: 'User',
+      teamId: 7,
+      requestedCallsignSuffix: undefined
+    });
+    // callsign_suffix INSERT param made it into the users upsert call.
+    expect(mockClient.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO users'),
+      expect.arrayContaining(['J.Doe'])
+    );
+    // ...and the user_cache upsert too.
+    expect(pool.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO user_cache'),
+      expect.arrayContaining(['J.Doe'])
+    );
+  });
+
+  it('returns 400 naming the missing value for a user_defined Organisation with no callsignSuffix supplied, never calling Authentik', async () => {
+    UserProvisioningService.resolveCallsignSuffixForNewUser.mockRejectedValue(
+      new UserProvisioningService.CallsignSuffixRequiredError()
+    );
+    global.fetch = jest.fn();
+
+    const res = await request(app).post('/api/users/create-and-add').send(VALID_BODY);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/callsign suffix is required/i);
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(pool.connect).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 naming the conflicting value on a uniqueness collision, never calling Authentik', async () => {
+    const { CallsignSuffixConflictError } = jest.requireActual('../services/CallsignSuffixUniquenessService');
+    UserProvisioningService.resolveCallsignSuffixForNewUser.mockRejectedValue(
+      new CallsignSuffixConflictError('J.Doe')
+    );
+    global.fetch = jest.fn();
+
+    const res = await request(app).post('/api/users/create-and-add').send(VALID_BODY);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/J\.Doe/);
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(pool.connect).not.toHaveBeenCalled();
   });
 });

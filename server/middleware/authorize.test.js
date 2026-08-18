@@ -63,6 +63,7 @@ jest.mock('../config/permissions.registry', () => {
       'GET /api/widgets': ['widget:read'],
       'PUT /api/teams/:teamId': ['team:update'],
       'POST /api/teams/:teamId/members': ['team:members:add'],
+      'PATCH /api/teams/:teamId/members/:userId': ['team:members:edit'],
       'GET /api/teams/:teamId': ['team:read']
     },
     roleDefaults: {
@@ -90,6 +91,7 @@ function buildApp(user) {
   app.get('/api/widgets', authorize, (req, res) => res.status(200).json({ ok: true }));
   app.put('/api/teams/:teamId', authorize, (req, res) => res.status(200).json({ ok: true }));
   app.post('/api/teams/:teamId/members', authorize, (req, res) => res.status(200).json({ ok: true }));
+  app.patch('/api/teams/:teamId/members/:userId', authorize, (req, res) => res.status(200).json({ ok: true }));
   app.get('/api/teams/:teamId', authorize, (req, res) => res.status(200).json({ ok: true }));
   return app;
 }
@@ -229,6 +231,94 @@ describe('authorize (BUG-015: team:members:add row-scoped resolver)', () => {
     expect(res.status).toBe(200);
     expect(mockIsAdmin).not.toHaveBeenCalled();
     expect(mockWarn).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Task 28.2 (Requirements 4, 13.10): the `'team:members:edit'` row-scoped
+ * resolver, backing `PATCH /api/teams/:teamId/members/:userId` (the
+ * Member_List name/TAK_Role/callsign_suffix edit route, task 28.1).
+ * Permits a Global_Manager, or a Team_Admin of `:teamId` (per
+ * `Team.isAdmin`, inherited per Requirement 4) for whom `:teamId` is ALSO
+ * a Visible_Branch (per `TeamVisibilityService.isVisibleBranch`,
+ * Requirement 13.10) -- both conditions required for a non-Global_Manager.
+ */
+describe('authorize (task 28.2: team:members:edit row-scoped resolver)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('permits a Global_Manager regardless of Team.isAdmin/isVisibleBranch', async () => {
+    const app = buildApp({ userId: 1, is_global_manager: true });
+
+    const res = await request(app)
+      .patch('/api/teams/42/members/7')
+      .set('X-Forwarded-For', TEST_IP);
+
+    expect(res.status).toBe(200);
+    expect(mockIsAdmin).not.toHaveBeenCalled();
+    expect(mockIsVisibleBranch).not.toHaveBeenCalled();
+    expect(mockWarn).not.toHaveBeenCalled();
+  });
+
+  it('permits a Team_Admin (Team.isAdmin true) whose team is a Visible_Branch (isVisibleBranch true)', async () => {
+    mockIsAdmin.mockResolvedValueOnce(true);
+    mockIsVisibleBranch.mockResolvedValueOnce(true);
+    const app = buildApp({ userId: 1, is_global_manager: false });
+
+    const res = await request(app)
+      .patch('/api/teams/42/members/7')
+      .set('X-Forwarded-For', TEST_IP);
+
+    expect(res.status).toBe(200);
+    expect(mockIsAdmin).toHaveBeenCalledWith('42', 1);
+    expect(mockIsVisibleBranch).toHaveBeenCalledWith('42', expect.objectContaining({ userId: 1 }));
+    expect(mockWarn).not.toHaveBeenCalled();
+  });
+
+  it('denies (403, not 404) a Team_Admin whose team is NOT a Visible_Branch (Requirement 13.10)', async () => {
+    mockIsAdmin.mockResolvedValueOnce(true);
+    mockIsVisibleBranch.mockResolvedValueOnce(false);
+    const app = buildApp({ userId: 1, is_global_manager: false });
+
+    const res = await request(app)
+      .patch('/api/teams/42/members/7')
+      .set('X-Forwarded-For', TEST_IP);
+
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: 'Forbidden' });
+    expect(mockWarn).toHaveBeenCalledTimes(1);
+    const [payload] = mockWarn.mock.calls[0];
+    expect(payload).toEqual({
+      ip: TEST_IP,
+      route: '/api/teams/42/members/7',
+      reason: 'permission_denied'
+    });
+  });
+
+  it('denies a non-admin, non-global-manager user', async () => {
+    mockIsAdmin.mockResolvedValueOnce(false);
+    mockIsVisibleBranch.mockResolvedValueOnce(true);
+    const app = buildApp({ userId: 1, is_global_manager: false });
+
+    const res = await request(app)
+      .patch('/api/teams/42/members/7')
+      .set('X-Forwarded-For', TEST_IP);
+
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: 'Forbidden' });
+  });
+
+  it('denies when Team.isAdmin is true but isVisibleBranch is false (the Requirement 13.10 case specifically)', async () => {
+    mockIsAdmin.mockResolvedValueOnce(true);
+    mockIsVisibleBranch.mockResolvedValueOnce(false);
+    const app = buildApp({ userId: 1, is_global_manager: false });
+
+    const res = await request(app)
+      .patch('/api/teams/42/members/7')
+      .set('X-Forwarded-For', TEST_IP);
+
+    expect(res.status).toBe(403);
   });
 });
 

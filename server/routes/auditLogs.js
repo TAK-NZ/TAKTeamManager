@@ -97,7 +97,7 @@ const TEAM_SCOPED_RESOURCE_TYPES = ['team', 'channel'];
  * filters.
  *
  * @param {object} filters
- * @param {string|number} [filters.userId]
+ * @param {string} [filters.userEmail]
  * @param {string} [filters.action]
  * @param {string} [filters.resourceType]
  * @param {string|number} [filters.teamId]
@@ -109,7 +109,7 @@ const TEAM_SCOPED_RESOURCE_TYPES = ['team', 'channel'];
  *   embedded in `whereClause`.
  */
 function buildAuditLogFilters(filters = {}) {
-  const { userId, action, resourceType, teamId, startDate, endDate } = filters;
+  const { userEmail, action, resourceType, teamId, startDate, endDate } = filters;
 
   const conditions = [];
   const params = [];
@@ -124,9 +124,9 @@ function buildAuditLogFilters(filters = {}) {
   // `created_at` reference became ambiguous the moment that join was
   // added. `channels.id` inside the teamId subquery below is unambiguous
   // (only `channels` is referenced there) and stays unqualified.
-  if (userId !== undefined && userId !== null && userId !== '') {
-    params.push(userId);
-    conditions.push(`audit_logs.user_id = $${params.length}`);
+  if (userEmail !== undefined && userEmail !== null && userEmail !== '') {
+    params.push(userEmail);
+    conditions.push(`users.email = $${params.length}`);
   }
 
   if (action) {
@@ -177,7 +177,7 @@ function buildAuditLogFilters(filters = {}) {
 // Requirement 31 Criterion 1: Global_Manager-only, filtered, paginated
 // audit_logs query.
 router.get('/', authenticateToken, authorize, paginationParams, [
-  query('userId').optional().isInt(),
+  query('userEmail').optional().trim().isLength({ min: 1 }),
   query('action').optional().trim().isLength({ min: 1, max: 100 }),
   query('resourceType').optional().trim().isLength({ min: 1, max: 50 }),
   query('teamId').optional().isInt(),
@@ -190,11 +190,11 @@ router.get('/', authenticateToken, authorize, paginationParams, [
   }
 
   try {
-    const { userId, action, resourceType, teamId, startDate, endDate } = req.query;
+    const { userEmail, action, resourceType, teamId, startDate, endDate } = req.query;
     const { pageSize, offset } = req.pagination;
 
     const { whereClause, params } = buildAuditLogFilters({
-      userId,
+      userEmail,
       action,
       resourceType,
       teamId,
@@ -229,7 +229,7 @@ router.get('/', authenticateToken, authorize, paginationParams, [
         dataParams
       ),
       pool.query(
-        `SELECT COUNT(*) AS total FROM audit_logs ${whereClause}`,
+        `SELECT COUNT(*) AS total FROM audit_logs LEFT JOIN users ON users.id = audit_logs.user_id ${whereClause}`,
         params
       )
     ]);
@@ -274,7 +274,7 @@ const EXPORT_CHUNK_SIZE = 500;
 // applying the same filters as `GET /api/audit-logs` (Criterion 1), with
 // no pagination -- every matching row is streamed, not one page.
 router.get('/export.csv', authenticateToken, authorize, [
-  query('userId').optional().isInt(),
+  query('userEmail').optional().trim().isLength({ min: 1 }),
   query('action').optional().trim().isLength({ min: 1, max: 100 }),
   query('resourceType').optional().trim().isLength({ min: 1, max: 50 }),
   query('teamId').optional().isInt(),
@@ -286,9 +286,9 @@ router.get('/export.csv', authenticateToken, authorize, [
     return res.status(400).json({ errors: errors.array() });
   }
 
-  const { userId, action, resourceType, teamId, startDate, endDate } = req.query;
+  const { userEmail, action, resourceType, teamId, startDate, endDate } = req.query;
   const { whereClause, params } = buildAuditLogFilters({
-    userId,
+    userEmail,
     action,
     resourceType,
     teamId,
@@ -327,10 +327,12 @@ router.get('/export.csv', authenticateToken, authorize, [
       const offsetParamIndex = params.length + 2;
 
       const { rows } = await pool.query(
-        `SELECT id, user_id, action, resource_type, resource_id, details, created_at
+        `SELECT audit_logs.id, audit_logs.user_id, audit_logs.action, audit_logs.resource_type,
+                audit_logs.resource_id, audit_logs.details, audit_logs.created_at
          FROM audit_logs
+         LEFT JOIN users ON users.id = audit_logs.user_id
          ${whereClause}
-         ORDER BY created_at DESC, id DESC
+         ORDER BY audit_logs.created_at DESC, audit_logs.id DESC
          LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}`,
         chunkParams
       );

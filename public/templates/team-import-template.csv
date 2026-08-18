@@ -1,3 +1,7 @@
-name,parentTeamName (optional),parentTeamId (optional)
-Southland District,Fire and Emergency New Zealand,
-Central Region,,3
+rowId,parentRowRef,parentTeamName,parentTeamId,name,visibility,callsignPrefix
+org1,,,,Fire and Emergency New Zealand,public,FENZ
+region1,org1,,,Te Ihu,public,TEIHU
+district1,region1,,,Canterbury,,CHC
+station1,district1,,,Station 40,private,S40
+,,Wellington Regional Council,,Wellington District,public,WGN
+,,,42,Northern Sub-team,,

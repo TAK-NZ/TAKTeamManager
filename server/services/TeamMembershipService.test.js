@@ -13,9 +13,13 @@ jest.mock('../config/database', () => ({
 jest.mock('./EventPublisher', () => ({
   publishOperation: jest.fn()
 }));
+jest.mock('../models/Team', () => ({
+  getFullMemberList: jest.fn()
+}));
 
 const pool = require('../config/database');
 const EventPublisher = require('./EventPublisher');
+const Team = require('../models/Team');
 const TeamMembershipService = require('./TeamMembershipService');
 
 function buildMockClient(queryImpl) {
@@ -170,6 +174,156 @@ describe('TeamMembershipService.addUserToTeam - externally-provided client (Requ
     expect(mockClient.query).toHaveBeenCalledWith('BEGIN');
     expect(mockClient.query).toHaveBeenCalledWith('COMMIT');
     expect(mockClient.release).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * Requirement 11.18 (task 25.1): `addUserToTeam` must reject a membership
+ * change that would create a same-Team `callsign_suffix` collision in the
+ * DESTINATION team, checked via the shared `checkCallsignSuffixUniqueness`
+ * (`CallsignSuffixUniquenessService`, task 23.1) BEFORE any
+ * `DELETE`/`INSERT` write against `team_memberships` is attempted.
+ *
+ * `../models/Team` is mocked (not `./CallsignSuffixUniquenessService`
+ * itself) so these tests exercise `addUserToTeam`'s own wiring into the
+ * REAL shared uniqueness-check function, consistent with
+ * `UserProvisioningService.test.js`'s existing convention for the same
+ * dependency -- `checkCallsignSuffixUniqueness`'s own internals already
+ * have a dedicated test file (`CallsignSuffixUniquenessService.test.js`).
+ */
+describe('TeamMembershipService.addUserToTeam - callsign_suffix uniqueness (Requirement 11.18)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('rejects the membership change with CallsignSuffixConflictError when the user\'s own callsign_suffix collides with an existing member of the destination team, and never attempts a DELETE/INSERT write', async () => {
+    const mockClient = buildMockClient((sql) => {
+      if (sql.includes('SELECT callsign_suffix FROM users WHERE id = $1')) {
+        return Promise.resolve({ rows: [{ callsign_suffix: 'J.Doe' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    pool.connect.mockResolvedValue(mockClient);
+    Team.getFullMemberList.mockResolvedValue([
+      { id: 999, callsign_suffix: 'j.doe' } // case-insensitive collision, different user
+    ]);
+
+    await expect(
+      TeamMembershipService.addUserToTeam(1, 2, 'member', 9)
+    ).rejects.toThrow('callsign_suffix "J.Doe" is already in use within this Team');
+
+    const sqlCalls = mockClient.query.mock.calls.map(([sql]) => sql);
+    expect(sqlCalls.some((sql) => sql.trim().startsWith('DELETE FROM team_memberships'))).toBe(false);
+    expect(sqlCalls.some((sql) => sql.includes('INSERT INTO team_memberships'))).toBe(false);
+
+    // Since ownsTransaction is true here, the failure still routes through
+    // this method's existing catch block's ROLLBACK/release cleanup.
+    expect(mockClient.query).toHaveBeenCalledWith('ROLLBACK');
+    expect(mockClient.query).not.toHaveBeenCalledWith('COMMIT');
+    expect(mockClient.release).toHaveBeenCalled();
+  });
+
+  it('succeeds normally when the user\'s own callsign_suffix does not collide with anyone in the destination team', async () => {
+    const mockClient = buildMockClient((sql) => {
+      if (sql.includes('SELECT callsign_suffix FROM users WHERE id = $1')) {
+        return Promise.resolve({ rows: [{ callsign_suffix: 'J.Doe' }] });
+      }
+      if (sql.includes('SELECT c.id, c.authentik_group_id')) {
+        return Promise.resolve({ rows: [] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    pool.connect.mockResolvedValue(mockClient);
+    Team.getFullMemberList.mockResolvedValue([
+      { id: 999, callsign_suffix: 'A.Smith' }
+    ]);
+    EventPublisher.publishOperation.mockResolvedValue('op-id');
+
+    const result = await TeamMembershipService.addUserToTeam(1, 2, 'member', 9);
+
+    expect(result).toEqual({ success: true, groupsQueued: 0 });
+    expect(mockClient.query).toHaveBeenCalledWith('DELETE FROM team_memberships WHERE user_id = $1', [1]);
+    expect(mockClient.query).toHaveBeenCalledWith(
+      'INSERT INTO team_memberships (user_id, team_id, role) VALUES ($1, $2, $3)',
+      [1, 2, 'member']
+    );
+    expect(mockClient.query).toHaveBeenCalledWith('COMMIT');
+  });
+
+  it('succeeds without a real uniqueness conflict when the user has no callsign_suffix set (null/empty short-circuits the check)', async () => {
+    const mockClient = buildMockClient((sql) => {
+      if (sql.includes('SELECT callsign_suffix FROM users WHERE id = $1')) {
+        return Promise.resolve({ rows: [{ callsign_suffix: null }] });
+      }
+      if (sql.includes('SELECT c.id, c.authentik_group_id')) {
+        return Promise.resolve({ rows: [] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    pool.connect.mockResolvedValue(mockClient);
+    EventPublisher.publishOperation.mockResolvedValue('op-id');
+
+    const result = await TeamMembershipService.addUserToTeam(1, 2, 'member', 9);
+
+    expect(result).toEqual({ success: true, groupsQueued: 0 });
+    // checkCallsignSuffixUniqueness short-circuits on a falsy candidate
+    // value without even calling Team.getFullMemberList.
+    expect(Team.getFullMemberList).not.toHaveBeenCalled();
+    expect(mockClient.query).toHaveBeenCalledWith('COMMIT');
+  });
+
+  it('runs the uniqueness check before any DELETE/INSERT team_memberships call (ordering)', async () => {
+    const callOrder = [];
+    const mockClient = buildMockClient((sql) => {
+      if (sql.includes('SELECT callsign_suffix FROM users WHERE id = $1')) {
+        callOrder.push('select-own-suffix');
+        return Promise.resolve({ rows: [{ callsign_suffix: 'J.Doe' }] });
+      }
+      if (sql.trim().startsWith('DELETE FROM team_memberships')) {
+        callOrder.push('delete');
+        return Promise.resolve({ rows: [] });
+      }
+      if (sql.includes('INSERT INTO team_memberships')) {
+        callOrder.push('insert');
+        return Promise.resolve({ rows: [] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    pool.connect.mockResolvedValue(mockClient);
+    Team.getFullMemberList.mockImplementation(async () => {
+      callOrder.push('uniqueness-check');
+      return [];
+    });
+    EventPublisher.publishOperation.mockResolvedValue('op-id');
+
+    await TeamMembershipService.addUserToTeam(1, 2, 'member', 9);
+
+    expect(callOrder).toEqual(['select-own-suffix', 'uniqueness-check', 'delete', 'insert']);
+  });
+
+  it('applies the same check when an externally-provided client is used', async () => {
+    const externalClient = buildMockClient((sql) => {
+      if (sql.includes('SELECT callsign_suffix FROM users WHERE id = $1')) {
+        return Promise.resolve({ rows: [{ callsign_suffix: 'J.Doe' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    Team.getFullMemberList.mockResolvedValue([
+      { id: 999, callsign_suffix: 'J.DOE' }
+    ]);
+
+    await expect(
+      TeamMembershipService.addUserToTeam(1, 2, 'member', 9, externalClient)
+    ).rejects.toThrow('callsign_suffix "J.Doe" is already in use within this Team');
+
+    expect(pool.connect).not.toHaveBeenCalled();
+    const sqlCalls = externalClient.query.mock.calls.map(([sql]) => sql);
+    expect(sqlCalls.some((sql) => sql.trim().startsWith('DELETE FROM team_memberships'))).toBe(false);
+    expect(sqlCalls.some((sql) => sql.includes('INSERT INTO team_memberships'))).toBe(false);
+    // No ROLLBACK/release for an externally-provided client -- the caller
+    // owns the transaction lifecycle.
+    expect(externalClient.query).not.toHaveBeenCalledWith('ROLLBACK');
+    expect(externalClient.release).not.toHaveBeenCalled();
   });
 });
 

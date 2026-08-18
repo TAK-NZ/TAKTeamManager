@@ -1,46 +1,20 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { PlusIcon, UserGroupIcon, XMarkIcon, TrashIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, ChevronRightIcon, EyeSlashIcon, ArrowLeftOnRectangleIcon, PencilIcon, LockClosedIcon, LockOpenIcon } from '@heroicons/react/24/outline'
-import { teamsAPI } from '../services/api'
+import { PlusIcon, UserGroupIcon, TrashIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, ChevronRightIcon, EyeSlashIcon, ArrowLeftOnRectangleIcon, PencilIcon } from '@heroicons/react/24/outline'
+import { teamsAPI, configAPI } from '../services/api'
 import api from '../services/api'
-
-// Small inline indicator shown next to a form field's label, making it
-// unambiguous at a glance whether a field can still be changed once the
-// team exists: a green OPEN padlock for a field that remains editable
-// after creation, or a red CLOSED padlock for a field that is locked
-// after creation. A native title tooltip on hover explains why -- same
-// `title=""` tooltip convention already used throughout this page (e.g.
-// the "Cannot delete team with sub-teams" trash icon).
-function FieldLockIndicator({ locked, lockedReason, editableReason = 'Editable at any time' }) {
-  return locked ? (
-    <LockClosedIcon
-      className="h-4 w-4 text-red-500 inline-block ml-1.5 align-text-top"
-      title={lockedReason}
-    />
-  ) : (
-    <LockOpenIcon
-      className="h-4 w-4 text-green-500 inline-block ml-1.5 align-text-top"
-      title={editableReason}
-    />
-  )
-}
+import { labelFor } from '../utils/teamLabels'
+import TeamFormDialog from '../components/TeamFormDialog'
 
 export default function Teams({ user }) {
   const [teams, setTeams] = useState([])
   const [loading, setLoading] = useState(true)
   const [showCreateDialog, setShowCreateDialog] = useState(false)
-  const [formData, setFormData] = useState({
-    name: '',
-    description: '',
-    callsignPrefix: '',
-    color: 'Blue',
-    visibility: 'public',
-    canJoin: false,
-    parentTeamId: null,
-    callsignSubteamDepth: 1,
-    callsignNameFormat: 'full_name'
-  })
-  const [creating, setCreating] = useState(false)
+  // Bugfix: Create/Edit Team is now a single shared dialog
+  // (`TeamFormDialog`) also used by TeamDetail.jsx -- this page's job is
+  // just to track which team (if any) is being edited and hand it to
+  // that dialog as the `team` prop. `null` means "creating a new team".
+  const [editingTeam, setEditingTeam] = useState(null)
   const [colorMappings, setColorMappings] = useState({})
   const [deleteTeamId, setDeleteTeamId] = useState(null)
   const [deleting, setDeleting] = useState(false)
@@ -50,17 +24,23 @@ export default function Teams({ user }) {
   const [currentPage, setCurrentPage] = useState(1)
   const itemsPerPage = 15
   const [expandedTeams, setExpandedTeams] = useState(new Set())
-  const [editingTeamId, setEditingTeamId] = useState(null)
+  // Requirement 2.4/2.5 (task 32.2): the system-wide Max_Team_Depth
+  // constant, sourced from GET /api/config/public so it's never
+  // hardcoded on the Client. Used to disable/grey any Parent-Team
+  // dropdown option that's already at the deepest permitted level.
+  const [maxTeamDepth, setMaxTeamDepth] = useState(null)
 
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const [teamsResponse, configResponse] = await Promise.all([
+        const [teamsResponse, configResponse, publicConfigResponse] = await Promise.all([
           teamsAPI.getMyTeams(),
-          api.get('/config/color-mappings')
+          api.get('/config/color-mappings'),
+          configAPI.getPublic()
         ])
         setTeams(teamsResponse.data.teams)
         setColorMappings(configResponse.data.colorMappings || {})
+        setMaxTeamDepth(publicConfigResponse.data.maxTeamDepth ?? null)
       } catch (error) {
         console.error('Failed to fetch data:', error)
       } finally {
@@ -71,35 +51,19 @@ export default function Teams({ user }) {
     fetchData()
   }, [])
 
-  const handleCreateTeam = async (e) => {
-    e.preventDefault()
-    setCreating(true)
-    try {
-      if (editingTeamId) {
-        const response = await teamsAPI.update(editingTeamId, formData)
-        setTeams(teams.map(team => team.id === editingTeamId ? {...team, ...response.data.team} : team))
-      } else {
-        const response = await teamsAPI.create(formData)
-        setTeams([...teams, response.data.team])
-      }
-      setShowCreateDialog(false)
-      setEditingTeamId(null)
-      setFormData({
-        name: '',
-        description: '',
-        callsignPrefix: '',
-        color: 'Blue',
-        visibility: 'public',
-        canJoin: false,
-        parentTeamId: null,
-        callsignSubteamDepth: 1,
-        callsignNameFormat: 'full_name'
-      })
-    } catch (error) {
-      console.error(editingTeamId ? 'Failed to update team:' : 'Failed to create team:', error)
-      alert((editingTeamId ? 'Failed to update team: ' : 'Failed to create team: ') + (error.response?.data?.error || error.message))
-    } finally {
-      setCreating(false)
+  const closeTeamFormDialog = () => {
+    setShowCreateDialog(false)
+    setEditingTeam(null)
+  }
+
+  // Applies TeamFormDialog's `onSaved` response to this page's own
+  // `teams` list: updates the existing row in place when editing, or
+  // appends the newly created team when creating.
+  const handleTeamSaved = (updatedTeam) => {
+    if (editingTeam) {
+      setTeams(teams.map(team => team.id === updatedTeam.id ? {...team, ...updatedTeam} : team))
+    } else {
+      setTeams([...teams, updatedTeam])
     }
   }
 
@@ -220,7 +184,10 @@ export default function Teams({ user }) {
         </div>
         {isGlobalAdmin && (
           <button 
-            onClick={() => setShowCreateDialog(true)}
+            onClick={() => {
+              setEditingTeam(null)
+              setShowCreateDialog(true)
+            }}
             className="btn-primary flex items-center"
           >
             <PlusIcon className="h-5 w-5 mr-2" />
@@ -238,7 +205,10 @@ export default function Teams({ user }) {
           </p>
           {isGlobalAdmin && (
             <button 
-              onClick={() => setShowCreateDialog(true)}
+              onClick={() => {
+                setEditingTeam(null)
+                setShowCreateDialog(true)
+              }}
               className="btn-primary"
             >
               Create Your First Team
@@ -386,18 +356,7 @@ export default function Teams({ user }) {
                         {isGlobalAdmin && (
                           <button
                             onClick={() => {
-                              setFormData({
-                                name: team.name,
-                                description: team.description || '',
-                                callsignPrefix: team.callsign_prefix || '',
-                                color: team.color || 'Blue',
-                                visibility: team.visibility || 'private',
-                                canJoin: team.can_join || false,
-                                parentTeamId: team.parent_team_id || null,
-                                callsignSubteamDepth: team.callsign_subteam_depth || 1,
-                                callsignNameFormat: team.callsign_name_format || 'full_name'
-                              })
-                              setEditingTeamId(team.id)
+                              setEditingTeam(team)
                               setShowCreateDialog(true)
                             }}
                             className="text-gray-600 hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300"
@@ -465,312 +424,30 @@ export default function Teams({ user }) {
         </div>
       )}
 
-      {/* Create Team Dialog */}
-      {showCreateDialog && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
-              <h3 className="text-xl font-semibold text-gray-900 dark:text-gray-100">{editingTeamId ? 'Edit Team' : 'Create New Team'}</h3>
-              <button
-                onClick={() => {
-                  setShowCreateDialog(false)
-                  setEditingTeamId(null)
-                  setFormData({
-                    name: '',
-                    description: '',
-                    callsignPrefix: '',
-                    color: 'Blue',
-                    visibility: 'public',
-                    canJoin: false,
-                    parentTeamId: null,
-                    callsignSubteamDepth: 1,
-                    callsignNameFormat: 'full_name'
-                  })
-                }}
-                className="text-gray-400 hover:text-gray-500 dark:hover:text-gray-300"
-              >
-                <XMarkIcon className="h-6 w-6" />
-              </button>
-            </div>
-            
-            <form onSubmit={handleCreateTeam} className="p-6">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="space-y-6">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                      Team Name *
-                      <FieldLockIndicator
-                        locked={false}
-                        editableReason="Editable at any time, before or after creation"
-                      />
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      value={formData.name}
-                      onChange={(e) => setFormData({...formData, name: e.target.value})}
-                      className="input w-full"
-                      placeholder={formData.parentTeamId ? "Southland District" : "Enter team name"}
-                    />
-                    {formData.parentTeamId && formData.name && (
-                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                        Display name will be: <span className="font-medium">{teams.find(t => t.id === formData.parentTeamId)?.callsign_prefix || teams.find(t => t.id === formData.parentTeamId)?.name || 'Parent'} - {formData.name}</span>
-                      </p>
-                    )}
-                  </div>
-                  
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                      Prefix
-                      <FieldLockIndicator
-                        locked={true}
-                        lockedReason="Cannot be changed after the team is created"
-                      />
-                    </label>
-                    <input
-                      type="text"
-                      value={formData.callsignPrefix}
-                      onChange={editingTeamId ? undefined : (e) => setFormData({...formData, callsignPrefix: e.target.value})}
-                      className={`input w-full ${editingTeamId ? 'bg-gray-100 dark:bg-gray-600 text-gray-500' : ''}`}
-                      disabled={!!editingTeamId}
-                      placeholder={formData.parentTeamId ? "STL, CHC, etc." : "FENZ, DOC, etc."}
-                    />
-                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                      {editingTeamId ? 'Prefix cannot be changed after team creation' : 
-                       formData.parentTeamId ? 'Sub-team prefix for callsigns. Example: FENZ-STL-John Smith' :
-                       'Team prefix for callsigns. Example: FENZ-John Smith'}
-                    </p>
-                  </div>
-                  
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                      Parent Team
-                      <FieldLockIndicator
-                        locked={false}
-                        editableReason="Editable at any time, before or after creation"
-                      />
-                    </label>
-                    <select
-                      value={formData.parentTeamId || ''}
-                      onChange={(e) => {
-                        const parentId = e.target.value ? parseInt(e.target.value) : null
-                        const parentTeam = parentId ? teams.find(t => t.id === parentId) : null
-                        setFormData({
-                          ...formData, 
-                          parentTeamId: parentId,
-                          color: parentTeam ? parentTeam.color : formData.color
-                        })
-                      }}
-                      className="input w-full"
-                    >
-                      <option value="">No parent (Top-level team)</option>
-                      {teams.filter(t => t.id !== editingTeamId).map(team => (
-                        <option key={team.id} value={team.id}>
-                          {team.name}
-                        </option>
-                      ))}
-                    </select>
-                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                      Select a parent team to create a sub-team, or leave empty for a top-level team.
-                    </p>
-                  </div>
-                  
-                  {!formData.parentTeamId && (
-                    <>
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                          Callsign Sub-team Depth
-                          <FieldLockIndicator
-                            locked={false}
-                            editableReason="Editable at any time, before or after creation"
-                          />
-                        </label>
-                        <select
-                          value={formData.callsignSubteamDepth}
-                          onChange={(e) => setFormData({...formData, callsignSubteamDepth: parseInt(e.target.value)})}
-                          className="input w-full"
-                        >
-                          <option value={0}>0 - Root prefix only (FENZ-John Doe)</option>
-                          <option value={1}>1 - Include 1 sub-team (FENZ-STL-John Doe)</option>
-                          <option value={2}>2 - Include 2 sub-teams</option>
-                          <option value={3}>3 - Include 3 sub-teams</option>
-                          <option value={4}>4 - Include 4 sub-teams</option>
-                          <option value={5}>5 - Include all sub-teams</option>
-                        </select>
-                        <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                          How many sub-team prefixes to include in callsigns for this team hierarchy.
-                        </p>
-                      </div>
-                      
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                          Callsign Name Format
-                          <FieldLockIndicator
-                            locked={false}
-                            editableReason="Editable at any time, before or after creation"
-                          />
-                        </label>
-                        <select
-                          value={formData.callsignNameFormat}
-                          onChange={(e) => setFormData({...formData, callsignNameFormat: e.target.value})}
-                          className="input w-full"
-                        >
-                          <option value="full_name">Full Name (John Doe)</option>
-                          <option value="first_initial_last">First Initial + Last Name (J Doe)</option>
-                          <option value="first_last_initial">First Name + Last Initial (John D)</option>
-                        </select>
-                        <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                          How user names will appear in callsigns for this team hierarchy.
-                        </p>
-                      </div>
-                    </>
-                  )}
-                  
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                      TAK Color
-                      <FieldLockIndicator
-                        locked={true}
-                        lockedReason={formData.parentTeamId ? 'Sub-teams always inherit TAK color from their parent team' : 'Cannot be changed after the team is created'}
-                      />
-                    </label>
-                    <select
-                      value={formData.color}
-                      onChange={editingTeamId || formData.parentTeamId ? undefined : (e) => setFormData({...formData, color: e.target.value})}
-                      className={`input w-full ${editingTeamId || formData.parentTeamId ? 'bg-gray-100 dark:bg-gray-600 text-gray-500' : ''}`}
-                      disabled={editingTeamId || formData.parentTeamId}
-                    >
-                      {Object.keys(colorMappings).length > 0 ? (
-                        Object.entries(colorMappings).map(([color, organization]) => (
-                          <option key={color} value={color}>
-                            {organization && organization.trim() !== '' ? organization : color}
-                          </option>
-                        ))
-                      ) : (
-                        [
-                          { color: 'Yellow', org: 'Hato Hone St John' },
-                          { color: 'Cyan', org: 'Health New Zealand (Te Whatu Ora)' },
-                          { color: 'Green', org: 'Department of Conservation (DOC)' },
-                          { color: 'Red', org: 'Fire and Emergency New Zealand (FENZ)' },
-                          { color: 'Purple', org: 'National Emergency Management Agency (NEMA)' },
-                          { color: 'Orange', org: 'Land Search and Rescue New Zealand (LandSAR)' },
-                          { color: 'Blue', org: 'New Zealand Police' },
-                          { color: 'White', org: 'Wellington Free Ambulance' },
-                          { color: 'Maroon', org: 'New Zealand Red Cross' },
-                          { color: 'Dark Blue', org: 'New Zealand Customs Service' },
-                          { color: 'Teal', org: 'Coastguard New Zealand' },
-                          { color: 'Brown', org: 'New Zealand Defence Force (NZDF)' }
-                        ].map(({ color, org }) => (
-                          <option key={color} value={color}>
-                            {org}
-                          </option>
-                        ))
-                      )}
-                    </select>
-                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                      {editingTeamId ? 'TAK color cannot be changed after team creation' : 
-                       formData.parentTeamId ? 'Sub-teams inherit TAK color from parent team' : 
-                       'TAK color designation for team members.'}
-                    </p>
-                  </div>
-                </div>
-                
-                <div className="space-y-6">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                      Description
-                      <FieldLockIndicator
-                        locked={false}
-                        editableReason="Editable at any time, before or after creation"
-                      />
-                    </label>
-                    <textarea
-                      value={formData.description}
-                      onChange={(e) => setFormData({...formData, description: e.target.value})}
-                      className="input w-full"
-                      rows={4}
-                      placeholder="Enter team description and purpose"
-                    />
-                  </div>
-                  
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                      Visibility
-                      <FieldLockIndicator
-                        locked={false}
-                        editableReason="Editable at any time, before or after creation"
-                      />
-                    </label>
-                    <select
-                      value={formData.visibility}
-                      onChange={(e) => setFormData({...formData, visibility: e.target.value})}
-                      className="input w-full"
-                    >
-                      <option value="private">Private - Only visible to members</option>
-                      <option value="public">Public - Visible to all users</option>
-                    </select>
-                  </div>
-                  
-                  <div className="space-y-3">
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                      Team Settings
-                      <FieldLockIndicator
-                        locked={false}
-                        editableReason="Editable at any time, before or after creation"
-                      />
-                    </label>
-                    <div className="flex items-start">
-                      <input
-                        type="checkbox"
-                        id="canJoin"
-                        checked={formData.canJoin}
-                        onChange={(e) => setFormData({...formData, canJoin: e.target.checked})}
-                        className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded mt-1"
-                      />
-                      <div className="ml-3">
-                        <label htmlFor="canJoin" className="text-sm text-gray-700 dark:text-gray-300 font-medium">
-                          Allow join requests
-                        </label>
-                        <p className="text-xs text-gray-500 dark:text-gray-400">
-                          Users can request to join this team through the public interface.
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              
-              <div className="flex justify-end space-x-3 pt-6 mt-6 border-t border-gray-200 dark:border-gray-700">
-                <button
-                  type="button"
-                  onClick={() => setShowCreateDialog(false)}
-                  className="btn-secondary px-6 py-2"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={creating}
-                  className="btn-primary px-6 py-2"
-                >
-                  {creating ? (editingTeamId ? 'Updating Team...' : 'Creating Team...') : (editingTeamId ? 'Update Team' : 'Create Team')}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      {/* Create/Edit Team Dialog (shared with TeamDetail.jsx) */}
+      <TeamFormDialog
+        mode={editingTeam ? 'edit' : 'create'}
+        team={editingTeam}
+        teams={teams}
+        maxTeamDepth={maxTeamDepth}
+        colorMappings={colorMappings}
+        isOpen={showCreateDialog}
+        onClose={closeTeamFormDialog}
+        onSaved={handleTeamSaved}
+      />
 
       {/* Delete Confirmation Dialog */}
-      {deleteTeamId && (
+      {deleteTeamId && (() => {
+        const deleteLabel = labelFor(teams.find(t => t.id === deleteTeamId))
+        return (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full">
             <div className="p-6">
               <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
-                Delete Team
+                Delete {deleteLabel}
               </h3>
               <p className="text-gray-600 dark:text-gray-400 mb-6">
-                Are you sure you want to delete this team? This action cannot be undone.
+                Are you sure you want to delete this {deleteLabel.toLowerCase()}? This action cannot be undone.
               </p>
               <div className="flex justify-end space-x-3">
                 <button
@@ -785,13 +462,14 @@ export default function Teams({ user }) {
                   disabled={deleting}
                   className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50"
                 >
-                  {deleting ? 'Deleting...' : 'Delete Team'}
+                  {deleting ? 'Deleting...' : `Delete ${deleteLabel}`}
                 </button>
               </div>
             </div>
           </div>
         </div>
-      )}
+        )
+      })()}
     </div>
   )
 }

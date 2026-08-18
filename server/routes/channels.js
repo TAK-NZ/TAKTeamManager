@@ -19,20 +19,43 @@ const router = express.Router();
 // fully local, because this second route still hit Authentik on the same
 // page load.
 //
-// The live lookup was also nearly always a no-op in practice: on error
-// (including "Authentik returned no matching group", which is exactly
-// what happens for a group whose `attributes.description` was never set)
-// the route already fell back to the literal string 'TAK Channel' -- so
-// the live call frequently paid Authentik's full round-trip latency only
-// to produce the exact same fallback value it would have produced without
-// it. Removed entirely; every response now uses that same fallback
-// formatting unconditionally, with zero external calls.
+// A later change removed the live Authentik call entirely but went too
+// far: it also dropped the local database lookup, unconditionally
+// returning the literal string 'TAK Channel' for every channel
+// regardless of whether a real description exists locally. This
+// regressed the Dashboard to show "TAK Channel" for every channel
+// instead of its actual description. Fixed here by querying the three
+// local tables that already store each channel type's real description
+// (`channels`, `bch_channels`, `region_channels` -- populated by
+// Team.createTeamChannel/GlobalChannelService/syncWorker.js's sync, no
+// Authentik call needed at all) instead of either hitting Authentik live
+// or hardcoding a placeholder.
+//
+// Group-name-to-local-row matching: `req.user.groups` (from
+// `user_cache.groups`, populated by authentikSync.js's
+// `groupMap[groupId] = group.name`) holds the raw Authentik GROUP NAME,
+// e.g. "tak_Teams - FENZ - Southland District", "tak_BCH - Community -
+// Amateur Radio APRS_READ", "tak_Regions - Auckland". After stripping
+// the "tak_" prefix and any "_READ"/"_WRITE" suffix (both already done
+// below for the base-channel-name grouping itself):
+//   - a team channel's base name matches `channels.display_name` exactly
+//     (e.g. "Teams - FENZ - Southland District")
+//   - a BCH channel's base name has an additional "BCH - " prefix beyond
+//     what `bch_channels.name` stores (e.g. base name "BCH - Community -
+//     Amateur Radio APRS" -> bch_channels.name "Community - Amateur
+//     Radio APRS") -- confirmed against syncWorker.js's
+//     syncExistingGlobalChannels, which strips exactly `tak_BCH${separator}`
+//     (not just "tak_") when populating bch_channels.name
+//   - likewise a region channel's base name has an additional
+//     "Regions - " prefix beyond `region_channels.name`
 router.get('/descriptions', authenticateToken, authorize, async (req, res) => {
   try {
     const userGroups = req.user.groups || [];
     const takGroups = userGroups.filter(groupName => groupName.startsWith('tak_'));
     
-    // Get unique base channel names
+    // Get unique base channel names (still including the "tak_" prefix at
+    // this point, matching this route's pre-existing `name` field shape
+    // that Dashboard.jsx's descriptionMap key lookup depends on).
     const baseChannels = new Set()
     takGroups.forEach(groupName => {
       let baseName
@@ -45,15 +68,44 @@ router.get('/descriptions', authenticateToken, authorize, async (req, res) => {
       }
       baseChannels.add(baseName)
     })
-    
+
+    const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
+
+    // Fetch every locally-known description in 3 queries (not one query
+    // per channel) and build lookup maps keyed the same way each table
+    // actually stores its own `name` column.
+    const [channelsResult, bchResult, regionResult] = await Promise.all([
+      pool.query('SELECT display_name, description FROM channels WHERE description IS NOT NULL'),
+      pool.query('SELECT name, description FROM bch_channels WHERE description IS NOT NULL'),
+      pool.query('SELECT name, description FROM region_channels WHERE description IS NOT NULL')
+    ]);
+
+    const teamChannelDescByDisplayName = new Map(
+      channelsResult.rows.map((row) => [row.display_name, row.description])
+    );
+    const bchDescByName = new Map(bchResult.rows.map((row) => [row.name, row.description]));
+    const regionDescByName = new Map(regionResult.rows.map((row) => [row.name, row.description]));
+
+    const bchPrefix = `BCH${separator}`;
+    const regionPrefix = `Regions${separator}`;
+
     const channelDescriptions = Array.from(baseChannels).map((baseName) => {
       // Use group name for hierarchy (remove tak_ prefix)
       const displayName = baseName.replace('tak_', '');
 
+      let description;
+      if (displayName.startsWith(bchPrefix)) {
+        description = bchDescByName.get(displayName.slice(bchPrefix.length));
+      } else if (displayName.startsWith(regionPrefix)) {
+        description = regionDescByName.get(displayName.slice(regionPrefix.length));
+      } else {
+        description = teamChannelDescByDisplayName.get(displayName);
+      }
+
       return {
         name: baseName,
         display_name: displayName,
-        description: 'TAK Channel'
+        description: description || 'TAK Channel'
       };
     });
 

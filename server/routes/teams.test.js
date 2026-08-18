@@ -74,20 +74,44 @@ jest.mock('../middleware/auth', () => ({
 
 jest.mock('../middleware/authorize', () => (req, res, next) => next());
 
-// Requirement 5.12 (task 11.6): PUT /api/teams/:teamId requires
-// `../services/userAttributes` inline inside the handler (not at module
-// load time), but jest.mock still intercepts that require regardless of
-// when it happens, so this mock lets the tests below assert whether
-// `updateTeamUserAttributes` was (or wasn't) triggered by a given update.
+// Requirement 5.12 (task 11.6) / 13.6 (task 28.1): PUT /api/teams/:teamId
+// and PATCH /api/teams/:teamId/members/:userId both require
+// `../services/userAttributes` inline inside their handlers (not at
+// module load time), but jest.mock still intercepts that require
+// regardless of when it happens, so this mock lets the tests below
+// assert whether `updateTeamUserAttributes`/`updateUserAttributes` was
+// (or wasn't) triggered by a given update.
 jest.mock('../services/userAttributes', () => ({
-  updateTeamUserAttributes: jest.fn().mockResolvedValue(true)
+  updateTeamUserAttributes: jest.fn().mockResolvedValue(true),
+  updateUserAttributes: jest.fn().mockResolvedValue(true)
 }));
+
+// Requirement 11.4, 13.2 (task 28.1): PATCH /api/teams/:teamId/members/:userId
+// looks up the target user via `User.findById` and writes via
+// `User.update`.
+jest.mock('../models/User', () => ({
+  findById: jest.fn(),
+  update: jest.fn()
+}));
+
+// Requirement 11.16 (task 28.1): callsign_suffix uniqueness is checked
+// via the shared `checkCallsignSuffixUniqueness` function before any
+// write.
+jest.mock('../services/CallsignSuffixUniquenessService', () => {
+  const { CallsignSuffixConflictError } = jest.requireActual('../services/CallsignSuffixUniquenessService');
+  return {
+    checkCallsignSuffixUniqueness: jest.fn().mockResolvedValue(undefined),
+    CallsignSuffixConflictError
+  };
+});
 
 const express = require('express');
 const request = require('supertest');
 const pool = require('../config/database');
 const Team = require('../models/Team');
+const User = require('../models/User');
 const TeamVisibilityService = require('../services/TeamVisibilityService');
+const { checkCallsignSuffixUniqueness, CallsignSuffixConflictError } = require('../services/CallsignSuffixUniquenessService');
 const teamsRouter = require('./teams');
 
 function buildApp() {
@@ -810,5 +834,190 @@ describe('GET /api/teams/:teamId/sub-teams (Requirement 6.5)', () => {
     expect(res.status).toBe(500);
     expect(res.body.error).toBe('Failed to fetch sub-teams');
     expect(TeamVisibilityService.filterVisibleBranches).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Integration tests for `PATCH /api/teams/:teamId/members/:userId`
+ * (Requirements 11.4, 11.16, 13.2, 13.3, 13.4, 13.5, 13.6, 13.9, task
+ * 28.1).
+ *
+ * `authenticateToken`/`authorize` are mocked (module-level, above) to
+ * bypass real JWT/DB-backed authorization -- the `'team:members:edit'`
+ * resolver itself is a separate task (28.2) and is not exercised here.
+ */
+describe('PATCH /api/teams/:teamId/members/:userId (Requirements 11.4, 11.16, 13.2-13.6, 13.9)', () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockIsAdmin = true;
+    app = buildApp();
+    User.findById.mockResolvedValue({ id: 7, authentik_user_id: 900, first_name: 'John', last_name: 'Doe', email: 'john@example.com' });
+    checkCallsignSuffixUniqueness.mockResolvedValue(undefined);
+  });
+
+  it('updates firstName only', async () => {
+    User.update.mockResolvedValue({ id: 7, first_name: 'Jane', last_name: 'Doe' });
+
+    const res = await request(app)
+      .patch('/api/teams/1/members/7')
+      .send({ firstName: 'Jane' });
+
+    expect(res.status).toBe(200);
+    expect(User.update).toHaveBeenCalledWith('7', { first_name: 'Jane' });
+    expect(res.body.member).toEqual({ id: 7, first_name: 'Jane', last_name: 'Doe' });
+  });
+
+  it('updates lastName only', async () => {
+    User.update.mockResolvedValue({ id: 7, first_name: 'John', last_name: 'Smith' });
+
+    const res = await request(app)
+      .patch('/api/teams/1/members/7')
+      .send({ lastName: 'Smith' });
+
+    expect(res.status).toBe(200);
+    expect(User.update).toHaveBeenCalledWith('7', { last_name: 'Smith' });
+  });
+
+  it('updates takRole only, dual-writing user_cache and pushing to Authentik', async () => {
+    const UserAttributesService = require('../services/userAttributes');
+    User.update.mockResolvedValue({ id: 7, tak_role: 'Team Lead' });
+
+    const res = await request(app)
+      .patch('/api/teams/1/members/7')
+      .send({ takRole: 'Team Lead' });
+
+    expect(res.status).toBe(200);
+    expect(User.update).toHaveBeenCalledWith('7', { tak_role: 'Team Lead' });
+    expect(pool.query).toHaveBeenCalledWith(
+      'UPDATE user_cache SET tak_role = $1 WHERE authentik_id = $2',
+      ['Team Lead', 900]
+    );
+    expect(UserAttributesService.updateUserAttributes).toHaveBeenCalledWith(900, { role: 'Team Lead' });
+  });
+
+  it('updates callsignSuffix only, dual-writing user_cache and checking uniqueness excluding the edited user', async () => {
+    User.update.mockResolvedValue({ id: 7, callsign_suffix: 'J.Doe' });
+
+    const res = await request(app)
+      .patch('/api/teams/1/members/7')
+      .send({ callsignSuffix: 'J.Doe' });
+
+    expect(res.status).toBe(200);
+    expect(checkCallsignSuffixUniqueness).toHaveBeenCalledWith('1', 'J.Doe', 7);
+    expect(User.update).toHaveBeenCalledWith('7', { callsign_suffix: 'J.Doe' });
+    expect(pool.query).toHaveBeenCalledWith(
+      'UPDATE user_cache SET callsign_suffix = $1 WHERE authentik_id = $2',
+      ['J.Doe', 900]
+    );
+  });
+
+  it('updates all fields together', async () => {
+    User.update.mockResolvedValue({
+      id: 7, first_name: 'Jane', last_name: 'Smith', tak_role: 'Medic', callsign_suffix: 'J.Smith'
+    });
+
+    const res = await request(app)
+      .patch('/api/teams/1/members/7')
+      .send({ firstName: 'Jane', lastName: 'Smith', takRole: 'Medic', callsignSuffix: 'J.Smith' });
+
+    expect(res.status).toBe(200);
+    expect(User.update).toHaveBeenCalledWith('7', {
+      first_name: 'Jane',
+      last_name: 'Smith',
+      callsign_suffix: 'J.Smith',
+      tak_role: 'Medic'
+    });
+  });
+
+  it('confirms a firstName/lastName-only edit writes directly to users with no access_requests interaction (Requirement 13.9)', async () => {
+    User.update.mockResolvedValue({ id: 7, first_name: 'Jane', last_name: 'Smith' });
+
+    const res = await request(app)
+      .patch('/api/teams/1/members/7')
+      .send({ firstName: 'Jane', lastName: 'Smith' });
+
+    expect(res.status).toBe(200);
+    // Only the name fields are written -- no takRole/callsignSuffix
+    // supplied, so User.update is called with exactly those two fields.
+    expect(User.update).toHaveBeenCalledWith('7', { first_name: 'Jane', last_name: 'Smith' });
+
+    // Requirement 13.9: this edit path writes directly to `users` and is
+    // completely independent of the existing self-service `name_change`
+    // access-request/approval flow (`server/routes/requests.js`'s
+    // `POST /api/requests/team-access` + `RequestApprovalService`'s
+    // `name_change` branch, which INSERTs into/reads from
+    // `access_requests`) -- confirm no `pool.query` call anywhere in
+    // this request touches the `access_requests` table at all.
+    const accessRequestsCalls = pool.query.mock.calls.filter(
+      ([sql]) => typeof sql === 'string' && sql.includes('access_requests')
+    );
+    expect(accessRequestsCalls).toHaveLength(0);
+  });
+
+  it('rejects an invalid takRole with 400 before writing anything', async () => {
+    const res = await request(app)
+      .patch('/api/teams/1/members/7')
+      .send({ takRole: 'Not A Real Role' });
+
+    expect(res.status).toBe(400);
+    expect(User.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects a callsignSuffix containing a disallowed character with 400 before writing anything', async () => {
+    const res = await request(app)
+      .patch('/api/teams/1/members/7')
+      .send({ callsignSuffix: 'J Doe' });
+
+    expect(res.status).toBe(400);
+    expect(User.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects a conflicting callsignSuffix with 400 and does not change the stored value', async () => {
+    checkCallsignSuffixUniqueness.mockRejectedValue(new CallsignSuffixConflictError('J.Doe'));
+
+    const res = await request(app)
+      .patch('/api/teams/1/members/7')
+      .send({ callsignSuffix: 'J.Doe' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/J\.Doe/);
+    expect(User.update).not.toHaveBeenCalled();
+  });
+
+  it('ignores an email field even if sent', async () => {
+    User.update.mockResolvedValue({ id: 7, first_name: 'Jane' });
+
+    const res = await request(app)
+      .patch('/api/teams/1/members/7')
+      .send({ firstName: 'Jane', email: 'attacker@example.com' });
+
+    expect(res.status).toBe(200);
+    expect(User.update).toHaveBeenCalledWith('7', { first_name: 'Jane' });
+    const updateCallArgs = User.update.mock.calls[0][1];
+    expect(updateCallArgs.email).toBeUndefined();
+  });
+
+  it('returns 404 when the target user does not exist', async () => {
+    User.findById.mockResolvedValue(undefined);
+
+    const res = await request(app)
+      .patch('/api/teams/1/members/999')
+      .send({ firstName: 'Jane' });
+
+    expect(res.status).toBe(404);
+    expect(User.update).not.toHaveBeenCalled();
+  });
+
+  it('responds 500 when User.update rejects', async () => {
+    User.update.mockRejectedValue(new Error('db unavailable'));
+
+    const res = await request(app)
+      .patch('/api/teams/1/members/7')
+      .send({ firstName: 'Jane' });
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Failed to update team member');
   });
 });

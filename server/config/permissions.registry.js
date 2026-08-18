@@ -51,6 +51,14 @@ const routes = {
   'PUT /api/teams/:teamId': ['team:update'],
   'GET /api/teams/:teamId': ['team:read'],
   'POST /api/teams/:teamId/members': ['team:members:add'],
+  // Requirements 11.4, 13.2, 13.10 (tasks 28.1, 28.2): Member_List
+  // name/TAK_Role/callsign_suffix edit route. The 'team:members:edit'
+  // row-scoped resolver (server/middleware/authorize.js) permits a
+  // Global_Manager, or a Team_Admin of :teamId (inherited via
+  // Team.isAdmin, per Requirement 4) AND for whom :teamId is a
+  // Visible_Branch (per TeamVisibilityService, Requirement 13.10) --
+  // both conditions required for a non-Global_Manager.
+  'PATCH /api/teams/:teamId/members/:userId': ['team:members:edit'],
   'GET /api/teams/:teamId/hierarchy': ['team:read'],
   'GET /api/teams/:teamId/sub-teams': ['team:read'],
   // Requirement 5.8-5.11 (task 8.3): thin wrapper route around

@@ -5,7 +5,8 @@ import {
   UserGroupIcon, 
   UsersIcon, 
   ClipboardDocumentListIcon,
-  GlobeAltIcon,
+  MegaphoneIcon,
+  DocumentMagnifyingGlassIcon,
   Bars3Icon,
   XMarkIcon,
   CogIcon,
@@ -30,8 +31,8 @@ const getNavigation = (user) => {
   }
   
   if (user?.is_global_manager) {
-    baseNavigation.push({ name: 'Global Channels', href: '/global-channels', icon: GlobeAltIcon })
-    baseNavigation.push({ name: 'Audit Log', href: '/audit-logs', icon: ClipboardDocumentListIcon })
+    baseNavigation.push({ name: 'Global Channels', href: '/global-channels', icon: MegaphoneIcon })
+    baseNavigation.push({ name: 'Audit Log', href: '/audit-logs', icon: DocumentMagnifyingGlassIcon })
   }
   
   if (user?.isAdmin) {

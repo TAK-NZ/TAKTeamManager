@@ -1,5 +1,50 @@
 {
-  "pbtResults": {},
+  "pbtResults": {
+    "3.2* Write property test for admin inheritance": {
+      "status": "passed",
+      "lastRunTimestamp": 1787012497823
+    },
+    "6.6* Write property test for the character-class differential": {
+      "status": "passed",
+      "lastRunTimestamp": 1787012703749
+    },
+    "6.4* Write property test for Organisation-only field inheritance": {
+      "status": "passed",
+      "lastRunTimestamp": 1787012929081
+    },
+    "11.5* Write property test for the partial-merge guarantee": {
+      "status": "passed",
+      "lastRunTimestamp": 1787013199519
+    },
+    "10.3* Write property test for callsign segment assembly": {
+      "status": "passed",
+      "lastRunTimestamp": 1787013214546
+    },
+    "11.2* Write property test for level-filtered selection": {
+      "status": "passed",
+      "lastRunTimestamp": 1787013249465
+    },
+    "13.3* Write property test for single-team visibility resolution": {
+      "status": "passed",
+      "lastRunTimestamp": 1787013325920
+    },
+    "15.2* Write property test for the public exclusion rule": {
+      "status": "passed",
+      "lastRunTimestamp": 1787013813278
+    },
+    "17.4* Write property test for duplicate-`rowId` whole-file rejection": {
+      "status": "passed",
+      "lastRunTimestamp": 1787014175038
+    },
+    "17.5* Write property test for failure isolation": {
+      "status": "passed",
+      "lastRunTimestamp": 1787014547568
+    },
+    "17.6* Write property test for row-order independence": {
+      "status": "passed",
+      "lastRunTimestamp": 1787014754014
+    }
+  },
   "executionHistory": {
     "1.1 Write migration adding `teams.callsign_level_selection` (`integer[]`, nullable, no column-level default)": [
       {
@@ -91,6 +136,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786938931796
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787011903444
       }
     ],
     "2.1 Create `server/config/constants.js` exporting `MAX_TEAM_DEPTH = 5`": [
@@ -132,6 +182,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786938937957
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787011929710
       }
     ],
     "3.2* Write property test for admin inheritance": [
@@ -139,6 +194,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786938939194
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787011953727
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787012546558
       }
     ],
     "3.1 Rewrite `Team.isAdmin(teamId, userId)` to walk the Ancestor_Chain via a recursive CTE, matching only a direct (`inherited_from_team_id IS NULL`), `role = 'admin'` membership on the team itself or any ancestor": [
@@ -163,6 +228,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786938943841
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787012558177
       }
     ],
     "5. Max_Team_Depth enforcement on team creation": [
@@ -170,6 +240,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786938946021
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787012584958
       }
     ],
     "5.1 In `Team.create`, compute the target depth (`parent_team_id` present -> `getTeamDepth(parent_team_id) + 1`, else `0`) and throw a typed depth-exceeded error before inserting when it exceeds `MAX_TEAM_DEPTH`": [
@@ -211,6 +286,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786938951538
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787012977867
       }
     ],
     "6.4* Write property test for Organisation-only field inheritance": [
@@ -218,6 +298,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786938953225
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787012594048
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787012969279
       }
     ],
     "6.6* Write property test for the character-class differential": [
@@ -225,6 +315,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786938955070
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787012595984
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787012967447
       }
     ],
     "6.1 Generalize `Team.create`'s existing inline `color = parentTeam.color` sub-team inheritance to also cover `callsign_name_format`, and apply the same Organisation-value inheritance in `Team.update` when the target team is a Sub_Team, silently ignoring (never rejecting) any client-supplied `color`/`callsignNameFormat`": [
@@ -300,6 +400,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786938964790
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787012985093
       }
     ],
     "8. Callsign_Level_Selection accept/validate/default/reject": [
@@ -307,6 +412,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786938969093
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787013006233
       }
     ],
     "8.1 In `Team.create`/`Team.update`, accept `callsign_level_selection` only when the target is a root team, validate every element is an integer between 1 and `MAX_TEAM_DEPTH`, default to `[1..MAX_TEAM_DEPTH]` when omitted on Organisation creation, and throw a typed error when supplied on a Sub_Team": [
@@ -382,6 +492,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786938977659
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787013013525
       }
     ],
     "10. Pure callsign services": [
@@ -389,6 +504,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786938979188
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787013394095
       }
     ],
     "10.3* Write property test for callsign segment assembly": [
@@ -396,6 +516,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786938981343
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787013048182
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787013381232
       }
     ],
     "10.1 Create `server/services/CallsignService.js` with `assembleCallsign({ organisationPrefix, teamSegmentPrefixes, nameSegment })`, implementing the three-segment, `-`-joined, empty-segment-omitting assembly rule": [
@@ -437,6 +567,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786938986936
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787013395834
       }
     ],
     "11.2* Write property test for level-filtered selection": [
@@ -444,6 +579,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786938989070
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787013049139
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787013376981
       }
     ],
     "11.5* Write property test for the partial-merge guarantee": [
@@ -451,6 +596,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786938990819
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787013050061
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787013382930
       }
     ],
     "11.1 Rewrite `UserAttributesService.computeCallsignAttributes` to read the Ancestor_Chain via `Team.getAncestorChain`, read the Organisation's `callsign_level_selection` (defaulting to `[1..MAX_TEAM_DEPTH]` when null), filter ancestor `callsign_prefix` values to Team_Depth positions in that selection, read the target user's stored `callsign_suffix` (no live computation), and call `CallsignService.assembleCallsign` -- no longer reading `callsign_subteam_depth` or `callsign_name_format` at generation time": [
@@ -526,6 +681,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786938999570
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787013412383
       }
     ],
     "13. Visible_Branch resolution service": [
@@ -533,6 +693,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939002583
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787013418306
       }
     ],
     "13.3* Write property test for single-team visibility resolution": [
@@ -540,6 +705,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939005562
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787013051198
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787013379210
       }
     ],
     "13.1 Create `server/services/TeamVisibilityService.js` implementing `isVisibleBranch(teamId, user)` per the Visible_Branch definition (cross-Organisation exclusion, private-ancestor cascade, Global_Manager bypass), built on `Team.getAncestorChain`": [
@@ -581,6 +756,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939010665
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787013439724
       }
     ],
     "14.1 Remove `'team:read'` from `roleDefaults.authenticated_user`; add a `'team:read'` row-scoped resolver in `server/middleware/authorize.js` backed by `TeamVisibilityService.isVisibleBranch`, and add a permission-specific branch mapping a `'team:read'` denial to 404 instead of the generic 403": [
@@ -639,6 +819,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939019360
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787013866319
       }
     ],
     "15.2* Write property test for the public exclusion rule": [
@@ -646,6 +831,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939021064
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787013452825
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787013860416
       }
     ],
     "15.1 Add a \"has a private ancestor\" `WHERE NOT EXISTS` clause to `Team.getJoinableTeams` (the public, unauthenticated query)": [
@@ -687,6 +882,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939027704
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787013872233
       }
     ],
     "17. CSV import dependency-graph resolution (pure logic)": [
@@ -694,6 +894,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939028789
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787014812335
       }
     ],
     "17.4* Write property test for duplicate-`rowId` whole-file rejection": [
@@ -701,6 +906,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939030009
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787013897288
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787014802836
       }
     ],
     "17.5* Write property test for failure isolation": [
@@ -708,6 +923,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939031345
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787013898936
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787014804249
       }
     ],
     "17.6* Write property test for row-order independence": [
@@ -715,6 +940,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939032472
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787013900925
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787014805877
       }
     ],
     "17.1 Implement `buildImportGraph(rows)` in `server/services/BulkImportService.js`: build one node per row (keyed by `rowId`, else a synthetic `__row_${lineNumber}` key), resolve `parentRowRef`/`parentTeamName`/`parentTeamId` into edges, and reject the whole file when a non-empty `rowId` is duplicated or when a row supplies both `parentRowRef` and `parentTeamName`/`parentTeamId`": [
@@ -727,6 +962,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786947147760
+      },
+      {
+        "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786947372090
       }
     ],
     "17.2 Implement cycle detection over `parentRowRef` edges using a three-colour (white/grey/black) DFS, rejecting the whole file and naming every row on a detected cycle": [
@@ -734,6 +974,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939034988
+      },
+      {
+        "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786947380470
+      },
+      {
+        "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786947590692
       }
     ],
     "17.3 Implement dangling-`parentRowRef` row failure with transitive-dependent-failure propagation (a row whose resolved parent node is itself failed/absent is failed), and a topological ordering (Kahn's algorithm) of every non-failed row": [
@@ -741,6 +991,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939036159
+      },
+      {
+        "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786947598733
+      },
+      {
+        "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786947920343
       }
     ],
     "18. CSV import pipeline wiring": [
@@ -748,6 +1008,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939037364
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787014818001
       }
     ],
     "18.3* Write unit test for a row supplying both `parentRowRef` and `parentTeamId`/`parentTeamName`": [
@@ -755,6 +1020,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939038518
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787013902569
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787013964078
       }
     ],
     "18.1 Rewrite `BulkImportService.importTeams` as the two-phase pipeline (parse all rows, `buildImportGraph`, then create rows in topological order via `Team.create`, reusing task 5.1/6.1's Max_Team_Depth and Organisation-only-field enforcement unchanged)": [
@@ -762,6 +1037,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939042578
+      },
+      {
+        "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786947930903
+      },
+      {
+        "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786948622791
       }
     ],
     "18.2 Add `rowId`, `parentRowRef`, `visibility` (default `public` when omitted), and `callsignPrefix` columns to the Team_Import_Row parsing logic, and extend `POST /api/bulk-import/teams`'s response shape with a `rejected: true` + combined error array for whole-file rejections (duplicate `rowId`, cycle), distinct from the existing per-row `results` array": [
@@ -769,6 +1054,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939043901
+      },
+      {
+        "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786948636438
+      },
+      {
+        "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786949720726
       }
     ],
     "19. CSV import template": [
@@ -776,6 +1071,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939045047
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787014824642
       }
     ],
     "19.1 Rewrite `public/templates/team-import-template.csv` to demonstrate a hierarchy at least 3 Team_Depth levels deep using `rowId`/`parentRowRef`, plus the existing `parentTeamName`/`parentTeamId` columns and the new `visibility`/`callsignPrefix` columns": [
@@ -783,6 +1083,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939046334
+      },
+      {
+        "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786949730292
+      },
+      {
+        "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786950186496
       }
     ],
     "20. Checkpoint - Ensure all tests pass, ask the user if questions arise.": [
@@ -790,6 +1100,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939047882
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787014830124
       }
     ],
     "21.1 Add `callsign_suffix` and `tak_role` to `Team.getMembers`'s `SELECT`, and add `Team.getFullMemberList(teamId)` as an explicit alias reusing the exact same query": [
@@ -797,6 +1112,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939048955
+      },
+      {
+        "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786950196178
+      },
+      {
+        "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786950383548
       }
     ],
     "22. Callsign_suffix creation-time resolution": [
@@ -804,6 +1129,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939050127
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787014838320
       }
     ],
     "22.1 Create `UserProvisioningService.resolveCallsignSuffixForNewUser(client, { firstName, lastName, teamId, requestedCallsignSuffix })`: resolve the target Organisation's `callsign_name_format` via `Team.getAncestorChain`, require a non-empty `requestedCallsignSuffix` for `user_defined` (throwing a typed error otherwise), compute the default via `CallsignService.computeDefaultCallsignSuffix` otherwise (preferring `requestedCallsignSuffix` when supplied), and check the effective value against `Team.getFullMemberList(teamId)` for a case-insensitive collision (throwing a typed `CallsignSuffixConflictError`, see task 23.1)": [
@@ -811,6 +1141,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939051499
+      },
+      {
+        "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786950556372
+      },
+      {
+        "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786950764672
       }
     ],
     "22.2 Wire `resolveCallsignSuffixForNewUser` into `POST /api/users`, `POST /api/users/create-and-add`, and `BulkImportService.importUserRow`, mapping its typed errors to a 400 naming the missing/conflicting value": [
@@ -818,6 +1158,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939052722
+      },
+      {
+        "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786950778636
+      },
+      {
+        "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786951585153
       }
     ],
     "23. Shared per-Team uniqueness check": [
@@ -825,6 +1175,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939053980
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787014844713
       }
     ],
     "23.1 Create a `CallsignSuffixConflictError` class and a shared `checkCallsignSuffixUniqueness(teamId, candidateValue, excludeUserId)` function (used by task 22.1, and by tasks 24.3 and 25.1 below) comparing case-insensitively against `Team.getFullMemberList(teamId)`, excluding the user being edited when applicable": [
@@ -832,6 +1187,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939055722
+      },
+      {
+        "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786950394172
+      },
+      {
+        "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786950545223
       }
     ],
     "24. Access-request `callsign_suffix` flow": [
@@ -839,6 +1204,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939056912
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787014850701
       }
     ],
     "24.1 In `POST /api/requests/team-access`, accept an optional `callsignSuffix` field, requiring it (400 if absent) when the target Team's Organisation's `callsign_name_format` is `user_defined`, and store it on the new `access_requests.callsign_suffix` column": [
@@ -846,6 +1216,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939058196
+      },
+      {
+        "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786951596193
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786996045215
       }
     ],
     "24.2 Extend `GET /api/requests/pending` to include, per pending request, the reviewer-facing effective `callsign_suffix` (the request's own submitted value when present, otherwise the server-computed default via `CallsignService.computeDefaultCallsignSuffix`)": [
@@ -853,6 +1233,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939059519
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786993237519
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786995011804
       }
     ],
     "24.3 Extend `POST /api/requests/:requestId/approve` to accept an optional `callsignSuffix` override, resolve the effective value (override > request's stored value > computed default), check it via `checkCallsignSuffixUniqueness` against the target Team, and reject (returning the conflicting value) on collision instead of committing": [
@@ -860,6 +1250,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939060585
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786995777095
       }
     ],
     "25. Membership-change uniqueness enforcement": [
@@ -867,6 +1262,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939061668
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787014867808
       }
     ],
     "25.1 In `TeamMembershipService.addUserToTeam` (and the approval `team_change` branch that calls it), reject a membership change that would create a same-Team `callsign_suffix` collision via `checkCallsignSuffixUniqueness`": [
@@ -874,6 +1274,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939063224
+      },
+      {
+        "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786951597331
+      },
+      {
+        "executionId": "8fc0437d-9058-4096-bce6-ebb1e7b6092d",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786981723787
       }
     ],
     "26. Checkpoint - Ensure all tests pass, ask the user if questions arise.": [
@@ -881,6 +1291,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939064703
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787014876630
       }
     ],
     "27. TAK_Role shared allow-list": [
@@ -888,6 +1303,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939065731
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787014869334
       }
     ],
     "27.1 Export `TAK_ROLE_VALUES = Object.values(ROLE_KEY_LABELS)` from `server/routes/settings.js`": [
@@ -895,6 +1315,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939066818
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786995785261
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786995927790
       }
     ],
     "28. Member_List edit route": [
@@ -902,6 +1332,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939068195
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787014882516
       }
     ],
     "28.3* Write integration test confirming a name edit updates `users.first_name`/`last_name` directly with no `access_requests` row created": [
@@ -909,6 +1344,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939069410
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787014895241
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787015042487
       }
     ],
     "28.4* Write unit test confirming an `email` field present in the request body is ignored": [
@@ -916,6 +1361,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939070573
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787015058906
       }
     ],
     "28.1 Create `PATCH /api/teams/:teamId/members/:userId` in `server/routes/teams.js`: accepts optional `firstName`, `lastName`, `takRole`, `callsignSuffix`; ignores an `email` field if present; validates `takRole` against `TAK_ROLE_VALUES` (400 otherwise); validates `callsignSuffix` via `isValidCallsignSuffix` and `checkCallsignSuffixUniqueness` (excluding the edited user); writes `firstName`/`lastName` directly to `users`; writes `takRole` to `users.tak_role` and pushes `{role: takRole}` to Authentik via the fetch-merge-PATCH `updateUserAttributes` from task 11.4": [
@@ -923,6 +1373,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939072184
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786995939863
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786996817593
       }
     ],
     "28.2 Add a `'team:members:edit'` Permission_Registry entry/resolver (Team_Admin of `:teamId`, inherited via task 3.1, or Global_Manager), additionally gated by `TeamVisibilityService.isVisibleBranch`": [
@@ -930,6 +1390,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939073324
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786996830847
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786997022481
       }
     ],
     "29. Authentik `tak_role` reconciliation": [
@@ -937,6 +1407,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939074798
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787015066513
       }
     ],
     "29.1 Extend `authentikSync.js`'s per-user upsert loop: when Authentik's `takRole` attribute differs from `users.tak_role`, update `users.tak_role` to match Authentik's value (never the reverse), leaving `user_cache.tak_role`'s existing Authentik-preferred behavior unchanged": [
@@ -944,6 +1419,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939076336
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786997035666
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786997406386
       }
     ],
     "30. Checkpoint - Ensure all tests pass, ask the user if questions arise.": [
@@ -951,6 +1436,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939077596
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787015071690
       }
     ],
     "31.1 Add `teamsAPI.getCallsignLevelOptions(id)`, `teamsAPI.updateMember(teamId, userId, data)`, and `bulkImportAPI.importTeams(formData)`": [
@@ -958,6 +1448,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939078828
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786997430414
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786997537731
       }
     ],
     "32. `client/src/pages/Teams.jsx`": [
@@ -965,6 +1465,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939080135
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787015080138
       }
     ],
     "32.1 Add `labelFor(team)`/`labelForNew(parentTeamId)` helpers and apply \"Organisation\"/\"Team\" labelling to the create/edit dialog title, submit button text, and delete-confirmation copy": [
@@ -972,6 +1477,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939083383
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786997568529
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787007469809
       }
     ],
     "32.2 Disable and grey any Parent-Team dropdown option whose `team_depth === maxTeamDepth` (fetched from `GET /api/config/public`), with a tooltip explaining why": [
@@ -979,6 +1494,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939084991
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787007490629
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787009744968
       }
     ],
     "32.3 Extend the existing parent-selected disable behavior to the \"Callsign Name Format\" select (already applied to \"TAK Color\"), and add `'first_initial_dot_last'`/`'user_defined'` options with inline help text for `user_defined`": [
@@ -986,6 +1511,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939086686
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787009755928
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787010036584
       }
     ],
     "32.4 Replace the single \"Callsign Sub-team Depth\" select with a Callsign_Level_Selection toggle row (one toggle per Team_Depth 1..`maxTeamDepth`), fetching `teamsAPI.getCallsignLevelOptions(id)` when editing an existing Organisation, and implement the pure `formatLevelLabel(depth, prefixes)` helper (up-to-3-example, comma-separated, ellipsis-if-more labelling)": [
@@ -993,6 +1528,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939088971
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787010047269
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787011250881
       }
     ],
     "32.6 Add `pattern=\"[A-Za-z0-9]*\"` and an inline validation message to the `callsignPrefix` input": [
@@ -1000,6 +1545,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939090872
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787011259230
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787011405727
       }
     ],
     "33.1 Apply `labelFor` to the header, breadcrumbs, and Edit/Sub-team dialog titles; disable and grey the \"Add Sub-team\" control when `team.team_depth === maxTeamDepth`; replace the root-only depth/format badge pair with a \"Levels: ...\" summary (from `callsign_level_selection`) plus the format badge, including example strings for the two new format values": [
@@ -1007,6 +1562,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939092811
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786997569879
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787007472655
       }
     ],
     "33.2 Add a `TAK_Role` column to the Members and Team Admins tabs, and a per-row inline edit form (first name, last name, a `TAK_ROLE_VALUES` select, and a `callsign_suffix` input enforcing the Requirement 11.3 pattern) wired to `teamsAPI.updateMember`; render email as plain, non-editable text": [
@@ -1014,6 +1579,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939098739
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787007491957
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787009742680
       }
     ],
     "33.3 Apply the same `callsignPrefix` pattern validation from task 32.6 to the Sub-team creation dialog": [
@@ -1021,6 +1596,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939101062
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787009757558
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787010038285
       }
     ],
     "34.1 Fetch the selected team's Organisation `callsignNameFormat` (extending the joinable-team row shape returned by `teamsAPI.getJoinable()`), and render a required \"Preferred Callsign Suffix\" input only when it is `user_defined`": [
@@ -1028,6 +1613,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939102877
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786997572176
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787009745676
       }
     ],
     "35.1 Render an editable \"Callsign Suffix\" field per pending request, pre-filled with the request's submitted value when present or the server-computed default otherwise, editable before approving; on a 400 collision response from `POST /api/requests/:requestId/approve`, surface the conflicting value inline and keep the field open for retry": [
@@ -1035,6 +1630,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939104648
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786997573970
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787007474144
       }
     ],
     "36.1 Add a Global_Manager-only \"Bulk Import\" tab: a file picker + \"Upload Team CSV\" button posting via `bulkImportAPI.importTeams`, a download link for the updated template, and a results view distinguishing a whole-file rejection from a per-row results table": [
@@ -1042,6 +1647,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939106263
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786997574663
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787007474810
       }
     ],
     "37. Client wiring verification": [
@@ -1049,6 +1664,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939108401
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787015357038
       }
     ],
     "37.2* Write component tests for the Add-Sub-team/Parent-dropdown disable state at depth-4-vs-5": [
@@ -1056,6 +1676,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939110052
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787015095146
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787015111090
       }
     ],
     "37.3* Write component test confirming the existing `inherited_from_team_name` admin badge remains compatible with the rewritten `isAdmin` (task 3.1)": [
@@ -1063,6 +1693,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939115659
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787015096545
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787015351393
       }
     ],
     "37.1 Audit every control added in tasks 32-36: confirm each handles both a successful and a 4xx/5xx response with a user-visible failure indication, and reflects saved values from the response/re-fetch rather than optimistic-only local state": [
@@ -1070,6 +1710,16 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939116871
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787011417015
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787011858561
       }
     ],
     "38. Final checkpoint - Ensure all tests pass, ask the user if questions arise.": [
@@ -1077,6 +1727,11 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786939118141
+      },
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787015383493
       }
     ],
     "1. Additive schema migrations": [
@@ -1154,6 +1809,132 @@
         "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
         "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
         "timestamp": 1786947135292
+      }
+    ],
+    "17.7* Write property test for cycle detection": [
+      {
+        "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786947922404
+      }
+    ],
+    "18.4* Write unit test confirming a CSV row exceeding Max_Team_Depth is rejected with the same error shape as the direct `POST /api/teams` API": [
+      {
+        "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786949722722
+      }
+    ],
+    "19.2* Write unit test parsing the shipped template and asserting it reaches Team_Depth >= 3 via `rowId`/`parentRowRef` chaining": [
+      {
+        "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786950187941
+      }
+    ],
+    "21. Shared Member_List roster query": [
+      {
+        "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786950384883
+      }
+    ],
+    "23.2* Write property test for per-Team uniqueness": [
+      {
+        "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786950546559
+      }
+    ],
+    "22.3* Write unit test confirming all three creation entry points share the same default-computation/uniqueness behavior via `resolveCallsignSuffixForNewUser`": [
+      {
+        "executionId": "fadfc425-5af1-448a-ac23-badae5585f80",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786951587149
+      }
+    ],
+    "25.2* Write unit test for membership-change collision rejection": [
+      {
+        "executionId": "8fc0437d-9058-4096-bce6-ebb1e7b6092d",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786981725957
+      }
+    ],
+    "27.2* Write property test for TAK_Role membership validation": [
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786995929458
+      }
+    ],
+    "24.4* Write unit test for the override/submitted-value/computed-default precedence and the collision-rejection response shape": [
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786996046572
+      }
+    ],
+    "28.5* Write property test for stored-suffix stability across every write path built in Phases 4, 7, and 8": [
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786997024532
+      }
+    ],
+    "29.2* Write property test for `TAK_Role` stability across unrelated changes": [
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786997408346
+      }
+    ],
+    "31. `client/src/services/api.js` additions": [
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1786997539420
+      }
+    ],
+    "35. `client/src/pages/Requests.jsx`": [
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787007476275
+      }
+    ],
+    "36. `client/src/pages/Admin.jsx` -- Bulk Import tab": [
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787007477047
+      }
+    ],
+    "34. `client/src/pages/RequestAccess.jsx`": [
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787009747353
+      }
+    ],
+    "33. `client/src/pages/TeamDetail.jsx`": [
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787010040251
+      }
+    ],
+    "32.5* Write property test for level-toggle label formatting": [
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787011407380
+      }
+    ],
+    "37.4* Write component tests for `RequestAccess.jsx`'s conditional `callsign_suffix` field (rendered only for `user_defined`)": [
+      {
+        "executionId": "f8758034-0700-4c23-a329-60c4c423c4fa",
+        "chatSessionId": "sess_5d836ab6-fedd-47f2-ae93-6f071438a301",
+        "timestamp": 1787011861356
       }
     ]
   }

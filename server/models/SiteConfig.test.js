@@ -179,4 +179,21 @@ describe('SiteConfig.getPublicConfig', () => {
     expect(config.maxTeamDepth).toBe(MAX_TEAM_DEPTH);
     expect(config.maxTeamDepth).toBe(5);
   });
+
+  // Requirements 13.4, 13.5 (task 33.2): the Client's Member_List inline
+  // edit form needs the 8 predefined TAK_Role values from somewhere it
+  // can reach without a Global_Manager-only endpoint (unlike
+  // GET /api/config/color-mappings, this endpoint is unauthenticated),
+  // sourced from the same ROLE_KEY_LABELS allow-list `PATCH
+  // /api/teams/:teamId/members/:userId` validates against.
+  test('exposes takRoleValues sourced from settings.js\'s TAK_ROLE_VALUES', async () => {
+    const { TAK_ROLE_VALUES } = require('../routes/settings');
+
+    const config = await SiteConfig.getPublicConfig();
+
+    expect(config.takRoleValues).toEqual(TAK_ROLE_VALUES);
+    expect(config.takRoleValues).toEqual([
+      'Team Member', 'Team Lead', 'Sniper', 'Medic', 'Forward Observer', 'RTO', 'K9', 'HQ'
+    ]);
+  });
 });

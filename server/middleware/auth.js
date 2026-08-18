@@ -145,6 +145,11 @@ const authenticateToken = async (req, res, next) => {
 };
 
 const requireTeamAdmin = async (req, res, next) => {
+  // Global Managers have implicit admin access to all teams
+  if (req.user && req.user.is_global_manager) {
+    return next();
+  }
+
   const { teamId } = req.params;
   const Team = require('../models/Team');
   

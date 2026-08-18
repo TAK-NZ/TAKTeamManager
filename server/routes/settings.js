@@ -123,6 +123,11 @@ const ROLE_KEY_LABELS = {
 // every key in a PUT's `updates` object before applying any of them.
 const TAK_MAPPING_CONFIG_KEYS = [...Object.keys(COLOR_KEY_LABELS), ...Object.keys(ROLE_KEY_LABELS)];
 
+// The full allow-list of TAK_Role display values (e.g. 'Team Member',
+// 'Team Lead', ...), used to validate a Member_List/CSV-import `TAK_Role`
+// edit against the set of roles this endpoint's ROLE_KEY_LABELS defines.
+const TAK_ROLE_VALUES = Object.values(ROLE_KEY_LABELS);
+
 // Branding config_keys backed by site_config, seeded by this task's
 // migration (1786800000000_seed-branding-site-config.cjs).
 const BRANDING_CONFIG_KEYS = {
@@ -1132,6 +1137,7 @@ router.post('/import', authenticateToken, authorize, async (req, res) => {
 module.exports = router;
 module.exports.COLOR_KEY_LABELS = COLOR_KEY_LABELS;
 module.exports.ROLE_KEY_LABELS = ROLE_KEY_LABELS;
+module.exports.TAK_ROLE_VALUES = TAK_ROLE_VALUES;
 module.exports.TAK_MAPPING_CONFIG_KEYS = TAK_MAPPING_CONFIG_KEYS;
 module.exports.BRANDING_CONFIG_KEYS = BRANDING_CONFIG_KEYS;
 module.exports.TAK_SERVER_CONFIG_KEYS = TAK_SERVER_CONFIG_KEYS;

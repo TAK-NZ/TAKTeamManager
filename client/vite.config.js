@@ -18,6 +18,10 @@ export default defineConfig(({ mode }) => {
         '/api': {
           target: devProxyTarget,
           changeOrigin: true
+        },
+        '/templates': {
+          target: devProxyTarget,
+          changeOrigin: true
         }
       }
     },

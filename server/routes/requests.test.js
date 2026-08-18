@@ -18,15 +18,31 @@ jest.mock('../config/database', () => ({
 
 jest.mock('../models/Team', () => ({
   findById: jest.fn(),
-  getJoinableTeams: jest.fn()
+  getJoinableTeams: jest.fn(),
+  getAncestorChain: jest.fn()
 }));
+
+jest.mock('../models/User', () => ({
+  getTeamMemberships: jest.fn()
+}));
+
+jest.mock('../middleware/auth', () => ({
+  authenticateToken: (req, res, next) => {
+    req.user = { id: 'authentik-1', userId: 1, is_global_manager: false };
+    next();
+  }
+}));
+
+jest.mock('../middleware/authorize', () => (req, res, next) => next());
 
 jest.mock('axios');
 
 const mockCreateAccessRequest = jest.fn();
+const mockApproveRequest = jest.fn();
 jest.mock('../services/RequestApprovalService', () => {
   return jest.fn().mockImplementation(() => ({
-    createAccessRequest: mockCreateAccessRequest
+    createAccessRequest: mockCreateAccessRequest,
+    approveRequest: mockApproveRequest
   }));
 });
 
@@ -35,6 +51,7 @@ const request = require('supertest');
 const axios = require('axios');
 const pool = require('../config/database');
 const Team = require('../models/Team');
+const User = require('../models/User');
 const requestsRouter = require('./requests');
 const {
   requestAccessLimiterStore,
@@ -96,6 +113,7 @@ describe('POST /api/requests/team-access field sanitization', () => {
     jest.clearAllMocks();
     requestAccessLimiterStore.resetAll();
     Team.getJoinableTeams.mockResolvedValue([{ id: 1, name: 'Team', visibility: 'public' }]);
+    Team.getAncestorChain.mockResolvedValue([{ id: 1, callsign_name_format: 'full_name' }]);
     mockCreateAccessRequest.mockResolvedValue({ requestId: 42, token: 'tok' });
     // Default: no existing email_rate_tracking window, so emailWindowLimiter
     // inserts a fresh row and calls next() for every test in this describe
@@ -202,6 +220,7 @@ describe('POST /api/requests/team-access joinable-team check (Requirement 7.4)',
     jest.clearAllMocks();
     requestAccessLimiterStore.resetAll();
     mockCreateAccessRequest.mockResolvedValue({ requestId: 42, token: 'tok' });
+    Team.getAncestorChain.mockResolvedValue([{ id: 1, callsign_name_format: 'full_name' }]);
     pool.connect.mockResolvedValue(buildMockEmailWindowClient());
     axios.post.mockResolvedValue({
       data: { success: true, action: 'team_access_request', score: 0.9 }
@@ -261,6 +280,7 @@ describe('requestAccessLimiter and emailWindowLimiter (Requirements 7.1, 7.2)', 
     jest.clearAllMocks();
     requestAccessLimiterStore.resetAll();
     Team.getJoinableTeams.mockResolvedValue([{ id: 1, name: 'Team', visibility: 'public' }]);
+    Team.getAncestorChain.mockResolvedValue([{ id: 1, callsign_name_format: 'full_name' }]);
     mockCreateAccessRequest.mockResolvedValue({ requestId: 42, token: 'tok' });
     pool.connect.mockResolvedValue(buildMockEmailWindowClient());
     axios.post.mockResolvedValue({
@@ -381,6 +401,7 @@ describe('verifyCaptcha (reCAPTCHA v3) on POST /team-access (Requirements 7.3, 7
     jest.clearAllMocks();
     requestAccessLimiterStore.resetAll();
     Team.getJoinableTeams.mockResolvedValue([{ id: 1, name: 'Team', visibility: 'public' }]);
+    Team.getAncestorChain.mockResolvedValue([{ id: 1, callsign_name_format: 'full_name' }]);
     mockCreateAccessRequest.mockResolvedValue({ requestId: 42, token: 'tok' });
     pool.connect.mockResolvedValue(buildMockEmailWindowClient());
     app = buildApp();
@@ -500,6 +521,7 @@ describe('RECAPTCHA_DISABLED testing-only bypass on POST /team-access', () => {
     jest.clearAllMocks();
     requestAccessLimiterStore.resetAll();
     Team.getJoinableTeams.mockResolvedValue([{ id: 1, name: 'Team', visibility: 'public' }]);
+    Team.getAncestorChain.mockResolvedValue([{ id: 1, callsign_name_format: 'full_name' }]);
     mockCreateAccessRequest.mockResolvedValue({ requestId: 42, token: 'tok' });
     pool.connect.mockResolvedValue(buildMockEmailWindowClient());
     app = buildApp();
@@ -542,5 +564,328 @@ describe('RECAPTCHA_DISABLED testing-only bypass on POST /team-access', () => {
 
     expect(res.status).toBe(400);
     expect(mockCreateAccessRequest).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Integration tests for the conditionally-required `callsignSuffix` field
+ * on `POST /api/requests/team-access` (Requirements 11.9, 11.10).
+ *
+ * The target Team's Organisation's `callsign_name_format` is resolved via
+ * `Team.getAncestorChain(teamId)` (root-first, so index 0 is always the
+ * Organisation), AFTER the existing joinability check passes.
+ */
+describe('POST /api/requests/team-access callsignSuffix handling (Requirements 11.9, 11.10)', () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    requestAccessLimiterStore.resetAll();
+    Team.getJoinableTeams.mockResolvedValue([{ id: 1, name: 'Team', visibility: 'public' }]);
+    mockCreateAccessRequest.mockResolvedValue({ requestId: 42, token: 'tok' });
+    pool.connect.mockResolvedValue(buildMockEmailWindowClient());
+    axios.post.mockResolvedValue({
+      data: { success: true, action: 'team_access_request', score: 0.9 }
+    });
+    app = buildApp();
+  });
+
+  it('rejects with 400 when callsignSuffix is omitted and the target Organisation format is user_defined', async () => {
+    Team.getAncestorChain.mockResolvedValue([{ id: 1, callsign_name_format: 'user_defined' }]);
+
+    const res = await request(app).post('/api/requests/team-access').send(VALID_BODY);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('callsignSuffix is required for this team');
+    expect(mockCreateAccessRequest).not.toHaveBeenCalled();
+  });
+
+  it('succeeds and stores the submitted callsignSuffix when the target Organisation format is user_defined', async () => {
+    Team.getAncestorChain.mockResolvedValue([{ id: 1, callsign_name_format: 'user_defined' }]);
+
+    const res = await request(app)
+      .post('/api/requests/team-access')
+      .send({ ...VALID_BODY, callsignSuffix: 'J.Doe' });
+
+    expect(res.status).toBe(200);
+    expect(mockCreateAccessRequest).toHaveBeenCalledTimes(1);
+    expect(mockCreateAccessRequest.mock.calls[0][0].callsign_suffix).toBe('J.Doe');
+  });
+
+  it('succeeds with callsign_suffix: null when callsignSuffix is omitted and the target Organisation format is not user_defined', async () => {
+    Team.getAncestorChain.mockResolvedValue([{ id: 1, callsign_name_format: 'full_name' }]);
+
+    const res = await request(app).post('/api/requests/team-access').send(VALID_BODY);
+
+    expect(res.status).toBe(200);
+    expect(mockCreateAccessRequest).toHaveBeenCalledTimes(1);
+    expect(mockCreateAccessRequest.mock.calls[0][0].callsign_suffix).toBeNull();
+  });
+
+  it('succeeds and stores a submitted callsignSuffix even when the target Organisation format is not user_defined', async () => {
+    Team.getAncestorChain.mockResolvedValue([{ id: 1, callsign_name_format: 'full_name' }]);
+
+    const res = await request(app)
+      .post('/api/requests/team-access')
+      .send({ ...VALID_BODY, callsignSuffix: 'Badge123' });
+
+    expect(res.status).toBe(200);
+    expect(mockCreateAccessRequest).toHaveBeenCalledTimes(1);
+    expect(mockCreateAccessRequest.mock.calls[0][0].callsign_suffix).toBe('Badge123');
+  });
+});
+
+/**
+ * Integration tests for `POST /api/requests/:requestId/approve`'s optional
+ * `callsignSuffix` override field (Requirements 11.12, 11.13, 11.15,
+ * 11.16; task 24.3). `RequestApprovalService.approveRequest` itself is
+ * mocked here (its own resolution/uniqueness-check logic is covered by
+ * `server/services/RequestApprovalService.test.js`) -- these tests only
+ * verify the route wires the body field through as the 4th positional
+ * argument, and maps a thrown `CallsignSuffixConflictError` to a 400
+ * naming the conflicting value.
+ */
+describe('POST /api/requests/:requestId/approve callsignSuffix handling (Requirements 11.12, 11.13, 11.15, 11.16)', () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    app = buildApp();
+  });
+
+  it('passes callsignSuffix through to approveRequest as the 4th argument', async () => {
+    mockApproveRequest.mockResolvedValue({ success: true });
+
+    const res = await request(app)
+      .post('/api/requests/1/approve')
+      .send({ additionalDetails: 'welcome', callsignSuffix: 'Override-Suffix' });
+
+    expect(res.status).toBe(200);
+    expect(mockApproveRequest).toHaveBeenCalledWith('1', 1, 'welcome', 'Override-Suffix');
+  });
+
+  it('approves successfully with no callsignSuffix supplied (passed through as undefined)', async () => {
+    mockApproveRequest.mockResolvedValue({ success: true });
+
+    const res = await request(app)
+      .post('/api/requests/1/approve')
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(mockApproveRequest).toHaveBeenCalledWith('1', 1, undefined, undefined);
+  });
+
+  it('responds 400 naming the conflicting value when approveRequest throws CallsignSuffixConflictError, without a generic 500', async () => {
+    const { CallsignSuffixConflictError } = require('../services/CallsignSuffixUniquenessService');
+    mockApproveRequest.mockRejectedValue(new CallsignSuffixConflictError('J.Doe'));
+
+    const res = await request(app)
+      .post('/api/requests/1/approve')
+      .send({ callsignSuffix: 'J.Doe' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('J.Doe');
+  });
+
+  it('responds 500 for a non-CallsignSuffixConflictError failure, unchanged from existing behavior', async () => {
+    mockApproveRequest.mockRejectedValue(new Error('Request not found or already processed'));
+
+    const res = await request(app)
+      .post('/api/requests/1/approve')
+      .send({});
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Failed to approve request');
+  });
+});
+
+/**
+ * Integration tests for `GET /api/requests/pending` (Requirements 11.11,
+ * 11.12; task 24.2), covering the new per-row `effective_callsign_suffix`
+ * field: the request's own submitted `callsign_suffix` when present,
+ * otherwise the server-computed default via
+ * `CallsignService.computeDefaultCallsignSuffix`, resolving the target
+ * team's Organisation's `callsign_name_format` via
+ * `Team.getAncestorChain`, deduped by `target_team_id`.
+ */
+describe('GET /api/requests/pending effective_callsign_suffix (Requirements 11.11, 11.12)', () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    app = buildApp();
+  });
+
+  function mockAdminTeams(teamIds) {
+    User.getTeamMemberships.mockResolvedValue(
+      teamIds.map((id) => ({ id, role: 'admin' }))
+    );
+  }
+
+  it('returns the request\'s own callsign_suffix as effective_callsign_suffix, calling getAncestorChain only for team_path resolution', async () => {
+    mockAdminTeams([1]);
+    pool.query.mockResolvedValue({
+      rows: [
+        {
+          id: 100,
+          target_team_id: 1,
+          team_name: 'Team A',
+          callsign_suffix: 'Badge123',
+          requested_first_name: null,
+          requested_last_name: null,
+          requester_first_name: 'John',
+          requester_last_name: 'Doe'
+        }
+      ]
+    });
+    Team.getAncestorChain.mockResolvedValue([{ id: 1, name: 'Team A', callsign_prefix: null, callsign_name_format: 'full_name' }]);
+
+    const res = await request(app).get('/api/requests/pending');
+
+    expect(res.status).toBe(200);
+    expect(res.body.requests).toHaveLength(1);
+    expect(res.body.requests[0].effective_callsign_suffix).toBe('Badge123');
+    expect(res.body.requests[0].team_path).toBe('Team A');
+    expect(Team.getAncestorChain).toHaveBeenCalledTimes(1);
+  });
+
+  it('computes the default via CallsignService when callsign_suffix is not set, using requested_* falling back to requester_* names', async () => {
+    mockAdminTeams([1]);
+    pool.query.mockResolvedValue({
+      rows: [
+        {
+          id: 101,
+          target_team_id: 1,
+          team_name: 'Team A',
+          callsign_suffix: null,
+          requested_first_name: null,
+          requested_last_name: null,
+          requester_first_name: 'John',
+          requester_last_name: 'Doe'
+        }
+      ]
+    });
+    Team.getAncestorChain.mockResolvedValue([{ id: 1, callsign_name_format: 'first_initial_dot_last' }]);
+
+    const res = await request(app).get('/api/requests/pending');
+
+    expect(res.status).toBe(200);
+    expect(res.body.requests[0].effective_callsign_suffix).toBe('J.Doe');
+    expect(Team.getAncestorChain).toHaveBeenCalledWith(1);
+  });
+
+  it('prefers requested_first_name/requested_last_name over requester_first_name/requester_last_name when computing the default', async () => {
+    mockAdminTeams([1]);
+    pool.query.mockResolvedValue({
+      rows: [
+        {
+          id: 102,
+          target_team_id: 1,
+          team_name: 'Team A',
+          callsign_suffix: null,
+          requested_first_name: 'James',
+          requested_last_name: 'Smith',
+          requester_first_name: 'John',
+          requester_last_name: 'Doe'
+        }
+      ]
+    });
+    Team.getAncestorChain.mockResolvedValue([{ id: 1, callsign_name_format: 'first_initial_dot_last' }]);
+
+    const res = await request(app).get('/api/requests/pending');
+
+    expect(res.status).toBe(200);
+    expect(res.body.requests[0].effective_callsign_suffix).toBe('J.Smith');
+  });
+
+  it('resolves the target team\'s Organisation callsign_name_format only ONCE for multiple pending requests targeting the same team', async () => {
+    mockAdminTeams([1]);
+    pool.query.mockResolvedValue({
+      rows: [
+        {
+          id: 103,
+          target_team_id: 1,
+          team_name: 'Team A',
+          callsign_suffix: null,
+          requested_first_name: null,
+          requested_last_name: null,
+          requester_first_name: 'John',
+          requester_last_name: 'Doe'
+        },
+        {
+          id: 104,
+          target_team_id: 1,
+          team_name: 'Team A',
+          callsign_suffix: null,
+          requested_first_name: null,
+          requested_last_name: null,
+          requester_first_name: 'Jane',
+          requester_last_name: 'Roe'
+        }
+      ]
+    });
+    Team.getAncestorChain.mockResolvedValue([{ id: 1, callsign_name_format: 'full_name' }]);
+
+    const res = await request(app).get('/api/requests/pending');
+
+    expect(res.status).toBe(200);
+    expect(res.body.requests[0].effective_callsign_suffix).toBe('John-Doe');
+    expect(res.body.requests[1].effective_callsign_suffix).toBe('Jane-Roe');
+    expect(Team.getAncestorChain).toHaveBeenCalledTimes(1);
+    expect(Team.getAncestorChain).toHaveBeenCalledWith(1);
+  });
+
+  it('resolves each Organisation\'s callsign_name_format independently for pending requests targeting DIFFERENT teams', async () => {
+    mockAdminTeams([1, 2]);
+    pool.query.mockResolvedValue({
+      rows: [
+        {
+          id: 105,
+          target_team_id: 1,
+          team_name: 'Team A',
+          callsign_suffix: null,
+          requested_first_name: null,
+          requested_last_name: null,
+          requester_first_name: 'John',
+          requester_last_name: 'Doe'
+        },
+        {
+          id: 106,
+          target_team_id: 2,
+          team_name: 'Team B',
+          callsign_suffix: null,
+          requested_first_name: null,
+          requested_last_name: null,
+          requester_first_name: 'Jane',
+          requester_last_name: 'Roe'
+        }
+      ]
+    });
+    Team.getAncestorChain.mockImplementation((targetTeamId) => {
+      if (targetTeamId === 1) {
+        return Promise.resolve([{ id: 1, callsign_name_format: 'full_name' }]);
+      }
+      return Promise.resolve([{ id: 2, callsign_name_format: 'first_initial_last' }]);
+    });
+
+    const res = await request(app).get('/api/requests/pending');
+
+    expect(res.status).toBe(200);
+    expect(res.body.requests[0].effective_callsign_suffix).toBe('John-Doe');
+    expect(res.body.requests[1].effective_callsign_suffix).toBe('J-Roe');
+    expect(Team.getAncestorChain).toHaveBeenCalledTimes(2);
+    expect(Team.getAncestorChain).toHaveBeenCalledWith(1);
+    expect(Team.getAncestorChain).toHaveBeenCalledWith(2);
+  });
+
+  it('returns an empty requests array without querying access_requests when the user administers no teams', async () => {
+    mockAdminTeams([]);
+
+    const res = await request(app).get('/api/requests/pending');
+
+    expect(res.status).toBe(200);
+    expect(res.body.requests).toEqual([]);
+    expect(pool.query).not.toHaveBeenCalled();
+    expect(Team.getAncestorChain).not.toHaveBeenCalled();
   });
 });

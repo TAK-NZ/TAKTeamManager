@@ -165,7 +165,15 @@ class Team {
   }
 
   static async getSubTeams(parentId) {
-    const result = await pool.query('SELECT * FROM teams WHERE parent_team_id = $1', [parentId]);
+    const result = await pool.query(`
+      SELECT t.*,
+        (SELECT COUNT(*) FROM team_memberships tm
+         JOIN users u ON u.id = tm.user_id
+         WHERE tm.team_id = t.id AND u.is_team_device IS NOT TRUE) as member_count,
+        (SELECT COUNT(*) FROM teams t2 WHERE t2.parent_team_id = t.id) as sub_teams_count
+      FROM teams t
+      WHERE t.parent_team_id = $1
+    `, [parentId]);
     return result.rows;
   }
 
@@ -358,7 +366,7 @@ class Team {
   static async addMember(teamId, userId, role = 'member') {
     try {
       const result = await pool.query(
-        'INSERT INTO team_memberships (team_id, user_id, role) VALUES ($1, $2, $3) RETURNING *',
+        'INSERT INTO team_memberships (team_id, user_id, role) VALUES ($1, $2, $3) ON CONFLICT (user_id, team_id) DO UPDATE SET role = $3 RETURNING *',
         [teamId, userId, role]
       );
       return result.rows[0];
@@ -373,11 +381,24 @@ class Team {
     }
   }
 
+  /**
+   * Requirement 11.14, 13.1 (task 21.1): every direct + inherited
+   * member/admin of `teamId`, for both the Client's Member_List display
+   * (Requirement 13.1, hence the explicit `u.callsign_suffix`/`u.tak_role`
+   * columns alongside `u.*`) and the `callsign_suffix` per-Team
+   * uniqueness check (Requirement 11.14, via `getFullMemberList` below).
+   * `u.callsign_suffix`/`u.tak_role` are re-listed explicitly here (even
+   * though `u.*` already includes them) so this query's contract with
+   * its callers -- both of whom depend on these two columns being
+   * present -- stays visible at a glance and isn't silently broken by a
+   * future change to `u.*`'s column set.
+   */
   static async getMembers(teamId) {
     try {
       // Get members including inherited memberships
       const result = await pool.query(`
-        SELECT u.*, tm.role, tm.inherited_from_team_id,
+        SELECT u.*, u.callsign_suffix, u.tak_role, tm.role, tm.inherited_from_team_id,
+               uc.tak_callsign,
                CASE 
                  WHEN tm.inherited_from_team_id IS NOT NULL THEN t.name
                  ELSE NULL
@@ -385,6 +406,7 @@ class Team {
         FROM users u 
         JOIN team_memberships tm ON u.id = tm.user_id 
         LEFT JOIN teams t ON tm.inherited_from_team_id = t.id
+        LEFT JOIN user_cache uc ON u.authentik_user_id::text = uc.authentik_id::text
         WHERE tm.team_id = $1
         ORDER BY tm.role DESC, u.first_name, u.last_name
       `, [teamId]);
@@ -408,6 +430,26 @@ class Team {
         return [];
       }
     }
+  }
+
+  /**
+   * Requirement 11.14, 13.1 (task 21.1): a deliberate ALIAS of
+   * `getMembers`, not a separate implementation -- design.md's "Shared
+   * Member_List roster query" section requires this to be exactly
+   * today's `getMembers(teamId)` result, reused verbatim. Used by both
+   * the Client's Member_List view (Requirement 13.1) and every
+   * `callsign_suffix` per-Team uniqueness check (Requirement
+   * 11.14-11.18): callers compare a candidate `callsign_suffix` value
+   * case-insensitively against every returned row's `callsign_suffix`
+   * (excluding the row being edited, for an update). Given a second name
+   * here purely to make that dual use explicit at call sites -- no new
+   * query is introduced.
+   *
+   * @param {number|string} teamId
+   * @returns {Promise<Array<object>>} identical to `getMembers(teamId)`.
+   */
+  static async getFullMemberList(teamId) {
+    return this.getMembers(teamId);
   }
 
   /**
@@ -607,7 +649,48 @@ class Team {
         'UPDATE teams SET name = COALESCE($1, name), description = COALESCE($2, description), visibility = COALESCE($3, visibility), can_join = COALESCE($4, can_join), parent_team_id = $5, callsign_name_format = COALESCE($6, callsign_name_format), color = COALESCE($8, color), callsign_level_selection = COALESCE($9, callsign_level_selection), updated_at = CURRENT_TIMESTAMP WHERE id = $7 RETURNING *',
         [name, description, visibility, can_join, parent_team_id, callsign_name_format, teamId, color, callsign_level_selection]
       );
-      return result.rows[0];
+      const updatedTeam = result.rows[0];
+
+      // Bugfix (Requirement 3.2/3.3): a Sub_Team's `color`/
+      // `callsign_name_format` is only ever COPIED from its
+      // Organisation's then-current values at CREATION time
+      // (`Team.create`'s ancestor-chain lookup above) -- it is never
+      // re-read afterward. Without this cascade, changing an
+      // Organisation's own `color`/`callsign_name_format` here would
+      // only ever update the Organisation's own row, leaving every
+      // already-created descendant Sub_Team's stored (denormalized)
+      // value permanently stale -- exactly the reported bug ("the
+      // sub-team's format does not update"). When the team just updated
+      // is itself an Organisation (`parent_team_id IS NULL`, checked
+      // against the POST-update row so a same-request re-parent to root
+      // is also handled correctly) AND at least one of these two fields
+      // was actually supplied on this update, push the new value down to
+      // every existing descendant Sub_Team's own row too, in one
+      // recursive-CTE-scoped UPDATE. `COALESCE` here mirrors the
+      // Organisation row's own update above: a field that was NOT
+      // supplied on this request (`undefined`) leaves each descendant's
+      // existing stored value for that field untouched.
+      if (
+        updatedTeam &&
+        updatedTeam.parent_team_id === null &&
+        (color !== undefined || callsign_name_format !== undefined)
+      ) {
+        await pool.query(
+          `WITH RECURSIVE descendants AS (
+            SELECT id FROM teams WHERE parent_team_id = $1
+            UNION ALL
+            SELECT t.id FROM teams t JOIN descendants d ON t.parent_team_id = d.id
+          )
+          UPDATE teams
+          SET color = COALESCE($2, color),
+              callsign_name_format = COALESCE($3, callsign_name_format),
+              updated_at = CURRENT_TIMESTAMP
+          WHERE id IN (SELECT id FROM descendants)`,
+          [teamId, color, callsign_name_format]
+        );
+      }
+
+      return updatedTeam;
     } catch (error) {
       logger.error({ err: error, teamId }, 'Error updating team');
       throw error;
@@ -785,11 +868,21 @@ class Team {
    * `t`'s own `visibility` is already constrained to `'public'` by the
    * outer `WHERE`, so it does not need to be re-checked here) and check
    * whether any row reached that way is `private`.
+   *
+   * Requirement 11.9/11.10 (task 34.1): each row also carries the
+   * resolved root Team's (i.e. `t`'s Organisation's) `callsign_name_format`
+   * value as `callsignNameFormat`, reusing the same `rt` LEFT JOIN already
+   * computed above for `display_name` rather than adding a second
+   * root-resolution subquery. The Client (`RequestAccess.jsx`) uses this
+   * to conditionally render a required "Preferred Callsign Suffix" input
+   * only when the selected Team's Organisation's format is `user_defined`,
+   * without an extra request.
    */
   static async getJoinableTeams() {
     try {
       const result = await pool.query(`
         SELECT t.id, t.name, t.description, t.visibility,
+               rt.callsign_name_format AS "callsignNameFormat",
                CASE 
                  WHEN t.parent_team_id IS NOT NULL THEN 
                    COALESCE(rt.callsign_prefix, rt.name, '') || ' - ' || t.name

@@ -9,6 +9,7 @@ const authentikService = require('../services/authentik');
 const UserAttributesService = require('../services/userAttributes');
 const TeamMembershipService = require('../services/TeamMembershipService');
 const UserProvisioningService = require('../services/UserProvisioningService');
+const { CallsignSuffixConflictError } = require('../services/CallsignSuffixUniquenessService');
 const EventPublisher = require('../services/EventPublisher');
 const pool = require('../config/database');
 const { getLogger } = require('../middleware/requestContext');
@@ -224,11 +225,35 @@ router.post('/', authenticateToken, authorize, [
   }
 
   try {
-    const { username, email, firstName, lastName, password, teamId } = req.body;
+    const { username, email, firstName, lastName, password, teamId, callsignSuffix } = req.body;
 
     // Authorization (team admin of teamId, or global manager) is enforced
     // centrally by authorize.js via the 'POST /api/users': ['user:create:team_admin']
     // Permission_Registry entry.
+
+    // Requirement 11.6, 11.7, 11.14, 11.15 (task 22.2): resolve/default/
+    // uniqueness-check this new user's callsign_suffix BEFORE creating
+    // anything in Authentik, so a CallsignSuffixRequiredError/
+    // CallsignSuffixConflictError is returned as a 400 without ever
+    // creating an Authentik user for what is fundamentally a
+    // request-validation failure.
+    let resolvedCallsignSuffix;
+    try {
+      resolvedCallsignSuffix = await UserProvisioningService.resolveCallsignSuffixForNewUser(null, {
+        firstName,
+        lastName,
+        teamId,
+        requestedCallsignSuffix: callsignSuffix
+      });
+    } catch (resolutionError) {
+      if (
+        resolutionError instanceof UserProvisioningService.CallsignSuffixRequiredError ||
+        resolutionError instanceof CallsignSuffixConflictError
+      ) {
+        return res.status(400).json({ error: resolutionError.message });
+      }
+      throw resolutionError;
+    }
 
     // Create user in Authentik
     const authentikUser = await authentikService.createUser({
@@ -246,7 +271,8 @@ router.post('/', authenticateToken, authorize, [
       username,
       email,
       first_name: firstName,
-      last_name: lastName
+      last_name: lastName,
+      callsign_suffix: resolvedCallsignSuffix
     });
 
     // Add to team
@@ -359,9 +385,36 @@ router.post('/create-and-add', authenticateToken, authorize, [
     return res.status(400).json({ errors: errors.array() });
   }
 
-  const { email, firstName, lastName, teamId } = req.body;
+  const { email, firstName, lastName, teamId, callsignSuffix } = req.body;
   const username = email.split('@')[0];
   let newUser;
+
+  // --- Phase 0: resolve/default/uniqueness-check callsign_suffix
+  // (Requirement 11.6, 11.7, 11.14, 11.15; task 22.2). This is a
+  // pure-read operation (Team.getAncestorChain/getFullMemberList, via the
+  // shared pool), so it runs BEFORE Phase 1's Authentik user-creation
+  // call: a CallsignSuffixRequiredError/CallsignSuffixConflictError here
+  // is a request-validation failure, not a mid-operation failure, so
+  // returning early avoids ever creating an orphaned Authentik user for
+  // it. ---
+  let resolvedCallsignSuffix;
+  try {
+    resolvedCallsignSuffix = await UserProvisioningService.resolveCallsignSuffixForNewUser(null, {
+      firstName,
+      lastName,
+      teamId,
+      requestedCallsignSuffix: callsignSuffix
+    });
+  } catch (resolutionError) {
+    if (
+      resolutionError instanceof UserProvisioningService.CallsignSuffixRequiredError ||
+      resolutionError instanceof CallsignSuffixConflictError
+    ) {
+      return res.status(400).json({ error: resolutionError.message });
+    }
+    getLogger().error({ err: resolutionError }, 'Failed to resolve callsign_suffix for new user');
+    return res.status(500).json({ error: 'Failed to create user' });
+  }
 
   // --- Phase 1: Authentik user creation (no open DB transaction). ---
   try {
@@ -414,6 +467,7 @@ router.post('/create-and-add', authenticateToken, authorize, [
       firstName,
       lastName,
       teamId,
+      callsign_suffix: resolvedCallsignSuffix,
       createdBy: req.user?.userId ?? null
     });
     localUserId = result.localUserId;
@@ -487,10 +541,12 @@ router.post('/create-and-add', authenticateToken, authorize, [
     await UserAttributesService.updateUserAttributes(newUser.pk, attributes);
   }
 
-  // Update user cache
+  // Update user cache (Requirement 11.1: user_cache.callsign_suffix
+  // mirrors users.callsign_suffix, dual-written alongside the existing
+  // tak_callsign/tak_color/tak_role dual-write here).
   await pool.query(
-    'INSERT INTO user_cache (authentik_id, username, email, first_name, last_name, is_active, tak_callsign, tak_color, tak_role) VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8) ON CONFLICT (authentik_id) DO UPDATE SET username = $2, email = $3, first_name = $4, last_name = $5, is_active = true, tak_callsign = $6, tak_color = $7, tak_role = $8',
-    [newUser.pk, username, email, firstName, lastName, attributes?.callsign, attributes?.color, attributes?.role]
+    'INSERT INTO user_cache (authentik_id, username, email, first_name, last_name, is_active, tak_callsign, tak_color, tak_role, callsign_suffix) VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8, $9) ON CONFLICT (authentik_id) DO UPDATE SET username = $2, email = $3, first_name = $4, last_name = $5, is_active = true, tak_callsign = $6, tak_color = $7, tak_role = $8, callsign_suffix = $9',
+    [newUser.pk, username, email, firstName, lastName, attributes?.callsign, attributes?.color, attributes?.role, resolvedCallsignSuffix]
   );
 
   res.status(201).json({
@@ -529,9 +585,18 @@ router.post('/add-to-team', authenticateToken, authorize, [
     
     const user = userResult.rows[0];
     
-    // Ensure user exists in users table
+    // Ensure user exists in users table. first_name/last_name are
+    // deliberately omitted from the ON CONFLICT DO UPDATE SET clause here,
+    // matching the same one-way-sync direction used in
+    // server/services/authentikSync.js's syncSingleUser: the local `users`
+    // table is the authoritative source for a real first/last name split
+    // (set by UserProvisioningService.createAndAddUser and by the
+    // Member_List inline-edit route), while user_cache's copy is only ever
+    // a best-effort value derived from Authentik's single `name` field. An
+    // unconditional overwrite here would re-clobber an already-established
+    // local split via this second propagation path.
     await pool.query(
-      'INSERT INTO users (authentik_user_id, username, email, first_name, last_name, is_active) VALUES ($1, $2, $3, $4, $5, true) ON CONFLICT (authentik_user_id) DO UPDATE SET username = $2, email = $3, first_name = $4, last_name = $5, is_active = true',
+      'INSERT INTO users (authentik_user_id, username, email, first_name, last_name, is_active) VALUES ($1, $2, $3, $4, $5, true) ON CONFLICT (authentik_user_id) DO UPDATE SET username = $2, email = $3, is_active = true',
       [user.authentik_id, user.username, user.email, user.first_name, user.last_name]
     );
     
@@ -561,6 +626,28 @@ router.post('/add-to-team', authenticateToken, authorize, [
     // Use new service layer for team assignment
     const result = await TeamMembershipService.addUserToTeam(localUserId, teamId, 'member', requestingUserId);
     
+    // Ensure the user has a callsign_suffix before generating the full callsign.
+    // If the user already has one (from prior provisioning or Member_List edit),
+    // this is a no-op. If they don't, compute and store a default using the same
+    // logic as POST /create-and-add (resolveCallsignSuffixForNewUser).
+    const suffixCheck = await pool.query('SELECT callsign_suffix, first_name, last_name FROM users WHERE id = $1', [localUserId]);
+    if (suffixCheck.rows.length > 0 && !suffixCheck.rows[0].callsign_suffix) {
+      try {
+        const resolvedSuffix = await UserProvisioningService.resolveCallsignSuffixForNewUser(null, {
+          firstName: suffixCheck.rows[0].first_name || user.first_name || '',
+          lastName: suffixCheck.rows[0].last_name || user.last_name || '',
+          teamId,
+          requestedCallsignSuffix: null
+        });
+        await pool.query('UPDATE users SET callsign_suffix = $1 WHERE id = $2', [resolvedSuffix, localUserId]);
+        // Also mirror to user_cache
+        await pool.query('UPDATE user_cache SET callsign_suffix = $1 WHERE authentik_id = $2', [resolvedSuffix, user.authentik_id]);
+      } catch (suffixErr) {
+        // Non-fatal: log and proceed — the callsign will just lack a name segment
+        getLogger().error({ err: suffixErr }, 'Failed to compute default callsign_suffix for existing user');
+      }
+    }
+
     // Update user callsign and color
     const attributes = await UserAttributesService.generateCallsign(localUserId, teamId);
     if (attributes) {
@@ -571,6 +658,15 @@ router.post('/add-to-team', authenticateToken, authorize, [
         'UPDATE user_cache SET tak_callsign = $1, tak_color = $2, tak_role = $3 WHERE authentik_id = $4',
         [attributes.callsign, attributes.color, attributes.role, user.authentik_id]
       );
+    }
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'user.add_to_team', 'team', teamId, JSON.stringify({ addedUserId: localUserId })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
     }
     
     res.json({ 
@@ -622,6 +718,15 @@ router.delete('/remove-from-team/:userId', authenticateToken, authorize, [
       'UPDATE user_cache SET tak_callsign = NULL, tak_color = NULL WHERE authentik_id = $1',
       [authentikUserId]
     );
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'user.remove_from_team', 'user', parseInt(req.params.userId, 10), null]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
     
     res.json({ 
       message: 'User removed from team successfully',

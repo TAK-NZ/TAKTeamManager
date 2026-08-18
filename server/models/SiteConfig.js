@@ -81,6 +81,26 @@ class SiteConfig {
     // enforces server-side, so it can never drift from the enforced limit.
     config.maxTeamDepth = MAX_TEAM_DEPTH;
 
+    // Expose the 8 predefined TAK_Role display values (Requirement 13.4,
+    // 13.5), so the Client's Member_List inline edit form (task 33.2,
+    // `client/src/pages/TeamDetail.jsx`) can render its `TAK_Role` select
+    // without hardcoding a second copy of this allow-list. This value is
+    // not sensitive (it is the same fixed 8-label set already shown to
+    // any authenticated user via the Role Descriptions admin surface,
+    // `server/routes/settings.js`'s `ROLE_KEY_LABELS`), so exposing it on
+    // this public, unauthenticated endpoint is safe.
+    //
+    // A Team_Admin editing a Member_List entry is not necessarily a
+    // Global_Manager (`req.user.isAdmin`), so the existing
+    // `GET /api/config/color-mappings` endpoint -- which 403s for any
+    // non-Global_Manager -- is not a usable source here. `settings.js`
+    // is required lazily (rather than at module load time) because
+    // `settings.js` itself requires `SiteConfig` at module scope; a
+    // top-level require here would create a load-order-dependent
+    // circular require between the two modules.
+    const { TAK_ROLE_VALUES } = require('../routes/settings');
+    config.takRoleValues = TAK_ROLE_VALUES;
+
     return config;
   }
 }

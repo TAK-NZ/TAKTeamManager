@@ -209,3 +209,88 @@ describe('CallsignService.computeDefaultCallsignSuffix', () => {
     expect(result).toBe('Anne-Smith-Jones');
   });
 });
+
+/**
+ * Property-based test (design.md's Property 12: "Callsign segment
+ * assembly preserves segment identity and separator placement"),
+ * implemented with `fast-check` via `@fast-check/jest`'s `test.prop`
+ * integration, matching the convention established in
+ * `../utils/callsignValidation.test.js` and
+ * `../config/permissions.registry.test.js`.
+ *
+ * Feature: org-team-hierarchy, task 10.3
+ * Validates: Requirements 8.1, 8.2, 8.3, 8.4, 8.5
+ */
+
+const fc = require('fast-check');
+const { test } = require('@fast-check/jest');
+
+describe('Property 12: Callsign segment assembly preserves segment identity and separator placement', () => {
+  // Alphanumeric-only alphabet: deliberately excludes '-' so the separator
+  // under test can never accidentally originate from inside a segment
+  // itself, isolating the assembly rule's own separator-placement logic.
+  const ALPHANUMERIC_CHARS =
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+
+  const alphanumericArb = fc
+    .array(fc.constantFrom(...ALPHANUMERIC_CHARS), { minLength: 0, maxLength: 10 })
+    .map((chars) => chars.join(''));
+
+  const orgPrefixArb = alphanumericArb;
+  const nameSegmentArb = alphanumericArb;
+  // Each individual team-level prefix is generated non-empty: an empty
+  // string entry inside teamSegmentPrefixes would vanish harmlessly under
+  // `.join('')` (Requirement 8.3), but would muddy the "split at known
+  // boundaries" assertion below without adding any coverage of the
+  // separator-placement rule under test.
+  const nonEmptyAlphanumericArb = fc
+    .array(fc.constantFrom(...ALPHANUMERIC_CHARS), { minLength: 1, maxLength: 10 })
+    .map((chars) => chars.join(''));
+  const teamPrefixListArb = fc.array(nonEmptyAlphanumericArb, {
+    minLength: 0,
+    maxLength: 5
+  });
+
+  // Feature: org-team-hierarchy, Property 12: Callsign segment assembly
+  // preserves segment identity and separator placement
+  test.prop([orgPrefixArb, teamPrefixListArb, nameSegmentArb], { numRuns: 100 })(
+    'assembleCallsign never produces a leading/trailing/doubled separator, and yields back the original non-empty segments when split at the "-" boundaries',
+    (organisationPrefix, teamSegmentPrefixes, nameSegment) => {
+      const result = CallsignService.assembleCallsign({
+        organisationPrefix,
+        teamSegmentPrefixes,
+        nameSegment
+      });
+
+      const teamSegment = teamSegmentPrefixes.join('');
+      const nonEmptySegments = [organisationPrefix, teamSegment, nameSegment].filter(
+        (segment) => segment !== ''
+      );
+
+      if (nonEmptySegments.length === 0) {
+        expect(result).toBe('');
+        return;
+      }
+
+      // No leading or trailing separator.
+      expect(result.startsWith('-')).toBe(false);
+      expect(result.endsWith('-')).toBe(false);
+
+      // Exactly one '-' between each pair of adjacent non-empty segments --
+      // i.e. never a doubled/adjacent separator.
+      expect(result.includes('--')).toBe(false);
+
+      // The Team segment is the no-separator concatenation of every
+      // teamSegmentPrefixes entry (Requirement 8.3), appearing intact.
+      if (teamSegment !== '') {
+        expect(result).toContain(teamSegment);
+      }
+
+      // Splitting at the known "-" boundaries yields back exactly the
+      // original non-empty segments, unchanged, in order.
+      const splitPieces = result.split('-');
+      expect(splitPieces.every((piece) => piece !== '')).toBe(true);
+      expect(splitPieces).toEqual(nonEmptySegments);
+    }
+  );
+});

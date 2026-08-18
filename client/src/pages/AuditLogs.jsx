@@ -23,7 +23,7 @@ export default function AuditLogs({ user }) {
   const [loading, setLoading] = useState(true)            // initial + refetch spinner
   const [error, setError] = useState(null)                // fetch error message, or null
   const [filters, setFilters] = useState({                // draft filter form values (uncommitted)
-    userId: '', action: '', resourceType: '', teamId: '', startDate: '', endDate: ''
+    userEmail: '', action: '', resourceType: '', teamId: '', startDate: '', endDate: ''
   })
   const [appliedFilters, setAppliedFilters] = useState({}) // last-applied filters
   const [teams, setTeams] = useState([])                  // for the team filter <select>
@@ -133,16 +133,16 @@ export default function AuditLogs({ user }) {
       <div className="card">
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <div>
-            <label htmlFor="audit-log-user-id-filter" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              User ID
+            <label htmlFor="audit-log-user-email-filter" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+              User Email
             </label>
             <input
-              id="audit-log-user-id-filter"
-              type="text"
-              value={filters.userId}
-              onChange={(e) => setFilters({ ...filters, userId: e.target.value })}
+              id="audit-log-user-email-filter"
+              type="email"
+              value={filters.userEmail}
+              onChange={(e) => setFilters({ ...filters, userEmail: e.target.value })}
               className="input w-full"
-              placeholder="e.g. 42"
+              placeholder="e.g. user@example.com"
             />
           </div>
 
@@ -241,7 +241,7 @@ export default function AuditLogs({ user }) {
           <button
             type="button"
             onClick={() => {
-              setFilters({ userId: '', action: '', resourceType: '', teamId: '', startDate: '', endDate: '' })
+              setFilters({ userEmail: '', action: '', resourceType: '', teamId: '', startDate: '', endDate: '' })
               setAppliedFilters({})
               setPagination((prev) => ({ ...prev, page: 1 }))
             }}

@@ -31,6 +31,23 @@
  * in `server/routes/users.js`.
  */
 const EventPublisher = require('./EventPublisher');
+const Team = require('../models/Team');
+const CallsignService = require('./CallsignService');
+const { checkCallsignSuffixUniqueness } = require('./CallsignSuffixUniquenessService');
+
+/**
+ * Requirement 11.6 (task 22.1): thrown by `resolveCallsignSuffixForNewUser`
+ * when the target Organisation's `callsign_name_format` is `user_defined`
+ * and no non-empty `requestedCallsignSuffix` was supplied -- `user_defined`
+ * computes no default at all (Requirement 11.5), so a value MUST be
+ * supplied by the caller in this case.
+ */
+class CallsignSuffixRequiredError extends Error {
+  constructor(message = "A callsign suffix is required for this Organisation's user_defined callsign format") {
+    super(message);
+    this.name = 'CallsignSuffixRequiredError';
+  }
+}
 
 class UserProvisioningService {
   /**
@@ -53,15 +70,20 @@ class UserProvisioningService {
    * @param {string} params.firstName
    * @param {string} params.lastName
    * @param {number} params.teamId
+   * @param {string|null} [params.callsign_suffix] - the resolved
+   *   Requirement 11.6/11.7/11.14-checked `callsign_suffix` value for
+   *   this new user (task 22.2's wiring of
+   *   `resolveCallsignSuffixForNewUser`'s result into this shared local
+   *   write path). Stored on `users.callsign_suffix`.
    * @param {number|null} [params.createdBy] - local user id of the actor
    *   performing this operation, recorded on queued Sync_Operations.
    * @returns {Promise<{localUserId: number, queuedGroups: number}>}
    */
-  static async createAndAddUser(client, { authentikUserId, username, email, firstName, lastName, teamId, createdBy = null }) {
+  static async createAndAddUser(client, { authentikUserId, username, email, firstName, lastName, teamId, callsign_suffix = null, createdBy = null }) {
     // Upsert local user record.
     await client.query(
-      'INSERT INTO users (authentik_user_id, username, email, first_name, last_name, is_active) VALUES ($1, $2, $3, $4, $5, true) ON CONFLICT (authentik_user_id) DO UPDATE SET username = $2, email = $3, first_name = $4, last_name = $5, is_active = true',
-      [authentikUserId, username, email, firstName, lastName]
+      'INSERT INTO users (authentik_user_id, username, email, first_name, last_name, is_active, callsign_suffix) VALUES ($1, $2, $3, $4, $5, true, $6) ON CONFLICT (authentik_user_id) DO UPDATE SET username = $2, email = $3, first_name = $4, last_name = $5, is_active = true, callsign_suffix = $6',
+      [authentikUserId, username, email, firstName, lastName, callsign_suffix]
     );
 
     const localUserResult = await client.query(
@@ -159,6 +181,77 @@ class UserProvisioningService {
 
     return { localUserId, queuedGroups };
   }
+
+  /**
+   * Requirement 11.6, 11.7, 11.14, 11.15 (task 22.1): resolves the
+   * effective `callsign_suffix` value to store for a brand-new user, and
+   * checks it for a per-Team uniqueness collision before returning it.
+   *
+   * This function is READ-ONLY with respect to the database: it does not
+   * insert or update anything itself (that remains the caller's
+   * responsibility, in a later, separate task -- see task 22.2). The
+   * `client` parameter is accepted for API-signature consistency with
+   * this task's exact specified signature, but is unused in this
+   * function's own body: `Team.getAncestorChain`/`Team.getFullMemberList`
+   * both use the shared `pool` directly (per their own existing
+   * implementations, tasks 2.2/21.1) rather than accepting a `client`
+   * parameter, so there is nothing transactional for this read-only
+   * function to participate in yet.
+   *
+   * Resolution order:
+   *   1. Resolve the target Organisation's `callsign_name_format` via
+   *      `Team.getAncestorChain(teamId)`'s root (depth 0) row.
+   *   2. If `callsign_name_format === 'user_defined'`: require a
+   *      non-empty `requestedCallsignSuffix` (throws
+   *      `CallsignSuffixRequiredError` otherwise, Requirement 11.6).
+   *   3. Otherwise: prefer a non-empty `requestedCallsignSuffix` when
+   *      supplied; else compute the default via
+   *      `CallsignService.computeDefaultCallsignSuffix` (Requirement
+   *      11.7).
+   *   4. Check the effective value against `Team.getFullMemberList(teamId)`
+   *      for a case-insensitive collision (Requirement 11.14) -- no
+   *      `excludeUserId` is passed, since this is a brand-new user with
+   *      no existing membership row yet. Throws
+   *      `CallsignSuffixConflictError` (task 23.1) on a collision
+   *      (Requirement 11.15).
+   *
+   * @param {import('pg').PoolClient} client - unused by this function's
+   *   own body (see above); accepted only for signature consistency.
+   * @param {object} params
+   * @param {string} params.firstName
+   * @param {string} params.lastName
+   * @param {number} params.teamId
+   * @param {string|null|undefined} [params.requestedCallsignSuffix]
+   * @returns {Promise<string>} the resolved, uniqueness-checked
+   *   `callsign_suffix` value to store for the new user.
+   * @throws {CallsignSuffixRequiredError} if `callsign_name_format` is
+   *   `user_defined` and no `requestedCallsignSuffix` was supplied.
+   * @throws {CallsignSuffixConflictError} on a per-Team uniqueness
+   *   collision.
+   */
+  static async resolveCallsignSuffixForNewUser(client, { firstName, lastName, teamId, requestedCallsignSuffix }) {
+    const ancestorChain = await Team.getAncestorChain(teamId);
+    const organisation = ancestorChain.find((team) => team.parent_team_id === null) || ancestorChain[0];
+    const callsignNameFormat = organisation?.callsign_name_format;
+
+    const trimmedRequested = requestedCallsignSuffix ? requestedCallsignSuffix.trim() : '';
+
+    let effectiveValue;
+    if (callsignNameFormat === 'user_defined') {
+      if (!trimmedRequested) {
+        throw new CallsignSuffixRequiredError();
+      }
+      effectiveValue = trimmedRequested;
+    } else {
+      effectiveValue = trimmedRequested || CallsignService.computeDefaultCallsignSuffix(firstName, lastName, callsignNameFormat);
+    }
+
+    await checkCallsignSuffixUniqueness(teamId, effectiveValue);
+
+    return effectiveValue;
+  }
 }
+
+UserProvisioningService.CallsignSuffixRequiredError = CallsignSuffixRequiredError;
 
 module.exports = UserProvisioningService;

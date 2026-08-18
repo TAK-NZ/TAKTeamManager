@@ -17,7 +17,8 @@ const fc = require('fast-check');
 const { test } = require('@fast-check/jest');
 
 jest.mock('../config/database', () => ({
-  connect: jest.fn()
+  connect: jest.fn(),
+  query: jest.fn()
 }));
 jest.mock('../models/Team', () => ({
   isAdmin: jest.fn(),
@@ -27,7 +28,8 @@ jest.mock('./authentik', () => ({
   createUser: jest.fn()
 }));
 jest.mock('./UserProvisioningService', () => ({
-  createAndAddUser: jest.fn()
+  createAndAddUser: jest.fn(),
+  resolveCallsignSuffixForNewUser: jest.fn()
 }));
 
 const mockLoggerInstance = { info: jest.fn(), error: jest.fn(), warn: jest.fn() };
@@ -61,6 +63,7 @@ describe('BulkImportService.importUsers', () => {
     pool.connect.mockImplementation(() => Promise.resolve(buildMockClient()));
     authentikService.createUser.mockResolvedValue({ pk: 1000 });
     UserProvisioningService.createAndAddUser.mockResolvedValue({ localUserId: 42, queuedGroups: 1 });
+    UserProvisioningService.resolveCallsignSuffixForNewUser.mockResolvedValue(null);
     Team.isAdmin.mockResolvedValue(true);
   });
 
@@ -209,31 +212,43 @@ describe('BulkImportService.importUsers', () => {
 });
 
 /**
- * Unit tests for `BulkImportService.importTeams` (Requirement 29.5;
- * task 51.2):
+ * Unit tests for `BulkImportService.importTeams` (Requirements 9.6,
+ * 9.7, 9.9, 9.10, 9.11; task 18.1's two-phase pipeline):
  *   - Global_Manager-only authorization for the WHOLE batch (rejected
  *     before any row is even read from the CSV, not per-row)
  *   - a row's parent resolved by `parentTeamName` (lookup by exact name)
  *   - a row's parent resolved by `parentTeamId` (used directly)
  *   - a root row with neither column (parent_team_id resolves to null)
  *   - one row fails (`parentTeamName` not found) while the rest continue
+ *   - a multi-level `rowId`/`parentRowRef` chain creates every team in
+ *     ONE call, in topological order, with each child's `Team.create`
+ *     receiving the ACTUAL created parent id (not the string `rowId`)
+ *   - a whole-file rejection (duplicate `rowId`, cycle) creates zero
+ *     teams and returns `{rejected: true, ...}`
+ *   - a dangling `parentRowRef` fails only its dependent subtree while
+ *     unrelated rows still succeed
+ *   - an error thrown from inside `Team.create` itself (e.g.
+ *     `TeamDepthExceededError`) is caught and recorded as that row's
+ *     OWN per-row failure, not a whole-batch failure
  */
 function csvFromTeamRows(rows) {
-  const header = 'name,parentTeamName,parentTeamId';
-  const lines = rows.map((r) => [r.name ?? '', r.parentTeamName ?? '', r.parentTeamId ?? ''].join(','));
+  const header = 'rowId,parentRowRef,name,parentTeamName,parentTeamId,visibility,callsignPrefix';
+  const lines = rows.map((r) => [
+    r.rowId ?? '',
+    r.parentRowRef ?? '',
+    r.name ?? '',
+    r.parentTeamName ?? '',
+    r.parentTeamId ?? '',
+    r.visibility ?? '',
+    r.callsignPrefix ?? ''
+  ].join(','));
   return [header, ...lines].join('\n');
 }
 
 describe('BulkImportService.importTeams', () => {
-  let mockClient;
-
   beforeEach(() => {
     jest.clearAllMocks();
-    mockClient = {
-      query: jest.fn().mockResolvedValue({ rows: [] }),
-      release: jest.fn()
-    };
-    pool.connect.mockImplementation(() => Promise.resolve(mockClient));
+    pool.query.mockResolvedValue({ rows: [] });
   });
 
   it('rejects the entire batch upfront when the importing user is not a Global_Manager', async () => {
@@ -244,9 +259,7 @@ describe('BulkImportService.importTeams', () => {
       /Global_Manager/
     );
 
-    // The batch is rejected before any row is read: no client acquired,
-    // no Team.create call, unlike importUsers's per-row authorization.
-    expect(pool.connect).not.toHaveBeenCalled();
+    // The batch is rejected before any row is even read from the CSV.
     expect(Team.create).not.toHaveBeenCalled();
   });
 
@@ -257,32 +270,36 @@ describe('BulkImportService.importTeams', () => {
       { name: 'FENZ' }
     ]);
 
-    mockClient.query.mockImplementation((sql, params) => {
+    pool.query.mockImplementation((sql, params) => {
       if (sql === 'SELECT id FROM teams WHERE name = $1' && params[0] === 'FENZ') {
         return Promise.resolve({ rows: [{ id: 1 }] });
       }
       return Promise.resolve({ rows: [] });
     });
 
-    Team.create
-      .mockResolvedValueOnce({ id: 101, name: 'Southland District', parent_team_id: 1 })
-      .mockResolvedValueOnce({ id: 102, name: 'Otago District', parent_team_id: 3 })
-      .mockResolvedValueOnce({ id: 103, name: 'FENZ', parent_team_id: null });
+    // Creation order for these 3 independent (no in-file dependency)
+    // rows follows Kahn's algorithm's queue order, which for all-in-
+    // degree-0 nodes matches Map insertion order -- i.e. file order.
+    Team.create.mockImplementation((teamData) => {
+      const idsByName = { 'Southland District': 101, 'Otago District': 102, FENZ: 103 };
+      return Promise.resolve({ id: idsByName[teamData.name], name: teamData.name, parent_team_id: teamData.parent_team_id });
+    });
 
     const importingUser = { userId: 1, is_global_manager: true };
     const summary = await BulkImportService.importTeams(csv, importingUser);
 
     expect(summary.successCount).toBe(3);
     expect(summary.failureCount).toBe(0);
+    expect(summary.rejected).toBeUndefined();
     expect(summary.results).toEqual([
       { row: 1, success: true, teamId: 101 },
       { row: 2, success: true, teamId: 102 },
       { row: 3, success: true, teamId: 103 }
     ]);
 
-    expect(Team.create).toHaveBeenNthCalledWith(1, expect.objectContaining({ name: 'Southland District', parent_team_id: 1 }));
-    expect(Team.create).toHaveBeenNthCalledWith(2, expect.objectContaining({ name: 'Otago District', parent_team_id: 3 }));
-    expect(Team.create).toHaveBeenNthCalledWith(3, expect.objectContaining({ name: 'FENZ', parent_team_id: null }));
+    expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ name: 'Southland District', parent_team_id: 1 }));
+    expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ name: 'Otago District', parent_team_id: 3 }));
+    expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ name: 'FENZ', parent_team_id: null }));
   });
 
   it('continues processing remaining rows when a parentTeamName lookup fails to find a match', async () => {
@@ -292,16 +309,17 @@ describe('BulkImportService.importTeams', () => {
       { name: 'Otago District', parentTeamName: 'FENZ' }
     ]);
 
-    mockClient.query.mockImplementation((sql, params) => {
+    pool.query.mockImplementation((sql, params) => {
       if (sql === 'SELECT id FROM teams WHERE name = $1' && params[0] === 'FENZ') {
         return Promise.resolve({ rows: [{ id: 1 }] });
       }
       return Promise.resolve({ rows: [] });
     });
 
-    Team.create
-      .mockResolvedValueOnce({ id: 201, name: 'Southland District', parent_team_id: 1 })
-      .mockResolvedValueOnce({ id: 203, name: 'Otago District', parent_team_id: 1 });
+    Team.create.mockImplementation((teamData) => {
+      const idsByName = { 'Southland District': 201, 'Otago District': 203 };
+      return Promise.resolve({ id: idsByName[teamData.name], name: teamData.name, parent_team_id: teamData.parent_team_id });
+    });
 
     const importingUser = { userId: 1, is_global_manager: true };
     const summary = await BulkImportService.importTeams(csv, importingUser);
@@ -318,6 +336,251 @@ describe('BulkImportService.importTeams', () => {
 
     // The failing row never reached Team.create.
     expect(Team.create).toHaveBeenCalledTimes(2);
+  });
+
+  it('imports a multi-level rowId/parentRowRef chain in one call, in topological order, passing each real created parent id', async () => {
+    // Deliberately out of dependency order in the file: Station 40
+    // (deepest) appears first, Organisation (root) appears last.
+    const csv = csvFromTeamRows([
+      { rowId: 'station1', parentRowRef: 'district1', name: 'Station 40' },
+      { rowId: 'district1', parentRowRef: 'region1', name: 'Canterbury' },
+      { rowId: 'region1', parentRowRef: 'org1', name: 'Te Ihu' },
+      { rowId: 'org1', name: 'FENZ' }
+    ]);
+
+    const idsByName = { FENZ: 1, 'Te Ihu': 2, Canterbury: 3, 'Station 40': 4 };
+    Team.create.mockImplementation((teamData) =>
+      Promise.resolve({ id: idsByName[teamData.name], name: teamData.name, parent_team_id: teamData.parent_team_id })
+    );
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importTeams(csv, importingUser);
+
+    expect(summary.successCount).toBe(4);
+    expect(summary.failureCount).toBe(0);
+    // Results are in ORIGINAL file order, not creation order.
+    expect(summary.results).toEqual([
+      { row: 1, success: true, teamId: 4 },
+      { row: 2, success: true, teamId: 3 },
+      { row: 3, success: true, teamId: 2 },
+      { row: 4, success: true, teamId: 1 }
+    ]);
+
+    // Team.create was called in TOPOLOGICAL (parent-before-child) order,
+    // regardless of file order, and each child received the ACTUAL
+    // created parent id (an integer), never the string rowId.
+    const callOrder = Team.create.mock.calls.map(([teamData]) => teamData.name);
+    expect(callOrder.indexOf('FENZ')).toBeLessThan(callOrder.indexOf('Te Ihu'));
+    expect(callOrder.indexOf('Te Ihu')).toBeLessThan(callOrder.indexOf('Canterbury'));
+    expect(callOrder.indexOf('Canterbury')).toBeLessThan(callOrder.indexOf('Station 40'));
+
+    expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ name: 'FENZ', parent_team_id: null }));
+    expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ name: 'Te Ihu', parent_team_id: 1 }));
+    expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ name: 'Canterbury', parent_team_id: 2 }));
+    expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ name: 'Station 40', parent_team_id: 3 }));
+  });
+
+  it('rejects the whole file and creates zero teams when a rowId is duplicated', async () => {
+    const csv = csvFromTeamRows([
+      { rowId: 'org1', name: 'FENZ A' },
+      { rowId: 'org1', name: 'FENZ B' }
+    ]);
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importTeams(csv, importingUser);
+
+    expect(summary.rejected).toBe(true);
+    expect(summary.successCount).toBe(0);
+    expect(summary.failureCount).toBe(2);
+    expect(summary.results).toEqual([
+      { error: 'Duplicate rowId: org1', rowIds: ['org1'] }
+    ]);
+    expect(Team.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects the whole file and creates zero teams when a parentRowRef cycle exists', async () => {
+    const csv = csvFromTeamRows([
+      { rowId: 'a', parentRowRef: 'b', name: 'Team A' },
+      { rowId: 'b', parentRowRef: 'a', name: 'Team B' }
+    ]);
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importTeams(csv, importingUser);
+
+    expect(summary.rejected).toBe(true);
+    expect(summary.successCount).toBe(0);
+    expect(summary.failureCount).toBe(2);
+    expect(summary.results).toHaveLength(1);
+    expect(summary.results[0].error).toMatch(/Cycle detected/);
+    expect(Team.create).not.toHaveBeenCalled();
+  });
+
+  it('fails only a dangling parentRowRef row and its dependents, while unrelated rows still succeed', async () => {
+    const csv = csvFromTeamRows([
+      { rowId: 'org1', name: 'FENZ' },
+      { rowId: 'orphan', parentRowRef: 'missing-ref', name: 'Orphan' },
+      { rowId: 'orphanChild', parentRowRef: 'orphan', name: 'Orphan Child' }
+    ]);
+
+    Team.create.mockImplementation((teamData) =>
+      Promise.resolve({ id: 1, name: teamData.name, parent_team_id: teamData.parent_team_id })
+    );
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importTeams(csv, importingUser);
+
+    expect(summary.rejected).toBeUndefined();
+    expect(summary.successCount).toBe(1);
+    expect(summary.failureCount).toBe(2);
+    expect(summary.results[0]).toEqual({ row: 1, success: true, teamId: 1 });
+    expect(summary.results[1].success).toBe(false);
+    expect(summary.results[1].error).toMatch(/missing-ref/);
+    expect(summary.results[2].success).toBe(false);
+    expect(summary.results[2].error).toMatch(/parent row failed/);
+
+    // Neither the dangling row nor its dependent ever reached Team.create.
+    expect(Team.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('records an error thrown from inside Team.create itself as that row\'s own per-row failure, continuing the batch', async () => {
+    const csv = csvFromTeamRows([
+      { name: 'Deep Team' },
+      { name: 'Fine Team' }
+    ]);
+
+    class TeamDepthExceededError extends Error {
+      constructor() {
+        super('Maximum team depth (5) exceeded');
+        this.name = 'TeamDepthExceededError';
+      }
+    }
+
+    Team.create.mockImplementation((teamData) => {
+      if (teamData.name === 'Deep Team') {
+        return Promise.reject(new TeamDepthExceededError());
+      }
+      return Promise.resolve({ id: 55, name: teamData.name, parent_team_id: null });
+    });
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importTeams(csv, importingUser);
+
+    expect(summary.rejected).toBeUndefined();
+    expect(summary.successCount).toBe(1);
+    expect(summary.failureCount).toBe(1);
+    expect(summary.results[0]).toEqual({
+      row: 1,
+      success: false,
+      error: 'Maximum team depth (5) exceeded'
+    });
+    expect(summary.results[1]).toEqual({ row: 2, success: true, teamId: 55 });
+    expect(Team.create).toHaveBeenCalledTimes(2);
+  });
+
+  /**
+   * Unit tests for the `visibility`/`callsignPrefix` Team_Import_Row
+   * columns (Requirements 9.7, 9.8; task 18.2).
+   */
+  it('creates a Team with visibility: public when the row explicitly sets it', async () => {
+    const csv = csvFromTeamRows([{ name: 'Explicit Public Org', visibility: 'public' }]);
+    Team.create.mockImplementation((teamData) =>
+      Promise.resolve({ id: 1, name: teamData.name, parent_team_id: teamData.parent_team_id })
+    );
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importTeams(csv, importingUser);
+
+    expect(summary.successCount).toBe(1);
+    expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ visibility: 'public' }));
+  });
+
+  it('creates a Team with visibility: public (the new default) when the row omits visibility', async () => {
+    const csv = csvFromTeamRows([{ name: 'Default Visibility Org' }]);
+    Team.create.mockImplementation((teamData) =>
+      Promise.resolve({ id: 1, name: teamData.name, parent_team_id: teamData.parent_team_id })
+    );
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importTeams(csv, importingUser);
+
+    expect(summary.successCount).toBe(1);
+    expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ visibility: 'public' }));
+  });
+
+  it('fails only the row with an invalid visibility value, continuing the batch', async () => {
+    const csv = csvFromTeamRows([
+      { name: 'Weird Org', visibility: 'weird' },
+      { name: 'Fine Org' }
+    ]);
+    Team.create.mockImplementation((teamData) =>
+      Promise.resolve({ id: 9, name: teamData.name, parent_team_id: teamData.parent_team_id })
+    );
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importTeams(csv, importingUser);
+
+    expect(summary.rejected).toBeUndefined();
+    expect(summary.successCount).toBe(1);
+    expect(summary.failureCount).toBe(1);
+    expect(summary.results[0]).toEqual({
+      row: 1,
+      success: false,
+      error: 'Invalid visibility: weird'
+    });
+    expect(summary.results[1]).toEqual({ row: 2, success: true, teamId: 9 });
+    // The invalid row never reached Team.create.
+    expect(Team.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('creates a Team with the row\'s valid callsignPrefix', async () => {
+    const csv = csvFromTeamRows([{ name: 'FENZ', callsignPrefix: 'FENZ' }]);
+    Team.create.mockImplementation((teamData) =>
+      Promise.resolve({ id: 1, name: teamData.name, parent_team_id: teamData.parent_team_id })
+    );
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importTeams(csv, importingUser);
+
+    expect(summary.successCount).toBe(1);
+    expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ callsign_prefix: 'FENZ' }));
+  });
+
+  it('creates a Team with callsign_prefix: null when the row omits callsignPrefix', async () => {
+    const csv = csvFromTeamRows([{ name: 'No Prefix Org' }]);
+    Team.create.mockImplementation((teamData) =>
+      Promise.resolve({ id: 1, name: teamData.name, parent_team_id: teamData.parent_team_id })
+    );
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importTeams(csv, importingUser);
+
+    expect(summary.successCount).toBe(1);
+    expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ callsign_prefix: null }));
+  });
+
+  it('fails only the row with an invalid callsignPrefix (containing a -), without ever calling Team.create for that row', async () => {
+    const csv = csvFromTeamRows([
+      { name: 'NZ Police', callsignPrefix: 'NZ-POL' },
+      { name: 'Fine Org' }
+    ]);
+    Team.create.mockImplementation((teamData) =>
+      Promise.resolve({ id: 9, name: teamData.name, parent_team_id: teamData.parent_team_id })
+    );
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importTeams(csv, importingUser);
+
+    expect(summary.rejected).toBeUndefined();
+    expect(summary.successCount).toBe(1);
+    expect(summary.failureCount).toBe(1);
+    expect(summary.results[0]).toEqual({
+      row: 1,
+      success: false,
+      error: 'Invalid callsignPrefix: NZ-POL (letters and digits only)'
+    });
+    expect(summary.results[1]).toEqual({ row: 2, success: true, teamId: 9 });
+    // The invalid row never reached Team.create.
+    expect(Team.create).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -400,6 +663,7 @@ describe('Property 14: CSV batch row processing is isolated', () => {
     UserProvisioningService.createAndAddUser.mockImplementation((client, params) =>
       Promise.resolve({ localUserId: params.teamId, queuedGroups: 1 })
     );
+    UserProvisioningService.resolveCallsignSuffixForNewUser.mockResolvedValue(null);
     pool.connect.mockImplementation(() => Promise.resolve(buildMockClient()));
   }
 
@@ -443,4 +707,939 @@ describe('Property 14: CSV batch row processing is isolated', () => {
       }
     }
   );
+});
+
+/**
+ * Unit tests for `BulkImportService.buildImportGraph` (Requirements 9.1,
+ * 9.2, 9.3, 9.5; task 17.1). This is PURE logic -- no mocks needed --
+ * covering node keying (synthetic `__row_N` keys vs. explicit `rowId`),
+ * whole-file rejection for a duplicate `rowId` and for a
+ * `parentRowRef`+`parentTeamName`/`parentTeamId` combo on one row, and
+ * edge resolution for each of `parentRowRef`-only,
+ * `parentTeamName`/`parentTeamId`-only, and neither.
+ */
+describe('BulkImportService.buildImportGraph', () => {
+  it('assigns synthetic __row_N keys to rows with no rowId at all', () => {
+    const rows = [
+      { name: 'Org A' },
+      { name: 'Org B' }
+    ];
+
+    const graph = buildImportGraph(rows);
+
+    expect(Array.from(graph.nodes.keys())).toEqual(['__row_1', '__row_2']);
+    expect(graph.wholeFileErrors).toEqual([]);
+    // Both rows are independent roots (no parentRowRef) -- task 17.3's
+    // Kahn's-algorithm pass includes both in creationOrder.
+    expect(graph.creationOrder.slice().sort()).toEqual(['__row_1', '__row_2']);
+  });
+
+  it('keys rows with unique rowId values by those values', () => {
+    const rows = [
+      { rowId: 'org1', name: 'FENZ' },
+      { rowId: 'region1', name: 'Te Ihu' }
+    ];
+
+    const graph = buildImportGraph(rows);
+
+    expect(Array.from(graph.nodes.keys())).toEqual(['org1', 'region1']);
+    expect(graph.wholeFileErrors).toEqual([]);
+  });
+
+  it('rejects the whole file with an error naming the value when a rowId is duplicated', () => {
+    const rows = [
+      { rowId: 'org1', name: 'FENZ' },
+      { rowId: 'org1', name: 'Duplicate FENZ' }
+    ];
+
+    const graph = buildImportGraph(rows);
+
+    expect(graph.wholeFileErrors).toEqual([
+      { error: 'Duplicate rowId: org1', rowIds: ['org1'] }
+    ]);
+  });
+
+  it('reports each distinct duplicated rowId value as its own wholeFileErrors entry', () => {
+    const rows = [
+      { rowId: 'org1', name: 'FENZ A' },
+      { rowId: 'org1', name: 'FENZ B' },
+      { rowId: 'region1', name: 'Region A' },
+      { rowId: 'region1', name: 'Region B' },
+      { rowId: 'region1', name: 'Region C' },
+      { rowId: 'unique1', name: 'Standalone' }
+    ];
+
+    const graph = buildImportGraph(rows);
+
+    expect(graph.wholeFileErrors).toHaveLength(2);
+    expect(graph.wholeFileErrors).toContainEqual({ error: 'Duplicate rowId: org1', rowIds: ['org1'] });
+    expect(graph.wholeFileErrors).toContainEqual({ error: 'Duplicate rowId: region1', rowIds: ['region1'] });
+  });
+
+  it('rejects the whole file when a row supplies both parentRowRef and parentTeamName', () => {
+    const rows = [
+      { rowId: 'org1', name: 'FENZ' },
+      { rowId: 'region1', name: 'Te Ihu', parentRowRef: 'org1', parentTeamName: 'Some Existing Team' }
+    ];
+
+    const graph = buildImportGraph(rows);
+
+    expect(graph.wholeFileErrors).toContainEqual({
+      error: 'Row region1 supplies both parentRowRef and parentTeamName/parentTeamId; only one parent-reference method may be used per row',
+      rowIds: ['region1']
+    });
+  });
+
+  it('rejects the whole file when a row supplies both parentRowRef and parentTeamId', () => {
+    const rows = [
+      { rowId: 'org1', name: 'FENZ' },
+      { rowId: 'region1', name: 'Te Ihu', parentRowRef: 'org1', parentTeamId: '42' }
+    ];
+
+    const graph = buildImportGraph(rows);
+
+    expect(graph.wholeFileErrors).toContainEqual({
+      error: 'Row region1 supplies both parentRowRef and parentTeamName/parentTeamId; only one parent-reference method may be used per row',
+      rowIds: ['region1']
+    });
+  });
+
+  it('resolves a row with only parentRowRef to resolvedParentKey, not resolvedParentTeamId', () => {
+    const rows = [
+      { rowId: 'org1', name: 'FENZ' },
+      { rowId: 'region1', name: 'Te Ihu', parentRowRef: 'org1' }
+    ];
+
+    const graph = buildImportGraph(rows);
+
+    const regionNode = graph.nodes.get('region1');
+    expect(regionNode.resolvedParentKey).toBe('org1');
+    expect(regionNode.parentTeamNameRef).toBeUndefined();
+    expect(regionNode.parentTeamIdRef).toBeUndefined();
+    expect(regionNode.resolvedParentTeamId).toBeUndefined();
+  });
+
+  it('resolves a row with only parentTeamName to the raw-ref field, not resolvedParentKey', () => {
+    const rows = [
+      { name: 'Southland District', parentTeamName: 'FENZ' }
+    ];
+
+    const graph = buildImportGraph(rows);
+
+    const node = graph.nodes.get('__row_1');
+    expect(node.parentTeamNameRef).toBe('FENZ');
+    expect(node.resolvedParentKey).toBeUndefined();
+    expect(node.parentTeamIdRef).toBeUndefined();
+  });
+
+  it('resolves a row with only parentTeamId to the raw-ref field, not resolvedParentKey', () => {
+    const rows = [
+      { name: 'Otago District', parentTeamId: '7' }
+    ];
+
+    const graph = buildImportGraph(rows);
+
+    const node = graph.nodes.get('__row_1');
+    expect(node.parentTeamIdRef).toBe('7');
+    expect(node.resolvedParentKey).toBeUndefined();
+    expect(node.parentTeamNameRef).toBeUndefined();
+  });
+
+  it('treats a row with none of rowId/parentRowRef/parentTeamName/parentTeamId as a valid root node', () => {
+    const rows = [
+      { name: 'FENZ' }
+    ];
+
+    const graph = buildImportGraph(rows);
+
+    expect(graph.wholeFileErrors).toEqual([]);
+    const node = graph.nodes.get('__row_1');
+    expect(node.resolvedParentKey).toBeUndefined();
+    expect(node.parentTeamNameRef).toBeUndefined();
+    expect(node.parentTeamIdRef).toBeUndefined();
+    expect(node.teamId).toBeUndefined();
+    expect(node.status).toBeUndefined();
+  });
+});
+
+/**
+ * Unit tests for cycle detection over `parentRowRef` edges (Requirement
+ * 9.13; task 17.2), added to `buildImportGraph`'s existing whole-file
+ * validation pass. Covers a simple 2-node cycle, a longer 3-node cycle,
+ * a self-referencing (degenerate 1-node) cycle, a no-cycle regression
+ * case, a dangling `parentRowRef` (not this task's concern), multiple
+ * independent cycles reported exactly once each, and cycle detection
+ * coexisting with a duplicate-rowId whole-file error.
+ */
+describe('BulkImportService.buildImportGraph cycle detection', () => {
+  it('detects a simple 2-node cycle (A references B, B references A)', () => {
+    const rows = [
+      { rowId: 'a', name: 'Team A', parentRowRef: 'b' },
+      { rowId: 'b', name: 'Team B', parentRowRef: 'a' }
+    ];
+
+    const graph = buildImportGraph(rows);
+
+    const cycleErrors = graph.wholeFileErrors.filter((e) => e.error.startsWith('Cycle detected'));
+    expect(cycleErrors).toHaveLength(1);
+    expect(cycleErrors[0].rowIds.slice().sort()).toEqual(['a', 'b']);
+  });
+
+  it('detects a longer cycle (A -> B -> C -> A)', () => {
+    const rows = [
+      { rowId: 'a', name: 'Team A', parentRowRef: 'b' },
+      { rowId: 'b', name: 'Team B', parentRowRef: 'c' },
+      { rowId: 'c', name: 'Team C', parentRowRef: 'a' }
+    ];
+
+    const graph = buildImportGraph(rows);
+
+    const cycleErrors = graph.wholeFileErrors.filter((e) => e.error.startsWith('Cycle detected'));
+    expect(cycleErrors).toHaveLength(1);
+    expect(cycleErrors[0].rowIds.slice().sort()).toEqual(['a', 'b', 'c']);
+  });
+
+  it('detects a self-referencing row as a degenerate 1-node cycle', () => {
+    const rows = [
+      { rowId: 'a', name: 'Team A', parentRowRef: 'a' }
+    ];
+
+    const graph = buildImportGraph(rows);
+
+    const cycleErrors = graph.wholeFileErrors.filter((e) => e.error.startsWith('Cycle detected'));
+    expect(cycleErrors).toHaveLength(1);
+    expect(cycleErrors[0].rowIds).toEqual(['a']);
+  });
+
+  it('reports no cycle-related error for a file with no cycle', () => {
+    const rows = [
+      { rowId: 'org1', name: 'FENZ' },
+      { rowId: 'region1', name: 'Te Ihu', parentRowRef: 'org1' },
+      { rowId: 'district1', name: 'Canterbury', parentRowRef: 'region1' }
+    ];
+
+    const graph = buildImportGraph(rows);
+
+    expect(graph.wholeFileErrors.filter((e) => e.error.startsWith('Cycle detected'))).toEqual([]);
+  });
+
+  it('does not report a cycle for a parentRowRef pointing at a nonexistent rowId (dangling, not a cycle)', () => {
+    const rows = [
+      { rowId: 'a', name: 'Team A', parentRowRef: 'does-not-exist' }
+    ];
+
+    const graph = buildImportGraph(rows);
+
+    expect(graph.wholeFileErrors.filter((e) => e.error.startsWith('Cycle detected'))).toEqual([]);
+  });
+
+  it('reports each of multiple independent cycles exactly once with the correct member rows', () => {
+    const rows = [
+      { rowId: 'a', name: 'Team A', parentRowRef: 'b' },
+      { rowId: 'b', name: 'Team B', parentRowRef: 'a' },
+      { rowId: 'x', name: 'Team X', parentRowRef: 'y' },
+      { rowId: 'y', name: 'Team Y', parentRowRef: 'z' },
+      { rowId: 'z', name: 'Team Z', parentRowRef: 'x' },
+      { rowId: 'standalone', name: 'Standalone Org' }
+    ];
+
+    const graph = buildImportGraph(rows);
+
+    const cycleErrors = graph.wholeFileErrors.filter((e) => e.error.startsWith('Cycle detected'));
+    expect(cycleErrors).toHaveLength(2);
+
+    const memberSets = cycleErrors.map((e) => e.rowIds.slice().sort());
+    expect(memberSets).toContainEqual(['a', 'b']);
+    expect(memberSets).toContainEqual(['x', 'y', 'z']);
+
+    // No cross-contamination between the two cycles, and the standalone
+    // row is not attributed to either.
+    const abCycle = cycleErrors.find((e) => e.rowIds.includes('a'));
+    expect(abCycle.rowIds).not.toEqual(expect.arrayContaining(['x', 'y', 'z']));
+    const xyzCycle = cycleErrors.find((e) => e.rowIds.includes('x'));
+    expect(xyzCycle.rowIds).not.toEqual(expect.arrayContaining(['a', 'b']));
+  });
+
+  it('reports a cycle alongside a duplicate-rowId whole-file error in the same result', () => {
+    const rows = [
+      { rowId: 'dup', name: 'First Dup' },
+      { rowId: 'dup', name: 'Second Dup' },
+      { rowId: 'a', name: 'Team A', parentRowRef: 'b' },
+      { rowId: 'b', name: 'Team B', parentRowRef: 'a' }
+    ];
+
+    const graph = buildImportGraph(rows);
+
+    const duplicateErrors = graph.wholeFileErrors.filter((e) => e.error.startsWith('Duplicate rowId'));
+    const cycleErrors = graph.wholeFileErrors.filter((e) => e.error.startsWith('Cycle detected'));
+
+    expect(duplicateErrors).toEqual([{ error: 'Duplicate rowId: dup', rowIds: ['dup'] }]);
+    expect(cycleErrors).toHaveLength(1);
+    expect(cycleErrors[0].rowIds.slice().sort()).toEqual(['a', 'b']);
+  });
+});
+
+/**
+ * Unit tests for dangling-`parentRowRef` row failure, transitive
+ * failure propagation, and Kahn's-algorithm topological ordering
+ * (Requirements 9.4, 9.6, 9.12; task 17.3), added to `buildImportGraph`.
+ */
+describe('BulkImportService.buildImportGraph dangling-reference failure and creationOrder', () => {
+  it('marks a row with a dangling parentRowRef as failed with an error, without a whole-file rejection', () => {
+    const rows = [
+      { rowId: 'a', name: 'Team A', parentRowRef: 'does-not-exist' }
+    ];
+
+    const graph = buildImportGraph(rows);
+
+    expect(graph.wholeFileErrors).toEqual([]);
+    const node = graph.nodes.get('a');
+    expect(node.status).toBe('failed');
+    expect(node.error).toMatch(/does-not-exist/);
+    expect(graph.creationOrder).not.toContain('a');
+  });
+
+  it('propagates failure transitively through an arbitrarily long chain (A -> B -> C, C dangling)', () => {
+    const rows = [
+      { rowId: 'a', name: 'Team A', parentRowRef: 'b' },
+      { rowId: 'b', name: 'Team B', parentRowRef: 'c' },
+      { rowId: 'c', name: 'Team C', parentRowRef: 'does-not-exist' }
+    ];
+
+    const graph = buildImportGraph(rows);
+
+    expect(graph.wholeFileErrors).toEqual([]);
+    expect(graph.nodes.get('a').status).toBe('failed');
+    expect(graph.nodes.get('b').status).toBe('failed');
+    expect(graph.nodes.get('c').status).toBe('failed');
+    expect(graph.creationOrder).toEqual([]);
+  });
+
+  it('never includes a failed node in creationOrder', () => {
+    const rows = [
+      { rowId: 'org1', name: 'FENZ' },
+      { rowId: 'region1', name: 'Te Ihu', parentRowRef: 'org1' },
+      { rowId: 'orphan', name: 'Orphan', parentRowRef: 'missing' },
+      { rowId: 'orphanChild', name: 'Orphan Child', parentRowRef: 'orphan' }
+    ];
+
+    const graph = buildImportGraph(rows);
+
+    expect(graph.nodes.get('org1').status).toBeUndefined();
+    expect(graph.nodes.get('region1').status).toBeUndefined();
+    expect(graph.nodes.get('orphan').status).toBe('failed');
+    expect(graph.nodes.get('orphanChild').status).toBe('failed');
+
+    expect(graph.creationOrder.sort()).toEqual(['org1', 'region1'].sort());
+    expect(graph.creationOrder).not.toContain('orphan');
+    expect(graph.creationOrder).not.toContain('orphanChild');
+  });
+
+  it('orders parentTeamName/parentTeamId-rooted rows before any parentRowRef row that depends on them', () => {
+    const rows = [
+      { rowId: 'district1', name: 'Canterbury', parentRowRef: 'region1' },
+      { rowId: 'region1', name: 'Te Ihu', parentTeamName: 'FENZ' },
+      { rowId: 'station1', name: 'Station 40', parentRowRef: 'district1' }
+    ];
+
+    const graph = buildImportGraph(rows);
+
+    expect(graph.wholeFileErrors).toEqual([]);
+    expect(graph.creationOrder).toHaveLength(3);
+
+    const indexOf = (key) => graph.creationOrder.indexOf(key);
+    // region1 has no in-file dependency (parentTeamName only) -> sorts first.
+    expect(indexOf('region1')).toBeLessThan(indexOf('district1'));
+    expect(indexOf('district1')).toBeLessThan(indexOf('station1'));
+  });
+
+  it('excludes a cyclic row from creationOrder and marks it failed, without an infinite loop', () => {
+    const rows = [
+      { rowId: 'a', name: 'Team A', parentRowRef: 'b' },
+      { rowId: 'b', name: 'Team B', parentRowRef: 'a' },
+      { rowId: 'independent', name: 'Independent Org' }
+    ];
+
+    const graph = buildImportGraph(rows);
+
+    const cycleErrors = graph.wholeFileErrors.filter((e) => e.error.startsWith('Cycle detected'));
+    expect(cycleErrors).toHaveLength(1);
+
+    expect(graph.nodes.get('a').status).toBe('failed');
+    expect(graph.nodes.get('b').status).toBe('failed');
+    expect(graph.nodes.get('independent').status).toBeUndefined();
+
+    expect(graph.creationOrder).toEqual(['independent']);
+  });
+
+  it('produces the same set of failed rowKeys and the same relative ordering constraints regardless of row order', () => {
+    const baseRows = [
+      { rowId: 'org1', name: 'FENZ', parentTeamName: 'ExistingRoot' },
+      { rowId: 'region1', name: 'Te Ihu', parentRowRef: 'org1' },
+      { rowId: 'district1', name: 'Canterbury', parentRowRef: 'region1' },
+      { rowId: 'station1', name: 'Station 40', parentRowRef: 'district1' },
+      { rowId: 'orphan', name: 'Orphan', parentRowRef: 'missing-ref' },
+      { rowId: 'orphanChild', name: 'Orphan Child', parentRowRef: 'orphan' },
+      { rowId: 'standalone', name: 'Standalone Org' }
+    ];
+
+    // A handful of shuffled permutations of the same row set.
+    const permutations = [
+      baseRows,
+      [...baseRows].reverse(),
+      [baseRows[3], baseRows[0], baseRows[5], baseRows[1], baseRows[6], baseRows[2], baseRows[4]],
+      [baseRows[6], baseRows[5], baseRows[4], baseRows[3], baseRows[2], baseRows[1], baseRows[0]]
+    ];
+
+    const results = permutations.map((rows) => buildImportGraph(rows));
+
+    // Every permutation must produce the identical SET of failed rowKeys.
+    const failedSets = results.map((graph) => {
+      const failed = [];
+      for (const [key, node] of graph.nodes.entries()) {
+        if (node.status === 'failed') {
+          failed.push(key);
+        }
+      }
+      return failed.sort();
+    });
+    for (const failedSet of failedSets) {
+      expect(failedSet).toEqual(['orphan', 'orphanChild']);
+    }
+
+    // Every permutation's creationOrder must satisfy the same relative
+    // ordering constraints: for every live parentRowRef edge, the
+    // parent's index precedes the child's index.
+    const expectedEdges = [
+      ['org1', 'region1'],
+      ['region1', 'district1'],
+      ['district1', 'station1']
+    ];
+    for (const graph of results) {
+      for (const [parentKey, childKey] of expectedEdges) {
+        expect(graph.creationOrder.indexOf(parentKey)).toBeLessThan(graph.creationOrder.indexOf(childKey));
+      }
+      expect(graph.creationOrder.sort()).toEqual(
+        ['org1', 'region1', 'district1', 'station1', 'standalone'].sort()
+      );
+    }
+  });
+});
+
+/**
+ * Property-based test (design.md's Property 14: "Parent-resolution
+ * failure isolates exactly its dependent subtree") for
+ * `buildImportGraph`'s dangling-`parentRowRef` failure propagation
+ * (Requirements 9.4, 9.12; task 17.5).
+ *
+ * NOTE on naming collision: this file already contains an unrelated
+ * `describe('Property 14: CSV batch row processing is isolated', ...)`
+ * block (above) covering `importUsers`'s per-row CSV-batch isolation
+ * for USER import -- a different design.md property, from a different
+ * feature (production-hardening), that happens to also be numbered
+ * "14" in ITS OWN design doc. THIS block is org-team-hierarchy's
+ * design.md Property 14, about `buildImportGraph`'s TEAM-import
+ * dependency-graph dangling-reference propagation -- a completely
+ * different concern. The describe name below is deliberately written
+ * as "Property 14 (design.md): ..." to avoid being confused with the
+ * pre-existing block.
+ *
+ * This is PURE logic -- no mocks needed -- matching the surrounding
+ * `describe('BulkImportService.buildImportGraph', ...)` and
+ * `describe('BulkImportService.buildImportGraph dangling-reference
+ * failure and creationOrder', ...)` blocks' conventions.
+ *
+ * Generator: a forest of rows built from a fixed pool of candidate
+ * `rowId` values (1-10). Each row's `parentRowRef` is one of:
+ *   - empty (a root row), or
+ *   - a reference to an EARLIER-generated row's `rowId` in the same
+ *     tree (mirroring task 3.2's/15.2's earlier-id-only parent
+ *     generators, guaranteeing this edge alone can never create a
+ *     cycle), or
+ *   - a reference to a `rowId` value guaranteed to not exist anywhere
+ *     in the generated row set (a deliberately dangling edge, drawn
+ *     from a disjoint "poison" pool).
+ * At least one row is forced to carry a dangling reference so the
+ * generator's space always includes a broken edge, rather than relying
+ * on chance.
+ *
+ * Feature: org-team-hierarchy, task 17.5
+ * Validates: Requirements 9.4, 9.12
+ */
+describe('Property 14 (design.md): Parent-resolution failure isolates exactly its dependent subtree', () => {
+  // A pool of rowId values used for real, in-file rows.
+  const ROW_ID_POOL = Array.from({ length: 10 }, (_, i) => `row${i}`);
+  // A disjoint pool of rowId values that never appear as an actual
+  // row's own rowId -- referencing one of these is, by construction,
+  // always a dangling parentRowRef.
+  const POISON_POOL = ['ghost0', 'ghost1', 'ghost2'];
+
+  // teamCount rows drawn (without replacement) from ROW_ID_POOL, each
+  // with a parentRowRef that is either empty, a reference to an
+  // earlier row in the array (guaranteed acyclic, guaranteed to
+  // resolve), or a reference to a POISON_POOL value (guaranteed
+  // dangling). At least one dangling reference is forced via
+  // `forcedDanglingIndex`, biasing the generator's space so a broken
+  // edge is always present.
+  const forestArb = fc.integer({ min: 1, max: 10 }).chain((teamCount) => {
+    const rowIds = ROW_ID_POOL.slice(0, teamCount);
+
+    // For each row (by index), a parent choice: 'none', 'earlier', or
+    // 'dangling'. When 'earlier' is chosen for row i (i > 0), a
+    // uniformly chosen earlier index 0..i-1 supplies the actual
+    // parentRowRef value.
+    const parentChoiceArb = fc.array(
+      fc.oneof(fc.constant('none'), fc.constant('earlier'), fc.constant('dangling')),
+      { minLength: teamCount, maxLength: teamCount }
+    );
+
+    const earlierIndexArb = fc.array(fc.nat({ max: Math.max(teamCount - 1, 0) }), {
+      minLength: teamCount,
+      maxLength: teamCount
+    });
+
+    const poisonArb = fc.array(fc.constantFrom(...POISON_POOL), {
+      minLength: teamCount,
+      maxLength: teamCount
+    });
+
+    // Which row index (if any) is forced to carry a dangling
+    // reference, guaranteeing the generated space always includes at
+    // least one broken edge.
+    const forcedDanglingIndexArb = fc.nat({ max: teamCount - 1 });
+
+    return fc.tuple(parentChoiceArb, earlierIndexArb, poisonArb, forcedDanglingIndexArb).map(
+      ([parentChoices, earlierIndexes, poisonValues, forcedDanglingIndex]) => {
+        const rows = rowIds.map((rowId, i) => {
+          let choice = parentChoices[i];
+          if (i === forcedDanglingIndex) {
+            choice = 'dangling';
+          }
+          // A row with no earlier row available can never use
+          // 'earlier' -- fall back to 'none' in that case only.
+          if (i === 0 && choice === 'earlier') {
+            choice = 'none';
+          }
+          if (choice === 'none') {
+            return { rowId, name: `Team ${rowId}` };
+          }
+          if (choice === 'earlier') {
+            // Clamp into 0..i-1 so this edge can never point at itself
+            // or a later/nonexistent index -- guaranteed resolvable
+            // and guaranteed acyclic.
+            const earlierIndex = earlierIndexes[i] % i;
+            return { rowId, name: `Team ${rowId}`, parentRowRef: rowIds[earlierIndex] };
+          }
+          // 'dangling': reference a value from the disjoint poison
+          // pool, which by construction never matches any rowId in
+          // `rowIds`.
+          return { rowId, name: `Team ${rowId}`, parentRowRef: poisonValues[i] };
+        });
+        return rows;
+      }
+    );
+  });
+
+  /**
+   * Independently (fresh, not via `buildImportGraph`'s own
+   * `markFailedRowsAndComputeCreationOrder`) computes the expected set
+   * of failed rowKeys: any row whose `parentRowRef` does not resolve
+   * to an existing rowId in the file is failed; then transitively, any
+   * row whose resolved parent is itself in the failed set is also
+   * failed -- repeated to a fixed point.
+   */
+  function computeExpectedFailedSet(rows) {
+    const byRowId = new Map(rows.map((row) => [row.rowId, row]));
+    const failed = new Set();
+
+    for (const row of rows) {
+      const parentRef = row.parentRowRef;
+      if (parentRef !== undefined && parentRef !== '' && !byRowId.has(parentRef)) {
+        failed.add(row.rowId);
+      }
+    }
+
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const row of rows) {
+        if (failed.has(row.rowId)) {
+          continue;
+        }
+        const parentRef = row.parentRowRef;
+        if (parentRef !== undefined && parentRef !== '' && failed.has(parentRef)) {
+          failed.add(row.rowId);
+          changed = true;
+        }
+      }
+    }
+
+    return failed;
+  }
+
+  test.prop([forestArb], { numRuns: 100 })(
+    'every row transitively dependent on a broken parentRowRef edge fails, and every other row succeeds',
+    (rows) => {
+      const graph = buildImportGraph(rows);
+      const expectedFailed = computeExpectedFailedSet(rows);
+
+      // This generator's forced-dangling-index construction should
+      // always yield at least one failed row; guard so the property is
+      // never vacuously true.
+      expect(expectedFailed.size).toBeGreaterThan(0);
+
+      for (const row of rows) {
+        const node = graph.nodes.get(row.rowId);
+        const shouldFail = expectedFailed.has(row.rowId);
+
+        expect(node.status === 'failed').toBe(shouldFail);
+
+        if (shouldFail) {
+          expect(graph.creationOrder).not.toContain(row.rowId);
+        } else {
+          expect(graph.creationOrder).toContain(row.rowId);
+        }
+      }
+    }
+  );
+});
+
+/**
+ * Property-based test (design.md's Property 15: "CSV import outcome is
+ * independent of row order") for `buildImportGraph`'s row-order
+ * confluence (Requirement 9.6; task 17.6).
+ *
+ * This generalizes the hand-constructed
+ * `'produces the same set of failed rowKeys and the same relative
+ * ordering constraints regardless of row order'` test above (a single
+ * fixed row set with a handful of hand-picked permutations) to many
+ * randomly generated valid row sets, each checked against many random
+ * permutations of itself.
+ *
+ * This is PURE logic -- no mocks needed -- matching the surrounding
+ * `describe('BulkImportService.buildImportGraph', ...)` blocks'
+ * conventions.
+ *
+ * Generator: a GUARANTEED-VALID (acyclic, non-duplicated-rowId) forest
+ * of rows, built the same way as task 17.5's Property 14 generator
+ * above -- each row's `rowId` is drawn, without replacement, from a
+ * fixed pool, and each row's `parentRowRef` is either empty (a root) or
+ * a reference to an EARLIER-generated row's own `rowId` in the same
+ * array, which by construction can never form a cycle and can never be
+ * dangling. Unlike task 17.5's generator, no `'dangling'` choice (and no
+ * poison pool) is offered here, since this property is scoped to VALID
+ * row sets only.
+ *
+ * A random permutation of the same row set is drawn via
+ * `fc.shuffledSubarray` with `minLength`/`maxLength` both set to the
+ * full array's length -- the same technique the `Property 14: CSV batch
+ * row processing is isolated` test (above) uses to shuffle a batch
+ * while preserving its full membership.
+ *
+ * Feature: org-team-hierarchy, task 17.6
+ * Validates: Requirements 9.6
+ */
+describe('Property 15 (design.md): CSV import outcome is independent of row order', () => {
+  const ROW_ID_POOL = Array.from({ length: 15 }, (_, i) => `row${i}`);
+
+  // teamCount rows drawn (without replacement, so rowId is always
+  // unique) from ROW_ID_POOL, each with a parentRowRef that is either
+  // empty or a reference to an EARLIER row in the array -- guaranteed
+  // acyclic and guaranteed to resolve, so the whole generated set is
+  // always valid (no duplicate rowId, no dangling reference, no
+  // cycle).
+  const validForestArb = fc.integer({ min: 1, max: 15 }).chain((teamCount) => {
+    const rowIds = ROW_ID_POOL.slice(0, teamCount);
+
+    const parentChoiceArb = fc.array(fc.boolean(), { minLength: teamCount, maxLength: teamCount });
+    const earlierIndexArb = fc.array(fc.nat({ max: Math.max(teamCount - 1, 0) }), {
+      minLength: teamCount,
+      maxLength: teamCount
+    });
+
+    return fc.tuple(parentChoiceArb, earlierIndexArb).map(([hasParentChoices, earlierIndexes]) =>
+      rowIds.map((rowId, i) => {
+        // A row with no earlier row available is always a root.
+        const wantsParent = hasParentChoices[i] && i > 0;
+        if (!wantsParent) {
+          return { rowId, name: `Team ${rowId}` };
+        }
+        // Clamp into 0..i-1 so this edge can never point at itself or
+        // a later/nonexistent index -- guaranteed resolvable and
+        // guaranteed acyclic.
+        const earlierIndex = earlierIndexes[i] % i;
+        return { rowId, name: `Team ${rowId}`, parentRowRef: rowIds[earlierIndex] };
+      })
+    );
+  });
+
+  // Pairs a generated valid forest with a random permutation of the
+  // SAME rows (full membership preserved, only order shuffled).
+  const forestWithShuffleArb = validForestArb.chain((rows) =>
+    fc
+      .shuffledSubarray(rows, { minLength: rows.length, maxLength: rows.length })
+      .map((shuffledRows) => ({ rows, shuffledRows }))
+  );
+
+  function failedRowKeySet(graph) {
+    const failed = [];
+    for (const [key, node] of graph.nodes.entries()) {
+      if (node.status === 'failed') {
+        failed.push(key);
+      }
+    }
+    return failed.sort();
+  }
+
+  test.prop([forestWithShuffleArb], { numRuns: 100 })(
+    'every permutation of a valid row set produces the same failed-rowKey set, the same per-row resolved parent, and the same topological-ordering constraints',
+    ({ rows, shuffledRows }) => {
+      const originalGraph = buildImportGraph(rows);
+      const shuffledGraph = buildImportGraph(shuffledRows);
+
+      // This generator only produces valid (acyclic, non-duplicated)
+      // row sets -- no row should ever be failed in either graph, but
+      // assert it defensively (a generator bug would otherwise slip
+      // through unnoticed).
+      expect(failedRowKeySet(originalGraph)).toEqual([]);
+      expect(failedRowKeySet(shuffledGraph)).toEqual([]);
+
+      // Every row's resolved parent is the SAME parent rowKey in both
+      // graphs, looked up by rowKey (not by array position, since
+      // shuffling changes position but not rowId).
+      for (const row of rows) {
+        const originalNode = originalGraph.nodes.get(row.rowId);
+        const shuffledNode = shuffledGraph.nodes.get(row.rowId);
+        expect(shuffledNode.resolvedParentKey).toBe(originalNode.resolvedParentKey);
+      }
+
+      // Both creationOrder arrays are valid topological orderings of
+      // the SAME dependency graph: for every row with a resolved
+      // parent, the parent's position precedes the row's position,
+      // in BOTH graphs -- the two arrays need not be identical
+      // element-for-element, since Kahn's algorithm's exact output can
+      // depend on queue iteration order when multiple nodes are
+      // simultaneously eligible.
+      for (const graph of [originalGraph, shuffledGraph]) {
+        for (const row of rows) {
+          const node = graph.nodes.get(row.rowId);
+          if (node.resolvedParentKey !== undefined) {
+            const parentIndex = graph.creationOrder.indexOf(node.resolvedParentKey);
+            const rowIndex = graph.creationOrder.indexOf(row.rowId);
+            expect(parentIndex).toBeLessThan(rowIndex);
+          }
+        }
+        // Both creationOrder arrays contain exactly the same SET of
+        // rowKeys (every row in this valid forest, none failed).
+        expect(graph.creationOrder.slice().sort()).toEqual(rows.map((r) => r.rowId).sort());
+      }
+    }
+  );
+});
+
+/**
+ * Property-based test (design.md's Property 13: "Duplicate `rowId`
+ * values reject the entire import before any creation") for
+ * `buildImportGraph`'s whole-file duplicate-`rowId` rejection
+ * (Requirement 9.2; task 17.4).
+ *
+ * This is PURE logic -- no mocks needed -- matching the surrounding
+ * `describe('BulkImportService.buildImportGraph', ...)` and
+ * `describe('BulkImportService.buildImportGraph cycle detection', ...)`
+ * blocks' conventions.
+ *
+ * Generator: a small pool of candidate rowId values (2-5), and a list of
+ * 2-15 rows each assigned a rowId drawn from that pool (with
+ * replacement) plus a name. A small pool relative to the row count
+ * guarantees at least one rowId value is duplicated by construction
+ * (pigeonhole), without needing to explicitly special-case a "first
+ * duplicate pair".
+ *
+ * Feature: org-team-hierarchy, task 17.4
+ * Validates: Requirements 9.2
+ */
+describe('Property 13: Duplicate rowId values reject the entire import before any creation', () => {
+  // Generated candidate rowId values are constrained to strings that are
+  // already equal to their own trimmed form (buildImportGraph reads
+  // every field via `readOptionalField`, which trims -- so a generated
+  // value that differs only in leading/trailing whitespace from another
+  // would collide there but not in this test's own untrimmed count,
+  // producing a false property failure unrelated to duplicate-rowId
+  // rejection itself).
+  const rowIdPoolArb = fc.uniqueArray(
+    fc.string({ minLength: 1, maxLength: 8 }).filter((s) => s.trim() === s && s !== ''),
+    { minLength: 2, maxLength: 5 }
+  );
+
+  // A row count comfortably larger than the pool's max size (5) so that,
+  // combined with a pool of only 2-5 distinct values, the pigeonhole
+  // principle guarantees at least one value is duplicated.
+  const rowsFromPoolArb = rowIdPoolArb.chain((pool) =>
+    fc
+      .array(fc.integer({ min: 0, max: pool.length - 1 }), { minLength: 6, maxLength: 15 })
+      .map((poolIndexes) => poolIndexes.map((i, rowIndex) => ({ rowId: pool[i], name: `Row ${rowIndex}` })))
+  );
+
+  test.prop([rowsFromPoolArb], { numRuns: 100 })(
+    'wholeFileErrors names exactly the set of rowId values that occur 2+ times, and no team is created from that file',
+    (rows) => {
+      const graph = buildImportGraph(rows);
+
+      // Independently compute (fresh, not via buildImportGraph's own
+      // counting logic) which rowId values are duplicated 2+ times.
+      const counts = new Map();
+      rows.forEach((row) => {
+        counts.set(row.rowId, (counts.get(row.rowId) || 0) + 1);
+      });
+      const duplicatedValues = Array.from(counts.entries())
+        .filter(([, count]) => count > 1)
+        .map(([rowId]) => rowId);
+
+      // This generator's pool-vs-row-count construction should always
+      // yield at least one duplicate; guard so the property is never
+      // vacuously true.
+      expect(duplicatedValues.length).toBeGreaterThan(0);
+
+      const duplicateErrors = graph.wholeFileErrors.filter((e) => e.error.startsWith('Duplicate rowId'));
+
+      // Exactly one wholeFileErrors entry per duplicated value -- no
+      // fewer, no more -- each naming that value.
+      expect(duplicateErrors).toHaveLength(duplicatedValues.length);
+      for (const value of duplicatedValues) {
+        expect(duplicateErrors).toContainEqual({ error: `Duplicate rowId: ${value}`, rowIds: [value] });
+      }
+
+      // "No team is created from that file" is enforced one layer up,
+      // by `importTeams`'s own `if (graph.wholeFileErrors.length > 0)
+      // return {..., rejected: true}` short-circuit before Phase 2 ever
+      // runs `Team.create` (covered by the existing 'rejects the whole
+      // file and creates zero teams when a rowId is duplicated' test
+      // above) -- this property, scoped to `buildImportGraph` itself,
+      // only needs to confirm the file IS flagged for rejection via a
+      // non-empty `wholeFileErrors`.
+      expect(graph.wholeFileErrors.length).toBeGreaterThan(0);
+    }
+  );
+});
+
+/**
+ * Unit tests for `BulkImportService.importUserRow`'s callsign_suffix
+ * resolution wiring (Requirements 11.6, 11.7, 11.14, 11.15; task 22.2).
+ *
+ * Covers: a successful import passing an optional `callsignSuffix` CSV
+ * column through to `resolveCallsignSuffixForNewUser` and on to
+ * `createAndAddUser`; a `CallsignSuffixRequiredError`/
+ * `CallsignSuffixConflictError` thrown for one row being recorded as
+ * THAT row's own failure via `importUsers`'s existing per-row catch,
+ * with the rest of the batch continuing; and confirming
+ * `authentikService.createUser` is never called for the failing row.
+ */
+describe('BulkImportService.importUserRow callsign_suffix resolution (task 22.2)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    pool.connect.mockImplementation(() => Promise.resolve(buildMockClient()));
+    authentikService.createUser.mockResolvedValue({ pk: 1000 });
+    UserProvisioningService.createAndAddUser.mockResolvedValue({ localUserId: 42, queuedGroups: 1 });
+    Team.isAdmin.mockResolvedValue(true);
+  });
+
+  function csvFromUserRowsWithSuffix(rows) {
+    const header = 'email,firstName,lastName,teamId,username,callsignSuffix';
+    const lines = rows.map((r) => [
+      r.email ?? '', r.firstName ?? '', r.lastName ?? '', r.teamId ?? '', r.username ?? '', r.callsignSuffix ?? ''
+    ].join(','));
+    return [header, ...lines].join('\n');
+  }
+
+  it('reads the optional callsignSuffix column and passes it through resolution to createAndAddUser', async () => {
+    UserProvisioningService.resolveCallsignSuffixForNewUser.mockResolvedValue('J.Doe');
+    const csv = csvFromUserRowsWithSuffix([
+      { email: 'jdoe@example.com', firstName: 'John', lastName: 'Doe', teamId: '5', callsignSuffix: 'J.Doe' }
+    ]);
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importUsers(csv, importingUser);
+
+    expect(summary.successCount).toBe(1);
+    expect(UserProvisioningService.resolveCallsignSuffixForNewUser).toHaveBeenCalledWith(null, {
+      firstName: 'John',
+      lastName: 'Doe',
+      teamId: 5,
+      requestedCallsignSuffix: 'J.Doe'
+    });
+    expect(UserProvisioningService.createAndAddUser).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ callsign_suffix: 'J.Doe' })
+    );
+  });
+
+  it('passes undefined requestedCallsignSuffix when the CSV column is omitted/empty', async () => {
+    UserProvisioningService.resolveCallsignSuffixForNewUser.mockResolvedValue('J-Doe');
+    const csv = csvFromRows([
+      { email: 'jdoe@example.com', firstName: 'John', lastName: 'Doe', teamId: '5' }
+    ]);
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    await BulkImportService.importUsers(csv, importingUser);
+
+    expect(UserProvisioningService.resolveCallsignSuffixForNewUser).toHaveBeenCalledWith(null, {
+      firstName: 'John',
+      lastName: 'Doe',
+      teamId: 5,
+      requestedCallsignSuffix: undefined
+    });
+  });
+
+  it('records a CallsignSuffixRequiredError as that row\'s own failure, continuing the rest of the batch, without calling Authentik for that row', async () => {
+    const { CallsignSuffixRequiredError } = jest.requireActual('./UserProvisioningService');
+    const csv = csvFromRows([
+      { email: 'alice@example.com', firstName: 'Alice', lastName: 'Smith', teamId: '5' },
+      { email: 'bob@example.com', firstName: 'Bob', lastName: 'Jones', teamId: '5' },
+      { email: 'carol@example.com', firstName: 'Carol', lastName: 'Lee', teamId: '5' }
+    ]);
+
+    UserProvisioningService.resolveCallsignSuffixForNewUser
+      .mockResolvedValueOnce('A.Smith')
+      .mockRejectedValueOnce(new CallsignSuffixRequiredError())
+      .mockResolvedValueOnce('C.Lee');
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importUsers(csv, importingUser);
+
+    expect(summary.successCount).toBe(2);
+    expect(summary.failureCount).toBe(1);
+    expect(summary.results[1].success).toBe(false);
+    expect(summary.results[1].error).toMatch(/callsign suffix is required/i);
+
+    // The failing row never reached Authentik user creation.
+    expect(authentikService.createUser).toHaveBeenCalledTimes(2);
+    expect(authentikService.createUser).not.toHaveBeenCalledWith(
+      expect.objectContaining({ email: 'bob@example.com' })
+    );
+  });
+
+  it('records a CallsignSuffixConflictError as that row\'s own failure, continuing the rest of the batch, without calling Authentik for that row', async () => {
+    const { CallsignSuffixConflictError } = jest.requireActual('./CallsignSuffixUniquenessService');
+    const csv = csvFromRows([
+      { email: 'alice@example.com', firstName: 'Alice', lastName: 'Smith', teamId: '5' },
+      { email: 'bob@example.com', firstName: 'Bob', lastName: 'Jones', teamId: '5' }
+    ]);
+
+    UserProvisioningService.resolveCallsignSuffixForNewUser
+      .mockResolvedValueOnce('A.Smith')
+      .mockRejectedValueOnce(new CallsignSuffixConflictError('A.Smith'));
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importUsers(csv, importingUser);
+
+    expect(summary.successCount).toBe(1);
+    expect(summary.failureCount).toBe(1);
+    expect(summary.results[1].success).toBe(false);
+    expect(summary.results[1].error).toMatch(/A\.Smith/);
+
+    expect(authentikService.createUser).toHaveBeenCalledTimes(1);
+    expect(authentikService.createUser).not.toHaveBeenCalledWith(
+      expect.objectContaining({ email: 'bob@example.com' })
+    );
+  });
 });

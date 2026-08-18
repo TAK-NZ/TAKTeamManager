@@ -1022,3 +1022,32 @@ describe('atomicFileWrite against the real filesystem (Requirement 32.4)', () =>
     expect(destinationExists).toBe(false);
   });
 });
+
+/**
+ * `TAK_ROLE_VALUES` export (task 27.1, Requirement 13.4): the flat
+ * allow-list of TAK_Role display values, derived from `ROLE_KEY_LABELS`,
+ * for later Member_List/CSV-import `TAK_Role` edit validation to reuse.
+ */
+describe('TAK_ROLE_VALUES export', () => {
+  it('is an array equal to Object.values(ROLE_KEY_LABELS)', () => {
+    const { TAK_ROLE_VALUES, ROLE_KEY_LABELS } = require('./settings');
+
+    expect(Array.isArray(TAK_ROLE_VALUES)).toBe(true);
+    expect(TAK_ROLE_VALUES).toEqual(Object.values(ROLE_KEY_LABELS));
+  });
+
+  it('contains every expected TAK_Role display label', () => {
+    const { TAK_ROLE_VALUES } = require('./settings');
+
+    expect(TAK_ROLE_VALUES).toEqual([
+      'Team Member',
+      'Team Lead',
+      'Sniper',
+      'Medic',
+      'Forward Observer',
+      'RTO',
+      'K9',
+      'HQ'
+    ]);
+  });
+});

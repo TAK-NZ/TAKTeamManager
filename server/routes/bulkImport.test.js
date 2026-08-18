@@ -150,6 +150,27 @@ describe('POST /api/bulk-import/teams', () => {
     expect(userArg).toEqual(mockUser);
   });
 
+  it('passes through a rejected: true whole-file-rejection response body unchanged, with 200', async () => {
+    mockUser = { id: 'authentik-1', userId: 1, is_global_manager: true };
+    const serviceResult = {
+      successCount: 0,
+      failureCount: 2,
+      results: [
+        { error: 'Duplicate rowId: org1', rowIds: ['org1'] }
+      ],
+      rejected: true
+    };
+    BulkImportService.importTeams.mockResolvedValue(serviceResult);
+
+    const res = await request(app)
+      .post('/api/bulk-import/teams')
+      .attach('csv', Buffer.from('rowId,name\norg1,FENZ A\norg1,FENZ B\n'), { filename: 'teams.csv', contentType: 'text/csv' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(serviceResult);
+    expect(BulkImportService.importTeams).toHaveBeenCalledTimes(1);
+  });
+
   it('rejects a non-Global_Manager caller with 403 at the registry/permission layer and never calls the service', async () => {
     mockUser = { id: 'authentik-2', userId: 2, is_global_manager: false };
 

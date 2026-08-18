@@ -1,6 +1,7 @@
 const pool = require('../config/database');
 const EventPublisher = require('./EventPublisher');
 const GroupMembershipCalculator = require('./GroupMembershipCalculator');
+const { checkCallsignSuffixUniqueness } = require('./CallsignSuffixUniquenessService');
 
 class TeamMembershipService {
   /**
@@ -36,6 +37,26 @@ class TeamMembershipService {
         await client.query('BEGIN');
       }
 
+      // Requirement 11.18 (task 25.1): before writing anything, reject a
+      // membership change that would create a same-Team `callsign_suffix`
+      // collision in the DESTINATION team. This reads the user's OWN
+      // current `callsign_suffix` (this method never sets/changes it --
+      // Requirement 11.8) on the SAME `client` as every other read/write
+      // in this method, so it participates in the same transaction. Any
+      // existing row this user already holds in `teamId` (an edge case)
+      // is excluded via `excludeUserId` so it never spuriously conflicts
+      // with itself. `checkCallsignSuffixUniqueness` already no-ops for a
+      // null/empty `callsign_suffix`, so no extra guard is needed here.
+      // Placed AFTER `BEGIN` (when this method owns the transaction) so a
+      // thrown `CallsignSuffixConflictError` is routed through this
+      // method's existing catch block's `ROLLBACK`/`release` cleanup like
+      // any other failure in this method, uniformly -- even though, since
+      // this check runs before any write, there is nothing yet to roll
+      // back for this specific failure.
+      const userResult = await client.query('SELECT callsign_suffix FROM users WHERE id = $1', [userId]);
+      const ownCallsignSuffix = userResult.rows[0]?.callsign_suffix;
+      await checkCallsignSuffixUniqueness(teamId, ownCallsignSuffix, userId);
+
       // Remove user from current team if any
       await client.query('DELETE FROM team_memberships WHERE user_id = $1', [userId]);
       
@@ -44,7 +65,29 @@ class TeamMembershipService {
         'INSERT INTO team_memberships (user_id, team_id, role) VALUES ($1, $2, $3)',
         [userId, teamId, role]
       );
-      
+
+      // Create inherited membership rows for all ancestor teams so the user
+      // appears in each parent/org's member list (matching
+      // UserProvisioningService.createAndAddUser's established behavior).
+      const parentTeamsResult = await client.query(`
+        WITH RECURSIVE parent_teams AS (
+          SELECT parent_team_id FROM teams WHERE id = $1 AND parent_team_id IS NOT NULL
+          UNION ALL
+          SELECT t.parent_team_id
+          FROM teams t
+          JOIN parent_teams pt ON t.id = pt.parent_team_id
+          WHERE t.parent_team_id IS NOT NULL
+        )
+        SELECT parent_team_id as team_id FROM parent_teams
+      `, [teamId]);
+
+      for (const parentTeam of parentTeamsResult.rows) {
+        await client.query(
+          'INSERT INTO team_memberships (team_id, user_id, role, inherited_from_team_id) VALUES ($1, $2, $3, $4) ON CONFLICT (user_id, team_id) DO NOTHING',
+          [parentTeam.team_id, userId, 'inherited', teamId]
+        );
+      }
+
       // Get team hierarchy and their primary channels. Selects every
       // ancestor's primary channel regardless of whether it has an
       // Authentik group id yet (unlike the old query, which filtered on

@@ -4,6 +4,186 @@ import { useParams, Link } from 'react-router-dom'
 import { PlusIcon, UsersIcon, UserPlusIcon, ShieldCheckIcon, BuildingOfficeIcon, FolderPlusIcon, HashtagIcon, XMarkIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, TrashIcon, PencilIcon, CheckIcon, ArrowLeftOnRectangleIcon } from '@heroicons/react/24/outline'
 import { teamsAPI, channelsAPI, usersAPI, configAPI } from '../services/api'
 import api from '../services/api'
+import { labelFor } from '../utils/teamLabels'
+import { computeTeamDepth } from '../utils/teamDepth'
+import TeamFormDialog from '../components/TeamFormDialog'
+
+// Requirement 5's two new `callsign_name_format` values need example
+// strings alongside the three existing ones, matching the "J Doe"/"John D"
+// pattern already used for `first_initial_last`/`first_last_initial`.
+// `first_initial_dot_last` -> "J.Doe" (Requirement 8.6), `user_defined` ->
+// "Custom" (Requirement 11.5, since that format computes no default at
+// all -- there is no single example name to show).
+const CALLSIGN_NAME_FORMAT_EXAMPLES = {
+  full_name: 'John Doe',
+  first_initial_last: 'J Doe',
+  first_last_initial: 'John D',
+  first_initial_dot_last: 'J.Doe',
+  user_defined: 'Custom'
+}
+
+export function formatCallsignNameFormatExample(callsignNameFormat) {
+  return CALLSIGN_NAME_FORMAT_EXAMPLES[callsignNameFormat] || CALLSIGN_NAME_FORMAT_EXAMPLES.full_name
+}
+
+// Requirement 5.7-5.11 (task 33.1): a compact "Levels: 1, 2, 4" summary
+// read from the Organisation's `callsign_level_selection`, replacing the
+// old single-depth "Depth N" badge (which assumed only a contiguous
+// prefix of levels could ever be selected).
+export function formatCallsignLevels(callsignLevelSelection) {
+  if (!Array.isArray(callsignLevelSelection) || callsignLevelSelection.length === 0) {
+    return 'All'
+  }
+  return callsignLevelSelection.slice().sort((a, b) => a - b).join(', ')
+}
+
+// Requirement 2.4/2.5: `computeTeamDepth` now lives in
+// `../utils/teamDepth.js` (shared with Teams.jsx's Parent-Team dropdown,
+// task 32.2), re-exported here so this file's own JSX and existing tests
+// keep working unchanged.
+export { computeTeamDepth }
+
+// Requirement 11.3/11.13 (task 33.2): mirrors
+// server/utils/callsignValidation.js's `isValidCallsignSuffix` character
+// class (letters, digits, `-`, `.`) as an HTML `pattern`, matching the
+// same convention already used by RequestAccess.jsx's "Preferred
+// Callsign Suffix" input (task 34.1).
+const CALLSIGN_SUFFIX_PATTERN = '[A-Za-z0-9.-]*'
+const CALLSIGN_SUFFIX_REGEX = /^[A-Za-z0-9.-]*$/
+
+// Requirement 3.10 (task 33.3): mirrors server/utils/callsignValidation.js's
+// `isValidCallsignPrefix` character class (letters and digits only, no `-`
+// -- stricter than `callsign_suffix` above, per Requirement 3.8) as an
+// HTML `pattern`, applied to the Create Sub-Team Dialog's own "Prefix"
+// input (`subTeamFormData.callsignPrefix`), the same treatment task 32.6
+// applies to the equivalent input in Teams.jsx.
+const CALLSIGN_PREFIX_PATTERN = '[A-Za-z0-9]*'
+const CALLSIGN_PREFIX_REGEX = /^[A-Za-z0-9]*$/
+
+// Pure validation helper for the Create Sub-Team Dialog's `callsignPrefix`
+// input, mirroring `isValidMemberCallsignSuffix` below's convention -- an
+// empty value is valid (the field is optional).
+export function isValidSubTeamCallsignPrefix(value) {
+  if (!value) {
+    return true
+  }
+  return CALLSIGN_PREFIX_REGEX.test(value)
+}
+
+// The 8 predefined TAK_Role values (Requirement 13.4/13.5), used as a
+// fallback default for the Member_List edit form's `<select>` before
+// `GET /api/config/public`'s `takRoleValues` field (added alongside this
+// task) has loaded, so the select is never empty on first render.
+const DEFAULT_TAK_ROLE_VALUES = ['Team Member', 'Team Lead', 'Sniper', 'Medic', 'Forward Observer', 'RTO', 'K9', 'HQ']
+
+// Requirements 13.1, 13.2, 13.5 (task 33.2): the initial per-row edit-form
+// values seeded from a Member_List row when its "Edit" pencil icon is
+// clicked. Extracted as a standalone pure function (rather than inlined
+// in the click handler) so the pre-fill rule can be unit tested without
+// rendering the component, matching this file's own
+// `formatCallsignLevels`/`formatCallsignNameFormatExample` convention.
+// Deliberately excludes `email` (Requirement 13.3 -- there is no input
+// control for it anywhere in this form).
+export function getInitialMemberEditForm(member) {
+  return {
+    firstName: member?.first_name || '',
+    lastName: member?.last_name || '',
+    takRole: member?.tak_role || 'Team Member',
+    callsignSuffix: member?.callsign_suffix || ''
+  }
+}
+
+// Requirement 11.3 (task 33.2): pure validation helper for the Member_List
+// edit form's `callsign_suffix` input, mirroring
+// server/utils/callsignValidation.js's `isValidCallsignSuffix` -- an
+// empty value is valid (the field is optional).
+export function isValidMemberCallsignSuffix(value) {
+  if (!value) {
+    return true
+  }
+  return CALLSIGN_SUFFIX_REGEX.test(value)
+}
+
+// Requirements 11.13, 13.1, 13.2, 13.3, 13.5 (task 33.2): the per-row
+// inline Member_List edit form, rendered as a single wide table row in
+// place of the member/admin's normal row when its "Edit" pencil icon has
+// been clicked. Shared between the Members and Team Admins tabs (both
+// call it identically) since the editable field set is the same
+// regardless of which tab the row came from. Email is intentionally NOT
+// rendered as an input anywhere in this form (Requirement 13.3).
+function MemberEditRow({ colSpan, form, setForm, takRoleValues, saving, error, onSave, onCancel }) {
+  return (
+    <tr className="bg-gray-50 dark:bg-gray-800">
+      <td colSpan={colSpan} className="px-6 py-4">
+        <div className="flex flex-wrap items-start gap-4">
+          <div>
+            <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">First Name</label>
+            <input
+              type="text"
+              value={form.firstName}
+              onChange={(e) => setForm({ ...form, firstName: e.target.value })}
+              className="input"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Last Name</label>
+            <input
+              type="text"
+              value={form.lastName}
+              onChange={(e) => setForm({ ...form, lastName: e.target.value })}
+              className="input"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">TAK Role</label>
+            <select
+              value={form.takRole}
+              onChange={(e) => setForm({ ...form, takRole: e.target.value })}
+              className="input"
+            >
+              {takRoleValues.map((role) => (
+                <option key={role} value={role}>{role}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Callsign Suffix</label>
+            <input
+              type="text"
+              value={form.callsignSuffix}
+              onChange={(e) => setForm({ ...form, callsignSuffix: e.target.value })}
+              className="input"
+              pattern={CALLSIGN_SUFFIX_PATTERN}
+              title="Only letters, digits, - and . are allowed"
+              placeholder="J.Doe"
+            />
+          </div>
+          <div className="flex items-end space-x-2 pb-0.5">
+            <button
+              type="button"
+              onClick={onSave}
+              disabled={saving}
+              className="btn-primary px-4 py-2 text-sm"
+            >
+              {saving ? 'Saving...' : 'Save'}
+            </button>
+            <button
+              type="button"
+              onClick={onCancel}
+              disabled={saving}
+              className="btn-secondary px-4 py-2 text-sm"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+        {error && (
+          <p className="text-red-600 text-sm mt-2">{error}</p>
+        )}
+      </td>
+    </tr>
+  )
+}
 
 export default function TeamDetail({ refreshUser }) {
   const { teamId } = useParams()
@@ -53,21 +233,20 @@ export default function TeamDetail({ refreshUser }) {
   const [deleteSubTeamId, setDeleteSubTeamId] = useState(null)
   const [deletingSubTeam, setDeletingSubTeam] = useState(false)
   const [allTeams, setAllTeams] = useState([])
+  // Bugfix: Edit Team is now the same shared `TeamFormDialog` component
+  // Teams.jsx uses (previously this page had its own stale, drifted copy
+  // of this dialog -- missing Callsign_Level_Selection toggles, two of
+  // the five callsign_name_format options, and still exposing the
+  // removed "Callsign Sub-team Depth" field). This page only tracks
+  // whether the dialog is open; the team being edited is always `team`
+  // itself, since TeamDetail.jsx only ever edits its own team.
   const [showEditDialog, setShowEditDialog] = useState(false)
-  const [editFormData, setEditFormData] = useState({
-    name: '',
-    description: '',
-    callsignPrefix: '',
-    color: 'Blue',
-    visibility: 'public',
-    canJoin: false,
-    parentTeamId: null,
-    callsignSubteamDepth: 1,
-    callsignNameFormat: 'full_name'
-  })
-  const [updating, setUpdating] = useState(false)
   const [colorMappings, setColorMappings] = useState({})
   const [folderSeparator, setFolderSeparator] = useState(' - ')
+  // Requirement 2.4/2.5 (task 33.1): the system-wide Max_Team_Depth
+  // constant, sourced from GET /api/config/public so it's never
+  // hardcoded a second time on the Client.
+  const [maxTeamDepth, setMaxTeamDepth] = useState(null)
   const [showChannelDialog, setShowChannelDialog] = useState(false)
   const [channelFormData, setChannelFormData] = useState({
     customSuffix: '',
@@ -76,6 +255,12 @@ export default function TeamDetail({ refreshUser }) {
   const [creatingChannel, setCreatingChannel] = useState(false)
   const [showAddMemberDialog, setShowAddMemberDialog] = useState(false)
   const [addMemberTab, setAddMemberTab] = useState('existing')
+  // Bugfix: the "Add Admin" button reuses this same Add Member Dialog
+  // rather than a separate dialog -- this tracks which role the dialog's
+  // "existing user"/"create new user" flows should add the selected/new
+  // user with. Set to 'admin' by the "Add Admin" button and 'member' by
+  // the "Add Member" button, both just before opening the dialog.
+  const [addMemberRole, setAddMemberRole] = useState('member')
   const [availableUsers, setAvailableUsers] = useState([])
   const [userSearch, setUserSearch] = useState('')
   const [selectedUserId, setSelectedUserId] = useState('')
@@ -88,6 +273,21 @@ export default function TeamDetail({ refreshUser }) {
   const [removeUserId, setRemoveUserId] = useState(null)
   const [removeUserRole, setRemoveUserRole] = useState('')
   const [removingUser, setRemovingUser] = useState(false)
+  // Requirements 11.13, 13.1, 13.2, 13.3, 13.5 (task 33.2): per-row inline
+  // Member_List edit state. `editingMemberId` tracks which member/admin row
+  // (by user id) currently has its inline edit form open -- at most one row
+  // across BOTH the Members and Team Admins tabs, since a user can only be
+  // editing one row at a time. `memberEditForm` holds that row's current
+  // form values; `savingMemberEdit`/`memberEditError` track the in-flight
+  // PATCH request and any surfaced failure (Requirement 14.2).
+  const [editingMemberId, setEditingMemberId] = useState(null)
+  const [memberEditForm, setMemberEditForm] = useState({ firstName: '', lastName: '', takRole: 'Team Member', callsignSuffix: '' })
+  const [savingMemberEdit, setSavingMemberEdit] = useState(false)
+  const [memberEditError, setMemberEditError] = useState(null)
+  // Requirement 13.5: the 8 predefined TAK_Role values, sourced from
+  // GET /api/config/public's `takRoleValues` field so this Client never
+  // hardcodes a second copy of settings.js's ROLE_KEY_LABELS allow-list.
+  const [takRoleValues, setTakRoleValues] = useState(DEFAULT_TAK_ROLE_VALUES)
 
   const handleCreateSubTeam = async (e) => {
     e.preventDefault()
@@ -198,7 +398,20 @@ export default function TeamDetail({ refreshUser }) {
     
     setAddingMember(true)
     try {
-      await usersAPI.addToTeam(selectedUserId, team.id)
+      // Bugfix (Add Admin button): usersAPI.addToTeam (POST
+      // /users/add-to-team) always adds the user with role 'member' --
+      // it has no role parameter at all (server/routes/users.js). When
+      // adding as an admin, use teamsAPI.addMember (POST
+      // /teams/:teamId/members) instead, which does accept role:
+      // 'admin'|'member' (server/routes/teams.js). The plain-member path
+      // keeps using usersAPI.addToTeam unchanged, to avoid altering its
+      // existing behavior (e.g. the "already a member of another team"
+      // check and channel/group assignment it performs).
+      if (addMemberRole === 'admin') {
+        await teamsAPI.addMember(team.id, { userId: selectedUserId, role: 'admin' })
+      } else {
+        await usersAPI.addToTeam(selectedUserId, team.id)
+      }
       
       // Refresh team data
       const teamResponse = await teamsAPI.getById(team.id)
@@ -212,6 +425,7 @@ export default function TeamDetail({ refreshUser }) {
       setShowAddMemberDialog(false)
       setSelectedUserId('')
       setUserSearch('')
+      setAddMemberRole('member')
     } catch (error) {
       console.error('Failed to add user:', error)
       alert('Failed to add user: ' + (error.response?.data?.error || error.message))
@@ -224,6 +438,16 @@ export default function TeamDetail({ refreshUser }) {
     e.preventDefault()
     setAddingMember(true)
     try {
+      // Note (Add Admin button limitation): usersAPI.createAndAdd (POST
+      // /users/create-and-add) always creates the new user's membership
+      // with role 'member' -- UserProvisioningService.createAndAddUser
+      // hardcodes 'member' with no role parameter, and the route accepts
+      // no role field either. So a brand-new user created via this
+      // "Create New User" tab is always added as a plain member, even
+      // when addMemberRole === 'admin' (i.e. the dialog was opened via
+      // "Add Admin"). Bug A's primary complaint is that the "Add Admin"
+      // button did nothing at all; full admin-at-creation support here
+      // would require a server-side change and is left as a follow-up.
       await usersAPI.createAndAdd(
         newUserForm.email,
         newUserForm.firstName,
@@ -242,6 +466,7 @@ export default function TeamDetail({ refreshUser }) {
       
       setShowAddMemberDialog(false)
       setNewUserForm({ email: '', firstName: '', lastName: '' })
+      setAddMemberRole('member')
     } catch (error) {
       console.error('Failed to create user:', error)
       alert('Failed to create user: ' + (error.response?.data?.error || error.message))
@@ -253,13 +478,95 @@ export default function TeamDetail({ refreshUser }) {
   // Fetch available users when dialog opens
   React.useEffect(() => {
     if (showAddMemberDialog && addMemberTab === 'existing') {
-      fetchAvailableUsers(userSearch)
+      if (addMemberRole === 'admin') {
+        // For promoting to admin: show existing team members (not already admin)
+        // that match the search term, rather than only unassigned users.
+        const candidates = members.filter(m => {
+          const isAlreadyAdmin = admins.some(a => a.id === m.id)
+          if (isAlreadyAdmin) return false
+          if (!userSearch) return true
+          const searchLower = userSearch.toLowerCase()
+          return (
+            (m.first_name && m.first_name.toLowerCase().includes(searchLower)) ||
+            (m.last_name && m.last_name.toLowerCase().includes(searchLower)) ||
+            (m.email && m.email.toLowerCase().includes(searchLower))
+          )
+        }).map(m => ({
+          id: m.id,
+          email: m.email,
+          first_name: m.first_name,
+          last_name: m.last_name
+        }))
+        setAvailableUsers(candidates)
+      } else {
+        fetchAvailableUsers(userSearch)
+      }
     }
-  }, [showAddMemberDialog, addMemberTab, userSearch])
+  }, [showAddMemberDialog, addMemberTab, userSearch, addMemberRole, members, admins])
 
   const handleRemoveUser = (userId, role) => {
     setRemoveUserId(userId)
     setRemoveUserRole(role)
+  }
+
+  // Requirements 11.13, 13.1, 13.2, 13.5 (task 33.2): opens the inline
+  // edit form for a single Member_List row, seeded from that row's
+  // current values via `getInitialMemberEditForm`.
+  const handleStartEditMember = (member) => {
+    setEditingMemberId(member.id)
+    setMemberEditForm(getInitialMemberEditForm(member))
+    setMemberEditError(null)
+  }
+
+  const handleCancelEditMember = () => {
+    setEditingMemberId(null)
+    setMemberEditError(null)
+  }
+
+  // Requirement 14.3: updates BOTH `members` and `admins` local state from
+  // teamsAPI.updateMember's own response (`response.data.member`), rather
+  // than optimistically applying the submitted form values -- so a value
+  // rejected/altered server-side is never shown as if it had been saved.
+  const applyUpdatedMemberToLocalState = (userId, updatedMember) => {
+    const mergeRow = (row) => (row.id === userId ? { ...row, ...updatedMember } : row)
+    setMembers((prev) => prev.map(mergeRow))
+    setAdmins((prev) => prev.map(mergeRow))
+  }
+
+  // Requirements 11.13, 11.16, 13.2, 13.3, 13.4, 13.6, 14.2, 14.3 (task
+  // 33.2): submits the inline edit form's current values to
+  // `PATCH /api/teams/:teamId/members/:userId`. Email is never included
+  // (Requirement 13.3 -- there is no input control for it in this form at
+  // all). On success, reflects the actual server response in local state
+  // (never optimistic-only) and closes the form; on failure (e.g. a 400
+  // `callsign_suffix` conflict per Requirement 11.16, or any other 4xx/5xx),
+  // surfaces the server's error message inline and keeps the form open so
+  // the admin can correct and retry (Requirement 14.2).
+  const handleSaveMemberEdit = async (userId) => {
+    if (!isValidMemberCallsignSuffix(memberEditForm.callsignSuffix)) {
+      setMemberEditError('Callsign suffix may only contain letters, digits, "-", and "."')
+      return
+    }
+
+    setSavingMemberEdit(true)
+    setMemberEditError(null)
+    try {
+      const response = await teamsAPI.updateMember(team.id, userId, {
+        firstName: memberEditForm.firstName,
+        lastName: memberEditForm.lastName,
+        takRole: memberEditForm.takRole,
+        callsignSuffix: memberEditForm.callsignSuffix
+      })
+      applyUpdatedMemberToLocalState(userId, response.data.member)
+      setEditingMemberId(null)
+    } catch (error) {
+      console.error('Failed to update team member:', error)
+      setMemberEditError(
+        error.response?.data?.error || error.response?.data?.errors?.[0]?.msg || 'Failed to update member'
+      )
+    } finally {
+      setSavingMemberEdit(false)
+    }
   }
 
   const confirmRemoveUser = async () => {
@@ -370,6 +677,10 @@ export default function TeamDetail({ refreshUser }) {
               setAllTeams(allTeamsResponse.data.teams || [])
               setColorMappings(configResponse.data.colorMappings || {})
               setFolderSeparator(publicConfigResponse.data.channel_folder_separator || ' - ')
+              setMaxTeamDepth(publicConfigResponse.data.maxTeamDepth ?? null)
+              if (Array.isArray(publicConfigResponse.data.takRoleValues) && publicConfigResponse.data.takRoleValues.length > 0) {
+                setTakRoleValues(publicConfigResponse.data.takRoleValues)
+              }
             }
           } catch (err) {
             console.error('Failed to fetch teams:', err)
@@ -525,6 +836,13 @@ export default function TeamDetail({ refreshUser }) {
     })
   }
 
+  // Requirement 1.1/1.2: "Organisation" for a root team, "Team" otherwise.
+  const teamLabel = labelFor(team)
+  // Requirement 2.4/2.5: this team's own Team_Depth, compared against
+  // maxTeamDepth to disable "Add Sub-team" at the deepest permitted level.
+  const teamDepth = computeTeamDepth(team, allTeams)
+  const atMaxTeamDepth = maxTeamDepth != null && teamDepth >= maxTeamDepth
+
   return (
     <div className="space-y-6">
       {/* Team Header */}
@@ -533,7 +851,7 @@ export default function TeamDetail({ refreshUser }) {
           <div className="flex-1">
             <div className="flex items-center space-x-2 mb-2">
               <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
-                {team.parent_team_id ? `${parentTeam?.callsign_prefix || parentTeam?.name || 'Root'} - ${team.name}` : team.name}
+                {team.parent_team_id ? `${parentTeam?.callsign_prefix || parentTeam?.name || 'Organisation'} - ${team.name}` : team.name}
               </h1>
               {team.color && (
                 <div 
@@ -549,10 +867,10 @@ export default function TeamDetail({ refreshUser }) {
             {team.parent_team_id && (
               <div className="mb-3">
                 <div className="text-sm text-gray-500 dark:text-gray-400">
-                  <span className="font-medium">Team Name:</span> {team.name}
+                  <span className="font-medium">{teamLabel} Name:</span> {team.name}
                 </div>
                 <div className="text-sm text-gray-500 dark:text-gray-400">
-                  <span className="font-medium">Display Name:</span> {parentTeam?.callsign_prefix || parentTeam?.name || 'Root'} - {team.name}
+                  <span className="font-medium">Display Name:</span> {parentTeam?.callsign_prefix || parentTeam?.name || 'Organisation'} - {team.name}
                 </div>
               </div>
             )}
@@ -560,7 +878,7 @@ export default function TeamDetail({ refreshUser }) {
             <div className="space-y-2">
               <div className="flex items-center text-sm text-gray-500 dark:text-gray-400">
                 <BuildingOfficeIcon className="h-4 w-4 mr-1" />
-                <span>Parent Team: </span>
+                <span>Parent {parentTeam ? labelFor(parentTeam) : 'Organisation'}: </span>
                 {parentTeam ? (
                   <Link 
                     to={`/teams/${parentTeam.id}`}
@@ -573,7 +891,7 @@ export default function TeamDetail({ refreshUser }) {
                     to="/teams"
                     className="ml-1 text-primary-600 hover:text-primary-500 dark:text-primary-400 dark:hover:text-primary-300"
                   >
-                    Root
+                    Organisation
                   </Link>
                 )}
               </div>
@@ -604,12 +922,14 @@ export default function TeamDetail({ refreshUser }) {
                 {!team.parent_team_id && (
                   <div className="flex items-center">
                     <span>Callsign: </span>
-                    <span className="ml-1 px-2 py-1 text-xs font-medium rounded-full bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200">
-                      Depth {team.callsign_subteam_depth || 1}
+                    <span
+                      className="ml-1 px-2 py-1 text-xs font-medium rounded-full bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200"
+                      title="Team-Depth positions included in generated callsigns for this Organisation"
+                    >
+                      Levels: {formatCallsignLevels(team.callsign_level_selection)}
                     </span>
                     <span className="ml-1 px-2 py-1 text-xs font-medium rounded-full bg-indigo-100 text-indigo-800 dark:bg-indigo-900 dark:text-indigo-200">
-                      {team.callsign_name_format === 'first_initial_last' ? 'J Doe' : 
-                       team.callsign_name_format === 'first_last_initial' ? 'John D' : 'John Doe'}
+                      {formatCallsignNameFormatExample(team.callsign_name_format)}
                     </span>
                   </div>
                 )}
@@ -619,33 +939,23 @@ export default function TeamDetail({ refreshUser }) {
           <div className="flex flex-col gap-2 lg:items-end">
             <div className="flex flex-wrap gap-2">
               <button 
-                onClick={() => {
-                  setEditFormData({
-                    name: team.name,
-                    description: team.description || '',
-                    callsignPrefix: team.callsign_prefix || '',
-                    color: team.color || 'Blue',
-                    visibility: team.visibility || 'private',
-                    canJoin: team.can_join || false,
-                    parentTeamId: team.parent_team_id || null,
-                    callsignSubteamDepth: team.callsign_subteam_depth || 1,
-                    callsignNameFormat: team.callsign_name_format || 'full_name'
-                  })
-                  setShowEditDialog(true)
-                }}
+                onClick={() => setShowEditDialog(true)}
                 className="btn-secondary flex items-center"
               >
                 <PencilIcon className="h-4 w-4 mr-2" />
-                Edit Team
+                Edit {teamLabel}
               </button>
               <button 
-                onClick={() => setShowAddMemberDialog(true)}
+                onClick={() => { setAddMemberRole('member'); setShowAddMemberDialog(true) }}
                 className="btn-secondary flex items-center"
               >
                 <UserPlusIcon className="h-4 w-4 mr-2" />
                 Add Member
               </button>
-              <button className="btn-secondary flex items-center">
+              <button
+                onClick={() => { setAddMemberRole('admin'); setShowAddMemberDialog(true) }}
+                className="btn-secondary flex items-center"
+              >
                 <ShieldCheckIcon className="h-4 w-4 mr-2" />
                 Add Admin
               </button>
@@ -653,7 +963,9 @@ export default function TeamDetail({ refreshUser }) {
             <div className="flex flex-wrap gap-2">
               <button 
                 onClick={() => setShowSubTeamDialog(true)}
-                className="btn-secondary flex items-center"
+                disabled={atMaxTeamDepth}
+                className={`btn-secondary flex items-center ${atMaxTeamDepth ? 'opacity-50 cursor-not-allowed' : ''}`}
+                title={atMaxTeamDepth ? `Maximum team depth (${maxTeamDepth}) reached` : undefined}
               >
                 <FolderPlusIcon className="h-4 w-4 mr-2" />
                 Add Sub-team
@@ -741,6 +1053,12 @@ export default function TeamDetail({ refreshUser }) {
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                       Role
                     </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                      TAK Role
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                      Callsign
+                    </th>
                     <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                       Actions
                     </th>
@@ -748,40 +1066,75 @@ export default function TeamDetail({ refreshUser }) {
                 </thead>
                 <tbody className="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
                   {paginatedData.map((member) => (
-                    <tr key={member.id} className="hover:bg-gray-50 dark:hover:bg-gray-800">
-                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">
-                        {member.first_name} {member.last_name}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                        {member.email}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        {member.inherited_from_team_name ? (
-                          <span className="px-2 py-1 text-xs font-medium rounded-full bg-blue-100 text-blue-800 dark:bg-blue-600 dark:text-blue-200">
-                            Inherited from <Link to={`/teams/${member.inherited_from_team_id}`} className="underline hover:no-underline">{member.inherited_from_team_name}</Link>
+                    editingMemberId === member.id ? (
+                      <MemberEditRow
+                        key={member.id}
+                        colSpan={6}
+                        form={memberEditForm}
+                        setForm={setMemberEditForm}
+                        takRoleValues={takRoleValues}
+                        saving={savingMemberEdit}
+                        error={memberEditError}
+                        onSave={() => handleSaveMemberEdit(member.id)}
+                        onCancel={handleCancelEditMember}
+                      />
+                    ) : (
+                      <tr key={member.id} className="hover:bg-gray-50 dark:hover:bg-gray-800">
+                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">
+                          {member.first_name} {member.last_name}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+                          {member.email}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          {member.inherited_from_team_name ? (
+                            <span className="px-2 py-1 text-xs font-medium rounded-full bg-blue-100 text-blue-800 dark:bg-blue-600 dark:text-blue-200">
+                              Member of <Link to={`/teams/${member.inherited_from_team_id}`} className="underline hover:no-underline">{member.inherited_from_team_name}</Link>
+                            </span>
+                          ) : (
+                            <span className="px-2 py-1 text-xs font-medium rounded-full bg-gray-100 text-gray-800 dark:bg-gray-600 dark:text-gray-200">
+                              Member
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <span className="px-2 py-1 text-xs font-medium rounded-full bg-teal-100 text-teal-800 dark:bg-teal-900 dark:text-teal-200">
+                            {member.tak_role || 'Team Member'}
                           </span>
-                        ) : (
-                          <span className="px-2 py-1 text-xs font-medium rounded-full bg-gray-100 text-gray-800 dark:bg-gray-600 dark:text-gray-200">
-                            Member
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                        {member.inherited_from_team_name ? (
-                          <span className="text-gray-400 dark:text-gray-500 text-xs">
-                            Cannot remove inherited member
-                          </span>
-                        ) : (
-                          <button
-                            onClick={() => handleRemoveUser(member.id, 'member')}
-                            className="text-red-600 hover:text-red-500 dark:text-red-400 dark:hover:text-red-300"
-                            title="Remove from team"
-                          >
-                            <TrashIcon className="h-4 w-4" />
-                          </button>
-                        )}
-                      </td>
-                    </tr>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+                          {member.tak_callsign || '-'}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                          <div className="flex items-center justify-end space-x-3">
+                            <button
+                              onClick={() => handleStartEditMember(member)}
+                              className="text-gray-600 hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300"
+                              title="Edit member"
+                            >
+                              <PencilIcon className="h-4 w-4" />
+                            </button>
+                            {member.inherited_from_team_name ? (
+                              <button
+                                onClick={() => handleRemoveUser(member.id, 'member')}
+                                className="text-orange-600 hover:text-orange-500 dark:text-orange-400 dark:hover:text-orange-300"
+                                title="Remove from all teams (removes from entire hierarchy)"
+                              >
+                                <TrashIcon className="h-4 w-4" />
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => handleRemoveUser(member.id, 'member')}
+                                className="text-red-600 hover:text-red-500 dark:text-red-400 dark:hover:text-red-300"
+                                title="Remove from team"
+                              >
+                                <TrashIcon className="h-4 w-4" />
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    )
                   ))}
                 </tbody>
               </table>
@@ -808,6 +1161,12 @@ export default function TeamDetail({ refreshUser }) {
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                       Role
                     </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                      TAK Role
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                      Callsign
+                    </th>
                     <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                       Actions
                     </th>
@@ -815,40 +1174,75 @@ export default function TeamDetail({ refreshUser }) {
                 </thead>
                 <tbody className="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
                   {paginatedData.map((admin) => (
-                    <tr key={admin.id} className="hover:bg-gray-50 dark:hover:bg-gray-800">
-                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">
-                        {admin.first_name} {admin.last_name}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                        {admin.email}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        {admin.inherited_from_team_name ? (
-                          <span className="px-2 py-1 text-xs font-medium rounded-full bg-purple-100 text-purple-800 dark:bg-purple-600 dark:text-purple-200">
-                            Inherited Admin from <Link to={`/teams/${admin.inherited_from_team_id}`} className="underline hover:no-underline">{admin.inherited_from_team_name}</Link>
+                    editingMemberId === admin.id ? (
+                      <MemberEditRow
+                        key={admin.id}
+                        colSpan={6}
+                        form={memberEditForm}
+                        setForm={setMemberEditForm}
+                        takRoleValues={takRoleValues}
+                        saving={savingMemberEdit}
+                        error={memberEditError}
+                        onSave={() => handleSaveMemberEdit(admin.id)}
+                        onCancel={handleCancelEditMember}
+                      />
+                    ) : (
+                      <tr key={admin.id} className="hover:bg-gray-50 dark:hover:bg-gray-800">
+                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">
+                          {admin.first_name} {admin.last_name}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+                          {admin.email}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          {admin.inherited_from_team_name ? (
+                            <span className="px-2 py-1 text-xs font-medium rounded-full bg-purple-100 text-purple-800 dark:bg-purple-600 dark:text-purple-200">
+                              Admin of <Link to={`/teams/${admin.inherited_from_team_id}`} className="underline hover:no-underline">{admin.inherited_from_team_name}</Link>
+                            </span>
+                          ) : (
+                            <span className="px-2 py-1 text-xs font-medium rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">
+                              Admin
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <span className="px-2 py-1 text-xs font-medium rounded-full bg-teal-100 text-teal-800 dark:bg-teal-900 dark:text-teal-200">
+                            {admin.tak_role || 'Team Member'}
                           </span>
-                        ) : (
-                          <span className="px-2 py-1 text-xs font-medium rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">
-                            Admin
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                        {admin.inherited_from_team_name ? (
-                          <span className="text-gray-400 dark:text-gray-500 text-xs">
-                            Cannot remove inherited admin
-                          </span>
-                        ) : (
-                          <button
-                            onClick={() => handleRemoveUser(admin.id, 'admin')}
-                            className="text-red-600 hover:text-red-500 dark:text-red-400 dark:hover:text-red-300"
-                            title="Remove from team"
-                          >
-                            <TrashIcon className="h-4 w-4" />
-                          </button>
-                        )}
-                      </td>
-                    </tr>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+                          {admin.tak_callsign || '-'}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                          <div className="flex items-center justify-end space-x-3">
+                            <button
+                              onClick={() => handleStartEditMember(admin)}
+                              className="text-gray-600 hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300"
+                              title="Edit admin"
+                            >
+                              <PencilIcon className="h-4 w-4" />
+                            </button>
+                            {admin.inherited_from_team_name ? (
+                              <button
+                                onClick={() => handleRemoveUser(admin.id, 'admin')}
+                                className="text-orange-600 hover:text-orange-500 dark:text-orange-400 dark:hover:text-orange-300"
+                                title="Remove from all teams (removes from entire hierarchy)"
+                              >
+                                <TrashIcon className="h-4 w-4" />
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => handleRemoveUser(admin.id, 'admin')}
+                                className="text-red-600 hover:text-red-500 dark:text-red-400 dark:hover:text-red-300"
+                                title="Remove from team"
+                              >
+                                <TrashIcon className="h-4 w-4" />
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    )
                   ))}
                 </tbody>
               </table>
@@ -1059,7 +1453,7 @@ export default function TeamDetail({ refreshUser }) {
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
-              <h3 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Create Sub-Team</h3>
+              <h3 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Create Team</h3>
               <button
                 onClick={() => setShowSubTeamDialog(false)}
                 className="text-gray-400 hover:text-gray-500 dark:hover:text-gray-300"
@@ -1073,7 +1467,7 @@ export default function TeamDetail({ refreshUser }) {
                 {/* Parent Team Info */}
                 <div className="bg-gray-50 dark:bg-gray-700 p-4 rounded-lg">
                   <div className="flex items-center space-x-2 mb-2">
-                    <h4 className="text-sm font-medium text-gray-700 dark:text-gray-300">Parent Team:</h4>
+                    <h4 className="text-sm font-medium text-gray-700 dark:text-gray-300">Parent {teamLabel}:</h4>
                     <div className="relative group">
                       <span className="text-sm font-medium text-gray-900 dark:text-gray-100 cursor-help">
                         {team.name}
@@ -1136,11 +1530,16 @@ export default function TeamDetail({ refreshUser }) {
                     value={subTeamFormData.callsignPrefix}
                     onChange={(e) => setSubTeamFormData({...subTeamFormData, callsignPrefix: e.target.value})}
                     className="input w-full"
+                    pattern={CALLSIGN_PREFIX_PATTERN}
+                    title="Only letters and digits are allowed (no -)"
                     placeholder="STL, AKL, etc."
                   />
                   <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                     Used to build callsigns. Example: FENZ-STL-John Smith
                   </p>
+                  {!isValidSubTeamCallsignPrefix(subTeamFormData.callsignPrefix) && (
+                    <p className="text-red-600 text-sm mt-1">Prefix may only contain letters and digits (no "-")</p>
+                  )}
                 </div>
                 
                 <div>
@@ -1202,7 +1601,7 @@ export default function TeamDetail({ refreshUser }) {
                   disabled={creatingSubTeam}
                   className="btn-primary px-6 py-2"
                 >
-                  {creatingSubTeam ? 'Creating Sub-Team...' : 'Create Sub-Team'}
+                  {creatingSubTeam ? 'Creating Team...' : 'Create Team'}
                 </button>
               </div>
             </form>
@@ -1247,7 +1646,9 @@ export default function TeamDetail({ refreshUser }) {
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
-              <h3 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Add Member to Team</h3>
+              <h3 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
+                Add {addMemberRole === 'admin' ? 'Admin' : 'Member'} to Team
+              </h3>
               <button
                 onClick={() => {
                   setShowAddMemberDialog(false)
@@ -1255,6 +1656,7 @@ export default function TeamDetail({ refreshUser }) {
                   setSelectedUserId('')
                   setUserSearch('')
                   setNewUserForm({ email: '', firstName: '', lastName: '' })
+                  setAddMemberRole('member')
                 }}
                 className="text-gray-400 hover:text-gray-500 dark:hover:text-gray-300"
               >
@@ -1321,7 +1723,7 @@ export default function TeamDetail({ refreshUser }) {
                                 type="radio"
                                 name="selectedUser"
                                 value={user.id}
-                                checked={selectedUserId === user.id}
+                                checked={selectedUserId === String(user.id)}
                                 onChange={(e) => setSelectedUserId(e.target.value)}
                                 className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300"
                               />
@@ -1582,237 +1984,37 @@ export default function TeamDetail({ refreshUser }) {
       )}
 
 
-      {/* Edit Team Dialog */}
-      {showEditDialog && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
-              <h3 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Edit Team</h3>
-              <button
-                onClick={() => setShowEditDialog(false)}
-                className="text-gray-400 hover:text-gray-500 dark:hover:text-gray-300"
-              >
-                <XMarkIcon className="h-6 w-6" />
-              </button>
-            </div>
-            
-            <form onSubmit={async (e) => {
-              e.preventDefault()
-              setUpdating(true)
-              try {
-                await teamsAPI.update(team.id, editFormData)
-                const updatedTeam = {...team, ...editFormData, parent_team_id: editFormData.parentTeamId}
-                setTeam(updatedTeam)
-                
-                // Update parent team if changed
-                if (editFormData.parentTeamId !== team.parent_team_id) {
-                  if (editFormData.parentTeamId) {
-                    const newParent = allTeams.find(t => t.id === editFormData.parentTeamId)
-                    setParentTeam(newParent || null)
-                  } else {
-                    setParentTeam(null)
-                  }
-                }
-                
-                setShowEditDialog(false)
-              } catch (error) {
-                console.error('Failed to update team:', error)
-                alert('Failed to update team: ' + (error.response?.data?.error || error.message))
-              } finally {
-                setUpdating(false)
-              }
-            }} className="p-6">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="space-y-6">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                      Team Name *
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      value={editFormData.name}
-                      onChange={(e) => setEditFormData({...editFormData, name: e.target.value})}
-                      className="input w-full"
-                    />
-                  </div>
-                  
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                      Prefix
-                    </label>
-                    <input
-                      type="text"
-                      value={editFormData.callsignPrefix}
-                      className="input w-full bg-gray-100 dark:bg-gray-600 text-gray-500"
-                      readOnly
-                    />
-                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                      Prefix cannot be changed after team creation
-                    </p>
-                  </div>
-                  
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                      Parent Team
-                    </label>
-                    <select
-                      value={editFormData.parentTeamId || ''}
-                      onChange={(e) => setEditFormData({...editFormData, parentTeamId: e.target.value ? parseInt(e.target.value) : null})}
-                      className="input w-full"
-                    >
-                      <option value="">No parent (Top-level team)</option>
-                      {allTeams.filter(t => t.id !== team.id).map(parentTeam => (
-                        <option key={parentTeam.id} value={parentTeam.id}>
-                          {parentTeam.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  
-                  {!editFormData.parentTeamId && (
-                    <>
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                          Callsign Sub-team Depth
-                        </label>
-                        <select
-                          value={editFormData.callsignSubteamDepth}
-                          onChange={(e) => setEditFormData({...editFormData, callsignSubteamDepth: parseInt(e.target.value)})}
-                          className="input w-full"
-                        >
-                          <option value={0}>0 - Root prefix only</option>
-                          <option value={1}>1 - Include 1 sub-team</option>
-                          <option value={2}>2 - Include 2 sub-teams</option>
-                          <option value={3}>3 - Include 3 sub-teams</option>
-                          <option value={4}>4 - Include 4 sub-teams</option>
-                          <option value={5}>5 - Include all sub-teams</option>
-                        </select>
-                      </div>
-                      
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                          Callsign Name Format
-                        </label>
-                        <select
-                          value={editFormData.callsignNameFormat}
-                          onChange={(e) => setEditFormData({...editFormData, callsignNameFormat: e.target.value})}
-                          className="input w-full"
-                        >
-                          <option value="full_name">Full Name</option>
-                          <option value="first_initial_last">First Initial + Last Name</option>
-                          <option value="first_last_initial">First Name + Last Initial</option>
-                        </select>
-                      </div>
-                    </>
-                  )}
-                  
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                      TAK Color
-                    </label>
-                    <select
-                      value={editFormData.color}
-                      className="input w-full bg-gray-100 dark:bg-gray-600 text-gray-500"
-                      disabled
-                    >
-                      {Object.keys(colorMappings).length > 0 ? (
-                        Object.entries(colorMappings).map(([color, organization]) => (
-                          <option key={color} value={color}>
-                            {organization && organization.trim() !== '' ? organization : color}
-                          </option>
-                        ))
-                      ) : (
-                        [
-                          { color: 'Red', org: 'Fire and Emergency New Zealand (FENZ)' },
-                          { color: 'Blue', org: 'New Zealand Police' },
-                          { color: 'Yellow', org: 'Hato Hone St John' },
-                          { color: 'Orange', org: 'Land Search and Rescue New Zealand (LandSAR)' },
-                          { color: 'Green', org: 'Department of Conservation (DOC)' },
-                          { color: 'Purple', org: 'National Emergency Management Agency (NEMA)' },
-                          { color: 'Cyan', org: 'Health New Zealand (Te Whatu Ora)' },
-                          { color: 'White', org: 'Wellington Free Ambulance' },
-                          { color: 'Maroon', org: 'New Zealand Red Cross' },
-                          { color: 'Dark Blue', org: 'New Zealand Customs Service' },
-                          { color: 'Teal', org: 'Coastguard New Zealand' },
-                          { color: 'Brown', org: 'New Zealand Defence Force (NZDF)' }
-                        ].map(({ color, org }) => (
-                          <option key={color} value={color}>
-                            {org}
-                          </option>
-                        ))
-                      )}
-                    </select>
-                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                      TAK color cannot be changed after team creation
-                    </p>
-                  </div>
-                </div>
-                
-                <div className="space-y-6">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                      Description
-                    </label>
-                    <textarea
-                      value={editFormData.description}
-                      onChange={(e) => setEditFormData({...editFormData, description: e.target.value})}
-                      className="input w-full"
-                      rows={4}
-                    />
-                  </div>
-                  
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                      Visibility
-                    </label>
-                    <select
-                      value={editFormData.visibility}
-                      onChange={(e) => setEditFormData({...editFormData, visibility: e.target.value})}
-                      className="input w-full"
-                    >
-                      <option value="private">Private</option>
-                      <option value="public">Public</option>
-                    </select>
-                  </div>
-                  
-                  <div className="flex items-start">
-                    <input
-                      type="checkbox"
-                      id="editCanJoin"
-                      checked={editFormData.canJoin}
-                      onChange={(e) => setEditFormData({...editFormData, canJoin: e.target.checked})}
-                      className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded mt-1"
-                    />
-                    <div className="ml-3">
-                      <label htmlFor="editCanJoin" className="text-sm text-gray-700 dark:text-gray-300 font-medium">
-                        Allow join requests
-                      </label>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              
-              <div className="flex justify-end space-x-3 pt-6 mt-6 border-t border-gray-200 dark:border-gray-700">
-                <button
-                  type="button"
-                  onClick={() => setShowEditDialog(false)}
-                  className="btn-secondary px-6 py-2"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={updating}
-                  className="btn-primary px-6 py-2"
-                >
-                  {updating ? 'Updating...' : 'Update Team'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      {/* Edit Team Dialog (shared with Teams.jsx) */}
+      <TeamFormDialog
+        mode="edit"
+        team={team}
+        teams={allTeams}
+        maxTeamDepth={maxTeamDepth}
+        colorMappings={colorMappings}
+        isOpen={showEditDialog}
+        onClose={() => setShowEditDialog(false)}
+        onSaved={(updatedTeam) => {
+          // Requirement 14.3 (task 37.1 fix): reflect the team as the
+          // server actually persisted it (`response.data.team`, passed
+          // here as `updatedTeam`) rather than blindly merging submitted
+          // form values into local state. This matters concretely here
+          // because the server silently ignores a Sub_Team's `color`/
+          // `callsignNameFormat` overrides (Requirement 3.3) and may
+          // normalize/default `callsign_level_selection` -- neither of
+          // which the submitted form values alone would reflect.
+          setTeam(updatedTeam)
+
+          // Update parent team if changed
+          if (updatedTeam.parent_team_id !== team.parent_team_id) {
+            if (updatedTeam.parent_team_id) {
+              const newParent = allTeams.find(t => t.id === updatedTeam.parent_team_id)
+              setParentTeam(newParent || null)
+            } else {
+              setParentTeam(null)
+            }
+          }
+        }}
+      />
     </div>
   )
 }

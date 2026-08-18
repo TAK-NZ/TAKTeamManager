@@ -193,6 +193,12 @@ export const teamsAPI = {
   getHierarchy: (id) => api.get(`/teams/${id}/hierarchy`),
   getSubTeams: (id) => api.get(`/teams/${id}/sub-teams`),
   delete: (id) => api.delete(`/teams/${id}`),
+  getCallsignLevelOptions: (id) => api.get(`/teams/${id}/callsign-level-options`),
+  updateMember: (teamId, userId, data) => api.patch(`/teams/${teamId}/members/${userId}`, data),
+};
+
+export const bulkImportAPI = {
+  importTeams: (formData) => api.post('/bulk-import/teams', formData, { headers: { 'Content-Type': 'multipart/form-data' } }),
 };
 
 export const usersAPI = {

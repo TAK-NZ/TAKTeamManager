@@ -30,6 +30,20 @@ jest.mock('./TeamMembershipService', () => ({
   addUserToTeam: jest.fn()
 }));
 
+jest.mock('../models/Team', () => ({
+  getAncestorChain: jest.fn(),
+  getFullMemberList: jest.fn()
+}));
+
+jest.mock('./CallsignService', () => ({
+  computeDefaultCallsignSuffix: jest.fn()
+}));
+
+jest.mock('./userAttributes', () => ({
+  generateCallsign: jest.fn(),
+  updateUserAttributes: jest.fn()
+}));
+
 jest.mock('./EmailService');
 
 jest.mock('./EventPublisher', () => ({
@@ -44,8 +58,12 @@ jest.mock('../middleware/requestContext', () => ({
 const pool = require('../config/database');
 const UserProvisioningService = require('./UserProvisioningService');
 const TeamMembershipService = require('./TeamMembershipService');
+const UserAttributesService = require('./userAttributes');
 const EmailService = require('./EmailService');
 const EventPublisher = require('./EventPublisher');
+const Team = require('../models/Team');
+const CallsignService = require('./CallsignService');
+const { CallsignSuffixConflictError } = require('./CallsignSuffixUniquenessService');
 const RequestApprovalService = require('./RequestApprovalService');
 
 const PENDING_NEW_ACCOUNT_REQUEST = {
@@ -77,6 +95,13 @@ describe('RequestApprovalService.approveRequest - new_account', () => {
     service = new RequestApprovalService();
     service.emailService.sendApprovalEmail = jest.fn().mockResolvedValue(true);
     originalFetch = global.fetch;
+    // Default: no Member_List collision, and an ancestor chain resolving
+    // to a non-user_defined format -- most tests in this suite don't
+    // exercise the callsign_suffix resolution/uniqueness logic (task
+    // 24.3) at all, so these defaults keep them passing unchanged.
+    Team.getAncestorChain.mockResolvedValue([{ id: 1, callsign_name_format: 'full_name' }]);
+    Team.getFullMemberList.mockResolvedValue([]);
+    CallsignService.computeDefaultCallsignSuffix.mockReturnValue('New-User');
   });
 
   afterEach(() => {
@@ -139,11 +164,144 @@ describe('RequestApprovalService.approveRequest - new_account', () => {
       firstName: 'New',
       lastName: 'User',
       teamId: 7,
+      callsign_suffix: 'New-User',
       createdBy: 9
     });
     expect(mockClient.query).toHaveBeenCalledWith('COMMIT');
     expect(mockClient.release).toHaveBeenCalledTimes(1);
     expect(service.emailService.sendApprovalEmail).toHaveBeenCalled();
+  });
+
+  /**
+   * Regression test: previously, a newly-approved new_account user never
+   * got a user_cache row until the next periodic Authentik sync (up to
+   * SYNC_INTERVAL_MINUTES, default 10 minutes, later). Since
+   * authenticateToken/GET /api/auth/me's session resolution looks the
+   * user up via authentikSync.getUserFromCache (keyed on user_cache),
+   * that user's very first login attempt right after approval would
+   * 401/redirect with ?error=user_not_synced. This verifies
+   * approveRequest now performs the SAME post-commit user_cache upsert
+   * POST /api/users/create-and-add already does (server/routes/users.js),
+   * strictly AFTER COMMIT (never inside the open transaction, since an
+   * Authentik call must never run inside one).
+   */
+  it('eagerly upserts a user_cache row after COMMIT, so the newly-approved user can log in immediately (no periodic-sync wait)', async () => {
+    mockAuthentikSuccess();
+
+    pool.query.mockImplementation((sql) => {
+      if (sql.includes('SELECT * FROM access_requests WHERE id = $1 AND status = $2')) {
+        return Promise.resolve({ rows: [PENDING_NEW_ACCOUNT_REQUEST] });
+      }
+      if (sql.includes('INSERT INTO user_cache')) {
+        return Promise.resolve({ rows: [] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const mockClient = {
+      query: jest.fn().mockImplementation((sql) => {
+        if (sql.includes('SELECT ar.*, t.name as team_name')) {
+          return Promise.resolve({
+            rows: [{
+              ...PENDING_NEW_ACCOUNT_REQUEST,
+              team_name: 'Alpha Team',
+              admin_first_name: 'Admin',
+              admin_last_name: 'Istrator'
+            }]
+          });
+        }
+        if (sql.includes('SELECT 1 FROM teams')) {
+          return Promise.resolve({ rows: [{}] });
+        }
+        return Promise.resolve({ rows: [] });
+      }),
+      release: jest.fn()
+    };
+    pool.connect.mockResolvedValue(mockClient);
+
+    UserProvisioningService.createAndAddUser.mockResolvedValue({ localUserId: 55, queuedGroups: 1 });
+    UserAttributesService.generateCallsign.mockResolvedValue({
+      callsign: 'FENZ-New User',
+      color: 'Red',
+      role: 'Team Member'
+    });
+    UserAttributesService.updateUserAttributes.mockResolvedValue(true);
+
+    const result = await service.approveRequest(1, 9);
+
+    expect(result).toEqual({ success: true });
+
+    // COMMIT must happen before the user_cache upsert.
+    const commitCallIndex = mockClient.query.mock.calls.findIndex(([sql]) => sql === 'COMMIT');
+    expect(commitCallIndex).toBeGreaterThanOrEqual(0);
+
+    expect(UserAttributesService.generateCallsign).toHaveBeenCalledWith(55, 7);
+    expect(UserAttributesService.updateUserAttributes).toHaveBeenCalledWith(4242, {
+      callsign: 'FENZ-New User',
+      color: 'Red',
+      role: 'Team Member'
+    });
+
+    const userCacheInsert = pool.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO user_cache'));
+    expect(userCacheInsert).toBeDefined();
+    expect(userCacheInsert[1]).toEqual([
+      4242,
+      'newuser',
+      'newuser@example.com',
+      'New',
+      'User',
+      'FENZ-New User',
+      'Red',
+      'Team Member'
+    ]);
+  });
+
+  it('does not fail the (already-committed) approval when the post-commit user_cache upsert itself throws', async () => {
+    mockAuthentikSuccess();
+
+    pool.query.mockImplementation((sql) => {
+      if (sql.includes('SELECT * FROM access_requests WHERE id = $1 AND status = $2')) {
+        return Promise.resolve({ rows: [PENDING_NEW_ACCOUNT_REQUEST] });
+      }
+      if (sql.includes('INSERT INTO user_cache')) {
+        return Promise.reject(new Error('db unavailable'));
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const mockClient = {
+      query: jest.fn().mockImplementation((sql) => {
+        if (sql.includes('SELECT ar.*, t.name as team_name')) {
+          return Promise.resolve({
+            rows: [{
+              ...PENDING_NEW_ACCOUNT_REQUEST,
+              team_name: 'Alpha Team',
+              admin_first_name: 'Admin',
+              admin_last_name: 'Istrator'
+            }]
+          });
+        }
+        if (sql.includes('SELECT 1 FROM teams')) {
+          return Promise.resolve({ rows: [{}] });
+        }
+        return Promise.resolve({ rows: [] });
+      }),
+      release: jest.fn()
+    };
+    pool.connect.mockResolvedValue(mockClient);
+
+    UserProvisioningService.createAndAddUser.mockResolvedValue({ localUserId: 55, queuedGroups: 1 });
+    UserAttributesService.generateCallsign.mockResolvedValue(null);
+
+    const result = await service.approveRequest(1, 9);
+
+    // The approval itself already succeeded (COMMIT already happened);
+    // the post-commit upsert failure is logged, not thrown.
+    expect(result).toEqual({ success: true });
+    expect(mockLoggerError).toHaveBeenCalledWith(
+      expect.objectContaining({ authentikUserId: 4242 }),
+      expect.stringContaining('post-commit user_cache upsert failed')
+    );
   });
 
   it('rejects cleanly without ever acquiring a database client when Authentik user creation fails', async () => {
@@ -296,6 +454,153 @@ describe('RequestApprovalService.approveRequest - new_account', () => {
       },
       expect.any(String)
     );
+  });
+});
+
+/**
+ * Unit tests for `RequestApprovalService.approveRequest`'s Requirement
+ * 11.12/11.13/11.15/11.16 (task 24.3) `callsign_suffix` resolution and
+ * uniqueness-check logic, for `new_account` requests only. These verify
+ * the override > stored-value > computed-default precedence, that the
+ * uniqueness check runs BEFORE the Authentik user is ever created (so a
+ * collision requires no compensating action), and that a collision is
+ * rejected with nothing committed.
+ */
+describe('RequestApprovalService.approveRequest - callsign_suffix resolution (task 24.3)', () => {
+  let service;
+  let originalFetch;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    service = new RequestApprovalService();
+    service.emailService.sendApprovalEmail = jest.fn().mockResolvedValue(true);
+    originalFetch = global.fetch;
+    Team.getAncestorChain.mockResolvedValue([{ id: 1, callsign_name_format: 'full_name' }]);
+    Team.getFullMemberList.mockResolvedValue([]);
+    CallsignService.computeDefaultCallsignSuffix.mockReturnValue('New-User');
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  function buildHappyPathClient(requestOverrides = {}) {
+    return {
+      query: jest.fn().mockImplementation((sql) => {
+        if (sql.includes('SELECT ar.*, t.name as team_name')) {
+          return Promise.resolve({
+            rows: [{
+              ...PENDING_NEW_ACCOUNT_REQUEST,
+              ...requestOverrides,
+              team_name: 'Alpha Team',
+              admin_first_name: 'Admin',
+              admin_last_name: 'Istrator'
+            }]
+          });
+        }
+        if (sql.includes('SELECT 1 FROM teams')) {
+          return Promise.resolve({ rows: [{}] });
+        }
+        return Promise.resolve({ rows: [] });
+      }),
+      release: jest.fn()
+    };
+  }
+
+  it('uses the request\'s own stored callsign_suffix when no override is supplied', async () => {
+    mockAuthentikSuccess();
+    pool.query.mockImplementation((sql) => {
+      if (sql.includes('SELECT * FROM access_requests WHERE id = $1 AND status = $2')) {
+        return Promise.resolve({ rows: [{ ...PENDING_NEW_ACCOUNT_REQUEST, callsign_suffix: 'Stored-Suffix' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    const mockClient = buildHappyPathClient({ callsign_suffix: 'Stored-Suffix' });
+    pool.connect.mockResolvedValue(mockClient);
+    UserProvisioningService.createAndAddUser.mockResolvedValue({ localUserId: 55, queuedGroups: 1 });
+
+    await service.approveRequest(1, 9);
+
+    expect(CallsignService.computeDefaultCallsignSuffix).not.toHaveBeenCalled();
+    expect(Team.getFullMemberList).toHaveBeenCalledWith(7);
+    expect(UserProvisioningService.createAndAddUser).toHaveBeenCalledWith(mockClient, expect.objectContaining({
+      callsign_suffix: 'Stored-Suffix'
+    }));
+  });
+
+  it('computes the default when there is no override and no stored value', async () => {
+    mockAuthentikSuccess();
+    pool.query.mockImplementation((sql) => {
+      if (sql.includes('SELECT * FROM access_requests WHERE id = $1 AND status = $2')) {
+        return Promise.resolve({ rows: [{ ...PENDING_NEW_ACCOUNT_REQUEST, callsign_suffix: null }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    const mockClient = buildHappyPathClient({ callsign_suffix: null });
+    pool.connect.mockResolvedValue(mockClient);
+    UserProvisioningService.createAndAddUser.mockResolvedValue({ localUserId: 55, queuedGroups: 1 });
+    CallsignService.computeDefaultCallsignSuffix.mockReturnValue('New-User');
+
+    await service.approveRequest(1, 9);
+
+    expect(Team.getAncestorChain).toHaveBeenCalledWith(7);
+    expect(CallsignService.computeDefaultCallsignSuffix).toHaveBeenCalledWith('New', 'User', 'full_name');
+    expect(UserProvisioningService.createAndAddUser).toHaveBeenCalledWith(mockClient, expect.objectContaining({
+      callsign_suffix: 'New-User'
+    }));
+  });
+
+  it('uses the override, ignoring both the stored value and the computed default', async () => {
+    mockAuthentikSuccess();
+    pool.query.mockImplementation((sql) => {
+      if (sql.includes('SELECT * FROM access_requests WHERE id = $1 AND status = $2')) {
+        return Promise.resolve({ rows: [{ ...PENDING_NEW_ACCOUNT_REQUEST, callsign_suffix: 'Stored-Suffix' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    const mockClient = buildHappyPathClient({ callsign_suffix: 'Stored-Suffix' });
+    pool.connect.mockResolvedValue(mockClient);
+    UserProvisioningService.createAndAddUser.mockResolvedValue({ localUserId: 55, queuedGroups: 1 });
+
+    await service.approveRequest(1, 9, '', 'Override-Suffix');
+
+    expect(CallsignService.computeDefaultCallsignSuffix).not.toHaveBeenCalled();
+    expect(UserProvisioningService.createAndAddUser).toHaveBeenCalledWith(mockClient, expect.objectContaining({
+      callsign_suffix: 'Override-Suffix'
+    }));
+  });
+
+  it('rejects with a CallsignSuffixConflictError before creating the Authentik user or committing anything, on a Member_List collision', async () => {
+    pool.query.mockImplementation((sql) => {
+      if (sql.includes('SELECT * FROM access_requests WHERE id = $1 AND status = $2')) {
+        return Promise.resolve({ rows: [{ ...PENDING_NEW_ACCOUNT_REQUEST, callsign_suffix: null }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    Team.getFullMemberList.mockResolvedValue([{ id: 99, callsign_suffix: 'New-User' }]);
+    CallsignService.computeDefaultCallsignSuffix.mockReturnValue('New-User');
+    global.fetch = jest.fn();
+
+    await expect(service.approveRequest(1, 9)).rejects.toThrow(CallsignSuffixConflictError);
+
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(pool.connect).not.toHaveBeenCalled();
+    expect(UserProvisioningService.createAndAddUser).not.toHaveBeenCalled();
+  });
+
+  it('ignores a callsignSuffixOverride supplied on a team_change approval', async () => {
+    const client = { query: jest.fn() };
+    TeamMembershipService.addUserToTeam.mockResolvedValue({ success: true, groupsQueued: 0 });
+
+    await service.processApprovedRequest(
+      client,
+      { request_type: 'team_change', existing_user_id: 42, target_team_id: 7 },
+      { adminId: 9 }
+    );
+
+    expect(TeamMembershipService.addUserToTeam).toHaveBeenCalledWith(42, 7, 'member', 9, client);
+    expect(CallsignService.computeDefaultCallsignSuffix).not.toHaveBeenCalled();
+    expect(Team.getFullMemberList).not.toHaveBeenCalled();
   });
 });
 

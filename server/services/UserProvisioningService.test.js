@@ -19,7 +19,19 @@ jest.mock('./EventPublisher', () => ({
   publishOperation: jest.fn()
 }));
 
+jest.mock('../models/Team', () => ({
+  getAncestorChain: jest.fn(),
+  getFullMemberList: jest.fn()
+}));
+
+jest.mock('./CallsignService', () => ({
+  computeDefaultCallsignSuffix: jest.fn()
+}));
+
 const EventPublisher = require('./EventPublisher');
+const Team = require('../models/Team');
+const CallsignService = require('./CallsignService');
+const { CallsignSuffixConflictError } = require('./CallsignSuffixUniquenessService');
 const UserProvisioningService = require('./UserProvisioningService');
 
 function buildMockClient(queryImpl) {
@@ -185,5 +197,146 @@ describe('UserProvisioningService.createAndAddUser', () => {
         teamId: 3
       })
     ).rejects.toThrow('constraint violation');
+  });
+});
+
+/**
+ * Unit tests for `UserProvisioningService.resolveCallsignSuffixForNewUser`
+ * (Requirements 11.6, 11.7, 11.14, 11.15; task 22.1).
+ * `Team.getAncestorChain`/`Team.getFullMemberList` and
+ * `CallsignService.computeDefaultCallsignSuffix` are mocked directly.
+ */
+describe('UserProvisioningService.resolveCallsignSuffixForNewUser', () => {
+  const fakeClient = {};
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('resolves to the requested suffix when callsign_name_format is user_defined and a value is supplied', async () => {
+    Team.getAncestorChain.mockResolvedValueOnce([
+      { id: 1, parent_team_id: null, callsign_name_format: 'user_defined', depth: 0 },
+      { id: 7, parent_team_id: 1, callsign_name_format: 'user_defined', depth: 1 }
+    ]);
+    Team.getFullMemberList.mockResolvedValueOnce([]);
+
+    const result = await UserProvisioningService.resolveCallsignSuffixForNewUser(fakeClient, {
+      firstName: 'John',
+      lastName: 'Doe',
+      teamId: 7,
+      requestedCallsignSuffix: 'Badge123'
+    });
+
+    expect(result).toBe('Badge123');
+    expect(CallsignService.computeDefaultCallsignSuffix).not.toHaveBeenCalled();
+  });
+
+  it('throws CallsignSuffixRequiredError when callsign_name_format is user_defined and no value is supplied', async () => {
+    Team.getAncestorChain.mockResolvedValueOnce([
+      { id: 1, parent_team_id: null, callsign_name_format: 'user_defined', depth: 0 }
+    ]);
+
+    await expect(
+      UserProvisioningService.resolveCallsignSuffixForNewUser(fakeClient, {
+        firstName: 'John',
+        lastName: 'Doe',
+        teamId: 1,
+        requestedCallsignSuffix: undefined
+      })
+    ).rejects.toThrow(UserProvisioningService.CallsignSuffixRequiredError);
+
+    expect(Team.getFullMemberList).not.toHaveBeenCalled();
+  });
+
+  it('throws CallsignSuffixRequiredError when callsign_name_format is user_defined and an empty/whitespace value is supplied', async () => {
+    Team.getAncestorChain.mockResolvedValueOnce([
+      { id: 1, parent_team_id: null, callsign_name_format: 'user_defined', depth: 0 }
+    ]);
+
+    await expect(
+      UserProvisioningService.resolveCallsignSuffixForNewUser(fakeClient, {
+        firstName: 'John',
+        lastName: 'Doe',
+        teamId: 1,
+        requestedCallsignSuffix: '   '
+      })
+    ).rejects.toThrow(UserProvisioningService.CallsignSuffixRequiredError);
+  });
+
+  it('computes the default via CallsignService when callsign_name_format is not user_defined and no value is supplied', async () => {
+    Team.getAncestorChain.mockResolvedValueOnce([
+      { id: 1, parent_team_id: null, callsign_name_format: 'full_name', depth: 0 },
+      { id: 7, parent_team_id: 1, callsign_name_format: 'full_name', depth: 1 }
+    ]);
+    CallsignService.computeDefaultCallsignSuffix.mockReturnValueOnce('John Doe');
+    Team.getFullMemberList.mockResolvedValueOnce([]);
+
+    const result = await UserProvisioningService.resolveCallsignSuffixForNewUser(fakeClient, {
+      firstName: 'John',
+      lastName: 'Doe',
+      teamId: 7,
+      requestedCallsignSuffix: undefined
+    });
+
+    expect(CallsignService.computeDefaultCallsignSuffix).toHaveBeenCalledWith('John', 'Doe', 'full_name');
+    expect(result).toBe('John Doe');
+  });
+
+  it('prefers a supplied requestedCallsignSuffix over the computed default for a non-user_defined format', async () => {
+    Team.getAncestorChain.mockResolvedValueOnce([
+      { id: 1, parent_team_id: null, callsign_name_format: 'full_name', depth: 0 }
+    ]);
+    Team.getFullMemberList.mockResolvedValueOnce([]);
+
+    const result = await UserProvisioningService.resolveCallsignSuffixForNewUser(fakeClient, {
+      firstName: 'John',
+      lastName: 'Doe',
+      teamId: 1,
+      requestedCallsignSuffix: 'Badge123'
+    });
+
+    expect(result).toBe('Badge123');
+    expect(CallsignService.computeDefaultCallsignSuffix).not.toHaveBeenCalled();
+  });
+
+  it('propagates CallsignSuffixConflictError from a uniqueness collision', async () => {
+    Team.getAncestorChain.mockResolvedValueOnce([
+      { id: 1, parent_team_id: null, callsign_name_format: 'full_name', depth: 0 }
+    ]);
+    CallsignService.computeDefaultCallsignSuffix.mockReturnValueOnce('John Doe');
+    Team.getFullMemberList.mockResolvedValueOnce([
+      { id: 99, callsign_suffix: 'John Doe' }
+    ]);
+
+    await expect(
+      UserProvisioningService.resolveCallsignSuffixForNewUser(fakeClient, {
+        firstName: 'John',
+        lastName: 'Doe',
+        teamId: 1,
+        requestedCallsignSuffix: undefined
+      })
+    ).rejects.toThrow(CallsignSuffixConflictError);
+  });
+
+  it('calls Team.getAncestorChain with teamId and uses the root (depth 0) row\'s callsign_name_format', async () => {
+    Team.getAncestorChain.mockResolvedValueOnce([
+      { id: 1, parent_team_id: null, callsign_name_format: 'first_initial_last', depth: 0 },
+      { id: 5, parent_team_id: 1, callsign_name_format: 'first_initial_last', depth: 1 },
+      { id: 9, parent_team_id: 5, callsign_name_format: 'first_initial_last', depth: 2 }
+    ]);
+    CallsignService.computeDefaultCallsignSuffix.mockReturnValueOnce('J Doe');
+    Team.getFullMemberList.mockResolvedValueOnce([]);
+
+    const result = await UserProvisioningService.resolveCallsignSuffixForNewUser(fakeClient, {
+      firstName: 'John',
+      lastName: 'Doe',
+      teamId: 9,
+      requestedCallsignSuffix: undefined
+    });
+
+    expect(Team.getAncestorChain).toHaveBeenCalledWith(9);
+    expect(CallsignService.computeDefaultCallsignSuffix).toHaveBeenCalledWith('John', 'Doe', 'first_initial_last');
+    expect(Team.getFullMemberList).toHaveBeenCalledWith(9);
+    expect(result).toBe('J Doe');
   });
 });

@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react'
-import { UserGroupIcon, UsersIcon, CogIcon, PencilIcon, CheckIcon, XMarkIcon } from '@heroicons/react/24/outline'
-import { configAPI, usersAPI, teamsAPI, syncAPI } from '../services/api'
+import { useState, useEffect, useRef } from 'react'
+import { UserGroupIcon, UsersIcon, CogIcon, PencilIcon, CheckIcon, XMarkIcon, ArrowUpTrayIcon } from '@heroicons/react/24/outline'
+import { configAPI, usersAPI, teamsAPI, syncAPI, bulkImportAPI } from '../services/api'
 import { formatDateTime } from '../utils/dateFormat'
 
 export default function Admin({ user }) {
@@ -85,6 +85,13 @@ export default function Admin({ user }) {
   const [tempColorValue, setTempColorValue] = useState('')
   const [tempRoleValue, setTempRoleValue] = useState('')
 
+  // --- Bulk Import (Team CSV) state (Requirements 9.14, 14.1) ---
+  const [bulkImportFile, setBulkImportFile] = useState(null)
+  const [bulkImporting, setBulkImporting] = useState(false)
+  const [bulkImportResult, setBulkImportResult] = useState(null)
+  const [bulkImportError, setBulkImportError] = useState(null)
+  const bulkImportFileInputRef = useRef(null)
+
   const handleEditColor = (colorName) => {
     setEditingColor(colorName)
     setTempColorValue(organizationMappings[colorName])
@@ -156,6 +163,38 @@ export default function Admin({ user }) {
     } catch (error) {
       console.error('Failed to trigger sync:', error)
       setSyncing(false)
+    }
+  }
+
+  const handleBulkImportFileChange = (e) => {
+    setBulkImportFile(e.target.files?.[0] || null)
+    setBulkImportResult(null)
+    setBulkImportError(null)
+  }
+
+  const handleBulkImportUpload = async () => {
+    if (!bulkImportFile) {
+      return
+    }
+    setBulkImporting(true)
+    setBulkImportResult(null)
+    setBulkImportError(null)
+    try {
+      const formData = new FormData()
+      formData.append('csv', bulkImportFile)
+      const response = await bulkImportAPI.importTeams(formData)
+      setBulkImportResult(response.data)
+      setBulkImportFile(null)
+      if (bulkImportFileInputRef.current) {
+        bulkImportFileInputRef.current.value = ''
+      }
+    } catch (error) {
+      console.error('Failed to import team CSV:', error)
+      setBulkImportError(
+        error.response?.data?.error || 'Failed to import team CSV. Please try again.'
+      )
+    } finally {
+      setBulkImporting(false)
     }
   }
 
@@ -279,6 +318,16 @@ export default function Admin({ user }) {
               }`}
             >
               Site Content
+            </button>
+            <button
+              onClick={() => setActiveTab('bulkImport')}
+              className={`py-2 px-1 border-b-2 font-medium text-sm ${
+                activeTab === 'bulkImport'
+                  ? 'border-primary-500 text-primary-600 dark:text-primary-400'
+                  : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:border-gray-300'
+              }`}
+            >
+              Bulk Import
             </button>
           </nav>
         </div>
@@ -461,6 +510,109 @@ export default function Admin({ user }) {
                   ))}
                 </tbody>
               </table>
+            </div>
+          )}
+
+          {activeTab === 'bulkImport' && (
+            <div>
+              <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+                Import an entire Organisation's Team hierarchy from a CSV file. Download the template
+                below for the expected columns, including how to reference a row's parent within the
+                same file.
+              </p>
+
+              <div className="flex flex-col sm:flex-row sm:items-center gap-3 mb-4">
+                <input
+                  ref={bulkImportFileInputRef}
+                  type="file"
+                  accept=".csv"
+                  onChange={handleBulkImportFileChange}
+                  className="text-sm text-gray-900 dark:text-gray-100 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-sm file:font-medium file:bg-primary-50 file:text-primary-700 dark:file:bg-primary-900 dark:file:text-primary-300"
+                />
+                <button
+                  onClick={handleBulkImportUpload}
+                  disabled={!bulkImportFile || bulkImporting}
+                  className="btn-primary flex items-center gap-2 disabled:opacity-50"
+                >
+                  <ArrowUpTrayIcon className="h-4 w-4" />
+                  {bulkImporting ? 'Uploading...' : 'Upload Team CSV'}
+                </button>
+                <a
+                  href="/templates/team-import-template.csv"
+                  download
+                  className="text-sm text-primary-600 hover:text-primary-900 dark:text-primary-400 dark:hover:text-primary-300 underline"
+                >
+                  Download CSV template
+                </a>
+              </div>
+
+              {bulkImportError && (
+                <div className="rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-900/30 p-3 mb-4">
+                  <p className="text-sm text-red-700 dark:text-red-300">{bulkImportError}</p>
+                </div>
+              )}
+
+              {bulkImportResult && bulkImportResult.rejected && (
+                <div className="rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-900/30 p-3 mb-4">
+                  <p className="text-sm font-medium text-red-800 dark:text-red-200 mb-2">
+                    The entire import was rejected. No teams were created.
+                  </p>
+                  <ul className="list-disc list-inside space-y-1">
+                    {bulkImportResult.results.map((wholeFileError, index) => (
+                      <li key={index} className="text-sm text-red-700 dark:text-red-300">
+                        {wholeFileError.error}
+                        {wholeFileError.rowIds?.length > 0 && (
+                          <> (rows: {wholeFileError.rowIds.join(', ')})</>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {bulkImportResult && !bulkImportResult.rejected && (
+                <div>
+                  <p className="text-sm text-gray-700 dark:text-gray-300 mb-2">
+                    {bulkImportResult.successCount} succeeded, {bulkImportResult.failureCount} failed.
+                  </p>
+                  <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                    <thead className="bg-gray-50 dark:bg-gray-700">
+                      <tr>
+                        <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
+                          Row
+                        </th>
+                        <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
+                          Status
+                        </th>
+                        <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
+                          Message
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                      {bulkImportResult.results.map((rowResult) => (
+                        <tr key={rowResult.row}>
+                          <td className="px-3 py-2 text-sm text-gray-900 dark:text-gray-100">
+                            {rowResult.row}
+                          </td>
+                          <td className="px-3 py-2 text-sm">
+                            {rowResult.success ? (
+                              <span className="text-green-600 dark:text-green-400 font-medium">Success</span>
+                            ) : (
+                              <span className="text-red-600 dark:text-red-400 font-medium">Failed</span>
+                            )}
+                          </td>
+                          <td className="px-3 py-2 text-sm text-gray-700 dark:text-gray-300">
+                            {rowResult.success
+                              ? `Team created (ID: ${rowResult.teamId})`
+                              : rowResult.error}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
           )}
         </div>
