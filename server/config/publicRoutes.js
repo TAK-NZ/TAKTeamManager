@@ -32,6 +32,11 @@ const publicRoutes = [
   { method: 'POST', path: '/api/requests/team-access' },
   { method: 'GET', path: '/api/requests/verify/:token' },
 
+  // --- server/routes/signup.js ---
+  { method: 'POST', path: '/api/requests/initiate' },
+  { method: 'GET', path: '/api/requests/available-teams' },
+  { method: 'POST', path: '/api/org-interest' },
+
   // --- server/routes/health.js (mounted at /health) ---
   { method: 'GET', path: '/health' },
   { method: 'GET', path: '/health/ready' },

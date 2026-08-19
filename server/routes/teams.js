@@ -286,6 +286,12 @@ router.put('/:teamId', authenticateToken, authorize, [
       callsign_level_selection: callsignLevelSelection
     });
 
+    // When canJoin is explicitly set to false, revoke any existing
+    // sign-up code for this team so the code is no longer usable.
+    if (canJoin === false) {
+      await pool.query('DELETE FROM signup_codes WHERE team_id = $1', [req.params.teamId]);
+    }
+
     // Update user attributes if callsign settings changed. Requirement
     // 5.12 (task 11.6): a Callsign_Level_Selection change must also
     // trigger this regeneration, consistent with the existing

@@ -310,7 +310,27 @@ const routes = {
   // BOTH this registry layer AND the service's own internal check),
   // rather than being reachable by any authenticated_user.
   'POST /api/bulk-import/users': ['bulk_import:users'],
-  'POST /api/bulk-import/teams': ['bulk_import:teams']
+  'POST /api/bulk-import/teams': ['bulk_import:teams'],
+
+  // --- /api/signup-codes (server/routes/signupCodes.js) ---
+  // Sign-up code management routes for team admins and global managers.
+  'POST /api/signup-codes/generate': ['signup_code:manage'],
+  'GET /api/signup-codes/:teamId': ['signup_code:read'],
+  'DELETE /api/signup-codes/:teamId': ['signup_code:manage'],
+  'GET /api/signup-codes/:teamId/qr': ['signup_code:read'],
+  'GET /api/signup-codes/:teamId/pdf': ['signup_code:read'],
+
+  // --- /api/orgs (server/routes/orgDomains.js) ---
+  // Org domain management routes for org admins and global managers.
+  'GET /api/orgs/:orgId/domains': ['org:domains:read'],
+  'PUT /api/orgs/:orgId/domains': ['org:domains:manage'],
+
+  // --- /api/admin (server/routes/orgDomains.js) ---
+  // Global admin routes for excluded domains and org interest management.
+  'GET /api/admin/excluded-domains': ['admin:excluded_domains:manage'],
+  'PUT /api/admin/excluded-domains': ['admin:excluded_domains:manage'],
+  'GET /api/admin/org-interest': ['admin:org_interest:read'],
+  'PATCH /api/admin/org-interest/:id': ['admin:org_interest:manage']
 };
 
 // Role-based default permission sets.

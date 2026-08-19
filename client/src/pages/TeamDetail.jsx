@@ -7,6 +7,8 @@ import api from '../services/api'
 import { labelFor } from '../utils/teamLabels'
 import { computeTeamDepth } from '../utils/teamDepth'
 import TeamFormDialog from '../components/TeamFormDialog'
+import SignupCodeManager from '../components/SignupCodeManager'
+import OrgDomainManager from '../components/OrgDomainManager'
 
 // Requirement 5's two new `callsign_name_format` values need example
 // strings alongside the three existing ones, matching the "J Doe"/"John D"
@@ -983,6 +985,23 @@ export default function TeamDetail({ refreshUser }) {
           </div>
         </div>
       </div>
+
+      {/* Sign-up Code Manager (only for teams with can_join) */}
+      {team.can_join && (
+        <SignupCodeManager
+          teamId={team.id}
+          teamName={team.display_name || team.name}
+          isAdmin={true}
+        />
+      )}
+
+      {/* Org Domain Manager (only for root teams / organisations) */}
+      {!team.parent_team_id && (
+        <OrgDomainManager
+          orgId={team.id}
+          isAdmin={true}
+        />
+      )}
 
       {/* Tabbed Interface */}
       <div className="card">

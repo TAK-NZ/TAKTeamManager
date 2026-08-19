@@ -182,6 +182,17 @@ export default function TeamFormDialog({
 
   const handleSubmit = async (e) => {
     e.preventDefault()
+
+    // Requirement 3.4 (signup-flow-rework): when editing an existing team
+    // and can_join is being toggled from true to false, warn the user that
+    // any active sign-up code will be permanently deleted by the server.
+    if (editingTeam && editingTeam.can_join && !formData.canJoin) {
+      const proceed = window.confirm(
+        'This team has an active sign-up code. Disabling join requests will permanently delete the code and invalidate all distributed links and QR codes. Continue?'
+      )
+      if (!proceed) return
+    }
+
     setSubmitting(true)
     try {
       const response = editingTeam

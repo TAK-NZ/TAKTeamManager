@@ -293,4 +293,33 @@ export const auditLogsAPI = {
   },
 };
 
+// --- Sign-up flow APIs (signup-flow-rework spec) ---
+
+export const signupAPI = {
+  initiate: (email, code, recaptchaToken) => api.post('/requests/initiate', { email, code, 'g-recaptcha-response': recaptchaToken }),
+  getAvailableTeams: (token) => api.get(`/requests/available-teams?token=${token}`),
+  submitTeamAccess: (data) => api.post('/requests/team-access', data),
+  submitOrgInterest: (data) => api.post('/org-interest', data),
+};
+
+export const signupCodesAPI = {
+  generate: (teamId) => api.post('/signup-codes/generate', { teamId }),
+  get: (teamId) => api.get(`/signup-codes/${teamId}`),
+  revoke: (teamId) => api.delete(`/signup-codes/${teamId}`),
+  getQr: (teamId) => api.get(`/signup-codes/${teamId}/qr`, { responseType: 'blob' }),
+  getPdf: (teamId) => api.get(`/signup-codes/${teamId}/pdf`, { responseType: 'blob' }),
+};
+
+export const orgDomainsAPI = {
+  get: (orgId) => api.get(`/orgs/${orgId}/domains`),
+  update: (orgId, domains) => api.put(`/orgs/${orgId}/domains`, { domains }),
+};
+
+export const adminAPI = {
+  getExcludedDomains: () => api.get('/admin/excluded-domains'),
+  updateExcludedDomains: (domains) => api.put('/admin/excluded-domains', { domains }),
+  getOrgInterest: () => api.get('/admin/org-interest'),
+  updateOrgInterest: (id, status) => api.patch(`/admin/org-interest/${id}`, { status }),
+};
+
 export default api;

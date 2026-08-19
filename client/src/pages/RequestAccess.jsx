@@ -1,168 +1,192 @@
 import { useState, useEffect } from 'react'
-import { useForm, Controller } from 'react-hook-form'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import DOMPurify from 'dompurify'
-import { requestsAPI, teamsAPI, configAPI } from '../services/api'
+import { signupAPI, configAPI } from '../services/api'
 import { ThemeProvider } from '../contexts/ThemeContext'
-import { ChevronDownIcon, MagnifyingGlassIcon } from '@heroicons/react/24/outline'
 import { DOMPURIFY_OPTIONS } from '../utils/htmlSafeSubset'
 import { getRecaptchaToken } from '../utils/recaptcha'
 
 // Must exactly match RECAPTCHA_EXPECTED_ACTION in server/middleware/captcha.js
-// -- reCAPTCHA v3 scopes each generated token to the action it was minted
-// for, and the server rejects a token whose action does not match.
 const RECAPTCHA_ACTION = 'team_access_request'
 
-// Requirement 11.3/11.9/11.10 (task 34.1): mirrors
-// server/utils/callsignValidation.js's `isValidCallsignSuffix` character
-// class (letters, digits, `-`, `.`) as an HTML `pattern`, so an invalid
-// `callsignSuffix` is rejected at the point of entry rather than only by
-// the server's own POST /api/requests/team-access validation.
-const CALLSIGN_SUFFIX_PATTERN = '[A-Za-z0-9.-]*'
-const CALLSIGN_SUFFIX_REGEX = /^[A-Za-z0-9.-]*$/
+// The valid charset for sign-up codes (30 chars, no ambiguous 0/O/1/I/L)
+const VALID_CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
 
-// Requirement 11.9/11.10 (task 34.1): pure helper deciding whether the
-// "Preferred Callsign Suffix" input should render for the currently
-// selected joinable-team row -- extracted (rather than inlined in the JSX
-// condition) so this decision can be unit tested without a component-render
-// harness, matching this project's existing convention (see Requests.test.jsx
-// and TeamDetail.test.jsx, which test extracted pure logic rather than
-// rendering a component).
+// Client-side code format validation: 8 chars from valid set, optional dash
+// after first 4 (e.g. "ABCD-EFGH" or "ABCDEFGH")
+export function isValidCodeFormat(input) {
+  if (!input) return true // empty is valid (code is optional)
+  const stripped = input.replace(/-/g, '').toUpperCase()
+  if (stripped.length !== 8) return false
+  return [...stripped].every(ch => VALID_CODE_CHARS.includes(ch))
+}
+
+// Requirement 11.9/11.10: pure helper deciding whether the "Preferred
+// Callsign Suffix" input should render for a team. Retained for backward
+// compatibility with existing tests and potential future use in the
+// TeamSelectionStep.
 export function shouldShowCallsignSuffixInput(team) {
   return team?.callsignNameFormat === 'user_defined'
 }
 
+// Steps in the sign-up state machine
+const STEPS = {
+  EMAIL: 'email',
+  SUBMITTED: 'submitted',
+  TEAM_SELECTION: 'team_selection',
+  NO_TEAMS: 'no_teams',
+  SUBMIT_SUCCESS: 'submit_success',
+  ORG_INTEREST_SUBMITTED: 'org_interest_submitted',
+  EXPIRED: 'expired',
+  LOADING: 'loading',
+}
+
 export default function RequestAccess() {
-  const [submitted, setSubmitted] = useState(false)
-  const [teams, setTeams] = useState([])
-  const [filteredTeams, setFilteredTeams] = useState([])
-  const [searchTerm, setSearchTerm] = useState('')
-  const [isDropdownOpen, setIsDropdownOpen] = useState(false)
-  const [selectedTeam, setSelectedTeam] = useState(null)
+  const [searchParams] = useSearchParams()
+  const tokenParam = searchParams.get('token')
+  const codeParam = searchParams.get('code')
+
+  const [step, setStep] = useState(tokenParam ? STEPS.LOADING : STEPS.EMAIL)
+  const [email, setEmail] = useState('')
+  const [code, setCode] = useState(codeParam || '')
+  const [codeError, setCodeError] = useState('')
+  const [isSubmitting, setIsSubmitting] = useState(false)
   const [config, setConfig] = useState({
     request_access_title: 'Request Team Access',
     request_access_subtitle: 'Fill out this form to request access to a TAK team',
     request_access_footer: ''
   })
-  const { register, handleSubmit, control, formState: { errors, isSubmitting } } = useForm()
+
+  // Team selection step state
+  const [teams, setTeams] = useState([])
+  const [firstName, setFirstName] = useState('')
+  const [lastName, setLastName] = useState('')
+  const [selectedTeamId, setSelectedTeamId] = useState('')
+  const [verifiedEmail, setVerifiedEmail] = useState('')
+
+  // No teams / org interest state
+  const [orgName, setOrgName] = useState('')
 
   useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const [teamsResponse, configResponse] = await Promise.all([
-          teamsAPI.getJoinable(),
-          configAPI.getPublic()
-        ])
-        setTeams(teamsResponse.data.teams || [])
-        setFilteredTeams(teamsResponse.data.teams || [])
-        setConfig(configResponse.data)
-      } catch (error) {
-        console.error('Failed to fetch data:', error)
-        toast.error('Failed to load page data')
-      }
-    }
-    fetchData()
+    configAPI.getPublic()
+      .then(res => setConfig(res.data))
+      .catch(err => console.error('Failed to fetch config:', err))
   }, [])
 
+  // If we have a token param, fetch available teams on mount
   useEffect(() => {
-    if (!Array.isArray(teams)) return
-    const filtered = teams.filter(team => 
-      team.display_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      team.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      (team.description && team.description.toLowerCase().includes(searchTerm.toLowerCase()))
-    )
-    setFilteredTeams(filtered)
-  }, [searchTerm, teams])
+    if (!tokenParam) return
 
-  useEffect(() => {
-    const handleClickOutside = (event) => {
-      if (!event.target.closest('.team-dropdown')) {
-        setIsDropdownOpen(false)
-      }
+    signupAPI.getAvailableTeams(tokenParam)
+      .then(res => {
+        const { teams: availableTeams, email: tokenEmail } = res.data
+        setVerifiedEmail(tokenEmail || '')
+        if (availableTeams && availableTeams.length > 0) {
+          setTeams(availableTeams)
+          setStep(STEPS.TEAM_SELECTION)
+        } else {
+          setStep(STEPS.NO_TEAMS)
+        }
+      })
+      .catch(err => {
+        if (err.response?.status === 410 || err.response?.status === 401) {
+          setStep(STEPS.EXPIRED)
+        } else {
+          console.error('Failed to fetch available teams:', err)
+          toast.error('Failed to load sign-up data')
+          setStep(STEPS.EXPIRED)
+        }
+      })
+  }, [tokenParam])
+
+  const handleEmailSubmit = async (e) => {
+    e.preventDefault()
+
+    // Validate code format if provided
+    if (code && !isValidCodeFormat(code)) {
+      setCodeError('Invalid code format. Must be 8 characters (letters/digits, optional dash).')
+      return
     }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [])
+    setCodeError('')
+    setIsSubmitting(true)
 
-  const onSubmit = async (data) => {
     try {
       let recaptchaToken
-
-      // config.recaptcha_disabled mirrors the server's own
-      // RECAPTCHA_DISABLED bypass (non-production only -- see
-      // server/middleware/captcha.js's isRecaptchaDisabledForTesting).
-      // When active, the server won't call Google's verify API at all,
-      // so there's no point loading the script / generating a token
-      // here either -- and doing so would otherwise block the form on a
-      // missing site key.
       if (!config.recaptcha_disabled) {
         if (!config.recaptcha_site_key) {
           toast.error('CAPTCHA is not configured. Please contact an administrator.')
+          setIsSubmitting(false)
           return
         }
         recaptchaToken = await getRecaptchaToken(config.recaptcha_site_key, RECAPTCHA_ACTION)
       }
 
-      const submitData = {
-        ...data,
-        teamId: selectedTeam?.id,
-        teamName: selectedTeam?.name,
-        'g-recaptcha-response': recaptchaToken
-      }
-      await requestsAPI.submitTeamAccess(submitData)
-      setSubmitted(true)
-      toast.success('Access request submitted successfully!')
+      await signupAPI.initiate(email, code || undefined, recaptchaToken)
+      setStep(STEPS.SUBMITTED)
     } catch (error) {
-      // Surface the server's specific rejection reason (e.g. the
-      // improved CAPTCHA failure messages from server/middleware/
-      // captcha.js) instead of a generic message, when one is available.
       const serverMessage = error.response?.data?.error
-      toast.error(serverMessage || 'Failed to submit request. Please try again.')
+      toast.error(serverMessage || 'Failed to submit. Please try again.')
+    } finally {
+      setIsSubmitting(false)
     }
   }
 
-  const handleTeamSelect = (team) => {
-    setSelectedTeam(team)
-    setSearchTerm(team.display_name || team.name)
-    setIsDropdownOpen(false)
+  const handleTeamAccessSubmit = async (e) => {
+    e.preventDefault()
+    if (!selectedTeamId || !firstName || !lastName) return
+
+    setIsSubmitting(true)
+    try {
+      await signupAPI.submitTeamAccess({
+        token: tokenParam,
+        firstName,
+        lastName,
+        teamId: parseInt(selectedTeamId, 10),
+      })
+      setStep(STEPS.SUBMIT_SUCCESS)
+    } catch (error) {
+      const serverMessage = error.response?.data?.error
+      toast.error(serverMessage || 'Failed to submit request. Please try again.')
+    } finally {
+      setIsSubmitting(false)
+    }
   }
 
-  if (submitted) {
-    return (
-      <ThemeProvider>
-        <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 py-12 px-4">
-          <div className="max-w-md w-full">
-            <div className="card text-center">
-              <div className="w-16 h-16 mx-auto mb-4 bg-green-100 dark:bg-green-900 rounded-full flex items-center justify-center">
-                <svg className="w-8 h-8 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                </svg>
-              </div>
-              <h2 className="text-xl font-bold text-gray-900 dark:text-gray-100 mb-2">Request Submitted</h2>
-              <p className="text-gray-600 dark:text-gray-400 mb-6">
-                Your team access request has been submitted. A team administrator will review your request and contact you via email.
-              </p>
-              {config.authentik_origin ? (
-                <a href={config.authentik_origin} className="btn-primary">
-                  Back to Login
-                </a>
-              ) : (
-                <Link to="/" className="btn-primary">
-                  Back to Login
-                </Link>
-              )}
-            </div>
+  const handleOrgInterestSubmit = async (e) => {
+    e.preventDefault()
+    if (!firstName || !lastName || !orgName) return
+
+    setIsSubmitting(true)
+    try {
+      await signupAPI.submitOrgInterest({
+        token: tokenParam,
+        firstName,
+        lastName,
+        orgName,
+        email: verifiedEmail,
+      })
+      setStep(STEPS.ORG_INTEREST_SUBMITTED)
+    } catch (error) {
+      const serverMessage = error.response?.data?.error
+      toast.error(serverMessage || 'Failed to submit. Please try again.')
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  const renderStep = () => {
+    switch (step) {
+      case STEPS.LOADING:
+        return (
+          <div className="card text-center py-12">
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary-600 mx-auto mb-4"></div>
+            <p className="text-gray-600 dark:text-gray-400">Loading...</p>
           </div>
-        </div>
-      </ThemeProvider>
-    )
-  }
+        )
 
-  return (
-    <ThemeProvider>
-      <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 py-12 px-4">
-        <div className="max-w-md w-full">
+      case STEPS.EMAIL:
+        return (
           <div className="card">
             <div className="text-center mb-6">
               <img
@@ -176,199 +200,320 @@ export default function RequestAccess() {
               </p>
             </div>
 
-          <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                Email Address
-              </label>
-              <input
-                type="email"
-                className="input"
-                {...register('email', { required: 'Email is required' })}
-              />
-              {errors.email && (
-                <p className="text-red-600 text-sm mt-1">{errors.email.message}</p>
-              )}
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
+            <form onSubmit={handleEmailSubmit} className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                  First Name
+                  Email Address
                 </label>
                 <input
-                  type="text"
-                  className="input"
-                  {...register('firstName', { required: 'First name is required' })}
+                  type="email"
+                  className="input w-full"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  required
+                  placeholder="you@example.com"
                 />
-                {errors.firstName && (
-                  <p className="text-red-600 text-sm mt-1">{errors.firstName.message}</p>
-                )}
               </div>
+
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                  Last Name
+                  Sign-up Code <span className="text-gray-400 font-normal">(optional)</span>
                 </label>
                 <input
                   type="text"
-                  className="input"
-                  {...register('lastName', { required: 'Last name is required' })}
+                  className="input w-full"
+                  value={code}
+                  onChange={(e) => {
+                    setCode(e.target.value)
+                    if (codeError) setCodeError('')
+                  }}
+                  placeholder="XXXX-XXXX"
+                  maxLength={9}
                 />
-                {errors.lastName && (
-                  <p className="text-red-600 text-sm mt-1">{errors.lastName.message}</p>
+                {codeError && (
+                  <p className="text-red-600 text-sm mt-1">{codeError}</p>
                 )}
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                  If you have a sign-up code from a team, enter it here to go directly to that team.
+                </p>
               </div>
-            </div>
 
-            <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                Select Team
-              </label>
-              <Controller
-                name="teamId"
-                control={control}
-                rules={{ required: 'Please select a team' }}
-                render={({ field }) => (
-                  <div className="relative team-dropdown">
-                    <div className="relative">
-                      <input
-                        type="text"
-                        className="input pr-10"
-                        placeholder="Search for a team..."
-                        value={searchTerm}
-                        onChange={(e) => {
-                          setSearchTerm(e.target.value)
-                          setIsDropdownOpen(true)
-                          if (!e.target.value) setSelectedTeam(null)
-                        }}
-                        onFocus={() => setIsDropdownOpen(true)}
-                      />
-                      <div className="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none">
-                        <MagnifyingGlassIcon className="h-5 w-5 text-gray-400" />
-                      </div>
-                    </div>
-                    
-                    {isDropdownOpen && filteredTeams.length > 0 && (
-                      <div className="absolute z-10 mt-1 w-full bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-md shadow-lg max-h-60 overflow-auto">
-                        {filteredTeams.map((team) => (
-                          <div
-                            key={team.id}
-                            className="px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 cursor-pointer"
-                            onClick={() => {
-                              handleTeamSelect(team)
-                              field.onChange(team.id)
-                            }}
-                          >
-                            <div className="font-medium text-gray-900 dark:text-gray-100">
-                              {team.display_name || team.name}
-                            </div>
-                            {team.description && (
-                              <div className="text-sm text-gray-500 dark:text-gray-400 truncate">
-                                {team.description}
-                              </div>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    
-                    {isDropdownOpen && filteredTeams.length === 0 && searchTerm && (
-                      <div className="absolute z-10 mt-1 w-full bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-md shadow-lg">
-                        <div className="px-4 py-2 text-gray-500 dark:text-gray-400">
-                          No teams found matching "{searchTerm}"
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-              />
-              {errors.teamId && (
-                <p className="text-red-600 text-sm mt-1">{errors.teamId.message}</p>
-              )}
-              {!selectedTeam && searchTerm && (
-                <p className="text-amber-600 text-sm mt-1">Please select a team from the dropdown</p>
-              )}
-            </div>
+              <button
+                type="submit"
+                disabled={isSubmitting || !email}
+                className="w-full btn-primary disabled:opacity-50"
+              >
+                {isSubmitting ? 'Submitting...' : 'Continue'}
+              </button>
+            </form>
 
-            {shouldShowCallsignSuffixInput(selectedTeam) && (
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                  Preferred Callsign Suffix
-                </label>
-                <input
-                  type="text"
-                  className="input"
-                  pattern={CALLSIGN_SUFFIX_PATTERN}
-                  title="Only letters, digits, - and . are allowed"
-                  {...register('callsignSuffix', {
-                    required: 'Preferred callsign suffix is required for this team',
-                    pattern: {
-                      value: CALLSIGN_SUFFIX_REGEX,
-                      message: 'Only letters, digits, - and . are allowed'
-                    }
-                  })}
+            {config.request_access_footer && (
+              <div className="mt-6 p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md">
+                <div
+                  className="text-sm text-blue-800 dark:text-blue-200"
+                  dangerouslySetInnerHTML={{
+                    __html: typeof config.request_access_footer === 'string'
+                      ? DOMPurify.sanitize(config.request_access_footer, DOMPURIFY_OPTIONS)
+                      : ''
+                  }}
                 />
-                {errors.callsignSuffix && (
-                  <p className="text-red-600 text-sm mt-1">{errors.callsignSuffix.message}</p>
-                )}
               </div>
             )}
 
-            <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                Reason for Access
-              </label>
-              <textarea
-                rows={4}
-                className="input"
-                placeholder="Please explain why you need access to this team..."
-                {...register('reason', { 
-                  required: 'Reason is required',
-                  minLength: { value: 10, message: 'Please provide more detail (minimum 10 characters)' }
-                })}
-              />
-              {errors.reason && (
-                <p className="text-red-600 text-sm mt-1">{errors.reason.message}</p>
+            <div className="text-center mt-6">
+              {config.authentik_origin ? (
+                <a
+                  href={config.authentik_origin}
+                  className="text-sm text-primary-600 hover:text-primary-500"
+                >
+                  Already have an account? Sign in
+                </a>
+              ) : (
+                <Link to="/" className="text-sm text-primary-600 hover:text-primary-500">
+                  Already have an account? Sign in
+                </Link>
               )}
             </div>
+          </div>
+        )
 
-            <button
-              type="submit"
-              disabled={isSubmitting || !selectedTeam}
-              className="w-full btn-primary disabled:opacity-50"
-            >
-              {isSubmitting ? 'Submitting...' : 'Submit Request'}
-            </button>
-          </form>
-
-          {config.request_access_footer && (
-            <div className="mt-6 p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md">
-              <div 
-                className="text-sm text-blue-800 dark:text-blue-200"
-                dangerouslySetInnerHTML={{
-                  __html: typeof config.request_access_footer === 'string'
-                    ? DOMPurify.sanitize(config.request_access_footer, DOMPURIFY_OPTIONS)
-                    : ''
-                }}
-              />
+      case STEPS.SUBMITTED:
+        return (
+          <div className="card text-center">
+            <div className="w-16 h-16 mx-auto mb-4 bg-blue-100 dark:bg-blue-900 rounded-full flex items-center justify-center">
+              <svg className="w-8 h-8 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+              </svg>
             </div>
-          )}
+            <h2 className="text-xl font-bold text-gray-900 dark:text-gray-100 mb-2">Check your email to continue</h2>
+            <p className="text-gray-600 dark:text-gray-400 mb-6">
+              We've sent a verification link to your email address. Click the link to continue with your sign-up.
+            </p>
+            <Link to="/request-access" className="text-sm text-primary-600 hover:text-primary-500">
+              Start over
+            </Link>
+          </div>
+        )
 
-          <div className="text-center mt-6">
-            {config.authentik_origin ? (
-              <a
-                href={config.authentik_origin}
-                className="text-sm text-primary-600 hover:text-primary-500"
+      case STEPS.TEAM_SELECTION:
+        return (
+          <div className="card">
+            <div className="text-center mb-6">
+              <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Select a Team</h2>
+              <p className="text-gray-600 dark:text-gray-400 mt-2">
+                Choose which team you'd like to join.
+              </p>
+            </div>
+
+            <form onSubmit={handleTeamAccessSubmit} className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                    First Name
+                  </label>
+                  <input
+                    type="text"
+                    className="input w-full"
+                    value={firstName}
+                    onChange={(e) => setFirstName(e.target.value)}
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                    Last Name
+                  </label>
+                  <input
+                    type="text"
+                    className="input w-full"
+                    value={lastName}
+                    onChange={(e) => setLastName(e.target.value)}
+                    required
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Team
+                </label>
+                <select
+                  className="input w-full"
+                  value={selectedTeamId}
+                  onChange={(e) => setSelectedTeamId(e.target.value)}
+                  required
+                >
+                  <option value="">Select a team...</option>
+                  {teams.map((team) => (
+                    <option key={team.id} value={team.id}>
+                      {team.display_name || team.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <button
+                type="submit"
+                disabled={isSubmitting || !selectedTeamId || !firstName || !lastName}
+                className="w-full btn-primary disabled:opacity-50"
               >
-                Already have an account? Sign in
+                {isSubmitting ? 'Submitting...' : 'Submit Request'}
+              </button>
+            </form>
+          </div>
+        )
+
+      case STEPS.NO_TEAMS:
+        return (
+          <div className="card">
+            <div className="text-center mb-6">
+              <h2 className="text-xl font-bold text-gray-900 dark:text-gray-100">No Teams Available</h2>
+              <p className="text-gray-600 dark:text-gray-400 mt-2">
+                There are no teams available for your email domain. If you represent an organisation, let us know below.
+              </p>
+            </div>
+
+            <form onSubmit={handleOrgInterestSubmit} className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                    First Name
+                  </label>
+                  <input
+                    type="text"
+                    className="input w-full"
+                    value={firstName}
+                    onChange={(e) => setFirstName(e.target.value)}
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                    Last Name
+                  </label>
+                  <input
+                    type="text"
+                    className="input w-full"
+                    value={lastName}
+                    onChange={(e) => setLastName(e.target.value)}
+                    required
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Organisation Name
+                </label>
+                <input
+                  type="text"
+                  className="input w-full"
+                  value={orgName}
+                  onChange={(e) => setOrgName(e.target.value)}
+                  required
+                  placeholder="Your organisation name"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Email
+                </label>
+                <input
+                  type="email"
+                  className="input w-full bg-gray-100 dark:bg-gray-600"
+                  value={verifiedEmail}
+                  readOnly
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={isSubmitting || !firstName || !lastName || !orgName}
+                className="w-full btn-primary disabled:opacity-50"
+              >
+                {isSubmitting ? 'Submitting...' : 'Submit Interest'}
+              </button>
+            </form>
+          </div>
+        )
+
+      case STEPS.SUBMIT_SUCCESS:
+        return (
+          <div className="card text-center">
+            <div className="w-16 h-16 mx-auto mb-4 bg-green-100 dark:bg-green-900 rounded-full flex items-center justify-center">
+              <svg className="w-8 h-8 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+              </svg>
+            </div>
+            <h2 className="text-xl font-bold text-gray-900 dark:text-gray-100 mb-2">Request Submitted</h2>
+            <p className="text-gray-600 dark:text-gray-400 mb-6">
+              Your request has been submitted. We'll review it shortly.
+            </p>
+            {config.authentik_origin ? (
+              <a href={config.authentik_origin} className="btn-primary inline-block">
+                Back to Login
               </a>
             ) : (
-              <Link to="/" className="text-sm text-primary-600 hover:text-primary-500">
-                Already have an account? Sign in
+              <Link to="/" className="btn-primary inline-block">
+                Back to Login
               </Link>
             )}
           </div>
+        )
+
+      case STEPS.ORG_INTEREST_SUBMITTED:
+        return (
+          <div className="card text-center">
+            <div className="w-16 h-16 mx-auto mb-4 bg-green-100 dark:bg-green-900 rounded-full flex items-center justify-center">
+              <svg className="w-8 h-8 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+              </svg>
+            </div>
+            <h2 className="text-xl font-bold text-gray-900 dark:text-gray-100 mb-2">Thank You</h2>
+            <p className="text-gray-600 dark:text-gray-400 mb-6">
+              Thank you. We'll be in touch about your organisation.
+            </p>
+            {config.authentik_origin ? (
+              <a href={config.authentik_origin} className="btn-primary inline-block">
+                Back to Login
+              </a>
+            ) : (
+              <Link to="/" className="btn-primary inline-block">
+                Back to Login
+              </Link>
+            )}
           </div>
+        )
+
+      case STEPS.EXPIRED:
+        return (
+          <div className="card text-center">
+            <div className="w-16 h-16 mx-auto mb-4 bg-red-100 dark:bg-red-900 rounded-full flex items-center justify-center">
+              <svg className="w-8 h-8 text-red-600 dark:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+              </svg>
+            </div>
+            <h2 className="text-xl font-bold text-gray-900 dark:text-gray-100 mb-2">Link Expired</h2>
+            <p className="text-gray-600 dark:text-gray-400 mb-6">
+              This link has expired. Please start the sign-up process again.
+            </p>
+            <Link to="/request-access" className="btn-primary inline-block">
+              Start Over
+            </Link>
+          </div>
+        )
+
+      default:
+        return null
+    }
+  }
+
+  return (
+    <ThemeProvider>
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 py-12 px-4">
+        <div className="max-w-md w-full">
+          {renderStep()}
         </div>
       </div>
     </ThemeProvider>

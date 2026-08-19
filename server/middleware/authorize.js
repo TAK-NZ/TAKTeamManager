@@ -344,7 +344,105 @@ const rowScopedResolvers = {
    * @param {import('express').Request} req
    * @returns {Promise<boolean>}
    */
-  'team:read': async (req) => TeamVisibilityService.isVisibleBranch(req.params.teamId, req.user)
+  'team:read': async (req) => TeamVisibilityService.isVisibleBranch(req.params.teamId, req.user),
+
+  /**
+   * `signup_code:manage` — satisfied if the requesting user is a
+   * Global_Manager OR is an admin (per `Team.isAdmin`) of the team
+   * identified by `:teamId` route param or `req.body.teamId`.
+   *
+   * @param {import('express').Request} req
+   * @returns {Promise<boolean>}
+   */
+  'signup_code:manage': async (req) => {
+    if (req.user && req.user.is_global_manager) {
+      return true;
+    }
+    const teamId = (req.params && req.params.teamId) || (req.body && req.body.teamId);
+    if (!teamId) return false;
+    return Team.isAdmin(teamId, req.user && req.user.userId);
+  },
+
+  /**
+   * `signup_code:read` — satisfied if the requesting user is a
+   * Global_Manager OR is an admin (per `Team.isAdmin`) of the team
+   * identified by `:teamId` route param.
+   *
+   * @param {import('express').Request} req
+   * @returns {Promise<boolean>}
+   */
+  'signup_code:read': async (req) => {
+    if (req.user && req.user.is_global_manager) {
+      return true;
+    }
+    const teamId = req.params && req.params.teamId;
+    if (!teamId) return false;
+    return Team.isAdmin(teamId, req.user && req.user.userId);
+  },
+
+  /**
+   * `org:domains:read` — satisfied if the requesting user is a
+   * Global_Manager OR is an admin (per `Team.isAdmin`) of the org
+   * identified by `:orgId` route param.
+   *
+   * @param {import('express').Request} req
+   * @returns {Promise<boolean>}
+   */
+  'org:domains:read': async (req) => {
+    if (req.user && req.user.is_global_manager) {
+      return true;
+    }
+    const orgId = req.params && req.params.orgId;
+    if (!orgId) return false;
+    return Team.isAdmin(orgId, req.user && req.user.userId);
+  },
+
+  /**
+   * `org:domains:manage` — satisfied if the requesting user is a
+   * Global_Manager OR is an admin (per `Team.isAdmin`) of the org
+   * identified by `:orgId` route param.
+   *
+   * @param {import('express').Request} req
+   * @returns {Promise<boolean>}
+   */
+  'org:domains:manage': async (req) => {
+    if (req.user && req.user.is_global_manager) {
+      return true;
+    }
+    const orgId = req.params && req.params.orgId;
+    if (!orgId) return false;
+    return Team.isAdmin(orgId, req.user && req.user.userId);
+  },
+
+  /**
+   * `admin:excluded_domains:manage` — Global_Manager-only.
+   *
+   * @param {import('express').Request} req
+   * @returns {Promise<boolean>}
+   */
+  'admin:excluded_domains:manage': async (req) => {
+    return Boolean(req.user && req.user.is_global_manager);
+  },
+
+  /**
+   * `admin:org_interest:read` — Global_Manager-only.
+   *
+   * @param {import('express').Request} req
+   * @returns {Promise<boolean>}
+   */
+  'admin:org_interest:read': async (req) => {
+    return Boolean(req.user && req.user.is_global_manager);
+  },
+
+  /**
+   * `admin:org_interest:manage` — Global_Manager-only.
+   *
+   * @param {import('express').Request} req
+   * @returns {Promise<boolean>}
+   */
+  'admin:org_interest:manage': async (req) => {
+    return Boolean(req.user && req.user.is_global_manager);
+  }
 };
 
 /**
