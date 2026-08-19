@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { PlusIcon, UserGroupIcon, TrashIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, ChevronRightIcon, EyeSlashIcon, ArrowLeftOnRectangleIcon, PencilIcon } from '@heroicons/react/24/outline'
+import { PlusIcon, UserGroupIcon, TrashIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, ChevronRightIcon, EyeSlashIcon, ArrowLeftOnRectangleIcon, PencilIcon, QrCodeIcon } from '@heroicons/react/24/outline'
 import { teamsAPI, configAPI } from '../services/api'
 import api from '../services/api'
 import { labelFor } from '../utils/teamLabels'
@@ -341,6 +341,9 @@ export default function Teams({ user }) {
                           )}
                           {team.can_join && (
                             <ArrowLeftOnRectangleIcon className="h-4 w-4 text-green-500" title="Joinable team" />
+                          )}
+                          {team.has_signup_code && (
+                            <QrCodeIcon className="h-4 w-4 text-purple-500" title="Has sign-up code" />
                           )}
                         </div>
                         {team.description && (

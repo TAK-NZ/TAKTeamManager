@@ -170,7 +170,8 @@ class Team {
         (SELECT COUNT(*) FROM team_memberships tm
          JOIN users u ON u.id = tm.user_id
          WHERE tm.team_id = t.id AND u.is_team_device IS NOT TRUE) as member_count,
-        (SELECT COUNT(*) FROM teams t2 WHERE t2.parent_team_id = t.id) as sub_teams_count
+        (SELECT COUNT(*) FROM teams t2 WHERE t2.parent_team_id = t.id) as sub_teams_count,
+          EXISTS(SELECT 1 FROM signup_codes sc WHERE sc.team_id = t.id) as has_signup_code
       FROM teams t
       WHERE t.parent_team_id = $1
     `, [parentId]);
@@ -552,7 +553,8 @@ class Team {
           (SELECT COUNT(*) FROM team_memberships tm
            JOIN users u ON u.id = tm.user_id
            WHERE tm.team_id = t.id AND u.is_team_device IS NOT TRUE) as member_count,
-          (SELECT COUNT(*) FROM teams t2 WHERE t2.parent_team_id = t.id) as sub_teams_count
+          (SELECT COUNT(*) FROM teams t2 WHERE t2.parent_team_id = t.id) as sub_teams_count,
+          EXISTS(SELECT 1 FROM signup_codes sc WHERE sc.team_id = t.id) as has_signup_code
         FROM teams t
         ORDER BY t.name
         ${hasPagination ? 'LIMIT $1 OFFSET $2' : ''}
