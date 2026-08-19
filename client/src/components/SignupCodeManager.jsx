@@ -136,20 +136,16 @@ export default function SignupCodeManager({ teamId, teamName, isAdmin }) {
 
   return (
     <div className="card">
-      <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">Sign-up Code</h3>
+      <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
+        Sign-up Code:{' '}
+        {code
+          ? <span className="font-mono tracking-wider">{code.formatted || code.code}</span>
+          : <span className="text-gray-500 dark:text-gray-400 font-normal">No sign-up code generated</span>
+        }
+      </h3>
 
       {code ? (
         <>
-          <div className="mb-4">
-            <p className="text-2xl font-mono font-bold text-gray-900 dark:text-gray-100 tracking-wider">
-              {code.formatted || code.code}
-            </p>
-            {code.created_at && (
-              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                Generated {new Date(code.created_at).toLocaleDateString()}
-              </p>
-            )}
-          </div>
 
           <div className="flex flex-wrap gap-2">
             <button
@@ -193,7 +189,6 @@ export default function SignupCodeManager({ teamId, teamName, isAdmin }) {
         </>
       ) : (
         <>
-          <p className="text-gray-500 dark:text-gray-400 mb-4">No sign-up code generated</p>
           <button
             onClick={() => setShowConfirm(true)}
             disabled={generating}
