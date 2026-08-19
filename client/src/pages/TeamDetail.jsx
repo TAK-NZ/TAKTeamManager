@@ -274,6 +274,7 @@ export default function TeamDetail({ refreshUser }) {
   const [addingMember, setAddingMember] = useState(false)
   const [removeUserId, setRemoveUserId] = useState(null)
   const [removeUserRole, setRemoveUserRole] = useState('')
+  const [removeConfirmInput, setRemoveConfirmInput] = useState('')
   const [removingUser, setRemovingUser] = useState(false)
   // Requirements 11.13, 13.1, 13.2, 13.3, 13.5 (task 33.2): per-row inline
   // Member_List edit state. `editingMemberId` tracks which member/admin row
@@ -509,6 +510,7 @@ export default function TeamDetail({ refreshUser }) {
   const handleRemoveUser = (userId, role) => {
     setRemoveUserId(userId)
     setRemoveUserRole(role)
+    setRemoveConfirmInput('')
   }
 
   // Requirements 11.13, 13.1, 13.2, 13.5 (task 33.2): opens the inline
@@ -1967,7 +1969,10 @@ export default function TeamDetail({ refreshUser }) {
       )}
 
       {/* Remove User Confirmation Dialog */}
-      {removeUserId && (
+      {removeUserId && (() => {
+        const removeTarget = [...members, ...admins].find(m => m.id === removeUserId)
+        const removeTargetEmail = removeTarget?.email || ''
+        return (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full">
             <div className="p-6">
@@ -1975,16 +1980,30 @@ export default function TeamDetail({ refreshUser }) {
                 Permanently Delete User
               </h3>
               <p className="text-gray-600 dark:text-gray-400 mb-4">
-                Are you sure you want to permanently delete this user? This action cannot be undone.
+                Are you sure you want to permanently delete <span className="font-medium text-gray-900 dark:text-gray-100">{removeTarget?.first_name} {removeTarget?.last_name}</span>? This action cannot be undone.
               </p>
-              <p className="text-gray-600 dark:text-gray-400 mb-6 text-sm">
-                The user will be removed from all teams and channels, their account will be deleted from the system and from the identity provider (Authentik).
+              <p className="text-gray-600 dark:text-gray-400 mb-4 text-sm">
+                The user will be removed from all teams and channels, their account will be deleted from the system and from the identity provider.
               </p>
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Type <span className="font-mono font-bold text-gray-900 dark:text-gray-100">{removeTargetEmail}</span> to confirm:
+                </label>
+                <input
+                  type="text"
+                  className="input w-full"
+                  value={removeConfirmInput}
+                  onChange={(e) => setRemoveConfirmInput(e.target.value)}
+                  placeholder={removeTargetEmail}
+                  autoComplete="off"
+                />
+              </div>
               <div className="flex justify-end space-x-3">
                 <button
                   onClick={() => {
                     setRemoveUserId(null)
                     setRemoveUserRole('')
+                    setRemoveConfirmInput('')
                   }}
                   className="btn-secondary"
                   disabled={removingUser}
@@ -1993,8 +2012,8 @@ export default function TeamDetail({ refreshUser }) {
                 </button>
                 <button
                   onClick={confirmRemoveUser}
-                  disabled={removingUser}
-                  className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50"
+                  disabled={removingUser || removeConfirmInput !== removeTargetEmail}
+                  className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {removingUser ? 'Deleting...' : 'Delete User Permanently'}
                 </button>
@@ -2002,7 +2021,8 @@ export default function TeamDetail({ refreshUser }) {
             </div>
           </div>
         </div>
-      )}
+        )
+      })()}
 
 
       {/* Edit Team Dialog (shared with Teams.jsx) */}
