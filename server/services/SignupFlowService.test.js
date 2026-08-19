@@ -271,7 +271,8 @@ describe('SignupFlowService.determineEmailState', () => {
         rows: [{
           email_verified: true,
           email_verification_expires_at: new Date(Date.now() + 86400000).toISOString(),
-          status: 'pending'
+          status: 'pending',
+          target_team_id: 42
         }]
       });
 

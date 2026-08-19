@@ -23,9 +23,9 @@ class SignupFlowService {
     );
     if (userResult.rows.length > 0) return 'active';
 
-    // Check access_requests for this email
+    // Check access_requests for this email — most recent first
     const requestResult = await pool.query(
-      `SELECT email_verified, email_verification_expires_at, status
+      `SELECT email_verified, email_verification_expires_at, status, target_team_id
        FROM access_requests
        WHERE requester_email = $1
        ORDER BY created_at DESC
@@ -35,11 +35,23 @@ class SignupFlowService {
 
     if (requestResult.rows.length > 0) {
       const req = requestResult.rows[0];
-      if (req.email_verified && req.status === 'pending') return 'pending_approval';
+
+      // Fully submitted (Step 2 done): email verified + team selected + pending admin
+      if (req.email_verified && req.status === 'pending' && req.target_team_id) {
+        return 'pending_approval';
+      }
+
+      // Step 1 done, Step 2 not done (token active, email NOT yet verified by token click)
       if (!req.email_verified) {
         const expiresAt = new Date(req.email_verification_expires_at);
         if (expiresAt > new Date()) return 'pending_verification_valid';
         return 'pending_verification_expired';
+      }
+
+      // Edge case: email_verified=true but no team (inconsistent state from old flow)
+      // Treat as if no request exists — allow new flow to start fresh
+      if (req.email_verified && !req.target_team_id) {
+        return 'new';
       }
     }
 
@@ -58,6 +70,18 @@ class SignupFlowService {
 
     switch (state) {
       case 'new': {
+        // Clean up stale/inconsistent rows from previous attempts
+        await pool.query(
+          `DELETE FROM access_requests 
+           WHERE requester_email = $1 
+           AND (
+             (email_verified = true AND target_team_id IS NULL)
+             OR (email_verified = false AND email_verification_expires_at <= NOW())
+             OR status IN ('expired', 'denied')
+           )`,
+          [email]
+        );
+
         const token = crypto.randomUUID();
         const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // NOW + 24h
 
