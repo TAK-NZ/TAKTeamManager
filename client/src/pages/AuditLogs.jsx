@@ -142,7 +142,7 @@ export default function AuditLogs({ user }) {
               value={filters.userEmail}
               onChange={(e) => setFilters({ ...filters, userEmail: e.target.value })}
               className="input w-full"
-              placeholder="e.g. user@example.com"
+              placeholder="e.g. user@organisation.nz"
             />
           </div>
 

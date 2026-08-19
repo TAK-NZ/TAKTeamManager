@@ -128,7 +128,7 @@ export default function OrgDomainManager({ orgId, isAdmin }) {
           value={newDomain}
           onChange={(e) => setNewDomain(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="example.com"
+          placeholder="fenz.govt.nz"
         />
         <button
           onClick={handleAdd}

@@ -158,7 +158,7 @@ function MemberEditRow({ colSpan, form, setForm, takRoleValues, saving, error, o
               className="input"
               pattern={CALLSIGN_SUFFIX_PATTERN}
               title="Only letters, digits, - and . are allowed"
-              placeholder="J.Doe"
+              placeholder="J.Bloggs"
             />
           </div>
           <div className="flex items-end space-x-2 pb-0.5">
@@ -1795,7 +1795,7 @@ export default function TeamDetail({ refreshUser }) {
                       value={newUserForm.email}
                       onChange={(e) => setNewUserForm({...newUserForm, email: e.target.value})}
                       className="input w-full"
-                      placeholder="user@example.com"
+                      placeholder="user@organisation.nz"
                     />
                   </div>
                   
@@ -1810,7 +1810,7 @@ export default function TeamDetail({ refreshUser }) {
                         value={newUserForm.firstName}
                         onChange={(e) => setNewUserForm({...newUserForm, firstName: e.target.value})}
                         className="input w-full"
-                        placeholder="John"
+                        placeholder="Joe"
                       />
                     </div>
                     
@@ -1824,7 +1824,7 @@ export default function TeamDetail({ refreshUser }) {
                         value={newUserForm.lastName}
                         onChange={(e) => setNewUserForm({...newUserForm, lastName: e.target.value})}
                         className="input w-full"
-                        placeholder="Doe"
+                        placeholder="Bloggs"
                       />
                     </div>
                   </div>

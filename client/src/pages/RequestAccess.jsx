@@ -222,7 +222,7 @@ export default function RequestAccess() {
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   required
-                  placeholder="you@example.com"
+                  placeholder="you@organisation.nz"
                 />
               </div>
 
@@ -339,7 +339,7 @@ export default function RequestAccess() {
                     value={firstName}
                     onChange={(e) => setFirstName(e.target.value)}
                     required
-                    placeholder="John"
+                    placeholder="Joe"
                   />
                 </div>
                 <div>
@@ -352,7 +352,7 @@ export default function RequestAccess() {
                     value={lastName}
                     onChange={(e) => setLastName(e.target.value)}
                     required
-                    placeholder="Doe"
+                    placeholder="Bloggs"
                   />
                 </div>
               </div>

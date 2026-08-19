@@ -123,7 +123,7 @@ export default function ExcludedDomainsManager() {
           value={newDomain}
           onChange={(e) => setNewDomain(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="example.com"
+          placeholder="gmail.com"
         />
         <button
           onClick={handleAdd}
