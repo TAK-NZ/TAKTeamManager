@@ -63,6 +63,7 @@ export default function RequestAccess() {
   const [firstName, setFirstName] = useState('')
   const [lastName, setLastName] = useState('')
   const [selectedTeamId, setSelectedTeamId] = useState('')
+  const [codeTeamId, setCodeTeamId] = useState(null) // the team ID the sign-up code maps to
   const [reason, setReason] = useState('')
   const [verifiedEmail, setVerifiedEmail] = useState('')
 
@@ -85,8 +86,9 @@ export default function RequestAccess() {
         setVerifiedEmail(tokenEmail || '')
         if (availableTeams && availableTeams.length > 0) {
           setTeams(availableTeams)
-          // Pre-select the team the sign-up code maps to (if provided)
+          // If a sign-up code was used, lock the team selection to that team
           if (res.data.codeTeamId) {
+            setCodeTeamId(res.data.codeTeamId)
             setSelectedTeamId(String(res.data.codeTeamId))
           } else if (availableTeams.length === 1) {
             setSelectedTeamId(String(availableTeams[0].id))
@@ -358,22 +360,40 @@ export default function RequestAccess() {
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                   Team
                 </label>
-                <select
-                  className="input w-full"
-                  value={selectedTeamId}
-                  onChange={(e) => setSelectedTeamId(e.target.value)}
-                  required
-                >
-                  <option value="">Select a team...</option>
-                  {teams.map((team) => (
-                    <option key={team.id} value={team.id}>
-                      {team.display_name || team.name}
-                    </option>
-                  ))}
-                </select>
-                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                  Select the team or organisation you would like to request access to.
-                </p>
+                {codeTeamId ? (
+                  <>
+                    <div className="input w-full bg-gray-50 dark:bg-gray-700 flex items-center justify-between">
+                      <span className="text-gray-900 dark:text-gray-100">
+                        {teams.find(t => String(t.id) === String(codeTeamId))?.display_name || teams.find(t => String(t.id) === String(codeTeamId))?.name || 'Selected team'}
+                      </span>
+                      <span className="text-xs bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200 px-2 py-0.5 rounded-full">
+                        via sign-up code
+                      </span>
+                    </div>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                      This team was selected via your sign-up code.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <select
+                      className="input w-full"
+                      value={selectedTeamId}
+                      onChange={(e) => setSelectedTeamId(e.target.value)}
+                      required
+                    >
+                      <option value="">Select a team...</option>
+                      {teams.map((team) => (
+                        <option key={team.id} value={team.id}>
+                          {team.display_name || team.name}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                      Select the team or organisation you would like to request access to.
+                    </p>
+                  </>
+                )}
               </div>
 
               <div>
