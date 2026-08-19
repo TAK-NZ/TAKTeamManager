@@ -254,6 +254,8 @@ class SignupFlowService {
         const codeTeamInList = teams.some(t => t.id === codeTeamId);
         if (!codeTeamInList) {
           codeTeamMessage = 'The team associated with this code requires an email address from that organisation';
+        } else {
+          codeTeamIdForClient = codeTeamId;
         }
       }
     }
@@ -261,6 +263,9 @@ class SignupFlowService {
     const result = { teams, email };
     if (codeTeamMessage) {
       result.codeTeamMessage = codeTeamMessage;
+    }
+    if (codeTeamIdForClient) {
+      result.codeTeamId = codeTeamIdForClient;
     }
     return result;
   }
