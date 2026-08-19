@@ -85,8 +85,10 @@ export default function RequestAccess() {
         setVerifiedEmail(tokenEmail || '')
         if (availableTeams && availableTeams.length > 0) {
           setTeams(availableTeams)
-          // Pre-select if only one team available (e.g., sign-up code targets one team)
-          if (availableTeams.length === 1) {
+          // Pre-select the team the sign-up code maps to (if provided)
+          if (res.data.codeTeamId) {
+            setSelectedTeamId(String(res.data.codeTeamId))
+          } else if (availableTeams.length === 1) {
             setSelectedTeamId(String(availableTeams[0].id))
           }
           setStep(STEPS.TEAM_SELECTION)

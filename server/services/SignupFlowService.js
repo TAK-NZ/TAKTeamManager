@@ -240,6 +240,7 @@ class SignupFlowService {
 
     // 5. Check if code was provided but team is excluded due to domain restrictions
     let codeTeamMessage;
+    let codeTeamIdForClient;
     if (effectiveCode) {
       // Check if the code resolves to a team
       const codeTeamResult = await pool.query(
