@@ -157,6 +157,16 @@ router.post('/custom', authenticateToken, authorize, [
     }
     
     const channel = await Channel.createCustomChannel(teamId, customSuffix, memberPermissions);
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'channel.create', 'channel', channel.id, JSON.stringify({ teamId, customSuffix })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
     res.status(201).json({ channel });
   } catch (error) {
     if (error instanceof Channel.ChannelLimitError) {

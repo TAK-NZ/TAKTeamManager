@@ -3,6 +3,7 @@ const multer = require('multer');
 const { authenticateToken } = require('../middleware/auth');
 const authorize = require('../middleware/authorize');
 const { getLogger } = require('../middleware/requestContext');
+const pool = require('../config/database');
 const BulkImportService = require('../services/BulkImportService');
 
 const router = express.Router();
@@ -125,6 +126,16 @@ router.post('/users', authenticateToken, authorize, handleUpload(csvUpload.singl
 
   try {
     const result = await BulkImportService.importUsers(req.file.buffer, req.user);
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'bulk_import.users', 'bulk_import', null, JSON.stringify({ rowCount: result.results ? result.results.length : 0 })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
     res.status(200).json(result);
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to process user CSV import');
@@ -147,6 +158,16 @@ router.post('/teams', authenticateToken, authorize, handleUpload(csvUpload.singl
 
   try {
     const result = await BulkImportService.importTeams(req.file.buffer, req.user);
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'bulk_import.teams', 'bulk_import', null, JSON.stringify({ rowCount: result.results ? result.results.length : 0 })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
     res.status(200).json(result);
   } catch (error) {
     if (error.name === 'BulkImportAuthorizationError') {

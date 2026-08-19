@@ -484,6 +484,24 @@ router.patch('/:teamId/members/:userId', authenticateToken, authorize, [
       await UserAttributesService.updateUserAttributes(targetUser.authentik_user_id, { role: takRole });
     }
 
+    // Push first_name/last_name to Authentik custom attributes (same
+    // one-way-sync pattern as takRole above: local edit pushes to Authentik,
+    // periodic sync reads back from Authentik).
+    if (firstName !== undefined || lastName !== undefined) {
+      const UserAttributesService = require('../services/userAttributes');
+      const nameAttrs = {};
+      if (firstName !== undefined) nameAttrs.firstName = firstName;
+      if (lastName !== undefined) nameAttrs.lastName = lastName;
+      await UserAttributesService.updateUserAttributes(targetUser.authentik_user_id, nameAttrs);
+      // Also mirror to user_cache
+      if (firstName !== undefined) {
+        await pool.query('UPDATE user_cache SET first_name = $1 WHERE authentik_id = $2', [firstName, targetUser.authentik_user_id]);
+      }
+      if (lastName !== undefined) {
+        await pool.query('UPDATE user_cache SET last_name = $1 WHERE authentik_id = $2', [lastName, targetUser.authentik_user_id]);
+      }
+    }
+
     try {
       await pool.query(
         'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',

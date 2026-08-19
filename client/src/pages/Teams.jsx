@@ -124,6 +124,15 @@ export default function Teams({ user }) {
   const startIndex = (currentPage - 1) * itemsPerPage
   const paginatedTeams = filteredTeams.slice(startIndex, startIndex + itemsPerPage)
 
+  const expandAllTeams = () => {
+    const allParentIds = new Set(teams.filter(t => teams.some(c => c.parent_team_id === t.id)).map(t => t.id))
+    setExpandedTeams(allParentIds)
+  }
+
+  const collapseAllTeams = () => {
+    setExpandedTeams(new Set())
+  }
+
   const toggleExpanded = (teamId) => {
     const newExpanded = new Set(expandedTeams)
     if (newExpanded.has(teamId)) {
@@ -232,6 +241,22 @@ export default function Teams({ user }) {
               />
             </div>
             <div className="text-sm text-gray-500 dark:text-gray-400">
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={expandAllTeams}
+                className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
+              >
+                <ChevronDownIcon className="h-4 w-4 mr-1" />
+                Expand All
+              </button>
+              <button
+                onClick={collapseAllTeams}
+                className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
+              >
+                <ChevronUpIcon className="h-4 w-4 mr-1" />
+                Collapse All
+              </button>
+            </div>
               {searchTerm ? `${filteredTeams.length} of ${teams.length} teams` : `${teams.length} teams`}
             </div>
           </div>

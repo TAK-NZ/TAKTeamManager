@@ -131,6 +131,15 @@ router.post('/documents', authenticateToken, authorize, [
       req.user.userId
     );
 
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'mou.create', 'mou_document', document.id, JSON.stringify({ title })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
     res.status(201).json({ document });
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to create MOU document');
@@ -160,6 +169,15 @@ router.put('/documents/:documentId', authenticateToken, authorize, [
       req.user.userId
     );
 
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'mou.update', 'mou_document', parseInt(documentId, 10), null]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
     res.json({ document });
   } catch (error) {
     handleServiceError(res, error, 'Failed to update MOU document');
@@ -174,6 +192,15 @@ router.post('/documents/:documentId/set-current', authenticateToken, authorize, 
     const { documentId } = req.params;
 
     const document = await mouService.setAsCurrentAgreement(documentId, req.user.userId);
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'mou.activate', 'mou_document', parseInt(documentId, 10), null]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
 
     res.json({ document });
   } catch (error) {
@@ -211,6 +238,15 @@ router.post('/:documentId/sign', authenticateToken, authorize, [
       req.user,
       signatureData ?? null
     );
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'mou.accept', 'mou_signature', null, JSON.stringify({ documentId: parseInt(documentId, 10) })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
 
     res.status(201).json({ signature });
   } catch (error) {

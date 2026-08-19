@@ -3,6 +3,7 @@ const { body, validationResult } = require('express-validator');
 const { authenticateToken } = require('../middleware/auth');
 const authorize = require('../middleware/authorize');
 const { getLogger } = require('../middleware/requestContext');
+const pool = require('../config/database');
 const GlobalChannelService = require('../services/GlobalChannelService');
 const router = express.Router();
 
@@ -55,6 +56,15 @@ router.post('/bch', authenticateToken, authorize, [
       description
     }, req.user.userId);
     
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'global_channel.create_bch', 'bch_channel', result.channelId, JSON.stringify({ name })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
     res.status(201).json({
       message: 'BCH channel created successfully',
       channelId: result.channelId,
@@ -86,6 +96,15 @@ router.post('/region', authenticateToken, authorize, [
       description
     }, req.user.userId);
     
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'global_channel.create_region', 'region_channel', result.channelId, JSON.stringify({ name })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
     res.status(201).json({
       message: 'Region channel created successfully',
       channelId: result.channelId
@@ -120,6 +139,15 @@ router.post('/assign-all-users', authenticateToken, authorize, async (req, res) 
   try {
     const result = await globalChannelService.assignAllUsersToGlobalChannels();
     
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'global_channel.assign_all_users', 'global_channel', null, JSON.stringify({ usersProcessed: result.usersProcessed })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
     res.json({
       message: 'Global channel assignment queued for all users',
       usersProcessed: result.usersProcessed,
@@ -152,6 +180,15 @@ router.put('/bch/:channelId', authenticateToken, authorize, [
       description
     }, req.user.userId);
     
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'global_channel.update_bch', 'bch_channel', parseInt(channelId, 10), JSON.stringify({ name })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
     res.json({ message: 'BCH channel updated successfully' });
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to update BCH channel');
@@ -180,6 +217,15 @@ router.put('/region/:channelId', authenticateToken, authorize, [
       description
     }, req.user.userId);
     
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'global_channel.update_region', 'region_channel', parseInt(channelId, 10), JSON.stringify({ name })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
     res.json({ message: 'Region channel updated successfully' });
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to update region channel');
@@ -194,6 +240,15 @@ router.post('/sync-existing', authenticateToken, authorize, async (req, res) => 
     // BCH create route above.
     const result = await globalChannelService.syncExistingChannels(req.user.userId);
     
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'global_channel.sync_existing', 'global_channel', null, JSON.stringify({ bchCount: result.bchCount, regionCount: result.regionCount })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
     res.json({
       message: 'Existing channels synced successfully',
       bchCount: result.bchCount,
@@ -222,6 +277,15 @@ router.delete('/:channelType/:channelId', authenticateToken, authorize, async (r
       req.user.userId
     );
     
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'global_channel.delete', 'global_channel', parseInt(channelId, 10), JSON.stringify({ channelType })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
     res.json({ message: 'Global channel deleted successfully' });
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to delete global channel');

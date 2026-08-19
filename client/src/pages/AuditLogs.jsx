@@ -305,7 +305,7 @@ export default function AuditLogs({ user }) {
                     Resource Type
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                    Resource ID
+                    Resource
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     Details
@@ -339,7 +339,7 @@ export default function AuditLogs({ user }) {
                       {row.resource_type}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-gray-100">
-                      {row.resource_id ?? '—'}
+                      {row.resource_name || row.resource_id || '—'}
                     </td>
                     <td className="px-6 py-4 text-sm text-gray-900 dark:text-gray-100">
                       {row.details == null ? (

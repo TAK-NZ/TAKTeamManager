@@ -537,9 +537,8 @@ router.post('/create-and-add', authenticateToken, authorize, [
   // --- Phase 3: best-effort callsign/attribute sync (Authentik call, run
   // only after the local transaction has committed). ---
   const attributes = await UserAttributesService.generateCallsign(localUserId, teamId);
-  if (attributes) {
-    await UserAttributesService.updateUserAttributes(newUser.pk, attributes);
-  }
+  const pushAttrs = { ...(attributes || {}), firstName, lastName };
+  await UserAttributesService.updateUserAttributes(newUser.pk, pushAttrs);
 
   // Update user cache (Requirement 11.1: user_cache.callsign_suffix
   // mirrors users.callsign_suffix, dual-written alongside the existing

@@ -234,8 +234,99 @@ router.get('/', authenticateToken, authorize, paginationParams, [
       )
     ]);
 
+    // --- Post-process: resolve numeric IDs to human-readable names ---
+    const rows = rowsResult.rows;
+
+    // Collect all IDs we need to resolve
+    const teamIds = new Set();
+    const resolveUserIds = new Set();
+    const channelIds = new Set();
+    const accessRequestIds = new Set();
+
+    for (const row of rows) {
+      if (row.resource_type === 'team' && row.resource_id) teamIds.add(row.resource_id);
+      if (row.resource_type === 'user' && row.resource_id) resolveUserIds.add(row.resource_id);
+      if (row.resource_type === 'channel' && row.resource_id) channelIds.add(row.resource_id);
+      if (row.resource_type === 'access_request' && row.resource_id) accessRequestIds.add(row.resource_id);
+
+      // Collect user IDs from details JSON
+      if (row.details && typeof row.details === 'object') {
+        for (const [key, value] of Object.entries(row.details)) {
+          if (key.toLowerCase().includes('userid') && typeof value === 'number') {
+            resolveUserIds.add(value);
+          }
+        }
+      }
+    }
+
+    // Batch resolve all collected IDs
+    const teamNameMap = new Map();
+    const userEmailMap = new Map();
+    const channelNameMap = new Map();
+    const requestEmailMap = new Map();
+
+    if (teamIds.size > 0) {
+      const teamResult = await pool.query(
+        'SELECT id, name FROM teams WHERE id = ANY($1)',
+        [Array.from(teamIds)]
+      );
+      for (const r of teamResult.rows) teamNameMap.set(r.id, r.name);
+    }
+
+    if (resolveUserIds.size > 0) {
+      const userResult = await pool.query(
+        'SELECT id, email FROM users WHERE id = ANY($1)',
+        [Array.from(resolveUserIds)]
+      );
+      for (const r of userResult.rows) userEmailMap.set(r.id, r.email);
+    }
+
+    if (channelIds.size > 0) {
+      const channelResult = await pool.query(
+        'SELECT id, display_name FROM channels WHERE id = ANY($1)',
+        [Array.from(channelIds)]
+      );
+      for (const r of channelResult.rows) channelNameMap.set(r.id, r.display_name);
+    }
+
+    if (accessRequestIds.size > 0) {
+      const reqResult = await pool.query(
+        'SELECT id, requester_email FROM access_requests WHERE id = ANY($1)',
+        [Array.from(accessRequestIds)]
+      );
+      for (const r of reqResult.rows) requestEmailMap.set(r.id, r.requester_email);
+    }
+
+    // Enrich rows with resolved names
+    const enrichedRows = rows.map(row => {
+      let resource_name = null;
+      const rid = row.resource_id;
+      if (row.resource_type === 'team') resource_name = teamNameMap.get(rid) || null;
+      else if (row.resource_type === 'user') resource_name = userEmailMap.get(rid) || null;
+      else if (row.resource_type === 'channel') resource_name = channelNameMap.get(rid) || null;
+      else if (row.resource_type === 'access_request') resource_name = requestEmailMap.get(rid) || null;
+
+      // Resolve user IDs in details to emails
+      let enriched_details = row.details;
+      if (row.details && typeof row.details === 'object') {
+        enriched_details = { ...row.details };
+        for (const [key, value] of Object.entries(enriched_details)) {
+          if (key.toLowerCase().includes('userid') && typeof value === 'number') {
+            const email = userEmailMap.get(value);
+            if (email) {
+              const newKey = key.replace(/Id$/, '').replace(/userid$/i, 'User');
+              enriched_details[newKey] = email;
+              delete enriched_details[key];
+            }
+          }
+        }
+      }
+
+      return { ...row, resource_name, details: enriched_details };
+    });
+
     res.json({
-      auditLogs: rowsResult.rows,
+      auditLogs: enrichedRows,
       pagination: {
         page: req.pagination.page,
         pageSize,

@@ -84,7 +84,24 @@ router.post('/', authenticateToken, authorize, [
     // never has. Respond with a distinct status code and body key for
     // each case so callers can tell which happened.
     if (result.status === 'pending') {
+      try {
+        await pool.query(
+          'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+          [req.user.userId, 'channel_request.create', 'channel_request', result.id, JSON.stringify({ teamId })]
+        );
+      } catch (auditErr) {
+        getLogger().error({ err: auditErr }, 'Failed to write audit log');
+      }
       return res.status(202).json({ channelRequest: result });
+    }
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'channel_request.create', 'channel_request', result.id, JSON.stringify({ teamId })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
     }
     return res.status(201).json({ channel: result });
   } catch (error) {
@@ -149,6 +166,16 @@ router.post('/:requestId/approve', authenticateToken, authorize, async (req, res
     // req.user.userId is the local users.id, recorded as processed_by on
     // the approved channel_requests row.
     const channel = await ChannelRequestService.approveChannelRequest(requestId, req.user.userId);
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'channel_request.approve', 'channel_request', parseInt(requestId, 10), null]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
     res.json({ channel });
   } catch (error) {
     if (error instanceof ChannelRequestService.ChannelRequestAlreadyProcessedError) {
@@ -176,6 +203,16 @@ router.post('/:requestId/deny', authenticateToken, authorize, [
     const { denialReason } = req.body;
 
     const channelRequest = await ChannelRequestService.denyChannelRequest(requestId, req.user.userId, denialReason);
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'channel_request.deny', 'channel_request', parseInt(requestId, 10), null]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
     res.json({ channelRequest });
   } catch (error) {
     if (error instanceof ChannelRequestService.ChannelRequestAlreadyProcessedError) {

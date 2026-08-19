@@ -103,8 +103,8 @@ function App() {
     <ThemeProvider>
       <Layout user={user}>
         <Routes>
-          <Route path="/" element={<Dashboard user={user} refreshUser={refreshUser} />} />
-          <Route path="/dashboard" element={<Dashboard user={user} refreshUser={refreshUser} />} />
+          <Route path="/" element={<Dashboard user={user} />} />
+          <Route path="/dashboard" element={<Dashboard user={user} />} />
           <Route path="/teams" element={<Teams user={user} />} />
           <Route path="/teams/:teamId" element={<TeamDetail refreshUser={refreshUser} />} />
           <Route path="/users" element={<Users />} />

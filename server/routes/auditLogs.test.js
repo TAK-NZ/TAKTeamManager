@@ -104,7 +104,7 @@ describe('GET /api/audit-logs filtering and pagination', () => {
     const res = await request(app).get('/api/audit-logs');
 
     expect(res.status).toBe(200);
-    expect(res.body.auditLogs).toEqual(rows);
+    expect(res.body.auditLogs).toEqual(rows.map(r => ({ ...r, resource_name: null })));
     expect(res.body.pagination).toEqual({ page: 1, pageSize: 50, total: 1 });
 
     const dataCall = pool.query.mock.calls.find(([sql]) => sql.includes('FROM audit_logs') && !sql.includes('COUNT'));

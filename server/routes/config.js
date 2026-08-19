@@ -3,6 +3,7 @@ const { body, validationResult } = require('express-validator');
 const { authenticateToken } = require('../middleware/auth');
 const authorize = require('../middleware/authorize');
 const { getLogger } = require('../middleware/requestContext');
+const pool = require('../config/database');
 const SiteConfig = require('../models/SiteConfig');
 const router = express.Router();
 
@@ -100,6 +101,15 @@ router.put('/:key', authenticateToken, authorize, [
     const updatedConfig = await SiteConfig.update(key, value, req.user.userId);
     if (!updatedConfig) {
       return res.status(404).json({ error: 'Configuration key not found' });
+    }
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'config.update', 'config', null, JSON.stringify({ key })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
     }
 
     res.json({ config: updatedConfig });

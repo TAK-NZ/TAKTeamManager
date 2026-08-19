@@ -1,11 +1,11 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { 
   HomeIcon, 
   UserGroupIcon, 
   UsersIcon, 
   ClipboardDocumentListIcon,
-  MegaphoneIcon,
+  SignalIcon,
   DocumentMagnifyingGlassIcon,
   Bars3Icon,
   XMarkIcon,
@@ -13,7 +13,7 @@ import {
   SunIcon,
   MoonIcon
 } from '@heroicons/react/24/outline'
-import { authAPI } from '../services/api'
+import { authAPI, requestsAPI } from '../services/api'
 import { useTheme } from '../contexts/ThemeContext'
 
 const getNavigation = (user) => {
@@ -31,7 +31,7 @@ const getNavigation = (user) => {
   }
   
   if (user?.is_global_manager) {
-    baseNavigation.push({ name: 'Global Channels', href: '/global-channels', icon: MegaphoneIcon })
+    baseNavigation.push({ name: 'Global Channels', href: '/global-channels', icon: SignalIcon })
     baseNavigation.push({ name: 'Audit Log', href: '/audit-logs', icon: DocumentMagnifyingGlassIcon })
   }
   
@@ -75,6 +75,34 @@ export default function Layout({ children, user }) {
   const location = useLocation()
   const navigation = getNavigation(user)
   const { theme, toggleTheme } = useTheme()
+
+  const [pendingRequestCount, setPendingRequestCount] = useState(0)
+
+  useEffect(() => {
+    if (!user?.isAdmin && !user?.is_global_manager) return
+
+    const fetchPendingCount = async () => {
+      try {
+        const response = await requestsAPI.getPending()
+        setPendingRequestCount(response.data.requests?.length || 0)
+      } catch (e) {
+        // Silent fail — badge just won't show
+      }
+    }
+
+    fetchPendingCount()
+    const intervalId = setInterval(fetchPendingCount, 60000) // refresh every 60s
+
+    const handleVisibilityChange = () => {
+      if (!document.hidden) fetchPendingCount()
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+
+    return () => {
+      clearInterval(intervalId)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
+  }, [user])
 
   const handleLogout = async () => {
     // The local tak_session cookie is always cleared server-side by
@@ -126,7 +154,14 @@ export default function Layout({ children, user }) {
                 }`}
                 onClick={() => setSidebarOpen(false)}
               >
-                <item.icon className="mr-3 h-6 w-6" />
+                <span className="relative mr-3">
+                  <item.icon className="h-6 w-6" />
+                  {item.name === 'Requests' && pendingRequestCount > 0 && (
+                    <span className="absolute -top-1 -right-1 flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-red-600 px-0.5 text-[10px] font-bold text-white">
+                      {pendingRequestCount > 99 ? '99+' : pendingRequestCount}
+                    </span>
+                  )}
+                </span>
                 {item.name}
               </Link>
             ))}
@@ -155,7 +190,14 @@ export default function Layout({ children, user }) {
                     : 'text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 hover:text-gray-900 dark:hover:text-gray-100'
                 }`}
               >
-                <item.icon className="mr-3 h-6 w-6" />
+                <span className="relative mr-3">
+                  <item.icon className="h-6 w-6" />
+                  {item.name === 'Requests' && pendingRequestCount > 0 && (
+                    <span className="absolute -top-1 -right-1 flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-red-600 px-0.5 text-[10px] font-bold text-white">
+                      {pendingRequestCount > 99 ? '99+' : pendingRequestCount}
+                    </span>
+                  )}
+                </span>
                 {item.name}
               </Link>
             ))}

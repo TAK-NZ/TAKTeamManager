@@ -3,6 +3,7 @@ const authentikSync = require('../services/authentikSync');
 const { authenticateToken } = require('../middleware/auth');
 const authorize = require('../middleware/authorize');
 const { getLogger } = require('../middleware/requestContext');
+const pool = require('../config/database');
 const router = express.Router();
 
 // Manual sync trigger (admin only)
@@ -15,6 +16,15 @@ router.post('/users', authenticateToken, authorize, async (req, res) => {
     // Trigger sync
     authentikSync.syncUsers().catch((err) => getLogger().error({ err }, 'Manual sync error'));
     
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'sync.trigger_manual', 'sync', null, null]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
     res.json({ message: 'User sync started' });
   } catch (error) {
     getLogger().error({ err: error }, 'Manual sync error');

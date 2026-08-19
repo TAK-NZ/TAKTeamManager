@@ -1,10 +1,10 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { UserGroupIcon, UsersIcon, ClipboardDocumentListIcon, ArrowUpRightIcon, ArrowDownLeftIcon, ArrowsRightLeftIcon, MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon, InformationCircleIcon, FolderIcon, FolderOpenIcon, ChevronRightIcon as ChevronRightSmall, ChevronDownIcon, ChevronUpIcon, ArrowPathIcon } from '@heroicons/react/24/outline'
+import { UserGroupIcon, UsersIcon, ClipboardDocumentListIcon, ArrowUpRightIcon, ArrowDownLeftIcon, ArrowsRightLeftIcon, MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon, InformationCircleIcon, FolderIcon, FolderOpenIcon, ChevronRightIcon as ChevronRightSmall, ChevronDownIcon, ChevronUpIcon, SignalIcon } from '@heroicons/react/24/outline'
 import { teamsAPI, requestsAPI, configAPI, usersAPI, channelsAPI } from '../services/api'
 import { buildFolderTree } from '../utils/channelTree'
 
-export default function Dashboard({ user, refreshUser }) {
+export default function Dashboard({ user }) {
   const [stats, setStats] = useState({ requests: 0 })
   const [userTeam, setUserTeam] = useState(null)
   const [userChannels, setUserChannels] = useState([])
@@ -372,9 +372,27 @@ export default function Dashboard({ user, refreshUser }) {
     }
     
     window.addEventListener('userAssignmentChanged', handleUserAssignmentChanged)
-    
+
+    // Auto-refresh every 60 seconds, paused when tab is hidden
+    const REFRESH_INTERVAL_MS = 60000
+    let intervalId = setInterval(fetchChannelData, REFRESH_INTERVAL_MS)
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        clearInterval(intervalId)
+        intervalId = null
+      } else {
+        // Tab became visible again — refresh immediately, then restart timer
+        fetchChannelData()
+        intervalId = setInterval(fetchChannelData, REFRESH_INTERVAL_MS)
+      }
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+
     return () => {
       window.removeEventListener('userAssignmentChanged', handleUserAssignmentChanged)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+      if (intervalId) clearInterval(intervalId)
     }
   }, [user])
 
@@ -451,7 +469,7 @@ export default function Dashboard({ user, refreshUser }) {
             )}
             {freshUser.takRole && (
               <div>
-                <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">My Role</dt>
+                <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">My TAK Role</dt>
                 <dd className="flex items-center text-sm text-gray-900 dark:text-gray-100">
                   {freshUser.takRole}
                   {roleDescriptions[freshUser.takRole] && (
@@ -475,7 +493,7 @@ export default function Dashboard({ user, refreshUser }) {
         <div className="card">
           <div className="flex items-center">
             <div className="flex-shrink-0">
-              <UserGroupIcon className="h-8 w-8 text-primary-600" />
+              <UserGroupIcon className="h-8 w-8 text-gray-500 dark:text-gray-400" />
             </div>
             <div className="ml-4">
               <p className="text-sm font-medium text-gray-500 dark:text-gray-400">My Team</p>
@@ -507,11 +525,11 @@ export default function Dashboard({ user, refreshUser }) {
         <div className="card">
           <div className="flex items-center">
             <div className="flex-shrink-0">
-              <ClipboardDocumentListIcon className="h-8 w-8 text-yellow-600" />
+              <ClipboardDocumentListIcon className="h-8 w-8 text-gray-500 dark:text-gray-400" />
             </div>
             <div className="ml-4">
               <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Pending Requests</p>
-              <p className="text-2xl font-bold text-gray-900 dark:text-gray-100">{stats.requests}</p>
+              {stats.requests > 0 ? <Link to="/requests" className="text-2xl font-bold text-primary-600 hover:text-primary-500 dark:text-primary-400 dark:hover:text-primary-300">{stats.requests}</Link> : <p className="text-2xl font-bold text-gray-900 dark:text-gray-100">{stats.requests}</p>}
             </div>
           </div>
         </div>
@@ -519,7 +537,7 @@ export default function Dashboard({ user, refreshUser }) {
         <div className="card">
           <div className="flex items-center">
             <div className="flex-shrink-0">
-              <UsersIcon className="h-8 w-8 text-green-600" />
+              <SignalIcon className="h-8 w-8 text-gray-500 dark:text-gray-400" />
             </div>
             <div className="ml-4">
               <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Total Channels</p>
@@ -536,19 +554,6 @@ export default function Dashboard({ user, refreshUser }) {
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-medium text-gray-900 dark:text-gray-100">My Channels</h2>
           <div className="flex items-center space-x-2">
-            <button
-              onClick={() => {
-                if (refreshUser) {
-                  refreshUser().then(() => {
-                    fetchChannelData()
-                  })
-                }
-              }}
-              className="text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300"
-              title="Refresh channels"
-            >
-              <ArrowPathIcon className="h-4 w-4" />
-            </button>
             <span className="text-sm text-gray-500 dark:text-gray-400">
               {filteredChannels.length} of {userChannels.length} channels
             </span>

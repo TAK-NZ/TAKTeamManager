@@ -165,6 +165,15 @@ router.put('/templates/:key', authenticateToken, authorize, [
       return res.status(404).json({ error: `Email template not found: ${key}` });
     }
 
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'email_template.update', 'email_template', result.rows[0].template_key, null]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
     res.json({ template: result.rows[0] });
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to update email template');
@@ -245,6 +254,15 @@ router.post('/send', authenticateToken, authorize, [
       templateKey,
       variables || {}
     );
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'communication.send', 'communication', null, JSON.stringify({ templateKey, recipientCount: sentCount })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
 
     // The full recipient email-address list is intentionally omitted
     // from the response (and never logged) -- the caller already knows

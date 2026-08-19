@@ -144,15 +144,21 @@ class EscalationService {
       
       if (requestsResult.rows.length === 0) return;
       
-      // Format request list
-      const requestList = requestsResult.rows.map(req => 
-        `- ${req.requester_first_name} ${req.requester_last_name} (${req.requester_email}) - ${req.team_name || 'Team access'}`
-      ).join('\n');
+      // Format request list as structured blocks
+      const requestList = requestsResult.rows.map(req => {
+        const email = req.requester_email || '';
+        const emailDisplay = `<a href="#" style="color: #212124; text-decoration: none; cursor: default; pointer-events: none;">${email}</a>`;
+        return `<b>User:</b> ${req.requester_first_name || ''} ${req.requester_last_name || ''}
+<b>E-Mail:</b> ${emailDisplay}
+<b>Team:</b> ${req.team_name || 'Team access'}`;
+      }).join('\n\n');
       
       // Send digest email
       await this.emailService.sendEmail(admin.email, 'admin_notification_digest', {
+        first_name: admin.first_name || '',
         pending_count: requestsResult.rows.length,
-        request_list: requestList
+        request_list: requestList,
+        team_manager_url: process.env.FRONTEND_URL || ''
       });
       
     } catch (error) {
@@ -198,10 +204,15 @@ class EscalationService {
       );
     }, 60 * 60 * 1000);
 
-    // Run daily digest at 9 AM. Same fire-and-forget reasoning applies.
+    // Run daily digest at configured time/timezone (defaults: 9:00 Pacific/Auckland).
+    const digestHour = parseInt(process.env.DIGEST_HOUR, 10) || 9;
+    const digestMinute = parseInt(process.env.DIGEST_MINUTE, 10) || 0;
+    const digestTimezone = process.env.DIGEST_TIMEZONE || 'Pacific/Auckland';
+    logger.info({ digestHour, digestMinute, digestTimezone }, 'Daily digest scheduled');
+
     setInterval(() => {
-      const now = new Date();
-      if (now.getHours() === 9 && now.getMinutes() === 0) {
+      const nowInTz = new Date(new Date().toLocaleString('en-US', { timeZone: digestTimezone }));
+      if (nowInTz.getHours() === digestHour && nowInTz.getMinutes() === digestMinute) {
         this.sendDailyDigests().catch(err =>
           logger.error({ err }, 'Scheduled daily digest sending failed')
         );

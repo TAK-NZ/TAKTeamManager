@@ -295,9 +295,9 @@ describe('AuthentikSyncService.processBatch concurrency (Requirement 11.2)', () 
 
     await authentikSync.processBatch(users, {});
 
-    // Each user now results in one INSERT INTO users and one
-    // INSERT INTO user_cache call.
-    expect(db.query).toHaveBeenCalledTimes(24);
+    // Each user now results in one INSERT INTO users, one INSERT INTO
+    // user_cache, and two SELECTs for the push-to-Authentik comparison.
+    expect(db.query).toHaveBeenCalledTimes(48);
     users.forEach(user => {
       expect(db.query).toHaveBeenCalledWith(
         expect.stringContaining('INSERT INTO user_cache'),
@@ -305,7 +305,7 @@ describe('AuthentikSyncService.processBatch concurrency (Requirement 11.2)', () 
       );
       expect(db.query).toHaveBeenCalledWith(
         expect.stringContaining('INSERT INTO users'),
-        [user.pk, user.username, user.email, user.username, '', user.is_active, null]
+        [user.pk, user.username, user.email, user.username, '', null]
       );
     });
   });
@@ -370,10 +370,11 @@ describe('AuthentikSyncService.processBatch concurrency (Requirement 11.2)', () 
 
     await authentikSync.processBatch([humanUser], {});
 
-    expect(db.query).toHaveBeenCalledTimes(2);
+    // 2 inserts (users + user_cache) + 2 SELECTs for push-to-Authentik check
+    expect(db.query).toHaveBeenCalledTimes(4);
     expect(db.query).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO users'),
-      [humanUser.pk, humanUser.username, humanUser.email, humanUser.username, '', humanUser.is_active, null]
+      [humanUser.pk, humanUser.username, humanUser.email, humanUser.username, '', null]
     );
     expect(db.query).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO user_cache'),
@@ -395,12 +396,12 @@ describe('AuthentikSyncService.processBatch concurrency (Requirement 11.2)', () 
     await authentikSync.processBatch(users, {});
 
     // Every user, including the failing one, still got an INSERT attempt.
-    // The 4 succeeding users each make 2 calls (users + user_cache); the
-    // failing user's first call (INSERT INTO users, which also keys off
-    // user.pk as params[0]) rejects, so its second call (user_cache) never
-    // runs -- the existing per-user try/catch stops after the first thrown
-    // error.
-    expect(db.query).toHaveBeenCalledTimes(9);
+    // The 4 succeeding users each make 4 calls (users + user_cache + 2
+    // SELECTs for push-to-Authentik check); the failing user's first call
+    // (INSERT INTO users, which also keys off user.pk as params[0]) rejects,
+    // so its remaining calls never run -- the existing per-user try/catch
+    // stops after the first thrown error.
+    expect(db.query).toHaveBeenCalledTimes(17);
 
     // The failure was logged per-user rather than thrown/propagated.
     expect(mockLoggerInstance.error).toHaveBeenCalledWith(
@@ -448,9 +449,10 @@ describe('AuthentikSyncService.syncSingleUser users.tak_role reconciliation (Req
   });
 
   it('updates users.tak_role to match Authentik\'s takRole attribute when it differs from the local value', async () => {
-    // Authentik is authoritative: ON CONFLICT DO UPDATE unconditionally
-    // overwrites to COALESCE($7, tak_role), so a present Authentik value
-    // always wins over whatever is currently stored locally.
+    // TAK Team Manager is authoritative for tak_role: the ON CONFLICT
+    // clause no longer overwrites tak_role from Authentik. The takRole
+    // from Authentik is only used to seed new users on INSERT via
+    // COALESCE($6, 'Team Member').
     const user = {
       pk: 'user-1',
       username: 'alice',
@@ -465,11 +467,13 @@ describe('AuthentikSyncService.syncSingleUser users.tak_role reconciliation (Req
 
     expect(db.query).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO users'),
-      [user.pk, user.username, user.email, user.username, '', user.is_active, 'Team Lead']
+      [user.pk, user.username, user.email, user.username, '', 'Team Lead']
     );
     const [usersSql] = db.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO users'));
-    expect(usersSql).toContain('COALESCE($7, \'Team Member\')');
-    expect(usersSql).toContain('tak_role = COALESCE($7, tak_role)');
+    expect(usersSql).toContain('COALESCE($6, \'Team Member\')');
+    // On conflict, only identity fields are updated (local is authoritative for tak_role)
+    expect(usersSql).toContain('ON CONFLICT (authentik_user_id) DO UPDATE SET username = $2, email = $3');
+    expect(usersSql).not.toContain('tak_role = COALESCE');
   });
 
   it('sets users.tak_role from Authentik\'s takRole attribute on initial insert for a user with no existing users row', async () => {
@@ -487,18 +491,14 @@ describe('AuthentikSyncService.syncSingleUser users.tak_role reconciliation (Req
 
     expect(db.query).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO users'),
-      [user.pk, user.username, user.email, user.username, '', user.is_active, 'Medic']
+      [user.pk, user.username, user.email, user.username, '', 'Medic']
     );
   });
 
   it('does not clobber an established local users.tak_role when Authentik has no takRole attribute set (sparse attribute)', async () => {
-    // Authentik's takRole attribute is sparse -- some users have no
-    // attribute set at all. An unconditional overwrite here would clobber
-    // a real Team_Admin/Global_Manager edit (task 28.1) with null,
-    // violating Requirement 13.8. The COALESCE($7, tak_role) fallback
-    // means the query param passed is `null`, and Postgres's COALESCE at
-    // query time (not application code) falls back to the existing
-    // stored value on conflict, or 'Team Member' on initial insert.
+    // TAK Team Manager is authoritative for tak_role. The ON CONFLICT
+    // clause no longer touches tak_role at all. On INSERT, COALESCE($6,
+    // 'Team Member') seeds a default when Authentik has no value.
     const user = {
       pk: 'user-3',
       username: 'carol',
@@ -512,15 +512,15 @@ describe('AuthentikSyncService.syncSingleUser users.tak_role reconciliation (Req
     await authentikSync.processBatch([user], {});
 
     const [usersSql, usersParams] = db.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO users'));
-    // The tak_role param passed is null (Authentik has no value), relying
-    // on the query's COALESCE to preserve the existing/default value
-    // rather than overwriting with null in application code.
-    expect(usersParams).toEqual([user.pk, user.username, user.email, user.username, '', user.is_active, null]);
-    expect(usersSql).toContain('COALESCE($7, \'Team Member\')');
-    expect(usersSql).toContain('tak_role = COALESCE($7, tak_role)');
+    // The tak_role param passed is null (Authentik has no value), and
+    // COALESCE($6, 'Team Member') handles the INSERT seed.
+    expect(usersParams).toEqual([user.pk, user.username, user.email, user.username, '', null]);
+    expect(usersSql).toContain('COALESCE($6, \'Team Member\')');
+    // On conflict, tak_role is NOT updated (local is authoritative)
+    expect(usersSql).not.toContain('tak_role = COALESCE');
   });
 
-  it('leaves the user_cache.tak_role upsert unconditional (unchanged), still overwriting from EXCLUDED even when Authentik\'s takRole is absent', async () => {
+  it('leaves the user_cache.tak_role upsert seed-only (not overwritten on conflict), since local is authoritative', async () => {
     const user = {
       pk: 'user-4',
       username: 'dave',
@@ -534,7 +534,8 @@ describe('AuthentikSyncService.syncSingleUser users.tak_role reconciliation (Req
     await authentikSync.processBatch([user], {});
 
     const [cacheSql, cacheParams] = db.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO user_cache'));
-    expect(cacheSql).toContain('tak_role = EXCLUDED.tak_role');
+    // tak_role is NOT in the ON CONFLICT DO UPDATE SET (local authoritative)
+    expect(cacheSql).not.toContain('tak_role = EXCLUDED.tak_role');
     // tak_role is the 7th positional value (index 6) in the user_cache insert.
     expect(cacheParams[6]).toBeUndefined();
   });
@@ -566,7 +567,7 @@ describe('AuthentikSyncService.syncSingleUser first_name/last_name one-way seed-
     // ON CONFLICT DO UPDATE SET clause must not mention first_name/last_name
     // at all, so a later sync can never overwrite an established value.
     const [usersSql, usersParams] = db.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO users'));
-    expect(usersParams).toEqual([user.pk, user.username, user.email, 'New Person', '', user.is_active, null]);
+    expect(usersParams).toEqual([user.pk, user.username, user.email, 'New Person', '', null]);
     expect(usersSql).not.toContain('first_name = $4');
     expect(usersSql).not.toContain('last_name = $5');
 
@@ -597,7 +598,7 @@ describe('AuthentikSyncService.syncSingleUser first_name/last_name one-way seed-
     await authentikSync.processBatch([user], {});
 
     const [usersSql] = db.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO users'));
-    expect(usersSql).toContain('ON CONFLICT (authentik_user_id) DO UPDATE SET username = $2, email = $3, is_active = $6, tak_role = COALESCE($7, tak_role)');
+    expect(usersSql).toContain('ON CONFLICT (authentik_user_id) DO UPDATE SET username = $2, email = $3');
     expect(usersSql).not.toMatch(/DO UPDATE SET[^)]*first_name/);
     expect(usersSql).not.toMatch(/DO UPDATE SET[^)]*last_name/);
   });

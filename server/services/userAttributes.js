@@ -167,8 +167,20 @@ class UserAttributesService {
       if (attributes.role !== undefined) {
         mergedAttributes.takRole = attributes.role;
       }
+      if (attributes.firstName !== undefined) {
+        mergedAttributes.first_name = attributes.firstName;
+      }
+      if (attributes.lastName !== undefined) {
+        mergedAttributes.last_name = attributes.lastName;
+      }
 
       const payload = { attributes: mergedAttributes };
+      // Also update Authentik's display name when first/last name changes
+      if (attributes.firstName !== undefined || attributes.lastName !== undefined) {
+        const firstName = attributes.firstName !== undefined ? attributes.firstName : (currentAttributes.first_name || '');
+        const lastName = attributes.lastName !== undefined ? attributes.lastName : (currentAttributes.last_name || '');
+        payload.name = `${firstName}${lastName ? ' ' + lastName : ''}`;
+      }
 
       logger.debug({ authentikUserId, payload }, 'Updating user attributes');
       

@@ -106,6 +106,15 @@ router.post('/', authenticateToken, authorize, [
       req.user.userId
     );
 
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'deployment_channel.create', 'deployment_channel', result.channelId, JSON.stringify({ name })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
     res.status(201).json({
       message: 'Deployment channel created successfully',
       channelId: result.channelId
@@ -151,6 +160,15 @@ router.post('/:channelId/subscribe', authenticateToken, authorize, async (req, r
 
     const result = await deploymentChannelService.subscribe(channelId, req.user.userId);
 
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'deployment_channel.activate', 'deployment_channel', parseInt(channelId, 10), null]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
     res.json({
       message: 'Subscribed to deployment channel successfully',
       success: result.success
@@ -169,6 +187,15 @@ router.post('/:channelId/unsubscribe', authenticateToken, authorize, async (req,
     const { channelId } = req.params;
 
     const result = await deploymentChannelService.unsubscribe(channelId, req.user.userId);
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'deployment_channel.deactivate', 'deployment_channel', parseInt(channelId, 10), null]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
 
     res.json({
       message: 'Unsubscribed from deployment channel successfully',

@@ -135,12 +135,15 @@ describe('EmailService', () => {
       });
 
       expect(mockSendMail).toHaveBeenCalledTimes(1);
-      expect(mockSendMail).toHaveBeenCalledWith({
-        from: 'noreply@example.com',
-        to: 'user@example.com',
-        subject: 'Hello Alice',
-        text: 'Welcome, Alice!'
-      });
+      expect(mockSendMail).toHaveBeenCalledWith(
+        expect.objectContaining({
+          from: 'noreply@example.com',
+          to: 'user@example.com',
+          subject: 'Hello Alice',
+          text: 'Welcome, Alice!',
+          html: expect.stringContaining('Welcome, Alice!')
+        })
+      );
       expect(result).toEqual({ messageId: 'msg-123' });
     });
 
@@ -204,19 +207,29 @@ describe('EmailService', () => {
 
   describe('sendApprovalEmail', () => {
     it('sends the access_request_approved template with the supplied details', async () => {
+      process.env.PASSWORD_RESET_URL = 'https://reset.example.com';
+      process.env.ACCOUNT_LOGIN_URL = 'https://login.example.com';
+
       pool.query.mockResolvedValue({
         rows: [
           {
             subject_template: 'Approved',
-            body_template: '{{request_description}} by {{admin_name}}: {{additional_details}}'
+            body_template: 'Team: {{team_path}} User: {{username}} Callsign: {{callsign}} Reset: {{password_reset_url}} Login: {{login_url}}'
           }
         ]
       });
 
-      await service.sendApprovalEmail('user@example.com', 'Join Team X', 'Admin A', 'extra info');
+      await service.sendApprovalEmail('user@example.com', {
+        teamPath: 'FENZ - Southland',
+        username: 'user@example.com',
+        callsign: 'FENZ-STL-User'
+      });
 
       const sentArgs = mockSendMail.mock.calls[0][0];
-      expect(sentArgs.text).toBe('Join Team X by Admin A: extra info');
+      expect(sentArgs.text).toBe('Team: FENZ - Southland User: user@example.com Callsign: FENZ-STL-User Reset: https://reset.example.com Login: https://login.example.com');
+
+      delete process.env.PASSWORD_RESET_URL;
+      delete process.env.ACCOUNT_LOGIN_URL;
     });
   });
 
@@ -226,15 +239,15 @@ describe('EmailService', () => {
         rows: [
           {
             subject_template: 'Denied',
-            body_template: '{{request_description}} by {{admin_name}}: {{denial_reason}}'
+            body_template: 'Hi {{first_name}}, denied for {{team_path}}: {{denial_reason}}'
           }
         ]
       });
 
-      await service.sendDenialEmail('user@example.com', 'Join Team X', 'Admin A', 'not eligible');
+      await service.sendDenialEmail('user@example.com', { teamPath: 'FENZ', firstName: 'Alice', denialReason: 'not eligible' });
 
       const sentArgs = mockSendMail.mock.calls[0][0];
-      expect(sentArgs.text).toBe('Join Team X by Admin A: not eligible');
+      expect(sentArgs.text).toBe('Hi Alice, denied for FENZ: not eligible');
     });
   });
 

@@ -449,7 +449,7 @@ describe('PUT /api/settings/tak-server', () => {
       .send({ p12Path: '/new/path/api.p12' });
 
     expect(res.status).toBe(200);
-    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(pool.query).toHaveBeenCalledTimes(2);
     const upsertCall = pool.query.mock.calls[0];
     expect(upsertCall[1][0]).toBe('tak_server_p12_path');
     expect(upsertCall[1][1]).toBe('/new/path/api.p12');

@@ -1,6 +1,7 @@
 const express = require('express');
 const { authenticateToken } = require('../middleware/auth');
 const authorize = require('../middleware/authorize');
+const { getLogger } = require('../middleware/requestContext');
 const pool = require('../config/database');
 const router = express.Router();
 
@@ -69,6 +70,15 @@ router.post('/retry-failed', authenticateToken, authorize, async (req, res) => {
       WHERE status = 'failed'
     `);
     
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'operations.retry_failed', 'sync_operation', null, JSON.stringify({ retriedCount: result.rowCount })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
     res.json({ 
       message: `${result.rowCount} operations queued for retry` 
     });

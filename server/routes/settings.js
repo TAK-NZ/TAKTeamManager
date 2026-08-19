@@ -200,6 +200,15 @@ router.put('/branding', authenticateToken, authorize, [
       await SiteConfig.update(BRANDING_CONFIG_KEYS.organizationLogoPath, organizationLogoPath, req.user.userId);
     }
 
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'settings.update_branding', 'settings', null, null]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
     const branding = await getBrandingFields();
     res.json({ branding });
   } catch (error) {
@@ -283,6 +292,15 @@ router.put('/tak-mappings', authenticateToken, authorize, [
         )
       )
     );
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'settings.update_mappings', 'settings', null, JSON.stringify({ keysUpdated: keys.length })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
 
     // Re-fetch to confirm the persisted state, e.g. in case a key was
     // valid per the allow-list but not actually present as a row yet
@@ -522,6 +540,15 @@ router.put('/tak-server', authenticateToken, authorize, [
 
     await Promise.all(updates);
 
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'settings.update_tak_server', 'settings', null, null]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
     res.json({ success: true });
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to update TAK Server settings');
@@ -698,6 +725,15 @@ router.post('/branding/logo', authenticateToken, authorize, handleUpload(logoUpl
     await atomicFileWrite(destinationPath, req.file.buffer);
     await SiteConfig.update(BRANDING_CONFIG_KEYS.organizationLogoPath, publicPath, req.user.userId);
 
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'settings.upload_logo', 'settings', null, null]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
     const branding = await getBrandingFields();
     res.json({ branding });
   } catch (error) {
@@ -721,6 +757,16 @@ router.post('/tak-server/cert', authenticateToken, authorize, handleUpload(certK
   try {
     await atomicFileWrite(destinationPath, req.file.buffer);
     await setTakServerConfigValue(TAK_SERVER_CONFIG_KEYS.certPath, destinationPath, req.user.userId);
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'settings.upload_cert', 'settings', null, null]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
     res.json({ success: true, certPath: destinationPath });
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to upload TAK Server certificate');
@@ -743,6 +789,16 @@ router.post('/tak-server/key', authenticateToken, authorize, handleUpload(certKe
   try {
     await atomicFileWrite(destinationPath, req.file.buffer);
     await setTakServerConfigValue(TAK_SERVER_CONFIG_KEYS.keyPath, destinationPath, req.user.userId);
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'settings.upload_key', 'settings', null, null]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
     res.json({ success: true, keyPath: destinationPath });
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to upload TAK Server key');
@@ -1116,6 +1172,15 @@ router.post('/import', authenticateToken, authorize, async (req, res) => {
     }
 
     await client.query('COMMIT');
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'settings.import', 'settings', null, JSON.stringify({ systemConfig: systemConfig.length, siteConfig: siteConfig.length, emailTemplates: Array.isArray(emailTemplates) ? emailTemplates.length : 0 })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
 
     res.json({
       success: true,

@@ -66,7 +66,7 @@ class RequestApprovalService {
       const requestId = result.rows[0].id;
       
       // Send verification email
-      await this.emailService.sendVerificationEmail(requestData.requester_email, token);
+      await this.emailService.sendVerificationEmail(requestData.requester_email, token, requestData.requester_first_name || '');
       
       await client.query('COMMIT');
       return { requestId, token };
@@ -268,14 +268,35 @@ class RequestApprovalService {
       });
       
       // Send approval email
-      const adminName = `${request.admin_first_name} ${request.admin_last_name}`;
-      const requestDescription = this.getRequestDescription(request);
-      
+      // Resolve team path for the approval email
+      let teamPath = request.team_name || '';
+      try {
+        const ancestorChain = await Team.getAncestorChain(request.target_team_id);
+        teamPath = ancestorChain.map(t => t.callsign_prefix || t.name).join(' - ');
+      } catch (pathErr) {
+        // Fall back to just team_name
+      }
+
+      // Compute callsign for the email
+      let callsignForEmail = '';
+      if (processResult?.localUserId && request.target_team_id) {
+        try {
+          const attrs = await UserAttributesService.generateCallsign(processResult.localUserId, request.target_team_id);
+          callsignForEmail = attrs?.callsign || '';
+        } catch (csErr) {
+          // Non-fatal
+        }
+      }
+
       await this.emailService.sendApprovalEmail(
         request.requester_email,
-        requestDescription,
-        adminName,
-        additionalDetails
+        {
+          teamPath,
+          username: request.requester_email,
+          firstName: request.requested_first_name || request.requester_first_name || "",
+          callsign: callsignForEmail,
+          additionalDetails
+        }
       );
       
       await client.query('COMMIT');
@@ -576,14 +597,21 @@ class RequestApprovalService {
       `, [requestId, adminId, denialReason]);
       
       // Send denial email
-      const adminName = `${request.admin_first_name} ${request.admin_last_name}`;
-      const requestDescription = this.getRequestDescription(request);
-      
+      let denialTeamPath = request.team_name || '';
+      try {
+        const denialAncestorChain = await Team.getAncestorChain(request.target_team_id);
+        denialTeamPath = denialAncestorChain.map(t => t.callsign_prefix || t.name).join(' - ');
+      } catch (pathErr) {
+        // Fall back to just team_name
+      }
+
       await this.emailService.sendDenialEmail(
         request.requester_email,
-        requestDescription,
-        adminName,
-        denialReason
+        {
+          teamPath: denialTeamPath,
+          firstName: request.requested_first_name || request.requester_first_name || '',
+          denialReason
+        }
       );
       
       await client.query('COMMIT');

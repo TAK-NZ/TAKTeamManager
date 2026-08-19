@@ -1,6 +1,7 @@
 const nodemailer = require('nodemailer');
 const pool = require('../config/database');
 const logger = require('../config/logger').createLogger('EmailService');
+const { wrapInBrandedTemplate } = require('../templates/emailBase');
 
 // Requirement 6.5/6.6: generic SMTP configuration, not tied to any single
 // provider (AWS SES, Authentik's own outbound mail relay, or otherwise) --
@@ -64,11 +65,19 @@ class EmailService {
       const subject = this.replaceVariables(template.subject_template, variables);
       const body = this.replaceVariables(template.body_template, variables);
 
+      // Convert plain text body to simple HTML (paragraphs for line breaks)
+      const bodyHtml = body
+        .split('\n\n')
+        .map(para => `<p>${para.replace(/\n/g, '<br>')}</p>`)
+        .join('');
+      const html = wrapInBrandedTemplate(bodyHtml);
+
       const result = await this.transporter.sendMail({
         from: this.fromAddress,
         to,
         subject,
-        text: body
+        text: body,   // plain text fallback
+        html          // branded HTML version
       });
 
       logger.info({ messageId: result.messageId }, 'Email sent');
@@ -88,29 +97,34 @@ class EmailService {
     return result;
   }
 
-  async sendVerificationEmail(email, token) {
+  async sendVerificationEmail(email, token, firstName = '') {
     const verificationLink = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/verify-request?token=${token}`;
     const expiryHours = await this.getConfigValue('email_verification_hours', '24');
 
     return this.sendEmail(email, 'access_request_verification', {
+      first_name: firstName,
       verification_link: verificationLink,
       expiry_hours: expiryHours
     });
   }
 
-  async sendApprovalEmail(email, requestDescription, adminName, additionalDetails = '') {
+  async sendApprovalEmail(email, { teamPath, username, callsign, firstName, additionalDetails } = {}) {
     return this.sendEmail(email, 'access_request_approved', {
-      request_description: requestDescription,
-      admin_name: adminName,
-      additional_details: additionalDetails
+      team_path: teamPath || '',
+      username: username || email,
+      first_name: firstName || '',
+      callsign: callsign || 'Will be assigned',
+      additional_details: additionalDetails || '',
+      password_reset_url: process.env.PASSWORD_RESET_URL || '',
+      login_url: process.env.ACCOUNT_LOGIN_URL || ''
     });
   }
 
-  async sendDenialEmail(email, requestDescription, adminName, denialReason) {
+  async sendDenialEmail(email, { teamPath, firstName, denialReason } = {}) {
     return this.sendEmail(email, 'access_request_denied', {
-      request_description: requestDescription,
-      admin_name: adminName,
-      denial_reason: denialReason
+      first_name: firstName || '',
+      team_path: teamPath || '',
+      denial_reason: denialReason || ''
     });
   }
 

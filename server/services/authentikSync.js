@@ -189,92 +189,44 @@ class AuthentikSyncService {
       const groupNames = user.groups?.map(groupId => groupMap[groupId]).filter(Boolean) || [];
       const isAdmin = groupNames.includes(adminGroupName);
 
-      // Also upsert a corresponding row into the local `users` table, keyed
-      // on authentik_user_id, following the same pattern used by
-      // UserProvisioningService.createAndAddUser. Without this, a user who
-      // only ever came in through this periodic sync (and never through an
-      // explicit provisioning flow) would exist in `user_cache` but have no
-      // row in `users`, causing any route that resolves the acting admin's
-      // local user id via `SELECT id FROM users WHERE authentik_user_id = $1`
-      // to fail. Uses the same first_name/last_name fallback expressions as
-      // the user_cache insert below so both rows stay consistent.
+      // TAK Team Manager is authoritative for all user attributes after
+      // initial bootstrap. The periodic sync pushes local values to Authentik
+      // when they differ (see push-to-Authentik section below).
+      //
+      // Upsert into the local `users` table, keyed on authentik_user_id.
+      // On INSERT (new user): seeds first_name/last_name from Authentik
+      // attributes (bootstrap), sets is_active = true always, seeds tak_role
+      // from Authentik if present.
+      // On UPDATE (existing user): only identity fields (username, email) are
+      // synced from Authentik. first_name, last_name, is_active, and tak_role
+      // are LOCAL-authoritative and never overwritten by Authentik values.
       //
       // Skipped when the Authentik user has no email: `users.email` is a
-      // UNIQUE NOT NULL column, and this Authentik instance has several
-      // service-account/API-token users (e.g. etl-adsbx, ak-outpost-<uuid>)
-      // with no email set. The first such user to sync would claim the
-      // empty-string email, causing every subsequent emailless user to hit
-      // a "duplicate key value violates unique constraint users_email_key"
-      // error. These service accounts never log into this app and don't
-      // need a `users` row for team-membership/audit-trail purposes, so
-      // they're only kept in `user_cache` below (which has no such
-      // constraint).
-      // Requirement 13.7/13.8 (task 29.1): keep users.tak_role in sync
-      // with Authentik's `takRole` attribute -- Authentik is authoritative
-      // once a value has been pushed to it by a Member_List edit (task
-      // 28.1 pushes synchronously in the same request; this periodic sync
-      // then keeps `users.tak_role` consistent with it, exactly mirroring
-      // how `tak_callsign`/`tak_color` already flow FROM Authentik below).
-      // This is a ONE-WAY sync: `users.tak_role` is only ever updated FROM
-      // Authentik's value, never the reverse.
-      //
-      // `users.tak_role` is NOT NULL (default 'Team Member'), unlike
-      // `user_cache.tak_role` (which has no such constraint and is
-      // unconditionally overwritten from EXCLUDED, including to
-      // null/undefined, in the upsert below). Authentik has no `takRole`
-      // attribute at all for some users (the attribute is sparse), so a
-      // raw unconditional overwrite here would either violate the NOT
-      // NULL constraint or silently clobber a real Team_Admin/
-      // Global_Manager edit (task 28.1) with null -- a regression of
-      // Requirement 13.8 ("THE App SHALL NOT recompute or otherwise
-      // modify that value as a side effect of any other change"). The
-      // COALESCE guards below fall back to `'Team Member'` on initial
-      // insert and to the existing stored value on conflict whenever
-      // Authentik's attribute is absent/undefined, so an unset Authentik
-      // attribute never overwrites an established local value.
+      // UNIQUE NOT NULL column, and service-account users with no email
+      // would violate that constraint.
       const takRoleFromAuthentik = user.attributes?.takRole ?? null;
+      const seedFirstName = user.attributes?.first_name || user.name || user.username;
+      const seedLastName = user.attributes?.last_name || '';
 
-      // first_name/last_name authority: Authentik only ever stores a single
-      // `name` field per user (no real separate first/last name split), so
-      // `user.first_name`/`user.last_name` below are effectively always
-      // undefined and this expression falls through to splitting/using
-      // `user.name`/`user.username` instead. Meanwhile, the local `users`
-      // table IS the authoritative source of a real first/last name split,
-      // set directly by UserProvisioningService.createAndAddUser (initial
-      // provisioning) and by the Member_List inline-edit route
-      // (PATCH /api/teams/:teamId/members/:userId in server/routes/teams.js).
-      // Exactly like the `tak_role` one-way-sync above (Requirement 13.8:
-      // "SHALL NOT recompute or otherwise modify that value as a side
-      // effect of any other change"), first_name/last_name must flow FROM
-      // Authentik only as a best-effort seed on the very first INSERT of a
-      // brand-new local row -- never as an overwrite of an existing row.
-      // So first_name/last_name are included in the INSERT ... VALUES
-      // list (to seed a new row) but deliberately omitted from the
-      // ON CONFLICT DO UPDATE SET list below, so a periodic sync can never
-      // clobber a value already established locally.
       if (user.email) {
         await db.query(
-          'INSERT INTO users (authentik_user_id, username, email, first_name, last_name, is_active, tak_role) VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, \'Team Member\')) ON CONFLICT (authentik_user_id) DO UPDATE SET username = $2, email = $3, is_active = $6, tak_role = COALESCE($7, tak_role)',
+          'INSERT INTO users (authentik_user_id, username, email, first_name, last_name, is_active, tak_role) VALUES ($1, $2, $3, $4, $5, true, COALESCE($6, \'Team Member\')) ON CONFLICT (authentik_user_id) DO UPDATE SET username = $2, email = $3',
           [
             user.pk,
             user.username,
             user.email,
-            user.first_name || user.name || user.username,
-            user.last_name || '',
-            user.is_active,
+            seedFirstName,
+            seedLastName,
             takRoleFromAuthentik
           ]
         );
       }
 
-      // user_cache.first_name/last_name: same one-way-sync direction as
-      // above, kept consistent with the `users` table so that downstream
-      // consumers of user_cache (e.g. POST /api/users/add-to-team in
-      // server/routes/users.js, which re-derives `users.first_name`/
-      // `last_name` from this cached row) don't reintroduce the same
-      // clobbering bug via a second code path. Omitted from
-      // ON CONFLICT DO UPDATE SET for the same reason: only seed on first
-      // insert, never overwrite an existing cached row.
+      // user_cache upsert: TAK Team Manager is authoritative for first_name,
+      // last_name, tak_role, tak_color, tak_callsign, is_active after initial
+      // bootstrap. On INSERT, seed all values from Authentik. On UPDATE, only
+      // sync identity fields (username, email) and admin-related fields
+      // (groups, is_admin) from Authentik.
       await db.query(`
         INSERT INTO user_cache (
           authentik_id, username, email, first_name, last_name, 
@@ -283,10 +235,6 @@ class AuthentikSyncService {
         ON CONFLICT (authentik_id) DO UPDATE SET
           username = EXCLUDED.username,
           email = EXCLUDED.email,
-          is_active = EXCLUDED.is_active,
-          tak_role = EXCLUDED.tak_role,
-          tak_color = EXCLUDED.tak_color,
-          tak_callsign = EXCLUDED.tak_callsign,
           groups = EXCLUDED.groups,
           is_admin = EXCLUDED.is_admin,
           updated_at = CURRENT_TIMESTAMP
@@ -294,15 +242,99 @@ class AuthentikSyncService {
         user.pk,
         user.username,
         user.email,
-        user.first_name || user.name || user.username,
-        user.last_name || '',
-        user.is_active,
+        seedFirstName,
+        seedLastName,
+        true,
         user.attributes?.takRole,
         user.attributes?.takColor,
         user.attributes?.takCallsign,
         groupNames,
         isAdmin
       ]);
+
+      // --- Push local-authoritative attributes to Authentik when they differ ---
+      // TAK Team Manager is authoritative for: first_name, last_name,
+      // tak_callsign, tak_color, tak_role, is_active. Only PATCH if at least
+      // one value differs (avoids unnecessary API calls). Skip for users with
+      // no email (service accounts that don't have a local `users` row).
+      if (user.email) {
+        try {
+          // Read the LOCAL authoritative values for this user
+          const localResult = await db.query(
+            'SELECT first_name, last_name, tak_role, is_active FROM users WHERE authentik_user_id = $1',
+            [user.pk]
+          );
+          const cacheResult = await db.query(
+            'SELECT tak_callsign, tak_color FROM user_cache WHERE authentik_id = $1',
+            [String(user.pk)]
+          );
+
+          if (localResult.rows.length > 0) {
+            const local = localResult.rows[0];
+            const cache = cacheResult.rows[0] || {};
+
+            // Current Authentik values (from the user object we already fetched)
+            const authentikAttrs = user.attributes || {};
+            const authentikName = user.name || '';
+
+            // Local authoritative values
+            const localFirstName = local.first_name || '';
+            const localLastName = local.last_name || '';
+            const localTakCallsign = cache.tak_callsign || '';
+            const localTakColor = cache.tak_color || '';
+            const localTakRole = local.tak_role || 'Team Member';
+            const localIsActive = local.is_active !== false; // default true
+            const localFullName = `${localFirstName}${localLastName ? ' ' + localLastName : ''}`;
+
+            // Check if anything differs
+            const nameChanged = authentikName !== localFullName;
+            const isActiveChanged = user.is_active !== localIsActive;
+            const attrsChanged = (
+              (authentikAttrs.first_name || '') !== localFirstName ||
+              (authentikAttrs.last_name || '') !== localLastName ||
+              (authentikAttrs.takCallsign || '') !== localTakCallsign ||
+              (authentikAttrs.takColor || '') !== localTakColor ||
+              (authentikAttrs.takRole || '') !== localTakRole
+            );
+
+            if (nameChanged || isActiveChanged || attrsChanged) {
+              const mergedAttributes = {
+                ...authentikAttrs,
+                first_name: localFirstName,
+                last_name: localLastName,
+                takCallsign: localTakCallsign,
+                takColor: localTakColor,
+                takRole: localTakRole
+              };
+
+              const patchPayload = {
+                name: localFullName,
+                is_active: localIsActive,
+                attributes: mergedAttributes
+              };
+
+              const patchResponse = await axios.patch(
+                `${process.env.AUTHENTIK_URL}/api/v3/core/users/${user.pk}/`,
+                patchPayload,
+                {
+                  headers: {
+                    'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+                    'Content-Type': 'application/json'
+                  },
+                  timeout: 10000
+                }
+              );
+
+              if (patchResponse.status >= 200 && patchResponse.status < 300) {
+                logger.debug({ username: user.username }, 'Pushed local attributes to Authentik');
+              }
+            }
+          }
+        } catch (pushError) {
+          // Non-fatal: log and continue — the next sync will retry
+          logger.error({ err: pushError, username: user.username }, 'Failed to push attributes to Authentik');
+        }
+      }
     } catch (error) {
       logger.error({ err: error, username: user.username }, 'Failed to sync user');
     }
