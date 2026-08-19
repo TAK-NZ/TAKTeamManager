@@ -311,6 +311,10 @@ router.post('/:requestId/approve', authenticateToken, authorize, [
       );
     }
     
+    // Fetch requester email before approve (for audit log — row may be modified/consumed)
+    const reqRow = await pool.query('SELECT requester_email FROM access_requests WHERE id = $1', [requestId]);
+    const requesterEmail = reqRow.rows[0]?.requester_email || '';
+
     // req.user.userId is the local users.id -- access_requests.processed_by
     // is a foreign key to that column, NOT the Authentik id (req.user.id).
     await requestService.approveRequest(requestId, req.user.userId, additionalDetails, callsignSuffix);
@@ -318,7 +322,7 @@ router.post('/:requestId/approve', authenticateToken, authorize, [
     try {
       await pool.query(
         'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
-        [req.user.userId, 'request.approve', 'access_request', parseInt(requestId, 10), null]
+        [req.user.userId, 'request.approve', 'access_request', parseInt(requestId, 10), JSON.stringify({ requesterEmail })]
       );
     } catch (auditErr) {
       getLogger().error({ err: auditErr }, 'Failed to write audit log');
@@ -356,9 +360,11 @@ router.post('/:requestId/deny', authenticateToken, authorize, [
     await requestService.denyRequest(requestId, req.user.userId, denialReason);
 
     try {
+      const denyReqRow = await pool.query('SELECT requester_email FROM access_requests WHERE id = $1', [requestId]);
+      const denyRequesterEmail = denyReqRow.rows[0]?.requester_email || '';
       await pool.query(
         'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
-        [req.user.userId, 'request.deny', 'access_request', parseInt(requestId, 10), JSON.stringify({ reason: denialReason })]
+        [req.user.userId, 'request.deny', 'access_request', parseInt(requestId, 10), JSON.stringify({ requesterEmail: denyRequesterEmail, reason: denialReason })]
       );
     } catch (auditErr) {
       getLogger().error({ err: auditErr }, 'Failed to write audit log');

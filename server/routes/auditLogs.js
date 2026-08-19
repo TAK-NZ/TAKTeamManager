@@ -304,7 +304,7 @@ router.get('/', authenticateToken, authorize, paginationParams, [
       if (row.resource_type === 'team') resource_name = teamNameMap.get(rid) || null;
       else if (row.resource_type === 'user') resource_name = userEmailMap.get(rid) || null;
       else if (row.resource_type === 'channel') resource_name = channelNameMap.get(rid) || null;
-      else if (row.resource_type === 'access_request') resource_name = requestEmailMap.get(rid) || null;
+      else if (row.resource_type === 'access_request') resource_name = requestEmailMap.get(rid) || (row.details?.requesterEmail ? `Request from ${row.details.requesterEmail}` : null);
 
       // Resolve user IDs in details to emails
       let enriched_details = row.details;

@@ -621,6 +621,8 @@ describe('POST /api/requests/:requestId/approve callsignSuffix handling (Require
 
   beforeEach(() => {
     jest.clearAllMocks();
+    // The approve route now queries for requester_email before calling approveRequest
+    pool.query.mockResolvedValue({ rows: [{ requester_email: 'test@example.com' }] });
     app = buildApp();
   });
 
