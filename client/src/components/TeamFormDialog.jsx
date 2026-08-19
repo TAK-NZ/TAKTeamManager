@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { XMarkIcon, LockClosedIcon, LockOpenIcon } from '@heroicons/react/24/outline'
+import toast from 'react-hot-toast'
 import { teamsAPI } from '../services/api'
 import { labelFor, labelForNew } from '../utils/teamLabels'
 import { formatLevelLabel, groupCallsignLevelOptionsByDepth } from '../utils/callsignLevels'
@@ -106,6 +107,7 @@ export default function TeamFormDialog({
 }) {
   const [formData, setFormData] = useState(EMPTY_FORM_DATA)
   const [submitting, setSubmitting] = useState(false)
+  const [showCanJoinConfirm, setShowCanJoinConfirm] = useState(false)
   // Requirement 5.7-5.11 (task 32.4): the Callsign_Level_Selection
   // toggle-labelling lookup, grouped depth -> deduplicated/sorted
   // callsign_prefix values, sourced from
@@ -186,13 +188,16 @@ export default function TeamFormDialog({
     // Requirement 3.4 (signup-flow-rework): when editing an existing team
     // and can_join is being toggled from true to false, warn the user that
     // any active sign-up code will be permanently deleted by the server.
-    if (editingTeam && editingTeam.can_join && !formData.canJoin) {
-      const proceed = window.confirm(
-        'This team has an active sign-up code. Disabling join requests will permanently delete the code and invalidate all distributed links and QR codes. Continue?'
-      )
-      if (!proceed) return
+    if (editingTeam && editingTeam.can_join && !formData.canJoin && !showCanJoinConfirm) {
+      setShowCanJoinConfirm(true)
+      return
     }
 
+    await doSubmit()
+  }
+
+  const doSubmit = async () => {
+    setShowCanJoinConfirm(false)
     setSubmitting(true)
     try {
       const response = editingTeam
@@ -202,7 +207,7 @@ export default function TeamFormDialog({
       onClose()
     } catch (error) {
       console.error(editingTeam ? 'Failed to update team:' : 'Failed to create team:', error)
-      alert((editingTeam ? 'Failed to update team: ' : 'Failed to create team: ') + (error.response?.data?.error || error.message))
+      toast.error((editingTeam ? 'Failed to update team: ' : 'Failed to create team: ') + (error.response?.data?.error || error.message))
     } finally {
       setSubmitting(false)
     }
@@ -532,6 +537,34 @@ export default function TeamFormDialog({
             </button>
           </div>
         </form>
+
+        {/* Disable join requests confirmation modal */}
+        {showCanJoinConfirm && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-[60]">
+            <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-sm w-full p-6">
+              <h4 className="text-lg font-medium text-amber-600 dark:text-amber-400 mb-2">
+                Disable Join Requests?
+              </h4>
+              <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+                This team has an active sign-up code. Disabling join requests will permanently delete the code and invalidate all distributed links and QR codes.
+              </p>
+              <div className="flex justify-end space-x-3">
+                <button
+                  onClick={() => setShowCanJoinConfirm(false)}
+                  className="btn-secondary px-4 py-2 text-sm"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={doSubmit}
+                  className="px-4 py-2 bg-amber-600 text-white rounded-md hover:bg-amber-700 text-sm"
+                >
+                  Confirm & Save
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )

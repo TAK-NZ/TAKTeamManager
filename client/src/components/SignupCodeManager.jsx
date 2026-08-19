@@ -15,6 +15,7 @@ export default function SignupCodeManager({ teamId, teamName, isAdmin }) {
   const [generating, setGenerating] = useState(false)
   const [revoking, setRevoking] = useState(false)
   const [showConfirm, setShowConfirm] = useState(false) // generate confirmation
+  const [showRevokeConfirm, setShowRevokeConfirm] = useState(false)
 
   useEffect(() => {
     if (!teamId || !isAdmin) return
@@ -52,13 +53,11 @@ export default function SignupCodeManager({ teamId, teamName, isAdmin }) {
   }
 
   const handleRevoke = async () => {
-    if (!window.confirm('Are you sure you want to revoke this code? All distributed links and QR codes will stop working.')) {
-      return
-    }
     setRevoking(true)
     try {
       await signupCodesAPI.revoke(teamId)
       setCode(null)
+      setShowRevokeConfirm(false)
       toast.success('Sign-up code revoked')
     } catch (err) {
       toast.error(err.response?.data?.error || 'Failed to revoke code')
@@ -178,7 +177,7 @@ export default function SignupCodeManager({ teamId, teamName, isAdmin }) {
               {generating ? 'Generating...' : 'Regenerate'}
             </button>
             <button
-              onClick={handleRevoke}
+              onClick={() => setShowRevokeConfirm(true)}
               disabled={revoking}
               className="btn-secondary text-sm text-red-600 dark:text-red-400 flex items-center gap-1"
             >
@@ -224,6 +223,36 @@ export default function SignupCodeManager({ teamId, teamName, isAdmin }) {
                 className="btn-primary px-4 py-2 text-sm"
               >
                 {generating ? 'Generating...' : 'Confirm'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Revoke confirmation dialog */}
+      {showRevokeConfirm && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-sm w-full p-6">
+            <h4 className="text-lg font-medium text-red-600 dark:text-red-400 mb-2">
+              Revoke Sign-up Code?
+            </h4>
+            <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+              Are you sure you want to revoke this code? All distributed links and QR codes will stop working immediately.
+            </p>
+            <div className="flex justify-end space-x-3">
+              <button
+                onClick={() => setShowRevokeConfirm(false)}
+                className="btn-secondary px-4 py-2 text-sm"
+                disabled={revoking}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleRevoke}
+                disabled={revoking}
+                className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50 text-sm"
+              >
+                {revoking ? 'Revoking...' : 'Revoke Code'}
               </button>
             </div>
           </div>

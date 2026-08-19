@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import React from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { PlusIcon, UsersIcon, UserPlusIcon, ShieldCheckIcon, BuildingOfficeIcon, FolderPlusIcon, HashtagIcon, XMarkIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, TrashIcon, PencilIcon, CheckIcon, ArrowLeftOnRectangleIcon } from '@heroicons/react/24/outline'
+import toast from 'react-hot-toast'
 import { teamsAPI, channelsAPI, usersAPI, configAPI } from '../services/api'
 import api from '../services/api'
 import { labelFor } from '../utils/teamLabels'
@@ -318,7 +319,7 @@ export default function TeamDetail({ refreshUser }) {
       setShowSubTeamDialog(false)
     } catch (error) {
       console.error('Failed to create sub-team:', error)
-      alert('Failed to create sub-team: ' + (error.response?.data?.error || error.message))
+      toast.error('Failed to create sub-team: ' + (error.response?.data?.error || error.message))
     } finally {
       setCreatingSubTeam(false)
     }
@@ -334,7 +335,7 @@ export default function TeamDetail({ refreshUser }) {
       setDeleteSubTeamId(null)
     } catch (error) {
       console.error('Failed to delete sub-team:', error)
-      alert('Failed to delete sub-team: ' + (error.response?.data?.error || error.message))
+      toast.error('Failed to delete sub-team: ' + (error.response?.data?.error || error.message))
     } finally {
       setDeletingSubTeam(false)
     }
@@ -355,7 +356,7 @@ export default function TeamDetail({ refreshUser }) {
       setShowChannelDialog(false)
     } catch (error) {
       console.error('Failed to create channel:', error)
-      alert('Failed to create channel: ' + (error.response?.data?.error || error.message))
+      toast.error('Failed to create channel: ' + (error.response?.data?.error || error.message))
     } finally {
       setCreatingChannel(false)
     }
@@ -431,7 +432,7 @@ export default function TeamDetail({ refreshUser }) {
       setAddMemberRole('member')
     } catch (error) {
       console.error('Failed to add user:', error)
-      alert('Failed to add user: ' + (error.response?.data?.error || error.message))
+      toast.error('Failed to add user: ' + (error.response?.data?.error || error.message))
     } finally {
       setAddingMember(false)
     }
@@ -472,7 +473,7 @@ export default function TeamDetail({ refreshUser }) {
       setAddMemberRole('member')
     } catch (error) {
       console.error('Failed to create user:', error)
-      alert('Failed to create user: ' + (error.response?.data?.error || error.message))
+      toast.error('Failed to create user: ' + (error.response?.data?.error || error.message))
     } finally {
       setAddingMember(false)
     }
@@ -597,7 +598,7 @@ export default function TeamDetail({ refreshUser }) {
       setRemoveUserRole('')
     } catch (error) {
       console.error('Failed to remove user:', error)
-      alert('Failed to remove user: ' + (error.response?.data?.error || error.message))
+      toast.error('Failed to remove user: ' + (error.response?.data?.error || error.message))
     } finally {
       setRemovingUser(false)
     }

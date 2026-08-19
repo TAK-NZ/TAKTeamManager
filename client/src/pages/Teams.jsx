@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { PlusIcon, UserGroupIcon, TrashIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, ChevronRightIcon, EyeSlashIcon, ArrowLeftOnRectangleIcon, PencilIcon, QrCodeIcon } from '@heroicons/react/24/outline'
+import toast from 'react-hot-toast'
 import { teamsAPI, configAPI } from '../services/api'
 import api from '../services/api'
 import { labelFor } from '../utils/teamLabels'
@@ -170,7 +171,7 @@ export default function Teams({ user }) {
       setDeleteTeamId(null)
     } catch (error) {
       console.error('Failed to delete team:', error)
-      alert('Failed to delete team: ' + (error.response?.data?.error || error.message))
+      toast.error('Failed to delete team: ' + (error.response?.data?.error || error.message))
     } finally {
       setDeleting(false)
     }

@@ -44,6 +44,9 @@ export default function Requests({ user }) {
   // of (never in addition to) the generic toast when POST .../approve 400s
   // with a callsign_suffix conflict.
   const [callsignSuffixErrorByRequestId, setCallsignSuffixErrorByRequestId] = useState({})
+  // Denial reason modal state
+  const [denyingRequestId, setDenyingRequestId] = useState(null)
+  const [denialReason, setDenialReason] = useState('')
 
   useEffect(() => {
     const fetchRequests = async () => {
@@ -118,13 +121,18 @@ export default function Requests({ user }) {
     }
   }
 
-  const handleDeny = async (requestId) => {
-    const denialReason = prompt('Please provide a reason for denial:');
-    if (!denialReason) return;
-    
+  const handleDeny = (requestId) => {
+    setDenyingRequestId(requestId)
+    setDenialReason('')
+  }
+
+  const confirmDeny = async () => {
+    if (!denialReason.trim()) return
     try {
-      await requestsAPI.denyRequest(requestId, { denialReason })
-      clearRequestState(requestId)
+      await requestsAPI.denyRequest(denyingRequestId, { denialReason })
+      clearRequestState(denyingRequestId)
+      setDenyingRequestId(null)
+      setDenialReason('')
       toast.success('Request denied successfully')
     } catch (error) {
       toast.error('Failed to deny request')
@@ -262,6 +270,45 @@ export default function Requests({ user }) {
       {user?.is_global_manager && (
         <div className="card">
           <OrgInterestRequests />
+        </div>
+      )}
+
+      {/* Denial reason modal */}
+      {denyingRequestId && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full p-6">
+            <h4 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
+              Deny Request
+            </h4>
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                Reason for denial
+              </label>
+              <textarea
+                className="input w-full"
+                value={denialReason}
+                onChange={(e) => setDenialReason(e.target.value)}
+                rows={3}
+                placeholder="Please explain why this request is being denied..."
+                autoFocus
+              />
+            </div>
+            <div className="flex justify-end space-x-3">
+              <button
+                onClick={() => { setDenyingRequestId(null); setDenialReason('') }}
+                className="btn-secondary px-4 py-2 text-sm"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmDeny}
+                disabled={!denialReason.trim()}
+                className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50 text-sm"
+              >
+                Deny Request
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
