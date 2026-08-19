@@ -68,13 +68,29 @@ export default function SignupCodeManager({ teamId, teamName, isAdmin }) {
   }
 
   const handleCopyUrl = () => {
-    const formattedCode = code?.formatted_code || code?.code
-    if (!formattedCode) return
-    const rawCode = formattedCode.replace(/-/g, '')
-    const url = `${window.location.origin}/request-access?code=${rawCode}`
-    navigator.clipboard.writeText(url)
-      .then(() => toast.success('URL copied to clipboard'))
-      .catch(() => toast.error('Failed to copy URL'))
+    // Use the URL from the server response, or construct one from the raw code
+    const copyUrl = code?.url || `${window.location.origin}/request-access?code=${(code?.code || '').replace(/-/g, '')}`
+    if (!copyUrl) return
+    // navigator.clipboard requires HTTPS; fall back to execCommand for HTTP
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(copyUrl)
+        .then(() => toast.success('URL copied to clipboard'))
+        .catch(() => toast.error('Failed to copy URL'))
+    } else {
+      const textArea = document.createElement('textarea')
+      textArea.value = copyUrl
+      textArea.style.position = 'fixed'
+      textArea.style.opacity = '0'
+      document.body.appendChild(textArea)
+      textArea.select()
+      try {
+        document.execCommand('copy')
+        toast.success('URL copied to clipboard')
+      } catch {
+        toast.error('Failed to copy URL')
+      }
+      document.body.removeChild(textArea)
+    }
   }
 
   const handleDownloadQr = async () => {
@@ -126,7 +142,7 @@ export default function SignupCodeManager({ teamId, teamName, isAdmin }) {
         <>
           <div className="mb-4">
             <p className="text-2xl font-mono font-bold text-gray-900 dark:text-gray-100 tracking-wider">
-              {code.formatted_code || code.code}
+              {code.formatted || code.code}
             </p>
             {code.created_at && (
               <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
