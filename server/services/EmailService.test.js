@@ -201,7 +201,7 @@ describe('EmailService', () => {
       await service.sendVerificationEmail('user@example.com', 'tok-123');
 
       const sentArgs = mockSendMail.mock.calls[0][0];
-      expect(sentArgs.text).toBe('https://app.example.com/verify-request?token=tok-123 in 48h');
+      expect(sentArgs.text).toBe('https://app.example.com/request-access?token=tok-123 in 48h');
     });
   });
 

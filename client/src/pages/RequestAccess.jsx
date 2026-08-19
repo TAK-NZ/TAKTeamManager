@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Link, useSearchParams } from 'react-router-dom'
+import { useSearchParams } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import DOMPurify from 'dompurify'
 import { signupAPI, configAPI } from '../services/api'
@@ -289,9 +289,15 @@ export default function RequestAccess() {
             <p className="text-gray-600 dark:text-gray-400 mb-6">
               We've sent a verification link to your email address. Click the link to continue with your sign-up.
             </p>
-            <Link to="/request-access" className="text-sm text-primary-600 hover:text-primary-500">
-              Start over
-            </Link>
+            {import.meta.env.VITE_START_OVER_URL ? (
+              <a href={import.meta.env.VITE_START_OVER_URL} className="text-sm text-primary-600 hover:text-primary-500">
+                Start over
+              </a>
+            ) : (
+              <a href="/request-access" className="text-sm text-primary-600 hover:text-primary-500">
+                Start over
+              </a>
+            )}
           </div>
         )
 

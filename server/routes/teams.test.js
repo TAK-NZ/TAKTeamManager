@@ -1021,3 +1021,54 @@ describe('PATCH /api/teams/:teamId/members/:userId (Requirements 11.4, 11.16, 13
     expect(res.body.error).toBe('Failed to update team member');
   });
 });
+
+/**
+ * Unit test for can_join=false code deletion (Task 10.2, signup-flow-rework).
+ *
+ * When PUT /api/teams/:teamId is called with canJoin=false, verify
+ * DELETE FROM signup_codes is executed for that team.
+ */
+describe('PUT /api/teams/:teamId — can_join=false deletes signup codes (Task 10.2)', () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockIsAdmin = true;
+    app = buildApp();
+    Team.findById.mockResolvedValue({ id: 42, color: 'Blue', parent_team_id: null });
+    Team.update.mockResolvedValue({ id: 42, name: 'Test', can_join: false });
+  });
+
+  it('executes DELETE FROM signup_codes when canJoin is set to false', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+
+    const res = await request(app)
+      .put('/api/teams/42')
+      .send({ canJoin: false });
+
+    expect(res.status).toBe(200);
+
+    // Verify DELETE FROM signup_codes was called for team 42
+    const deleteCalls = pool.query.mock.calls.filter(
+      ([sql]) => typeof sql === 'string' && sql.includes('DELETE FROM signup_codes')
+    );
+    expect(deleteCalls.length).toBeGreaterThanOrEqual(1);
+    expect(deleteCalls[0][1]).toEqual(['42']);
+  });
+
+  it('does NOT delete signup codes when canJoin is true', async () => {
+    Team.update.mockResolvedValue({ id: 42, name: 'Test', can_join: true });
+    pool.query.mockResolvedValue({ rows: [] });
+
+    const res = await request(app)
+      .put('/api/teams/42')
+      .send({ canJoin: true });
+
+    expect(res.status).toBe(200);
+
+    const deleteCalls = pool.query.mock.calls.filter(
+      ([sql]) => typeof sql === 'string' && sql.includes('DELETE FROM signup_codes')
+    );
+    expect(deleteCalls).toHaveLength(0);
+  });
+});

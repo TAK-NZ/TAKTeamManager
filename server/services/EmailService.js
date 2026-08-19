@@ -98,7 +98,7 @@ class EmailService {
   }
 
   async sendVerificationEmail(email, token, firstName = '') {
-    const verificationLink = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/verify-request?token=${token}`;
+    const verificationLink = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/request-access?token=${token}`;
     const expiryHours = await this.getConfigValue('email_verification_hours', '24');
 
     return this.sendEmail(email, 'access_request_verification', {
