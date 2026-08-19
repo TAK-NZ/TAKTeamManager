@@ -25,7 +25,7 @@ export default function SignupCodeManager({ teamId, teamName, isAdmin }) {
     setLoading(true)
     try {
       const res = await signupCodesAPI.get(teamId)
-      setCode(res.data.code || res.data)
+      setCode(res.data)
     } catch (err) {
       if (err.response?.status === 404) {
         setCode(null)
@@ -42,7 +42,7 @@ export default function SignupCodeManager({ teamId, teamName, isAdmin }) {
     setGenerating(true)
     try {
       const res = await signupCodesAPI.generate(teamId)
-      setCode(res.data.code || res.data)
+      setCode(res.data)
       toast.success('Sign-up code generated')
     } catch (err) {
       toast.error(err.response?.data?.error || 'Failed to generate code')
