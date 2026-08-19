@@ -1971,12 +1971,14 @@ export default function TeamDetail({ refreshUser }) {
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full">
             <div className="p-6">
-              <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
-                Remove {removeUserRole === 'admin' ? 'Admin' : 'Member'}
+              <h3 className="text-lg font-medium text-red-600 dark:text-red-400 mb-4">
+                Permanently Delete User
               </h3>
-              <p className="text-gray-600 dark:text-gray-400 mb-6">
-                Are you sure you want to remove this {removeUserRole} from the team? 
-                They will be removed from all team channels and lose access to team resources.
+              <p className="text-gray-600 dark:text-gray-400 mb-4">
+                Are you sure you want to permanently delete this user? This action cannot be undone.
+              </p>
+              <p className="text-gray-600 dark:text-gray-400 mb-6 text-sm">
+                The user will be removed from all teams and channels, their account will be deleted from the system and from the identity provider (Authentik).
               </p>
               <div className="flex justify-end space-x-3">
                 <button
@@ -1994,7 +1996,7 @@ export default function TeamDetail({ refreshUser }) {
                   disabled={removingUser}
                   className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50"
                 >
-                  {removingUser ? 'Removing...' : 'Remove User'}
+                  {removingUser ? 'Deleting...' : 'Delete User Permanently'}
                 </button>
               </div>
             </div>

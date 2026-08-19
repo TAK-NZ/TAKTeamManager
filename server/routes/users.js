@@ -709,14 +709,24 @@ router.delete('/remove-from-team/:userId', authenticateToken, authorize, [
     // Use new service layer for team removal
     const result = await TeamMembershipService.removeUserFromTeam(userId, requestingUserId);
     
-    // Clear TAK attributes in Authentik
+    // Clear TAK attributes in Authentik and deactivate the user
     await UserAttributesService.clearUserAttributes(authentikUserId);
-    
-    // Clear TAK callsign and color in user cache
-    await pool.query(
-      'UPDATE user_cache SET tak_callsign = NULL, tak_color = NULL WHERE authentik_id = $1',
-      [authentikUserId]
-    );
+
+    // Delete user from Authentik entirely
+    try {
+      await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`
+        }
+      });
+    } catch (deleteErr) {
+      getLogger().error({ err: deleteErr }, 'Failed to delete user from Authentik');
+    }
+
+    // Delete user from local system entirely
+    await pool.query('DELETE FROM user_cache WHERE authentik_id = $1', [String(authentikUserId)]);
+    await pool.query('DELETE FROM users WHERE id = $1', [userId]);
 
     try {
       await pool.query(
