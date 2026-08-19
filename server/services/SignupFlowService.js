@@ -16,9 +16,11 @@ class SignupFlowService {
    * 5. None → 'new'
    */
   async determineEmailState(email) {
-    // Check for active account
+    // Check for active account (must have a direct team membership to be considered active)
     const userResult = await pool.query(
-      'SELECT id FROM users WHERE email = $1 LIMIT 1',
+      `SELECT u.id FROM users u
+       JOIN team_memberships tm ON u.id = tm.user_id AND tm.inherited_from_team_id IS NULL
+       WHERE u.email = $1 LIMIT 1`,
       [email]
     );
     if (userResult.rows.length > 0) return 'active';
