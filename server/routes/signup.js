@@ -62,7 +62,8 @@ router.post('/requests/team-access', [
   body('token').notEmpty().withMessage('token is required'),
   body('firstName').trim().isLength({ min: 1, max: 255 }).withMessage('firstName is required'),
   body('lastName').trim().isLength({ min: 1, max: 255 }).withMessage('lastName is required'),
-  body('teamId').isInt({ min: 1 }).withMessage('teamId must be a positive integer')
+  body('teamId').isInt({ min: 1 }).withMessage('teamId must be a positive integer'),
+  body('reason').trim().isLength({ min: 10, max: 500 }).withMessage('Reason must be between 10 and 500 characters')
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -70,8 +71,8 @@ router.post('/requests/team-access', [
   }
 
   try {
-    const { token, firstName, lastName, teamId } = req.body;
-    const result = await signupFlowService.submitTeamAccess({ token, firstName, lastName, teamId });
+    const { token, firstName, lastName, teamId, reason } = req.body;
+    const result = await signupFlowService.submitTeamAccess({ token, firstName, lastName, teamId, reason });
     res.json(result);
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to submit team access request');

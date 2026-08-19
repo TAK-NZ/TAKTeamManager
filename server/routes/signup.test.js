@@ -143,7 +143,8 @@ describe('signup routes (Task 8.2)', () => {
           token: 'valid-token',
           firstName: 'Jane',
           lastName: 'Doe',
-          teamId: 5
+          teamId: 5,
+          reason: 'I need access to collaborate with the team'
         });
 
       expect(res.status).toBe(200);

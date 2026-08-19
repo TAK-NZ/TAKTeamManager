@@ -268,7 +268,7 @@ class SignupFlowService {
    * @param {Object} data - {token, firstName, lastName, teamId}
    * @returns {Promise<{requestId: number}>}
    */
-  async submitTeamAccess({ token, firstName, lastName, teamId }) {
+  async submitTeamAccess({ token, firstName, lastName, teamId, reason }) {
     // 1. Validate the verification token
     const tokenResult = await pool.query(
       `SELECT id, requester_email, signup_code_used FROM access_requests
@@ -319,15 +319,16 @@ class SignupFlowService {
       throw new Error('Selected team is not available');
     }
 
-    // 3. Update the access_request row: set name, team, mark email verified (consuming the token)
+    // 3. Update the access_request row: set name, team, reason, mark email verified (consuming the token)
     await pool.query(
       `UPDATE access_requests
        SET requester_first_name = $1,
            requester_last_name = $2,
            target_team_id = $3,
+           justification = $4,
            email_verified = true
-       WHERE id = $4`,
-      [firstName, lastName, teamId, accessRequestId]
+       WHERE id = $5`,
+      [firstName, lastName, teamId, reason, accessRequestId]
     );
 
     return { requestId: accessRequestId };

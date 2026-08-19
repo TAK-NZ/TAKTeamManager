@@ -63,6 +63,7 @@ export default function RequestAccess() {
   const [firstName, setFirstName] = useState('')
   const [lastName, setLastName] = useState('')
   const [selectedTeamId, setSelectedTeamId] = useState('')
+  const [reason, setReason] = useState('')
   const [verifiedEmail, setVerifiedEmail] = useState('')
 
   // No teams / org interest state
@@ -134,7 +135,7 @@ export default function RequestAccess() {
 
   const handleTeamAccessSubmit = async (e) => {
     e.preventDefault()
-    if (!selectedTeamId || !firstName || !lastName) return
+    if (!selectedTeamId || !firstName || !lastName || !reason || reason.length < 10) return
 
     setIsSubmitting(true)
     try {
@@ -143,6 +144,7 @@ export default function RequestAccess() {
         firstName,
         lastName,
         teamId: parseInt(selectedTeamId, 10),
+        reason,
       })
       setStep(STEPS.SUBMIT_SUCCESS)
     } catch (error) {
@@ -305,9 +307,14 @@ export default function RequestAccess() {
         return (
           <div className="card">
             <div className="text-center mb-6">
-              <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Select a Team</h2>
+              <img
+                className="mx-auto h-32 w-auto mb-4"
+                src="/assets/tak-nz-brand-tall.svg"
+                alt="TAK.NZ"
+              />
+              <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Complete Your Sign-up</h2>
               <p className="text-gray-600 dark:text-gray-400 mt-2">
-                Choose which team you'd like to join.
+                Your email has been verified. Please fill in your details below and select the team you'd like to join.
               </p>
             </div>
 
@@ -323,6 +330,7 @@ export default function RequestAccess() {
                     value={firstName}
                     onChange={(e) => setFirstName(e.target.value)}
                     required
+                    placeholder="John"
                   />
                 </div>
                 <div>
@@ -335,6 +343,7 @@ export default function RequestAccess() {
                     value={lastName}
                     onChange={(e) => setLastName(e.target.value)}
                     required
+                    placeholder="Doe"
                   />
                 </div>
               </div>
@@ -356,11 +365,32 @@ export default function RequestAccess() {
                     </option>
                   ))}
                 </select>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                  Select the team or organisation you would like to request access to.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Reason for Access
+                </label>
+                <textarea
+                  className="input w-full"
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  required
+                  rows={3}
+                  minLength={10}
+                  placeholder="Please explain why you need access to this team..."
+                />
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                  Briefly describe your role or why you need access (minimum 10 characters).
+                </p>
               </div>
 
               <button
                 type="submit"
-                disabled={isSubmitting || !selectedTeamId || !firstName || !lastName}
+                disabled={isSubmitting || !selectedTeamId || !firstName || !lastName || !reason || reason.length < 10}
                 className="w-full btn-primary disabled:opacity-50"
               >
                 {isSubmitting ? 'Submitting...' : 'Submit Request'}
