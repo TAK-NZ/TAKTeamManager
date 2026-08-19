@@ -81,6 +81,10 @@ class SiteConfig {
     // enforces server-side, so it can never drift from the enforced limit.
     config.maxTeamDepth = MAX_TEAM_DEPTH;
 
+    // Terms of Service URL — shown as a required checkbox on the sign-up
+    // form (step 2). If not set, the checkbox is not shown.
+    config.tos_url = process.env.TOS_URL || null;
+
     // Expose the 8 predefined TAK_Role display values (Requirement 13.4,
     // 13.5), so the Client's Member_List inline edit form (task 33.2,
     // `client/src/pages/TeamDetail.jsx`) can render its `TAK_Role` select

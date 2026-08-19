@@ -65,6 +65,7 @@ export default function RequestAccess() {
   const [selectedTeamId, setSelectedTeamId] = useState('')
   const [codeTeamId, setCodeTeamId] = useState(null) // the team ID the sign-up code maps to
   const [reason, setReason] = useState('')
+  const [tosAgreed, setTosAgreed] = useState(false)
   const [verifiedEmail, setVerifiedEmail] = useState('')
 
   // No teams / org interest state
@@ -414,9 +415,27 @@ export default function RequestAccess() {
                 </p>
               </div>
 
+              {config.tos_url && (
+                <div className="flex items-start">
+                  <input
+                    type="checkbox"
+                    id="tosCheckbox"
+                    checked={tosAgreed}
+                    onChange={(e) => setTosAgreed(e.target.checked)}
+                    className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded mt-0.5"
+                  />
+                  <label htmlFor="tosCheckbox" className="ml-2 text-sm text-gray-700 dark:text-gray-300">
+                    I agree to the{' '}
+                    <a href={config.tos_url} target="_blank" rel="noopener noreferrer" className="text-primary-600 hover:text-primary-500 underline">
+                      Terms of Service
+                    </a>
+                  </label>
+                </div>
+              )}
+
               <button
                 type="submit"
-                disabled={isSubmitting || !selectedTeamId || !firstName || !lastName || !reason || reason.length < 10}
+                disabled={isSubmitting || !selectedTeamId || !firstName || !lastName || !reason || reason.length < 10 || (config.tos_url && !tosAgreed)}
                 className="w-full btn-primary disabled:opacity-50"
               >
                 {isSubmitting ? 'Submitting...' : 'Submit Request'}
