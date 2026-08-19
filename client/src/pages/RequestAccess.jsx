@@ -85,6 +85,10 @@ export default function RequestAccess() {
         setVerifiedEmail(tokenEmail || '')
         if (availableTeams && availableTeams.length > 0) {
           setTeams(availableTeams)
+          // Pre-select if only one team available (e.g., sign-up code targets one team)
+          if (availableTeams.length === 1) {
+            setSelectedTeamId(String(availableTeams[0].id))
+          }
           setStep(STEPS.TEAM_SELECTION)
         } else {
           setStep(STEPS.NO_TEAMS)
@@ -291,13 +295,13 @@ export default function RequestAccess() {
             <p className="text-gray-600 dark:text-gray-400 mb-6">
               We've sent a verification link to your email address. Click the link to continue with your sign-up.
             </p>
-            {import.meta.env.VITE_START_OVER_URL ? (
-              <a href={import.meta.env.VITE_START_OVER_URL} className="text-sm text-primary-600 hover:text-primary-500">
-                Start over
+            {config.authentik_origin ? (
+              <a href={config.authentik_origin} className="text-sm text-primary-600 hover:text-primary-500">
+                Return to TAK.NZ
               </a>
             ) : (
-              <a href="/request-access" className="text-sm text-primary-600 hover:text-primary-500">
-                Start over
+              <a href="/" className="text-sm text-primary-600 hover:text-primary-500">
+                Return to TAK.NZ
               </a>
             )}
           </div>
