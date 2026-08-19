@@ -10,7 +10,6 @@ import TeamDetail from './pages/TeamDetail'
 import Users from './pages/Users'
 import Requests from './pages/Requests'
 import RequestAccess from './pages/RequestAccess'
-import VerifyRequest from './pages/VerifyRequest'
 import GlobalChannels from './pages/GlobalChannels'
 import Login from './pages/Login'
 import Admin from './pages/Admin'
@@ -30,13 +29,13 @@ function App() {
   }
 
   useEffect(() => {
-    // /request-access and /verify-request must be fully usable by a
-    // completely anonymous visitor with no session cookie. Skip the
-    // authenticated GET /auth/me check entirely on these paths -- calling
-    // it here would 401 for every anonymous visitor, and that 401 (via
-    // services/api.js's response interceptor) used to force-navigate to
-    // /login, which re-mounts this same effect and 401s again, producing
-    // an endless redirect loop instead of ever rendering the public page.
+    // /request-access must be fully usable by a completely anonymous
+    // visitor with no session cookie. Skip the authenticated GET /auth/me
+    // check entirely on this path -- calling it here would 401 for every
+    // anonymous visitor, and that 401 (via services/api.js's response
+    // interceptor) used to force-navigate to /login, which re-mounts this
+    // same effect and 401s again, producing an endless redirect loop
+    // instead of ever rendering the public page.
     if (isPublicOnlyPath(window.location.pathname)) {
       setLoading(false)
       return
@@ -93,7 +92,6 @@ function App() {
     return (
       <Routes>
         <Route path="/request-access" element={<RequestAccess />} />
-        <Route path="/verify-request" element={<VerifyRequest />} />
         <Route path="*" element={<Login />} />
       </Routes>
     )

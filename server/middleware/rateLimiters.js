@@ -175,12 +175,11 @@ function recordAuthCallbackFailure(req) {
 
 // ---------------------------------------------------------------------------
 // Requirement 7.1/7.2: requestAccessLimiter (per-IP) and emailWindowLimiter
-// (per-email, via `email_rate_tracking`) for `POST /api/requests/team-access`
-// and `GET /api/requests/verify/:token`.
+// (per-email, via `email_rate_tracking`) for `POST /api/requests/team-access`.
 // ---------------------------------------------------------------------------
 
 // Requirement 7.1: no more than 20 requests per IP per 15-minute window on
-// `POST /api/requests/team-access` and `GET /api/requests/verify/:token`.
+// `POST /api/requests/team-access`.
 // This is a *separate* `express-rate-limit` instance (own store) from
 // `authLimiter` above, even though both currently use the same 20/15min
 // thresholds, so that a burst against one route group never counts
@@ -192,9 +191,9 @@ const requestAccessLimiterStore = new MemoryStore();
 
 /**
  * Requirement 7.1: standard `express-rate-limit` instance capped at 20
- * requests per IP per 15-minute window, mounted on both
- * `POST /api/requests/team-access` and `GET /api/requests/verify/:token`.
- * Because this middleware runs before either route's handler, an IP that
+ * requests per IP per 15-minute window, mounted on
+ * `POST /api/requests/team-access`.
+ * Because this middleware runs before the route's handler, an IP that
  * exceeds the limit receives HTTP 429 and the handler -- which would
  * otherwise create an `access_requests` row or send a verification email
  * -- never runs (Requirement 7.2).

@@ -30,7 +30,6 @@ const publicRoutes = [
 
   // --- server/routes/requests.js ---
   { method: 'POST', path: '/api/requests/team-access' },
-  { method: 'GET', path: '/api/requests/verify/:token' },
 
   // --- server/routes/signup.js ---
   { method: 'POST', path: '/api/requests/initiate' },

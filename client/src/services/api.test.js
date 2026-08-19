@@ -83,10 +83,6 @@ describe('shouldRedirectToLogin', () => {
     expect(shouldRedirectToLogin(401, '/request-access')).toBe(false);
   });
 
-  it('does not redirect on a 401 while on /verify-request', () => {
-    expect(shouldRedirectToLogin(401, '/verify-request')).toBe(false);
-  });
-
   it('does not redirect on a non-401 status, regardless of path', () => {
     expect(shouldRedirectToLogin(500, '/dashboard')).toBe(false);
     expect(shouldRedirectToLogin(403, '/dashboard')).toBe(false);

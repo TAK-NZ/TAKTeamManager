@@ -365,27 +365,4 @@ router.post('/:requestId/deny', authenticateToken, authorize, [
   }
 });
 
-// Verify email token
-//
-// Requirement 7.1: this route receives only a `token` path param, not a
-// submitted email address, so the per-email `emailWindowLimiter` (which
-// needs `req.body.email`) does not apply here -- only the per-IP
-// `requestAccessLimiter` is mounted, consistent with Requirement 7.2's
-// framing of the per-email limit in terms of "a given email address"
-// associated with the request, which this route does not carry.
-router.get('/verify/:token', requestAccessLimiter, async (req, res) => {
-  try {
-    const { token } = req.params;
-    const request = await requestService.verifyEmail(token);
-    
-    res.json({ 
-      message: 'Email verified successfully. Your request has been forwarded to the team administrator.',
-      requestId: request.id
-    });
-  } catch (error) {
-    getLogger().error({ err: error }, 'Verification failed');
-    res.status(400).json({ error: error.message });
-  }
-});
-
 module.exports = router;

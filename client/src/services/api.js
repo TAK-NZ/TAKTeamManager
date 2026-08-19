@@ -103,9 +103,9 @@ const api = axios.create({
 //
 // Exclusions, to avoid an endless redirect loop: never force-navigate
 // away from a page that's intentionally usable by an anonymous visitor
-// (/request-access, /verify-request -- see utils/publicPaths.js), and
-// never force-navigate when already on /login itself (a 401 there is
-// expected/normal, not a session that just expired mid-use).
+// (/request-access -- see utils/publicPaths.js), and never force-navigate
+// when already on /login itself (a 401 there is expected/normal, not a
+// session that just expired mid-use).
 export function shouldRedirectToLogin(status, pathname) {
   return status === 401 && pathname !== '/login' && !isPublicOnlyPath(pathname);
 }

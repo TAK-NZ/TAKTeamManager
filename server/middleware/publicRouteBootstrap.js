@@ -16,7 +16,7 @@
  * this middleware existed.
  *
  * `publicRoutes.js` entries use Express mounted-route-pattern style paths
- * (e.g. `/api/requests/verify/:token`), not interpolated request paths, so
+ * (e.g. `/api/requests/available-teams`), not interpolated request paths, so
  * matching a real incoming `req.path` against those patterns requires a
  * param-aware matcher rather than a literal string comparison. Express
  * itself uses `path-to-regexp` for this exact purpose, and it is already a
@@ -40,7 +40,7 @@ const compiledPublicRoutes = publicRoutes.map(({ method, path }) => ({
  * Returns `true` if `{method, path}` matches an entry in the Public_Route_Registry.
  *
  * @param {string} method - HTTP method, e.g. `"GET"`.
- * @param {string} path - request path, e.g. `/api/requests/verify/abc123`.
+ * @param {string} path - request path, e.g. `/api/requests/team-access`.
  * @returns {boolean}
  */
 function isPublicRoute(method, path) {

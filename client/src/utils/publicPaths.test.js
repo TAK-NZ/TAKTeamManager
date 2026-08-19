@@ -11,10 +11,6 @@ describe('isPublicOnlyPath', () => {
     expect(isPublicOnlyPath('/request-access')).toBe(true);
   });
 
-  it('treats /verify-request as a public-only path', () => {
-    expect(isPublicOnlyPath('/verify-request')).toBe(true);
-  });
-
   it('does not treat /login as a public-only path (a 401 there is expected/normal, not looped)', () => {
     expect(isPublicOnlyPath('/login')).toBe(false);
   });
@@ -29,7 +25,7 @@ describe('isPublicOnlyPath', () => {
     expect(isPublicOnlyPath('/request-access/extra')).toBe(false);
   });
 
-  it('PUBLIC_ONLY_PATHS exposes exactly the two intentionally-public routes', () => {
-    expect(PUBLIC_ONLY_PATHS).toEqual(['/request-access', '/verify-request']);
+  it('PUBLIC_ONLY_PATHS exposes exactly the intentionally-public routes', () => {
+    expect(PUBLIC_ONLY_PATHS).toEqual(['/request-access']);
   });
 });

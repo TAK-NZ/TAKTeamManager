@@ -271,7 +271,7 @@ describe('POST /api/requests/team-access joinable-team check (Requirement 7.4)',
  * Integration tests for `requestAccessLimiter` (Requirement 7.1, 20
  * requests/IP/15min) and `emailWindowLimiter` (Requirement 7.2, 5
  * requests/submitted-email/60min) mounted on
- * `POST /api/requests/team-access` and `GET /api/requests/verify/:token`.
+ * `POST /api/requests/team-access`.
  */
 describe('requestAccessLimiter and emailWindowLimiter (Requirements 7.1, 7.2)', () => {
   let app;
@@ -306,23 +306,6 @@ describe('requestAccessLimiter and emailWindowLimiter (Requirements 7.1, 7.2)', 
       // The 21st request never reaches the handler, so no access request
       // is created and no verification email is sent for it.
       expect(mockCreateAccessRequest).toHaveBeenCalledTimes(REQUEST_ACCESS_LIMITER_MAX);
-    });
-  });
-
-  describe('requestAccessLimiter (per-IP) on GET /verify/:token', () => {
-    it('allows requests up to the configured limit and rejects the one after it with 429', async () => {
-      pool.query.mockResolvedValue({ rows: [] });
-
-      for (let i = 0; i < REQUEST_ACCESS_LIMITER_MAX; i++) {
-        const res = await request(app).get(`/api/requests/verify/tok-${i}`);
-        // Not asserting a specific success status here since verifyEmail's
-        // internals aren't mocked in this describe block -- only that the
-        // request isn't rate-limited (i.e. not 429).
-        expect(res.status).not.toBe(429);
-      }
-
-      const limitedRes = await request(app).get('/api/requests/verify/tok-extra');
-      expect(limitedRes.status).toBe(429);
     });
   });
 
@@ -362,18 +345,6 @@ describe('requestAccessLimiter and emailWindowLimiter (Requirements 7.1, 7.2)', 
         ([sql]) => typeof sql === 'string' && sql.includes('UPDATE email_rate_tracking SET count = count + 1')
       );
       expect(updateCall).toBeUndefined();
-    });
-
-    it('does not apply the per-email limiter to GET /verify/:token (no submitted email on that route)', async () => {
-      pool.query.mockResolvedValue({ rows: [] });
-
-      // pool.connect (used only by emailWindowLimiter) should never be
-      // invoked for this route, since emailWindowLimiter is not mounted
-      // on it.
-      const res = await request(app).get('/api/requests/verify/some-token');
-
-      expect(res.status).not.toBe(429);
-      expect(pool.connect).not.toHaveBeenCalled();
     });
   });
 

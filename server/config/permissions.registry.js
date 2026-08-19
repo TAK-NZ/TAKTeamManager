@@ -88,9 +88,8 @@ const routes = {
   'GET /api/channels/team/:teamId': ['channel:read'],
 
   // --- /api/requests (server/routes/requests.js) ---
-  // `POST /api/requests/team-access` and `GET /api/requests/verify/:token`
-  // run without `authenticateToken` (public) and are tracked in
-  // publicRoutes.js instead, not here.
+  // `POST /api/requests/team-access` runs without `authenticateToken`
+  // (public) and is tracked in publicRoutes.js instead, not here.
   'GET /api/requests/pending': ['request:read'],
   'POST /api/requests/:requestId/approve': ['request:approve'],
   'POST /api/requests/:requestId/deny': ['request:deny'],
