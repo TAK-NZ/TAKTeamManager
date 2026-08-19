@@ -275,7 +275,15 @@ class RequestApprovalService {
           let teamPath = request.team_name || '';
           try {
             const ancestorChain = await Team.getAncestorChain(request.target_team_id);
-            teamPath = ancestorChain.map(t => t.callsign_prefix || t.name).join(' - ');
+            if (ancestorChain.length <= 1) {
+              teamPath = ancestorChain[0]?.name || request.team_name || '';
+            } else {
+              const segments = ancestorChain.map((t, i) => {
+                if (i === ancestorChain.length - 1) return t.name;
+                return t.callsign_prefix || t.name;
+              });
+              teamPath = segments.join(' - ');
+            }
           } catch (pathErr) {}
 
           await this.emailService.sendApprovalEmail(
@@ -327,7 +335,15 @@ class RequestApprovalService {
           let teamPath = request.team_name || '';
           try {
             const ancestorChain = await Team.getAncestorChain(request.target_team_id);
-            teamPath = ancestorChain.map(t => t.callsign_prefix || t.name).join(' - ');
+            if (ancestorChain.length <= 1) {
+              teamPath = ancestorChain[0]?.name || request.team_name || '';
+            } else {
+              const segments = ancestorChain.map((t, i) => {
+                if (i === ancestorChain.length - 1) return t.name;
+                return t.callsign_prefix || t.name;
+              });
+              teamPath = segments.join(' - ');
+            }
           } catch (pathErr) {
             // Fall back to team_name
           }
@@ -612,7 +628,15 @@ class RequestApprovalService {
       let denialTeamPath = request.team_name || '';
       try {
         const denialAncestorChain = await Team.getAncestorChain(request.target_team_id);
-        denialTeamPath = denialAncestorChain.map(t => t.callsign_prefix || t.name).join(' - ');
+        if (denialAncestorChain.length <= 1) {
+          denialTeamPath = denialAncestorChain[0]?.name || request.team_name || '';
+        } else {
+          const segments = denialAncestorChain.map((t, i) => {
+            if (i === denialAncestorChain.length - 1) return t.name;
+            return t.callsign_prefix || t.name;
+          });
+          denialTeamPath = segments.join(' - ');
+        }
       } catch (pathErr) {
         // Fall back to just team_name
       }

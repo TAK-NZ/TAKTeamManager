@@ -169,7 +169,10 @@ router.get('/pending', authenticateToken, authorize, async (req, res) => {
         const ancestorChain = await Team.getAncestorChain(targetTeamId);
         const organisation = ancestorChain[0];
         callsignNameFormatByTargetTeamId.set(targetTeamId, organisation?.callsign_name_format);
-        const path = ancestorChain.map(t => t.callsign_prefix || t.name).join(' > ');
+        const path = ancestorChain.map((t, i) => {
+          if (i === ancestorChain.length - 1) return t.name;
+          return t.callsign_prefix || t.name;
+        }).join(' > ');
         teamPathByTeamId.set(targetTeamId, path);
       }));
 
@@ -232,7 +235,10 @@ router.get('/pending', authenticateToken, authorize, async (req, res) => {
       const ancestorChain = await Team.getAncestorChain(targetTeamId);
       const organisation = ancestorChain[0];
       callsignNameFormatByTargetTeamId.set(targetTeamId, organisation?.callsign_name_format);
-      const path = ancestorChain.map(t => t.callsign_prefix || t.name).join(' > ');
+      const path = ancestorChain.map((t, i) => {
+        if (i === ancestorChain.length - 1) return t.name;
+        return t.callsign_prefix || t.name;
+      }).join(' > ');
       teamPathByTeamId.set(targetTeamId, path);
     }));
 

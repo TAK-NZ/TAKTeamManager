@@ -231,24 +231,42 @@ class SignupCodeService {
       doc.on('error', reject);
 
       // Header
-      doc.fontSize(24).font('Helvetica-Bold').text('TAK.NZ', { align: 'center' });
+      doc.fontSize(28).font('Helvetica-Bold').text('TAK.NZ', { align: 'center' });
+      doc.moveDown(0.3);
+      doc.fontSize(10).font('Helvetica').fillColor('#666666').text('Team Awareness Kit \u2022 New Zealand', { align: 'center' });
+      doc.fillColor('#000000');
       doc.moveDown(0.5);
-      doc.fontSize(14).font('Helvetica').text(`Sign up for ${teamName}`, { align: 'center' });
+
+      // Horizontal rule
+      doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke('#cccccc');
+      doc.moveDown(1);
+
+      // Team name
+      doc.fontSize(16).font('Helvetica-Bold').text(`Join: ${teamName}`, { align: 'center' });
       doc.moveDown(2);
 
       // QR Code
       doc.image(qrBuffer, (doc.page.width - 200) / 2, doc.y, { width: 200 });
       doc.moveDown(1);
-      doc.y += 210; // Move past QR image
+      doc.y += 210;
 
-      // URL
-      doc.fontSize(10).text('Scan the QR code above or visit:', { align: 'center' });
+      // Instructions
+      doc.fontSize(11).font('Helvetica').text('Scan the QR code above with your phone camera', { align: 'center' });
       doc.moveDown(0.3);
-      doc.fontSize(11).font('Helvetica-Bold').text(url, { align: 'center' });
+      doc.fontSize(10).text('or visit this URL in your browser:', { align: 'center' });
+      doc.moveDown(0.5);
+      doc.fontSize(11).font('Helvetica-Bold').text(url, { align: 'center', link: url });
       doc.moveDown(2);
 
-      // Code
-      doc.fontSize(10).font('Helvetica').text(`Sign-up code: ${SignupCodeService.formatCode(code)}`, { align: 'center' });
+      // Sign-up code
+      doc.fontSize(10).font('Helvetica').text('If prompted, enter this sign-up code:', { align: 'center' });
+      doc.moveDown(0.3);
+      doc.fontSize(14).font('Courier-Bold').text(SignupCodeService.formatCode(code), { align: 'center' });
+      doc.moveDown(2);
+
+      // Footer
+      doc.fontSize(9).font('Helvetica').fillColor('#666666')
+        .text('This code does not expire. Keep this poster in a visible location for team members to scan.', { align: 'center' });
 
       doc.end();
     });

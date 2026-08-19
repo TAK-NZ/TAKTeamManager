@@ -252,7 +252,7 @@ export default function RequestAccess() {
             {config.request_access_footer && (
               <div className="mt-6 p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md">
                 <div
-                  className="text-sm text-blue-800 dark:text-blue-200"
+                  className="text-sm text-blue-800 dark:text-blue-200 [&_a]:underline [&_a]:text-blue-600 dark:[&_a]:text-blue-300 [&_a]:hover:text-blue-800 dark:[&_a]:hover:text-blue-100"
                   dangerouslySetInnerHTML={{
                     __html: typeof config.request_access_footer === 'string'
                       ? DOMPurify.sanitize(config.request_access_footer, DOMPURIFY_OPTIONS)

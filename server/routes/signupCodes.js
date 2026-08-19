@@ -110,9 +110,18 @@ router.get('/:teamId/pdf', authenticateToken, authorize, [
     }
 
     const team = await Team.findById(req.params.teamId);
-    const teamName = team ? team.name : 'Unknown Team';
+    let teamDisplayName = team ? team.name : 'Unknown Team';
+    if (team && team.parent_team_id) {
+      try {
+        const ancestorChain = await Team.getAncestorChain(req.params.teamId);
+        const org = ancestorChain[0];
+        teamDisplayName = `${org.callsign_prefix || org.name} - ${team.name}`;
+      } catch (e) {
+        // Fall back to plain name
+      }
+    }
 
-    const pdfBuffer = await signupCodeService.generatePdf(code.code, teamName);
+    const pdfBuffer = await signupCodeService.generatePdf(code.code, teamDisplayName);
     res.set('Content-Type', 'application/pdf');
     res.set('Content-Disposition', `attachment; filename="signup-${req.params.teamId}.pdf"`);
     res.send(pdfBuffer);
