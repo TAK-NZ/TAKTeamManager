@@ -116,7 +116,8 @@ class EmailService {
       callsign: callsign || 'Will be assigned',
       additional_details: additionalDetails || '',
       password_reset_url: process.env.PASSWORD_RESET_URL || '',
-      login_url: process.env.ACCOUNT_LOGIN_URL || ''
+      login_url: process.env.ACCOUNT_LOGIN_URL || '',
+      docs_url: process.env.DOCS_URL || ''
     });
   }
 
