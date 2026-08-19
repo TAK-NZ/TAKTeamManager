@@ -159,7 +159,7 @@ describe('RequestApprovalService.approveRequest - new_account', () => {
     );
     expect(UserProvisioningService.createAndAddUser).toHaveBeenCalledWith(mockClient, {
       authentikUserId: 4242,
-      username: 'newuser',
+      username: 'newuser@example.com',
       email: 'newuser@example.com',
       firstName: 'New',
       lastName: 'User',
@@ -246,7 +246,7 @@ describe('RequestApprovalService.approveRequest - new_account', () => {
     expect(userCacheInsert).toBeDefined();
     expect(userCacheInsert[1]).toEqual([
       4242,
-      'newuser',
+      'newuser@example.com',
       'newuser@example.com',
       'New',
       'User',

@@ -267,39 +267,31 @@ class RequestApprovalService {
         resolvedCallsignSuffix
       });
       
-      // Send approval email
-      // Resolve team path for the approval email
-      let teamPath = request.team_name || '';
-      try {
-        const ancestorChain = await Team.getAncestorChain(request.target_team_id);
-        teamPath = ancestorChain.map(t => t.callsign_prefix || t.name).join(' - ');
-      } catch (pathErr) {
-        // Fall back to just team_name
-      }
-
-      // Compute callsign for the email
-      let callsignForEmail = '';
-      if (processResult?.localUserId && request.target_team_id) {
-        try {
-          const attrs = await UserAttributesService.generateCallsign(processResult.localUserId, request.target_team_id);
-          callsignForEmail = attrs?.callsign || '';
-        } catch (csErr) {
-          // Non-fatal
-        }
-      }
-
-      await this.emailService.sendApprovalEmail(
-        request.requester_email,
-        {
-          teamPath,
-          username: request.requester_email,
-          firstName: request.requested_first_name || request.requester_first_name || "",
-          callsign: callsignForEmail,
-          additionalDetails
-        }
-      );
-      
       await client.query('COMMIT');
+
+      // Send approval email for non-new_account types (they don't have Phase 3)
+      if (request.request_type !== 'new_account') {
+        try {
+          let teamPath = request.team_name || '';
+          try {
+            const ancestorChain = await Team.getAncestorChain(request.target_team_id);
+            teamPath = ancestorChain.map(t => t.callsign_prefix || t.name).join(' - ');
+          } catch (pathErr) {}
+
+          await this.emailService.sendApprovalEmail(
+            request.requester_email,
+            {
+              teamPath,
+              username: request.requester_email,
+              firstName: request.requested_first_name || request.requester_first_name || '',
+              callsign: '',  // non-new_account requests don't generate a callsign
+              additionalDetails
+            }
+          );
+        } catch (emailErr) {
+          getLogger().error({ err: emailErr }, 'Failed to send approval email');
+        }
+      }
 
       // --- Phase 3 (new_account only): eagerly upsert user_cache, same
       // as POST /api/users/create-and-add's own Phase 3
@@ -319,7 +311,7 @@ class RequestApprovalService {
           const email = request.requester_email;
           const firstName = request.requested_first_name || request.requester_first_name;
           const lastName = request.requested_last_name || request.requester_last_name;
-          const username = email.split('@')[0];
+          const username = email;
 
           const attributes = await UserAttributesService.generateCallsign(processResult.localUserId, request.target_team_id);
           if (attributes) {
@@ -329,6 +321,26 @@ class RequestApprovalService {
           await pool.query(
             'INSERT INTO user_cache (authentik_id, username, email, first_name, last_name, is_active, tak_callsign, tak_color, tak_role) VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8) ON CONFLICT (authentik_id) DO UPDATE SET username = $2, email = $3, first_name = $4, last_name = $5, is_active = true, tak_callsign = $6, tak_color = $7, tak_role = $8',
             [newAccountAuthentikUser.pk, username, email, firstName, lastName, attributes?.callsign, attributes?.color, attributes?.role]
+          );
+
+          // Send approval email (after commit so callsign_suffix is readable)
+          let teamPath = request.team_name || '';
+          try {
+            const ancestorChain = await Team.getAncestorChain(request.target_team_id);
+            teamPath = ancestorChain.map(t => t.callsign_prefix || t.name).join(' - ');
+          } catch (pathErr) {
+            // Fall back to team_name
+          }
+
+          await this.emailService.sendApprovalEmail(
+            request.requester_email,
+            {
+              teamPath,
+              username: request.requester_email,
+              firstName: request.requested_first_name || request.requester_first_name || '',
+              callsign: attributes?.callsign || '',
+              additionalDetails
+            }
           );
         } catch (postCommitError) {
           // Logged, not thrown: the approval itself already committed
@@ -476,7 +488,7 @@ class RequestApprovalService {
     const email = request.requester_email;
     const firstName = request.requested_first_name || request.requester_first_name;
     const lastName = request.requested_last_name || request.requester_last_name;
-    const username = email.split('@')[0];
+    const username = email;
 
     const existingUserResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/?email=${encodeURIComponent(email)}`, {
       headers: { Authorization: `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }
@@ -638,7 +650,7 @@ class RequestApprovalService {
         const email = request.requester_email;
         const firstName = request.requested_first_name || request.requester_first_name;
         const lastName = request.requested_last_name || request.requester_last_name;
-        const username = email.split('@')[0];
+        const username = email;
 
         // Requirement 11.13 (task 24.3): `resolvedCallsignSuffix` was
         // already resolved and uniqueness-checked in Phase 1 (see

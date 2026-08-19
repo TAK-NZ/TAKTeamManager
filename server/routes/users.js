@@ -386,7 +386,7 @@ router.post('/create-and-add', authenticateToken, authorize, [
   }
 
   const { email, firstName, lastName, teamId, callsignSuffix } = req.body;
-  const username = email.split('@')[0];
+  const username = email;
   let newUser;
 
   // --- Phase 0: resolve/default/uniqueness-check callsign_suffix
