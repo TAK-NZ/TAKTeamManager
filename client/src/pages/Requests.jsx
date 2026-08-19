@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { CheckIcon, XMarkIcon, ClockIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import { requestsAPI } from '../services/api'
+import OrgInterestRequests from '../components/OrgInterestRequests'
 import { formatDate } from '../utils/dateFormat'
 
 // Requirement 11.11/11.12: pure helper computing the initial per-request
@@ -28,7 +29,7 @@ export function extractCallsignSuffixConflictError(error) {
   return null
 }
 
-export default function Requests() {
+export default function Requests({ user }) {
   const [requests, setRequests] = useState([])
   const [loading, setLoading] = useState(true)
   // Requirement 11.11/11.12: per-request editable "Callsign Suffix" value,
@@ -256,6 +257,12 @@ export default function Requests() {
               </div>
             </div>
           ))}
+        </div>
+      )}
+      {/* Org Interest Requests (global admin only) */}
+      {user?.is_global_manager && (
+        <div className="card">
+          <OrgInterestRequests />
         </div>
       )}
     </div>

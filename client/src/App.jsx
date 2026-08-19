@@ -106,7 +106,7 @@ function App() {
           <Route path="/teams" element={<Teams user={user} />} />
           <Route path="/teams/:teamId" element={<TeamDetail refreshUser={refreshUser} />} />
           <Route path="/users" element={<Users />} />
-          <Route path="/requests" element={<Requests />} />
+          <Route path="/requests" element={<Requests user={user} />} />
           <Route path="/global-channels" element={<GlobalChannels user={user} />} />
           <Route path="/admin" element={<Admin user={user} />} />
           <Route path="/audit-logs" element={<AuditLogs user={user} />} />

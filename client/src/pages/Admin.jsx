@@ -3,7 +3,6 @@ import { UserGroupIcon, UsersIcon, CogIcon, PencilIcon, CheckIcon, XMarkIcon, Ar
 import { configAPI, usersAPI, teamsAPI, syncAPI, bulkImportAPI } from '../services/api'
 import { formatDateTime } from '../utils/dateFormat'
 import ExcludedDomainsManager from '../components/ExcludedDomainsManager'
-import OrgInterestRequests from '../components/OrgInterestRequests'
 
 export default function Admin({ user }) {
   const [organizationMappings, setOrganizationMappings] = useState({})
@@ -341,16 +340,6 @@ export default function Admin({ user }) {
             >
               Excluded Domains
             </button>
-            <button
-              onClick={() => setActiveTab('orgInterest')}
-              className={`py-2 px-1 border-b-2 font-medium text-sm ${
-                activeTab === 'orgInterest'
-                  ? 'border-primary-500 text-primary-600 dark:text-primary-400'
-                  : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:border-gray-300'
-              }`}
-            >
-              Org Interest
-            </button>
           </nav>
         </div>
 
@@ -640,10 +629,6 @@ export default function Admin({ user }) {
 
           {activeTab === 'excludedDomains' && (
             <ExcludedDomainsManager />
-          )}
-
-          {activeTab === 'orgInterest' && (
-            <OrgInterestRequests />
           )}
         </div>
       </div>
