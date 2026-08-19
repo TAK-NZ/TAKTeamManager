@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const QRCode = require('qrcode');
 const PDFDocument = require('pdfkit');
+const path = require('path');
 const pool = require('../config/database');
 
 const CHARSET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
@@ -230,11 +231,10 @@ class SignupCodeService {
       doc.on('end', () => resolve(Buffer.concat(chunks)));
       doc.on('error', reject);
 
-      // Header
-      doc.fontSize(28).font('Helvetica-Bold').text('TAK.NZ', { align: 'center' });
-      doc.moveDown(0.3);
-      doc.fontSize(10).font('Helvetica').fillColor('#666666').text('Team Awareness Kit \u2022 New Zealand', { align: 'center' });
-      doc.fillColor('#000000');
+      // Logo
+      const logoPath = path.join(__dirname, '../assets/tak-nz-brand-wide.png');
+      doc.image(logoPath, (doc.page.width - 200) / 2, doc.y, { width: 200 });
+      doc.y += 60;
       doc.moveDown(0.5);
 
       // Horizontal rule
