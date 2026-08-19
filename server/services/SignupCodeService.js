@@ -233,8 +233,8 @@ class SignupCodeService {
 
       // Logo
       const logoPath = path.join(__dirname, '../assets/tak-nz-brand-wide.png');
-      doc.image(logoPath, (doc.page.width - 200) / 2, doc.y, { width: 200 });
-      doc.y += 60;
+      doc.image(logoPath, (doc.page.width - 300) / 2, doc.y, { width: 300 });
+      doc.y += 90;
       doc.moveDown(0.5);
 
       // Horizontal rule
