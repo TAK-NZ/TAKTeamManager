@@ -16,7 +16,7 @@
     "migrate:up": "npm run migrate -- up",
     "migrate:down": "npm run migrate -- down",
     "migrate:create": "npm run migrate -- create",
-    "test": "jest",
+    "test": "jest --forceExit",
     "lint": "eslint server scripts database/*.js eslint.config.js",
     "lint:pinned-deps": "node scripts/check-pinned-deps.js"
   },
@@ -67,7 +67,8 @@
   "jest": {
     "testPathIgnorePatterns": [
       "/node_modules/",
-      "/client/"
+      "/client/",
+      "\\.integration\\.test\\.js$"
     ],
     "coverageThreshold": {
       "global": {

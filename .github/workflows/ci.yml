@@ -47,6 +47,7 @@ jobs:
   security-audit:
     name: Dependency Audit (${{ matrix.tree }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -89,6 +90,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -123,6 +125,7 @@ jobs:
   client-test:
     name: Client Test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
