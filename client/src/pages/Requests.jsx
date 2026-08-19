@@ -93,9 +93,8 @@ export default function Requests({ user }) {
 
   const handleApprove = async (requestId) => {
     try {
-      const additionalDetails = prompt('Any additional details for the user? (optional)');
       await requestsAPI.approveRequest(requestId, {
-        additionalDetails: additionalDetails || '',
+        additionalDetails: '',
         callsignSuffix: callsignSuffixByRequestId[requestId] || '',
         firstName: namesByRequestId[requestId]?.firstName || '',
         lastName: namesByRequestId[requestId]?.lastName || ''
