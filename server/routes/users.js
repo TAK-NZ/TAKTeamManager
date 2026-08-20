@@ -11,6 +11,7 @@ const TeamMembershipService = require('../services/TeamMembershipService');
 const UserProvisioningService = require('../services/UserProvisioningService');
 const { CallsignSuffixConflictError } = require('../services/CallsignSuffixUniquenessService');
 const EventPublisher = require('../services/EventPublisher');
+const EmailService = require('../services/EmailService');
 const pool = require('../config/database');
 const { getLogger } = require('../middleware/requestContext');
 const router = express.Router();
@@ -744,6 +745,66 @@ router.delete('/remove-from-team/:userId', authenticateToken, authorize, [
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to remove user from team');
     res.status(500).json({ error: 'Failed to remove user from team' });
+  }
+});
+
+
+// Resend welcome/approval email to user
+router.post('/:userId/resend-welcome', authenticateToken, authorize, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { teamId } = req.body;
+
+    // Get user details
+    const userResult = await pool.query(
+      'SELECT id, email, first_name, last_name, tak_callsign FROM users WHERE id = $1',
+      [userId]
+    );
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    const user = userResult.rows[0];
+
+    // Build team path display name
+    let teamPath = '';
+    if (teamId) {
+      try {
+        const ancestors = await Team.getAncestorChain(teamId);
+        if (ancestors.length > 0) {
+          const root = ancestors[ancestors.length - 1];
+          const team = ancestors[0];
+          teamPath = ancestors.length > 1
+            ? `${root.callsign_prefix || root.name} - ${team.name}`
+            : (team.callsign_prefix || team.name);
+        }
+      } catch (e) {
+        // fallback: just use team name directly
+        const teamResult = await pool.query('SELECT name FROM teams WHERE id = $1', [teamId]);
+        if (teamResult.rows.length > 0) teamPath = teamResult.rows[0].name;
+      }
+    }
+
+    const emailService = new EmailService();
+    await emailService.sendApprovalEmail(user.email, {
+      teamPath,
+      username: user.email,
+      callsign: user.tak_callsign || 'Will be assigned',
+      firstName: user.first_name || ''
+    });
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'user.resend_welcome', 'user', parseInt(userId, 10), JSON.stringify({ email: user.email })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
+    res.json({ message: 'Welcome email resent successfully' });
+  } catch (error) {
+    getLogger().error({ err: error }, 'Failed to resend welcome email');
+    res.status(500).json({ error: 'Failed to resend welcome email' });
   }
 });
 

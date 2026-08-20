@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import React from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { PlusIcon, UsersIcon, UserPlusIcon, ShieldCheckIcon, BuildingOfficeIcon, FolderPlusIcon, HashtagIcon, XMarkIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, TrashIcon, PencilIcon, CheckIcon, ArrowLeftOnRectangleIcon } from '@heroicons/react/24/outline'
+import { PlusIcon, UsersIcon, UserPlusIcon, ShieldCheckIcon, BuildingOfficeIcon, FolderPlusIcon, HashtagIcon, XMarkIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, TrashIcon, PencilIcon, CheckIcon, ArrowLeftOnRectangleIcon, EnvelopeIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import { teamsAPI, channelsAPI, usersAPI, configAPI } from '../services/api'
 import api from '../services/api'
@@ -517,6 +517,17 @@ export default function TeamDetail({ refreshUser }) {
   // Requirements 11.13, 13.1, 13.2, 13.5 (task 33.2): opens the inline
   // edit form for a single Member_List row, seeded from that row's
   // current values via `getInitialMemberEditForm`.
+
+  // Resend the welcome/approval email to a team member
+  const handleResendWelcome = async (member) => {
+    try {
+      await usersAPI.resendWelcome(member.id, team.id)
+      toast.success(`Welcome email resent to ${member.email}`)
+    } catch (err) {
+      toast.error('Failed to resend welcome email')
+    }
+  }
+
   const handleStartEditMember = (member) => {
     setEditingMemberId(member.id)
     setMemberEditForm(getInitialMemberEditForm(member))
@@ -1136,6 +1147,13 @@ export default function TeamDetail({ refreshUser }) {
                             >
                               <PencilIcon className="h-4 w-4" />
                             </button>
+                            <button
+                              onClick={() => handleResendWelcome(member)}
+                              className="text-gray-600 hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300"
+                              title="Resend welcome email"
+                            >
+                              <EnvelopeIcon className="h-4 w-4" />
+                            </button>
                             {member.inherited_from_team_name ? (
                               <button
                                 onClick={() => handleRemoveUser(member.id, 'member')}
@@ -1243,6 +1261,13 @@ export default function TeamDetail({ refreshUser }) {
                               title="Edit admin"
                             >
                               <PencilIcon className="h-4 w-4" />
+                            </button>
+                            <button
+                              onClick={() => handleResendWelcome(admin)}
+                              className="text-gray-600 hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300"
+                              title="Resend welcome email"
+                            >
+                              <EnvelopeIcon className="h-4 w-4" />
                             </button>
                             {admin.inherited_from_team_name ? (
                               <button

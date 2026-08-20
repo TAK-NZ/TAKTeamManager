@@ -212,6 +212,7 @@ export const usersAPI = {
   addToTeam: (userId, teamId) => api.post('/users/add-to-team', { userId, teamId }),
   removeFromTeam: (userId, teamId) => api.delete(`/users/remove-from-team/${userId}`, { data: { teamId } }),
   moveToHoldingPen: (userId) => api.post(`/users/${userId}/holding-pen`),
+  resendWelcome: (userId, teamId) => api.post(`/users/${userId}/resend-welcome`, { teamId }),
 };
 
 export const channelsAPI = {
