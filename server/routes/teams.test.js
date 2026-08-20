@@ -176,15 +176,19 @@ describe('GET /api/teams/my-teams pagination (Requirement 11.4)', () => {
       mockIsAdmin = false;
     });
 
-    it('calls Team.getUserTeams and never Team.getAllTeams, with no pagination metadata in the response', async () => {
-      Team.getUserTeams.mockResolvedValue([{ id: 2, name: 'My Team' }]);
+    it('calls org-scoped team resolution and never Team.getAllTeams, with no pagination metadata in the response', async () => {
+      // Non-admin branch uses resolveOwnOrganisationTeams + filterVisibleBranches
+      pool.query.mockResolvedValue({ rows: [{ team_id: 5 }] });
+      Team.getAncestorChain.mockResolvedValue([{ id: 1, parent_team_id: null }]);
+      const orgTeams = [{ id: 2, name: 'My Team', parent_team_id: null, visibility: 'public' }];
+      Team.getOrganisationTeams.mockResolvedValue(orgTeams);
+      TeamVisibilityService.filterVisibleBranches.mockResolvedValue(orgTeams);
 
       const res = await request(app).get('/api/teams/my-teams').query({ page: 3, pageSize: 10 });
 
       expect(res.status).toBe(200);
-      expect(Team.getUserTeams).toHaveBeenCalledWith(1);
       expect(Team.getAllTeams).not.toHaveBeenCalled();
-      expect(res.body.teams).toEqual([{ id: 2, name: 'My Team' }]);
+      expect(res.body.teams).toEqual(orgTeams);
       expect(res.body.pagination).toBeUndefined();
     });
 
@@ -237,7 +241,7 @@ describe('GET /api/teams/my-teams?scope=organisation (Requirement 6.6)', () => {
 
     expect(res.status).toBe(200);
     expect(Team.getAncestorChain).toHaveBeenCalledWith(5);
-    expect(Team.getOrganisationTeams).toHaveBeenCalledWith(1);
+    expect(Team.getOrganisationTeams).toHaveBeenCalledWith(1, null);
     expect(TeamVisibilityService.filterVisibleBranches).toHaveBeenCalledWith(
       orgTeams,
       expect.objectContaining({ userId: 1 })
