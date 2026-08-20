@@ -26,7 +26,7 @@ const getNavigation = (user) => {
     baseNavigation.push({ name: 'Users', href: '/users', icon: UsersIcon })
   }
   
-  if (user?.isAdmin) {
+  if (user?.isAdmin || user?.isTeamAdmin) {
     baseNavigation.push({ name: 'Requests', href: '/requests', icon: ClipboardDocumentListIcon })
   }
   
