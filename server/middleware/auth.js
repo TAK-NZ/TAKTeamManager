@@ -92,6 +92,8 @@ async function resolveUserFromRequest(req) {
     const cachedUser = await authentikSync.getUserFromCache(decoded.username);
 
     if (!cachedUser) {
+      return { user: null, reason: 'user_not_found' };
+    }
 
     // Check if user is a team admin (has role=admin in any team_memberships row)
     const pool = require('../config/database');
@@ -104,9 +106,6 @@ async function resolveUserFromRequest(req) {
       isTeamAdmin = tmResult.rows.length > 0;
     } catch (e) { /* non-fatal */ }
 
-      return { user: null, reason: 'user_not_found' };
-    }
-
     return {
       user: {
         id: cachedUser.authentik_id,
@@ -116,8 +115,8 @@ async function resolveUserFromRequest(req) {
         first_name: cachedUser.first_name,
         last_name: cachedUser.last_name,
         name: cachedUser.first_name + (cachedUser.last_name ? ' ' + cachedUser.last_name : ''),
-        isAdmin: cachedUser.is_admin, // Team admin capabilities
-        is_global_manager: cachedUser.is_admin, // Global manager = Authentik TakTeamManager_Admin group
+        isAdmin: cachedUser.is_admin,
+        is_global_manager: cachedUser.is_admin,
         takRole: cachedUser.tak_role,
         takColor: cachedUser.tak_color,
         takCallsign: cachedUser.tak_callsign,
