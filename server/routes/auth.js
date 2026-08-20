@@ -211,8 +211,43 @@ router.get('/callback', authCallbackFailureLimiter, async (req, res) => {
     const basicUser = userResponse.data;
 
 
-    // Get cached user data from local database
+    // Refresh user groups from Authentik on login for immediate role updates
     const authentikSync = require('../services/authentikSync');
+    const pool = require('../config/database');
+    const adminGroupName = process.env.ADMIN_GROUP_NAME || 'TakTeamManager_Admin';
+
+    try {
+      const userDetailResponse = await axios.get(
+        `${process.env.AUTHENTIK_URL}/api/v3/core/users/${basicUser.sub}/`,
+        { headers: { Authorization: `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }, timeout: 10000 }
+      );
+      const authentikUser = userDetailResponse.data;
+
+      const groupNames = [];
+      if (authentikUser.groups && authentikUser.groups.length > 0) {
+        const groupResponse = await axios.get(
+          `${process.env.AUTHENTIK_URL}/api/v3/core/groups/?page_size=500`,
+          { headers: { Authorization: `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }, timeout: 10000 }
+        );
+        const groupMap = {};
+        for (const g of (groupResponse.data.results || [])) {
+          groupMap[g.pk] = g.name;
+        }
+        for (const gid of authentikUser.groups) {
+          if (groupMap[gid]) groupNames.push(groupMap[gid]);
+        }
+      }
+
+      const isAdmin = groupNames.includes(adminGroupName);
+      await pool.query(
+        'UPDATE user_cache SET groups = $1, is_admin = $2, updated_at = CURRENT_TIMESTAMP WHERE username = $3',
+        [JSON.stringify(groupNames), isAdmin, basicUser.preferred_username]
+      );
+    } catch (refreshErr) {
+      getLogger().warn({ err: refreshErr.message, username: basicUser.preferred_username }, 'Failed to refresh user groups on login');
+    }
+
+    // Get cached user data (now freshly updated)
     const cachedUser = await authentikSync.getUserFromCache(basicUser.preferred_username);
     
     if (!cachedUser) {
