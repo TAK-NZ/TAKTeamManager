@@ -55,7 +55,8 @@ const publicRoutes = [
   { method: 'GET', path: '/api/auth/silent' },
   { method: 'GET', path: '/api/auth/silent-callback' },
   { method: 'GET', path: '/api/auth/callback' },
-  { method: 'POST', path: '/api/auth/logout' }
+  { method: 'POST', path: '/api/auth/logout' },
+  { method: 'GET', path: '/api/auth/logout' }
 ];
 
 module.exports = publicRoutes;
