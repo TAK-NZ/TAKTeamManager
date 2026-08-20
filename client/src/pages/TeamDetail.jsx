@@ -188,7 +188,7 @@ function MemberEditRow({ colSpan, form, setForm, takRoleValues, saving, error, o
   )
 }
 
-export default function TeamDetail({ refreshUser }) {
+export default function TeamDetail({ user, refreshUser }) {
   const { teamId } = useParams()
   const [team, setTeam] = useState(null)
   const [members, setMembers] = useState([])
@@ -845,6 +845,11 @@ export default function TeamDetail({ refreshUser }) {
     })
   }
 
+  // Determine if current user can manage this team (global admin or team admin)
+  const isGlobalAdmin = user?.isAdmin
+  const isTeamAdmin = admins.some(a => String(a.id) === String(user?.userId))
+  const canManageTeam = isGlobalAdmin || isTeamAdmin
+
   // Requirement 1.1/1.2: "Organisation" for a root team, "Team" otherwise.
   const teamLabel = labelFor(team)
   // Requirement 2.4/2.5: this team's own Team_Depth, compared against
@@ -945,6 +950,7 @@ export default function TeamDetail({ refreshUser }) {
               </div>
             </div>
           </div>
+          {canManageTeam && (
           <div className="flex flex-col gap-2 lg:items-end">
             <div className="flex flex-wrap gap-2">
               <button 
@@ -990,6 +996,7 @@ export default function TeamDetail({ refreshUser }) {
               </button>
             </div>
           </div>
+          )}
         </div>
       </div>
 
@@ -998,7 +1005,7 @@ export default function TeamDetail({ refreshUser }) {
         <SignupCodeManager
           teamId={team.id}
           teamName={team.display_name || team.name}
-          isAdmin={true}
+          isAdmin={canManageTeam}
         />
       )}
 
@@ -1006,7 +1013,7 @@ export default function TeamDetail({ refreshUser }) {
       {!team.parent_team_id && (
         <OrgDomainManager
           orgId={team.id}
-          isAdmin={true}
+          isAdmin={canManageTeam}
         />
       )}
 
@@ -1132,6 +1139,7 @@ export default function TeamDetail({ refreshUser }) {
                           {member.tak_callsign || '-'}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                          {canManageTeam && (
                           <div className="flex items-center justify-end space-x-3">
                             <button
                               onClick={() => handleStartEditMember(member)}
@@ -1165,6 +1173,7 @@ export default function TeamDetail({ refreshUser }) {
                               </button>
                             )}
                           </div>
+                          )}
                         </td>
                       </tr>
                     )
@@ -1247,6 +1256,7 @@ export default function TeamDetail({ refreshUser }) {
                           {admin.tak_callsign || '-'}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                          {canManageTeam && (
                           <div className="flex items-center justify-end space-x-3">
                             <button
                               onClick={() => handleStartEditMember(admin)}
@@ -1280,6 +1290,7 @@ export default function TeamDetail({ refreshUser }) {
                               </button>
                             )}
                           </div>
+                          )}
                         </td>
                       </tr>
                     )
