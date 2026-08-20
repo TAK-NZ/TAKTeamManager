@@ -346,7 +346,7 @@ class Team {
    *   hierarchy (the Organisation's own row plus every descendant), in
    *   no particular guaranteed order.
    */
-  static async getOrganisationTeams(organisationId) {
+  static async getOrganisationTeams(organisationId, userId = null) {
     try {
       const result = await pool.query(`
         WITH RECURSIVE org_hierarchy AS (
@@ -355,8 +355,18 @@ class Team {
           SELECT t.* FROM teams t
           JOIN org_hierarchy oh ON t.parent_team_id = oh.id
         )
-        SELECT * FROM org_hierarchy
-      `, [organisationId]);
+        SELECT oh.*,
+          (SELECT COUNT(*) FROM team_memberships tm
+           JOIN users u ON u.id = tm.user_id
+           WHERE tm.team_id = oh.id AND u.is_team_device IS NOT TRUE) as member_count,
+          (SELECT COUNT(*) FROM teams t2 WHERE t2.parent_team_id = oh.id) as sub_teams_count,
+          (SELECT tm.role FROM team_memberships tm
+           WHERE tm.team_id = oh.id AND tm.user_id = $2
+           AND tm.inherited_from_team_id IS NULL
+           LIMIT 1) as role
+        FROM org_hierarchy oh
+        ORDER BY oh.name
+      `, [organisationId, userId]);
       return result.rows;
     } catch (error) {
       logger.error({ err: error, organisationId }, 'Error fetching organisation teams');

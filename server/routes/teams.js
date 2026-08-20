@@ -64,7 +64,7 @@ router.get('/my-teams', authenticateToken, authorize, paginationParams, async (r
     } else {
       // Regular users see all teams within their organisation, filtered
       // by visibility (private teams hidden unless they're a member/admin).
-      const orgTeams = await resolveOwnOrganisationTeams(req.user);
+      const orgTeams = await resolveOwnOrganisationTeams(req.user, true);
       teams = await TeamVisibilityService.filterVisibleBranches(orgTeams, req.user);
     }
     res.json(pagination ? { teams, pagination } : { teams });
@@ -101,7 +101,7 @@ router.get('/my-teams', authenticateToken, authorize, paginationParams, async (r
 // with no resolvable Organisation of their own (Global_Manager or
 // otherwise) gets an empty list here, rather than falling back to every
 // Team across every Organisation.
-async function resolveOwnOrganisationTeams(user) {
+async function resolveOwnOrganisationTeams(user, includeDetails = false) {
   const membershipResult = await pool.query(
     'SELECT team_id FROM team_memberships WHERE user_id = $1 LIMIT 1',
     [user.userId]
@@ -115,7 +115,7 @@ async function resolveOwnOrganisationTeams(user) {
     return [];
   }
   const organisationId = ancestorChain[0].id;
-  return Team.getOrganisationTeams(organisationId);
+  return Team.getOrganisationTeams(organisationId, includeDetails ? user.userId : null);
 }
 
 // Create team
