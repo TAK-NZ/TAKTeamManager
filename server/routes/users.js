@@ -757,7 +757,7 @@ router.post('/:userId/resend-welcome', authenticateToken, authorize, async (req,
 
     // Get user details
     const userResult = await pool.query(
-      'SELECT u.id, u.email, u.first_name, u.last_name, uc.tak_callsign FROM users u LEFT JOIN user_cache uc ON uc.authentik_id = u.authentik_user_id WHERE u.id = $1',
+      'SELECT u.id, u.email, u.first_name, u.last_name, uc.tak_callsign FROM users u LEFT JOIN user_cache uc ON uc.authentik_id = u.authentik_user_id::text WHERE u.id = $1',
       [userId]
     );
     if (userResult.rows.length === 0) {
