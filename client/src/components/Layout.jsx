@@ -64,7 +64,7 @@ function getUserRoleLabel(user) {
   if (user?.is_global_manager) {
     return 'Global Admin'
   }
-  if (user?.isAdmin) {
+  if (user?.isTeamAdmin) {
     return 'Team Admin'
   }
   return 'Member'
