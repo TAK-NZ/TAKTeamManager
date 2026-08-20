@@ -43,7 +43,7 @@ router.get('/:teamId', authenticateToken, authorize, [
   try {
     const code = await signupCodeService.getCode(req.params.teamId);
     if (!code) {
-      return res.status(404).json({ error: 'No active sign-up code for this team' });
+      return res.json(null);
     }
     res.json(code);
   } catch (error) {
