@@ -558,6 +558,35 @@ router.post('/create-and-add', authenticateToken, authorize, [
     [newUser.pk, username, email, firstName, lastName, attributes?.callsign, attributes?.color, attributes?.role, resolvedCallsignSuffix]
   );
 
+  // Send welcome/approval email to the new user
+  try {
+    const emailService = new EmailService();
+    // Build team display path
+    let teamPath = '';
+    try {
+      const ancestors = await Team.getAncestorChain(teamId);
+      if (ancestors.length > 0) {
+        const root = ancestors[ancestors.length - 1];
+        const leafTeam = ancestors[0];
+        teamPath = ancestors.length > 1
+          ? `${root.callsign_prefix || root.name} - ${leafTeam.name}`
+          : (leafTeam.callsign_prefix || leafTeam.name);
+      }
+    } catch (e) {
+      // fallback
+      const teamResult = await pool.query('SELECT name FROM teams WHERE id = $1', [teamId]);
+      if (teamResult.rows.length > 0) teamPath = teamResult.rows[0].name;
+    }
+    await emailService.sendApprovalEmail(email, {
+      teamPath,
+      username: email,
+      callsign: attributes?.callsign || 'Will be assigned',
+      firstName
+    });
+  } catch (emailErr) {
+    getLogger().error({ err: emailErr }, 'Failed to send welcome email to new user');
+  }
+
   res.status(201).json({
     user: {
       id: newUser.pk,
