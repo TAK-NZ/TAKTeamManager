@@ -1,4 +1,4 @@
-import { Routes, Route } from 'react-router-dom'
+import { Routes, Route, Navigate } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import { authAPI, configAPI } from './services/api'
 import { isPublicOnlyPath } from './utils/publicPaths'
@@ -110,6 +110,11 @@ function App() {
           <Route path="/global-channels" element={<GlobalChannels user={user} />} />
           <Route path="/admin" element={<Admin user={user} />} />
           <Route path="/audit-logs" element={<AuditLogs user={user} />} />
+          {/* Catch-all: an unknown path would otherwise render the Layout
+              with no page content at all (an empty shell with just the
+              nav). Redirect to the Dashboard instead. `replace` keeps the
+              bad URL out of history, so Back doesn't return to it. */}
+          <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>
       </Layout>
     </ThemeProvider>
