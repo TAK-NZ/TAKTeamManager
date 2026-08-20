@@ -386,7 +386,7 @@ router.post('/create-and-add', authenticateToken, authorize, [
     return res.status(400).json({ errors: errors.array() });
   }
 
-  const { email, firstName, lastName, teamId, callsignSuffix } = req.body;
+  const { email, firstName, lastName, teamId, callsignSuffix, role } = req.body;
   const username = email;
   let newUser;
 
@@ -472,6 +472,15 @@ router.post('/create-and-add', authenticateToken, authorize, [
       createdBy: req.user?.userId ?? null
     });
     localUserId = result.localUserId;
+
+    // If role is 'admin', promote the membership row that createAndAddUser
+    // just created from 'member' to 'admin'.
+    if (role === 'admin') {
+      await client.query(
+        'UPDATE team_memberships SET role = $3 WHERE team_id = $1 AND user_id = $2 AND inherited_from_team_id IS NULL',
+        [teamId, localUserId, 'admin']
+      );
+    }
 
     await client.query('COMMIT');
   } catch (error) {

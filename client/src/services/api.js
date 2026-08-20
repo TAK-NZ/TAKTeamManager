@@ -207,8 +207,8 @@ export const usersAPI = {
   create: (data) => api.post('/users', data),
   search: (query) => api.get(`/users/search?q=${query}`),
   getAvailable: (search) => api.get(`/users/available${search ? `?search=${encodeURIComponent(search)}` : ''}`),
-  createAndAdd: (email, firstName, lastName, teamId) => 
-    api.post('/users/create-and-add', { email, firstName, lastName, teamId }),
+  createAndAdd: (email, firstName, lastName, teamId, role) =>
+    api.post('/users/create-and-add', { email, firstName, lastName, teamId, role }),
   addToTeam: (userId, teamId) => api.post('/users/add-to-team', { userId, teamId }),
   removeFromTeam: (userId, teamId) => api.delete(`/users/remove-from-team/${userId}`, { data: { teamId } }),
   moveToHoldingPen: (userId) => api.post(`/users/${userId}/holding-pen`),

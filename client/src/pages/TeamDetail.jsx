@@ -442,21 +442,14 @@ export default function TeamDetail({ refreshUser }) {
     e.preventDefault()
     setAddingMember(true)
     try {
-      // Note (Add Admin button limitation): usersAPI.createAndAdd (POST
-      // /users/create-and-add) always creates the new user's membership
-      // with role 'member' -- UserProvisioningService.createAndAddUser
-      // hardcodes 'member' with no role parameter, and the route accepts
-      // no role field either. So a brand-new user created via this
-      // "Create New User" tab is always added as a plain member, even
-      // when addMemberRole === 'admin' (i.e. the dialog was opened via
-      // "Add Admin"). Bug A's primary complaint is that the "Add Admin"
-      // button did nothing at all; full admin-at-creation support here
-      // would require a server-side change and is left as a follow-up.
+      // Creates the user as a member (with upward membership propagation).
+      // When addMemberRole === 'admin', also grants admin role on this team.
       await usersAPI.createAndAdd(
         newUserForm.email,
         newUserForm.firstName,
         newUserForm.lastName,
-        team.id
+        team.id,
+        addMemberRole === 'admin' ? 'admin' : undefined
       )
       
       // Refresh team data
