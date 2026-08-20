@@ -360,10 +360,16 @@ class Team {
            JOIN users u ON u.id = tm.user_id
            WHERE tm.team_id = oh.id AND u.is_team_device IS NOT TRUE) as member_count,
           (SELECT COUNT(*) FROM teams t2 WHERE t2.parent_team_id = oh.id) as sub_teams_count,
-          (SELECT tm.role FROM team_memberships tm
-           WHERE tm.team_id = oh.id AND tm.user_id = $2
-           AND tm.inherited_from_team_id IS NULL
-           LIMIT 1) as role
+          COALESCE(
+            (SELECT tm.role FROM team_memberships tm
+             WHERE tm.team_id = oh.id AND tm.user_id = $2
+             AND tm.inherited_from_team_id IS NULL
+             LIMIT 1),
+            (SELECT 'inherited' FROM team_memberships tm
+             WHERE tm.team_id = oh.id AND tm.user_id = $2
+             AND tm.inherited_from_team_id IS NOT NULL
+             LIMIT 1)
+          ) as role
         FROM org_hierarchy oh
         ORDER BY oh.name
       `, [organisationId, userId]);
