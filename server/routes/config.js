@@ -21,10 +21,6 @@ router.get('/public', async (req, res) => {
 // Get all config (admin only)
 router.get('/all', authenticateToken, authorize, async (req, res) => {
   try {
-    if (!req.user.isAdmin) {
-      return res.status(403).json({ error: 'Admin access required' });
-    }
-    
     const config = await SiteConfig.getAll();
     res.json({ config });
   } catch (error) {
@@ -36,10 +32,6 @@ router.get('/all', authenticateToken, authorize, async (req, res) => {
 // Get color mappings and role descriptions (legacy endpoint for admin page)
 router.get('/color-mappings', authenticateToken, authorize, async (req, res) => {
   try {
-    if (!req.user.isAdmin) {
-      return res.status(403).json({ error: 'Admin access required' });
-    }
-    
     // Load color mappings from environment variables
     const colorMappings = {
       'Yellow': process.env.TAK_COLOR_YELLOW || '',
@@ -87,9 +79,6 @@ router.put('/:key', authenticateToken, authorize, [
   }
 
   try {
-    if (!req.user.isAdmin) {
-      return res.status(403).json({ error: 'Admin access required' });
-    }
 
     const { key } = req.params;
     const { value } = req.body;

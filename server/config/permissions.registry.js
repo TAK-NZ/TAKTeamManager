@@ -360,7 +360,8 @@ const roleDefaults = {
     'mou:read',
     'communication:broadcast:send',
     'device:manage',
-    'bulk_import:users'
+    'bulk_import:users',
+    'config:read:mappings'
   ]
 };
 
