@@ -160,12 +160,13 @@ describe('signupCodes routes (Task 7.3)', () => {
       expect(res.body.code).toBe('ABCD5678');
     });
 
-    it('returns 404 when no code exists', async () => {
+    it('returns 200 with null body when no code exists', async () => {
       mockGetCode.mockResolvedValueOnce(null);
 
       const res = await request(app).get('/api/signup-codes/1');
 
-      expect(res.status).toBe(404);
+      expect(res.status).toBe(200);
+      expect(res.body).toBeNull();
     });
   });
 
