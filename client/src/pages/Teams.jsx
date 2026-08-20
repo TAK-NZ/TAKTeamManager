@@ -84,6 +84,9 @@ export default function Teams({ user }) {
         const parent = teamMap.get(team.parent_team_id)
         if (parent) {
           parent.children.push(teamMap.get(team.id))
+        } else {
+          // Parent not in the list (e.g. regular user only sees their own teams)
+          rootTeams.push(teamMap.get(team.id))
         }
       } else {
         rootTeams.push(teamMap.get(team.id))
