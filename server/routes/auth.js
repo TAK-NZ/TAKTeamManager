@@ -299,6 +299,13 @@ router.get('/callback', authCallbackFailureLimiter, async (req, res) => {
 // `jti`) was present, logout additionally inserts a `token_revocations`
 // row so that a subsequent request using that same token is rejected by
 // `authenticateToken` with 401.
+// GET /logout for browser-navigable logout (redirects to login page)
+router.get('/logout', async (req, res) => {
+  const { maxAge, ...clearOptions } = getSessionCookieOptions();
+  res.clearCookie('tak_session', clearOptions);
+  res.redirect(process.env.FRONTEND_URL || '/');
+});
+
 router.post('/logout', async (req, res) => {
   const token = req.cookies && req.cookies.tak_session;
 
