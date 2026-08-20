@@ -19,10 +19,10 @@ import { useTheme } from '../contexts/ThemeContext'
 const getNavigation = (user) => {
   const baseNavigation = [
     { name: 'Dashboard', href: '/dashboard', icon: HomeIcon },
+    { name: 'Orgs & Teams', href: '/teams', icon: UserGroupIcon },
   ]
   
   if (user?.isAdmin || user?.is_global_manager) {
-    baseNavigation.push({ name: 'Orgs & Teams', href: '/teams', icon: UserGroupIcon })
     baseNavigation.push({ name: 'Users', href: '/users', icon: UsersIcon })
   }
   
