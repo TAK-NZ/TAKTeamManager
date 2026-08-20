@@ -62,10 +62,10 @@ router.get('/my-teams', authenticateToken, authorize, paginationParams, async (r
       teams = pagedTeams;
       pagination = { page, pageSize, total };
     } else {
-      // Regular users see only their teams (inherently small; not paginated).
-      // req.user.userId is the local users.id -- team_memberships.user_id
-      // is a foreign key to that column, NOT the Authentik id (req.user.id).
-      teams = await Team.getUserTeams(req.user.userId);
+      // Regular users see all teams within their organisation, filtered
+      // by visibility (private teams hidden unless they're a member/admin).
+      const orgTeams = await resolveOwnOrganisationTeams(req.user);
+      teams = await TeamVisibilityService.filterVisibleBranches(orgTeams, req.user);
     }
     res.json(pagination ? { teams, pagination } : { teams });
   } catch (error) {
