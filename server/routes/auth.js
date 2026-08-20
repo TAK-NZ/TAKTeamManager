@@ -36,6 +36,7 @@ function getSessionCookieOptions() {
     // cookie never persist and SSO login appear broken.
     secure: process.env.NODE_ENV === 'production',
     sameSite: 'lax',
+    path: '/',
     maxAge: parseDurationMs(process.env.JWT_EXPIRES_IN)
   };
 }
@@ -213,7 +214,6 @@ router.get('/callback', authCallbackFailureLimiter, async (req, res) => {
 
     // Refresh user groups from Authentik on login for immediate role updates
     const authentikSync = require('../services/authentikSync');
-    const pool = require('../config/database');
     const adminGroupName = process.env.ADMIN_GROUP_NAME || 'TakTeamManager_Admin';
 
     try {
@@ -366,8 +366,33 @@ router.post('/logout', async (req, res) => {
 // Get current user
 const { authenticateToken } = require('../middleware/auth');
 const authorize = require('../middleware/authorize');
-router.get('/me', authenticateToken, authorize, (req, res) => {
-  res.json({ user: req.user });
+// Requirement: the top-bar role label distinguishes a Global_Manager
+// (Authentik ADMIN_GROUP_NAME membership, already carried on req.user as
+// is_global_manager/isAdmin) from a Team_Admin (a role='admin' row in
+// team_memberships for at least one Team). That second flag is resolved
+// HERE rather than in resolveUserFromRequest (server/middleware/auth.js)
+// deliberately: resolveUserFromRequest runs on EVERY authenticated
+// request, so doing this lookup there would add a database round trip to
+// every API call for a value only the Client's role label needs. This
+// route is the single place the Client reads its own profile from, so the
+// lookup happens exactly once per profile fetch instead.
+//
+// A failure here is non-fatal and falls back to isTeamAdmin: false --
+// the profile response itself must still succeed, since an advisory
+// display label is not worth failing the whole request over.
+router.get('/me', authenticateToken, authorize, async (req, res) => {
+  let isTeamAdmin = false;
+  try {
+    const result = await pool.query(
+      "SELECT 1 FROM team_memberships WHERE user_id = $1 AND role = 'admin' LIMIT 1",
+      [req.user.userId]
+    );
+    isTeamAdmin = result.rows.length > 0;
+  } catch (err) {
+    getLogger().warn({ err: err.message }, 'Failed to resolve team admin status for profile');
+  }
+
+  res.json({ user: { ...req.user, isTeamAdmin } });
 });
 
 module.exports = router;
