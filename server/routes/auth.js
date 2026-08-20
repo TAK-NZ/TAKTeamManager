@@ -218,10 +218,11 @@ router.get('/callback', authCallbackFailureLimiter, async (req, res) => {
 
     try {
       const userDetailResponse = await axios.get(
-        `${process.env.AUTHENTIK_URL}/api/v3/core/users/${basicUser.sub}/`,
+        `${process.env.AUTHENTIK_URL}/api/v3/core/users/?username=${encodeURIComponent(basicUser.preferred_username)}`,
         { headers: { Authorization: `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }, timeout: 10000 }
       );
-      const authentikUser = userDetailResponse.data;
+      const authentikUser = userDetailResponse.data.results && userDetailResponse.data.results[0];
+      if (!authentikUser) throw new Error("User not found in Authentik");
 
       const groupNames = [];
       if (authentikUser.groups && authentikUser.groups.length > 0) {
@@ -241,7 +242,7 @@ router.get('/callback', authCallbackFailureLimiter, async (req, res) => {
       const isAdmin = groupNames.includes(adminGroupName);
       await pool.query(
         'UPDATE user_cache SET groups = $1, is_admin = $2, updated_at = CURRENT_TIMESTAMP WHERE username = $3',
-        [JSON.stringify(groupNames), isAdmin, basicUser.preferred_username]
+        [groupNames, isAdmin, basicUser.preferred_username]
       );
     } catch (refreshErr) {
       getLogger().warn({ err: refreshErr.message, username: basicUser.preferred_username }, 'Failed to refresh user groups on login');
