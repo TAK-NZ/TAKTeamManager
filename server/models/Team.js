@@ -524,7 +524,7 @@ class Team {
            WHERE tm2.team_id = t.id AND u2.is_team_device IS NOT TRUE) as member_count
         FROM teams t
         LEFT JOIN team_memberships tm ON t.id = tm.team_id AND tm.user_id = $1
-        WHERE tm.user_id IS NOT NULL AND tm.inherited_from_team_id IS NULL
+        WHERE tm.user_id IS NOT NULL
         ORDER BY t.name
       `, [userId]);
       return result.rows;
