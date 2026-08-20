@@ -896,12 +896,7 @@ export default function TeamDetail({ refreshUser }) {
                     {parentTeam.name}
                   </Link>
                 ) : (
-                  <Link 
-                    to="/teams"
-                    className="ml-1 text-primary-600 hover:text-primary-500 dark:text-primary-400 dark:hover:text-primary-300"
-                  >
-                    Organisation
-                  </Link>
+                  <span className="ml-1">None</span>
                 )}
               </div>
               
