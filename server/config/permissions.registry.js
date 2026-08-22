@@ -82,6 +82,18 @@ const routes = {
   'POST /api/users/create-and-add': ['user:create'],
   'POST /api/users/add-to-team': ['user:team:add'],
   'DELETE /api/users/remove-from-team/:userId': ['user:team:remove'],
+  // Requirement 2.1 (team-member-transfer): Team_Transfer route. The
+  // 'user:team:transfer' row-scoped resolver
+  // (server/middleware/authorize.js) permits a Global_Manager, a
+  // Team_Admin of the Destination_Team (`req.body.targetTeamId`), or a
+  // Team_Admin of the Source_Team (the Transferred_User's
+  // Direct_Membership team) -- all via `Team.isAdmin`, so an admin
+  // anywhere in either Team's Ancestor_Chain qualifies (Req 2.2, 2.6).
+  // Deliberately NOT added to `roleDefaults.authenticated_user` below: a
+  // statically-held identifier would satisfy `resolveAccess` outright and
+  // bypass the row-scoped resolver entirely, granting every authenticated
+  // user the ability to move any member between teams.
+  'POST /api/users/:userId/transfer': ['user:team:transfer'],
 
   // --- /api/channels (server/routes/channels.js) ---
   'GET /api/channels/descriptions': ['channel:read'],

@@ -10,6 +10,13 @@ const UserAttributesService = require('../services/userAttributes');
 const TeamMembershipService = require('../services/TeamMembershipService');
 const UserProvisioningService = require('../services/UserProvisioningService');
 const { CallsignSuffixConflictError } = require('../services/CallsignSuffixUniquenessService');
+const {
+  TeamTransferService,
+  NoCurrentTeamError,
+  AlreadyInDestinationTeamError,
+  SelfTransferError,
+  CrossOrganisationTransferError
+} = require('../services/TeamTransferService');
 const EventPublisher = require('../services/EventPublisher');
 const EmailService = require('../services/EmailService');
 const pool = require('../config/database');
@@ -783,6 +790,407 @@ router.delete('/remove-from-team/:userId', authenticateToken, authorize, [
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to remove user from team');
     res.status(500).json({ error: 'Failed to remove user from team' });
+  }
+});
+
+
+// ---------------------------------------------------------------------
+// Team_Transfer -- POST /api/users/:userId/transfer
+// (Requirements 1, 2, 3, 9.1, 10.2, 10.3 of team-member-transfer)
+// ---------------------------------------------------------------------
+
+/**
+ * Requirement 3.7's message, shared by the pre-flight `SELECT` below and
+ * by the `23505` mapping, so both mechanisms are indistinguishable to a
+ * caller: whichever one fires, a pending Transfer_Request already exists
+ * for that user and the caller must resolve it through approval or denial.
+ */
+const PENDING_TRANSFER_CONFLICT_MESSAGE =
+  'A team transfer is already pending approval for this user';
+
+/**
+ * The partial unique index (`existing_user_id` WHERE `status = 'pending'
+ * AND request_type = 'team_change'`) that backs Requirement 3.7 at the
+ * database level. The pre-flight `SELECT` is racy against a concurrent
+ * Transfer_Request creation on its own; this index closes that window for
+ * the path that actually inserts a row.
+ */
+const PENDING_TRANSFER_UNIQUE_INDEX = 'idx_access_requests_one_pending_team_change_per_user';
+
+/**
+ * True for the unique-violation raised by
+ * `idx_access_requests_one_pending_team_change_per_user`, which
+ * Requirement 3.7 maps to the same 409 as the pre-flight check.
+ *
+ * `error.constraint` carries the index name for a unique-INDEX violation
+ * (as opposed to a named unique CONSTRAINT); the message check is a
+ * belt-and-braces fallback for a driver or Postgres version that omits
+ * the field.
+ *
+ * @param {Error & {code?: string, constraint?: string}} error
+ * @returns {boolean}
+ */
+function isPendingTransferConflict(error) {
+  if (!error || error.code !== '23505') {
+    return false;
+  }
+
+  return error.constraint === PENDING_TRANSFER_UNIQUE_INDEX
+    || String(error.message || '').includes(PENDING_TRANSFER_UNIQUE_INDEX);
+}
+
+/**
+ * The single place the transfer route turns a typed error into a status
+ * code, per design.md's "typed error carries the data the response needs,
+ * route shapes the response" convention and its status-code mapping table.
+ *
+ * Every one of these errors already carries a caller-appropriate message
+ * (`CallsignSuffixConflictError`'s names the conflicting value, which is
+ * Requirement 9.1), so the message is passed through rather than
+ * rewritten here -- one source of truth per condition.
+ *
+ * `CrossOrganisationTransferError` maps to 400 on THIS path only
+ * (Requirement 1.7, a caller mistake at request time); the approval path
+ * maps the same error to 409, because there it means a Team was reparented
+ * under a pending Transfer_Request (Requirement 11.6).
+ *
+ * `StaleTransferRequestError` is deliberately absent: it can only be
+ * thrown when `expectedSourceTeamId` is supplied, which this path never
+ * does (it has no Transfer_Request to be stale against).
+ *
+ * @param {Error} error
+ * @returns {{status: number, error: string}|null} null when the error is
+ *   not one this route has a specified status code for, so the caller
+ *   falls through to logging it and returning 500.
+ */
+function transferErrorResponse(error) {
+  if (
+    error instanceof SelfTransferError            // Requirement 1.8
+    || error instanceof NoCurrentTeamError        // Requirement 1.4
+    || error instanceof AlreadyInDestinationTeamError // Requirement 1.5
+    || error instanceof CrossOrganisationTransferError // Requirement 1.7
+    || error instanceof CallsignSuffixConflictError    // Requirement 9.1
+  ) {
+    return { status: 400, error: error.message };
+  }
+
+  if (isPendingTransferConflict(error)) {              // Requirement 3.7
+    return { status: 409, error: PENDING_TRANSFER_CONFLICT_MESSAGE };
+  }
+
+  return null;
+}
+
+/**
+ * A Team's hierarchy path for an API response field, using the same
+ * `callsign_prefix || name` segment mapping and `' > '` join already used
+ * by `GET /api/requests/pending`'s `team_path`. (The transfer
+ * NOTIFICATION email joins with `' - '` instead, matching the other
+ * emails `RequestApprovalService` sends -- the two conventions are
+ * deliberately kept, one for API fields and one for email copy.)
+ *
+ * @param {Array<{name: string, callsign_prefix: string|null}>} ancestorChain
+ *   root-first, as returned by `Team.getAncestorChain`.
+ * @returns {string}
+ */
+function formatTeamPathForResponse(ancestorChain) {
+  return ancestorChain
+    .map((team, index) => (index === ancestorChain.length - 1 ? team.name : team.callsign_prefix || team.name))
+    .join(' > ');
+}
+
+/**
+ * Requirement 1.1: move an existing user's Direct_Membership to another
+ * Team without deleting the account -- the non-destructive counterpart to
+ * `DELETE /api/users/remove-from-team/:userId`, which deletes the
+ * Authentik user and the local `users`/`user_cache` rows outright and so
+ * destroys a federated identity (Requirement 1.6).
+ *
+ * Authorization is the `user:team:transfer` row-scoped resolver
+ * (Requirements 2.1-2.3): Global_Manager, or a Team_Admin of EITHER side.
+ * It therefore runs before every check below, so a 403 precedes every 4xx
+ * here. One consequence worth naming: a transfer requested for a user with
+ * no Direct_Membership by an admin of the target team returns 400 (the
+ * resolver grants on the target-team leg), while the same request from an
+ * unrelated admin returns 403. That precedence is standard and intended.
+ *
+ * The handler's step order is fixed by design.md, chosen so that each
+ * requirement's specified status code is actually reachable. Steps 1-7 run
+ * outside any transaction and are pre-flight status shaping only;
+ * `executeTransfer` re-asserts steps 5's and 6's preconditions under a
+ * `FOR UPDATE` row lock, which is the authoritative, race-free check.
+ * That duplication is intentional.
+ */
+router.post('/:userId/transfer', authenticateToken, authorize, [
+  body('targetTeamId').isInt({ min: 1 }).toInt(),
+  body('justification').optional().trim().isLength({ max: 500 }),
+  body('callsignSuffix').optional().trim().isLength({ max: 255 })
+], async (req, res) => {
+  const transferredUserId = Number(req.params.userId);
+  // req.user.userId is the LOCAL users.id (see server/middleware/auth.js),
+  // never req.user.id (the Authentik id) -- every comparison and every
+  // column written below is in local-id space.
+  const actorId = req.user.userId;
+  const actorIsGlobalManager = !!req.user.is_global_manager;
+
+  try {
+    // --- Step 1: the Transferred_User must exist (Requirement 1.3). ---
+    // A non-numeric `:userId` names no `users` row either, and is answered
+    // with the same 404 rather than being handed to Postgres as an invalid
+    // integer literal.
+    if (!Number.isInteger(transferredUserId) || transferredUserId < 1) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const userResult = await pool.query(
+      'SELECT id, first_name, last_name, email, is_team_device FROM users WHERE id = $1',
+      [transferredUserId]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // --- Step 2: no self-transfer (Requirement 1.8). ---
+    // Placed here, immediately after the existence lookup, because it is a
+    // pure integer comparison needing no query and because Requirement 1.8
+    // admits NO Global_Manager exemption -- nothing later in this order
+    // could change the verdict. A self-transfer would demote the acting
+    // user (Requirement 10.1) and could strip the Source_Team of its last
+    // Team_Admin, and the acting user cannot be a disinterested
+    // Approval_Team for their own move.
+    if (transferredUserId === actorId) {
+      throw new SelfTransferError(actorId);
+    }
+
+    // --- Step 3: body validation (Requirement 1.1). ---
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const targetTeamId = req.body.targetTeamId;
+
+    // --- Step 4: the Destination_Team must exist. ---
+    // Requirement 1.2 specifies 400 here, NOT 404: an unknown
+    // `targetTeamId` is a bad body field, whereas the 404 of step 1 is an
+    // unknown addressed resource.
+    const teamResult = await pool.query('SELECT id FROM teams WHERE id = $1', [targetTeamId]);
+
+    if (teamResult.rows.length === 0) {
+      return res.status(400).json({ error: 'Target team not found' });
+    }
+
+    // --- Step 5: the Direct_Membership preconditions (Requirements 1.4, 1.5). ---
+    const membershipResult = await pool.query(
+      'SELECT team_id, role FROM team_memberships WHERE user_id = $1 AND inherited_from_team_id IS NULL',
+      [transferredUserId]
+    );
+
+    if (membershipResult.rows.length === 0) {
+      throw new NoCurrentTeamError(transferredUserId);
+    }
+
+    const sourceTeamId = membershipResult.rows[0].team_id;
+    // Requirements 10.2/10.3 speak of a transfer being INITIATED, not
+    // completed, so `demotedFromAdmin` is reported on the 202 response as
+    // well as the 200 one. On the 200 path it comes off the outcome, which
+    // read the same role under the row lock.
+    const demotedFromAdmin = membershipResult.rows[0].role === 'admin';
+
+    if (sourceTeamId === targetTeamId) {
+      throw new AlreadyInDestinationTeamError(transferredUserId, targetTeamId);
+    }
+
+    // --- Step 6: the Organisation boundary (Requirement 1.7). ---
+    // `Team.getAncestorChain` is root-first, so index 0 is the
+    // Organisation. Both chains are reused below -- the destination one for
+    // the 200 response's `destinationTeamPath`, whichever one names the
+    // Approval_Team for the 202 response's `approvalTeamName` -- so this
+    // costs no query beyond the check itself.
+    const [sourceChain, destinationChain] = await Promise.all([
+      Team.getAncestorChain(sourceTeamId),
+      Team.getAncestorChain(targetTeamId)
+    ]);
+
+    if (sourceChain[0].id !== destinationChain[0].id && !actorIsGlobalManager) {
+      throw new CrossOrganisationTransferError(sourceChain[0].id, destinationChain[0].id);
+    }
+
+    // --- Step 7: one pending Transfer_Request per user (Requirement 3.7). ---
+    // This step MUST stay ABOVE the Dual_Admin branch of step 8. Requirement
+    // 3.7 applies "regardless of whether the Initiating_Admin is a
+    // Dual_Admin", so moving this below that branch would let a Dual_Admin
+    // silently execute a transfer while a Transfer_Request for the same user
+    // sat pending, and would make Requirement 3.7's 409 reachable on only
+    // one of the two paths. The pending row is left exactly as it is -- there
+    // is no `superseded` disposition, because it carries a justification and
+    // an outstanding Approval_Team decision.
+    const pendingResult = await pool.query(
+      `SELECT id
+         FROM access_requests
+        WHERE request_type = 'team_change'
+          AND status = 'pending'
+          AND existing_user_id = $1`,
+      [transferredUserId]
+    );
+
+    if (pendingResult.rows.length > 0) {
+      return res.status(409).json({ error: PENDING_TRANSFER_CONFLICT_MESSAGE });
+    }
+
+    // --- Step 8: Dual_Admin determination (Requirements 2.4, 2.5, 2.6). ---
+    // `Team.isAdmin` is what makes Requirement 2.6 hold: a Team_Admin of any
+    // Team in either side's Ancestor_Chain counts as an admin of that side.
+    // Both legs are skipped for a Global_Manager, who is a Dual_Admin by
+    // definition and for whom neither leg's answer is used.
+    let initiatorAdminsSource = false;
+    let initiatorAdminsDestination = false;
+
+    if (!actorIsGlobalManager) {
+      initiatorAdminsSource = await Team.isAdmin(sourceTeamId, actorId);
+      initiatorAdminsDestination = await Team.isAdmin(targetTeamId, actorId);
+    }
+
+    const isDualAdmin = actorIsGlobalManager || (initiatorAdminsSource && initiatorAdminsDestination);
+
+    // --- Step 9a: immediate execution (Requirement 2.4). ---
+    if (isDualAdmin) {
+      const client = await pool.connect();
+      let outcome;
+
+      try {
+        await client.query('BEGIN');
+
+        // `requestCallsignSuffix` is null by construction on this path:
+        // there is no Transfer_Request, so link (b) of Requirement 9.7's
+        // precedence chain is absent and the chain falls through from the
+        // submitted value to the user's stored one.
+        outcome = await TeamTransferService.executeTransfer(client, {
+          userId: transferredUserId,
+          destinationTeamId: targetTeamId,
+          actorId,
+          actorIsGlobalManager,
+          callsignSuffix: req.body.callsignSuffix || null,
+          requestCallsignSuffix: null
+        });
+
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK');
+        // Rethrown for the handler's single error-mapping catch below, so
+        // every typed transfer error is shaped in exactly one place.
+        throw error;
+      } finally {
+        client.release();
+      }
+
+      // Requirements 8.4, 13.4, 14.4: callsign, `user_cache`, the Authentik
+      // push, the notification, and the audit row all happen strictly after
+      // COMMIT. `applyPostCommitEffects` never throws -- each of its steps
+      // is independently failure-tolerant -- so a failure there leaves the
+      // committed membership change in place and this response at 200.
+      const effects = await TeamTransferService.applyPostCommitEffects(outcome);
+
+      return res.json({
+        status: 'completed',
+        demotedFromAdmin: outcome.demotedFromAdmin,
+        callsign: effects.callsign,
+        destinationTeamPath: formatTeamPathForResponse(destinationChain),
+        revokedChannelCount: outcome.revokedChannelIds.length
+      });
+    }
+
+    // --- Step 9b: create a Transfer_Request (Requirements 2.5, 3). ---
+    // Requirement 3.3: the Approval_Team is the side the initiator does NOT
+    // administer. Reaching here means the initiator is not a Global_Manager
+    // and administers exactly one side -- the resolver granted the request,
+    // so at least one leg is true, and step 8 established they are not both.
+    const approvalTeamId = initiatorAdminsDestination ? sourceTeamId : targetTeamId;
+    const approvalChain = initiatorAdminsDestination ? sourceChain : destinationChain;
+    const approvalTeamName = approvalChain[approvalChain.length - 1].name;
+
+    // Requirement 3.4: `requester_*` are the INITIATING_ADMIN's own values,
+    // not the Transferred_User's. That is what makes the existing approval
+    // and denial emails sent by `RequestApprovalService` reach the person who
+    // asked for the transfer with no change to either email path. The
+    // Transferred_User's own notification is a separate email sent by
+    // `applyPostCommitEffects`, and the two recipients never coincide --
+    // Requirement 1.8 forbids a self-transfer.
+    const initiatorResult = await pool.query(
+      'SELECT email, first_name, last_name FROM users WHERE id = $1',
+      [actorId]
+    );
+    const initiator = initiatorResult.rows[0] || {};
+
+    // Requirement 3.6: one user holding a DIRECT `role = 'admin'` row for
+    // the Approval_Team, or NULL when it has none. Selected on `role =
+    // 'admin'` only -- the `role IN ('admin', 'owner')` predicate in
+    // `RequestApprovalService` and `EscalationService` is dead defensive
+    // code (nothing writes `'owner'`, no row holds it, no CHECK admits it)
+    // and is deliberately not propagated here. Ordered by `user_id` rather
+    // than `RANDOM()` so the choice is reproducible.
+    const assignedAdminResult = await pool.query(
+      `SELECT user_id
+         FROM team_memberships
+        WHERE team_id = $1
+          AND role = 'admin'
+          AND inherited_from_team_id IS NULL
+        ORDER BY user_id ASC
+        LIMIT 1`,
+      [approvalTeamId]
+    );
+
+    // Requirement 3.5: `email_verified` is `true` and NO verification email
+    // is sent -- the Initiating_Admin's identity is already established by
+    // the authenticated session, and the row must be visible to
+    // `GET /api/requests/pending`, which filters on `email_verified`.
+    // `escalates_at` is deliberately left NULL: a Transfer_Request is
+    // addressed to a specific Approval_Team rather than escalated up the
+    // new-account chain.
+    const insertResult = await pool.query(
+      `INSERT INTO access_requests (
+         request_type, requester_email, requester_first_name, requester_last_name,
+         existing_user_id, current_team_id, target_team_id, approval_team_id,
+         initiated_by, assigned_to_admin, justification, callsign_suffix,
+         status, email_verified
+       ) VALUES ('team_change', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending', true)
+       RETURNING id`,
+      [
+        initiator.email || req.user.email || null,
+        initiator.first_name ?? req.user.first_name ?? null,
+        initiator.last_name ?? req.user.last_name ?? null,
+        transferredUserId,
+        sourceTeamId,
+        targetTeamId,
+        approvalTeamId,
+        actorId,
+        assignedAdminResult.rows[0]?.user_id ?? null,
+        req.body.justification || null,
+        req.body.callsignSuffix || null
+      ]
+    );
+
+    return res.status(202).json({
+      status: 'pending_approval',
+      requestId: insertResult.rows[0].id,
+      demotedFromAdmin,
+      approvalTeamId,
+      approvalTeamName
+    });
+  } catch (error) {
+    const mapped = transferErrorResponse(error);
+
+    if (mapped) {
+      return res.status(mapped.status).json({ error: mapped.error });
+    }
+
+    getLogger().error(
+      { err: error, transferredUserId: req.params.userId, targetTeamId: req.body?.targetTeamId },
+      'Failed to transfer user to another team'
+    );
+
+    return res.status(500).json({ error: 'Failed to transfer user' });
   }
 });
 

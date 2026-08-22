@@ -21,10 +21,12 @@
  * default).
  */
 
+const fs = require('fs');
+const path = require('path');
 const fc = require('fast-check');
 const { test } = require('@fast-check/jest');
 
-const { resolveAccess } = require('./permissions.registry');
+const { routes, roleDefaults, resolveAccess } = require('./permissions.registry');
 
 // Feature: production-hardening, Property 12: Permission Registry denies by default
 describe('Property 12: Permission Registry denies by default (resolveAccess)', () => {
@@ -143,5 +145,88 @@ describe('resolveAccess permits a present routeKey only when every required perm
   it('confirms an empty required-permissions array is permitted by an empty userPermissions set (degenerate iff case)', () => {
     const registry = buildRegistry('GET /no-op', []);
     expect(resolveAccess('GET /no-op', [], registry)).toBe(true);
+  });
+});
+/**
+ * Registry assertions for the team-member-transfer feature (task 3.6).
+ *
+ * Requirement 2.1: the Permission_Registry maps
+ * `POST /api/users/:userId/transfer` to `user:team:transfer`.
+ *
+ * The negative assertions matter more than the positive one here. Both
+ * `user:team:transfer` (Req 2.2) and `request:approve`/`request:deny`
+ * (Req 5.1-5.5) are granted per-request by row-scoped resolvers in
+ * `server/middleware/authorize.js`. Placing any of the three in
+ * `roleDefaults.authenticated_user` would make `resolveAccess` permit the
+ * route outright, so `authorize.js` would never consult the resolver --
+ * handing every authenticated user the ability to move any member between
+ * teams, or to approve/deny any Access_Request. These tests pin that
+ * absence so it cannot be undone by a well-meaning "the Requests page 403s
+ * for team admins" fix.
+ */
+describe('team-member-transfer registry entries (Requirements 2.1, 5.6)', () => {
+  const registry = { routes, roleDefaults };
+  const TRANSFER_ROUTE_KEY = 'POST /api/users/:userId/transfer';
+
+  it('maps POST /api/users/:userId/transfer to exactly user:team:transfer (Req 2.1)', () => {
+    expect(routes[TRANSFER_ROUTE_KEY]).toEqual(['user:team:transfer']);
+  });
+
+  it('resolves the transfer route only for a caller holding user:team:transfer or the wildcard', () => {
+    expect(resolveAccess(TRANSFER_ROUTE_KEY, ['user:team:transfer'], registry)).toBe(true);
+    expect(resolveAccess(TRANSFER_ROUTE_KEY, roleDefaults.global_manager, registry)).toBe(true);
+    expect(resolveAccess(TRANSFER_ROUTE_KEY, roleDefaults.authenticated_user, registry)).toBe(false);
+    expect(resolveAccess(TRANSFER_ROUTE_KEY, [], registry)).toBe(false);
+  });
+
+  it('keeps user:team:transfer out of roleDefaults.authenticated_user', () => {
+    expect(roleDefaults.authenticated_user).not.toContain('user:team:transfer');
+  });
+
+  it('keeps request:approve and request:deny out of roleDefaults.authenticated_user', () => {
+    expect(roleDefaults.authenticated_user).not.toContain('request:approve');
+    expect(roleDefaults.authenticated_user).not.toContain('request:deny');
+    // `request:read` IS held statically -- a Team_Admin can list pending
+    // Access_Requests -- while acting on one stays resolver-gated.
+    expect(roleDefaults.authenticated_user).toContain('request:read');
+  });
+
+  it('leaves the approve and deny route mappings unchanged', () => {
+    expect(routes['POST /api/requests/:requestId/approve']).toEqual(['request:approve']);
+    expect(routes['POST /api/requests/:requestId/deny']).toEqual(['request:deny']);
+  });
+
+  /**
+   * Requirement 5.6: a denied `request:approve`/`request:deny` check must
+   * keep responding 403, not 404. `authorize.js`'s
+   * `PERMISSION_DENIALS_MAPPED_TO_404` set is the only thing that turns a
+   * denial into a 404, and it is reserved for `team:read`'s "respond as
+   * though that Team does not exist" rule. It is a module-private const
+   * (`authorize.js` exports only the middleware function), so this asserts
+   * against the source text of that single declaration rather than an
+   * imported value -- requiring `authorize.js` here would pull in the
+   * database pool and the whole resolver graph for what is a one-line
+   * invariant.
+   */
+  it('does not add request:approve or request:deny to PERMISSION_DENIALS_MAPPED_TO_404 (Req 5.6)', () => {
+    const authorizeSource = fs.readFileSync(
+      path.join(__dirname, '..', 'middleware', 'authorize.js'),
+      'utf8'
+    );
+
+    const declaration = authorizeSource.match(
+      /const PERMISSION_DENIALS_MAPPED_TO_404\s*=\s*new Set\(\[([^\]]*)\]\)/
+    );
+
+    // Fail loudly rather than vacuously if the declaration is renamed or
+    // reshaped -- a silently unmatched regex would assert nothing.
+    expect(declaration).not.toBeNull();
+
+    const mappedTo404 = Array.from(declaration[1].matchAll(/['"]([^'"]+)['"]/g), (m) => m[1]);
+
+    expect(mappedTo404).toContain('team:read');
+    expect(mappedTo404).not.toContain('request:approve');
+    expect(mappedTo404).not.toContain('request:deny');
+    expect(mappedTo404).not.toContain('user:team:transfer');
   });
 });

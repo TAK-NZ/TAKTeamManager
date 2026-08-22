@@ -1,7 +1,7 @@
 const pool = require('../config/database');
 const EmailService = require('./EmailService');
 const UserProvisioningService = require('./UserProvisioningService');
-const TeamMembershipService = require('./TeamMembershipService');
+const { TeamTransferService } = require('./TeamTransferService');
 const EventPublisher = require('./EventPublisher');
 const UserAttributesService = require('./userAttributes');
 const Team = require('../models/Team');
@@ -149,16 +149,37 @@ class RequestApprovalService {
    * denied concurrently between the pre-fetch and this point is still
    * correctly rejected.
    *
-   * Requirement 11.12/11.13/11.15/11.16 (task 24.3): `callsignSuffixOverride`
-   * is a NEW, optional 4th parameter used ONLY for a `new_account`
-   * request -- the sole request type that creates a brand-new user, and
-   * therefore the only one that resolves/stores an initial
-   * `callsign_suffix` at approval time at all. `team_change`/
-   * `role_change`/`name_change` requests operate on an EXISTING user
-   * whose `callsign_suffix` was already resolved at their own original
-   * creation time (Requirement 11.8: never silently recomputed), so a
-   * `callsignSuffixOverride` supplied on an approval for one of those
-   * other types is simply ignored -- never applied, never an error.
+   * Requirement 11.12/11.13/11.15/11.16 (task 24.3), extended by
+   * Requirement 9.4 (task 10.1): `callsignSuffixOverride` is an optional
+   * 4th parameter honoured by `new_account` AND by `team_change`.
+   *
+   *  - `new_account` is the sole request type that creates a brand-new
+   *    user, and so the only one that resolves/stores an INITIAL
+   *    `callsign_suffix` at approval time (resolution order below).
+   *  - `team_change` (Requirement 9.4) operates on an existing user, but
+   *    a transfer can collide with the Destination_Team's Member_List,
+   *    so the approving admin may supply a replacement suffix on the
+   *    approval. The value becomes the highest-precedence link of
+   *    Requirement 9.7's chain and is stored on the approval
+   *    transaction by `TeamTransferService.executeTransfer` -- this
+   *    method passes it straight through rather than resolving it,
+   *    because links (b) `access_requests.callsign_suffix` and (c) the
+   *    user's stored `users.callsign_suffix` are resolved together
+   *    inside that one transactional step.
+   *  - `role_change`/`name_change` never touch a `callsign_suffix`
+   *    (Requirement 11.8: never silently recomputed), so an override
+   *    supplied on one of those is ignored -- never applied, never an
+   *    error.
+   *
+   * `approverIsGlobalManager` is the approving user's
+   * `req.user.is_global_manager`, threaded through to
+   * `executeTransfer`'s `actorIsGlobalManager`. Requirement 11.6's
+   * cross-Organisation exemption is evaluated against the APPROVING
+   * user, not against the Initiating_Admin recorded in `initiated_by`,
+   * so a request created inside one Organisation and approved after a
+   * reparenting is rejected unless the approver is themselves a
+   * Global_Manager. It defaults to `false` so an omitted argument fails
+   * closed.
    *
    * For `new_account`, the effective value (override > the request's own
    * stored `callsign_suffix` > the computed default, matching task
@@ -172,7 +193,7 @@ class RequestApprovalService {
    * safely run before Phase 1's Authentik call without risk of a
    * partially-committed side effect.
    */
-  async approveRequest(requestId, adminId, additionalDetails = '', callsignSuffixOverride = null) {
+  async approveRequest(requestId, adminId, additionalDetails = '', callsignSuffixOverride = null, approverIsGlobalManager = false) {
     // --- Phase 1: pre-fetch (no open transaction) + Authentik user
     // creation for new_account requests, and the Authentik display-name
     // update for name_change requests. ---
@@ -208,13 +229,22 @@ class RequestApprovalService {
     try {
       await client.query('BEGIN');
 
-      // Get request details
+      // Get request details.
+      //
+      // Requirement 11.5: `FOR UPDATE OF ar` locks the access_requests row
+      // for the duration of this transaction, so a second concurrent
+      // approval blocks here and then observes status = 'approved' (0 rows)
+      // instead of both approvals passing the `status = 'pending'` filter
+      // under READ COMMITTED. `OF ar` is required — a bare FOR UPDATE would
+      // also try to lock the nullable side of the LEFT JOINs, which Postgres
+      // rejects. This applies to every request type, not just team_change.
       const requestResult = await client.query(`
         SELECT ar.*, t.name as team_name, u.first_name as admin_first_name, u.last_name as admin_last_name
         FROM access_requests ar
         LEFT JOIN teams t ON ar.target_team_id = t.id
         LEFT JOIN users u ON u.id = $2
         WHERE ar.id = $1 AND ar.status = 'pending'
+        FOR UPDATE OF ar
       `, [requestId, adminId]);
       
       if (requestResult.rows.length === 0) {
@@ -264,7 +294,9 @@ class RequestApprovalService {
       const processResult = await this.processApprovedRequest(client, request, {
         newAccountAuthentikUser,
         adminId,
-        resolvedCallsignSuffix
+        resolvedCallsignSuffix,
+        callsignSuffixOverride,
+        approverIsGlobalManager
       });
       
       await client.query('COMMIT');
@@ -299,6 +331,21 @@ class RequestApprovalService {
         } catch (emailErr) {
           getLogger().error({ err: emailErr }, 'Failed to send approval email');
         }
+      }
+
+      // --- Post-commit effects for an approved Transfer_Request
+      // (Requirements 8, 13, 14, via task 10.1).
+      //
+      // Runs strictly AFTER `COMMIT` (Requirement 8.4 -- no external HTTP
+      // request while a transaction is open) and after the approval email
+      // above, so the ordering of the two notifications matches the order
+      // a reviewer sees them in the design's approval sequence.
+      // `applyPostCommitEffects` never throws: each of its five steps is
+      // individually try/caught and logged, leaving the committed
+      // membership change in place and this method's response at
+      // `{ success: true }` (Requirements 8.5, 13.4, 14.4).
+      if (request.request_type === 'team_change' && processResult?.transferOutcome) {
+        await TeamTransferService.applyPostCommitEffects(processResult.transferOutcome);
       }
 
       // --- Phase 3 (new_account only): eagerly upsert user_cache, same
@@ -641,16 +688,29 @@ class RequestApprovalService {
         // Fall back to just team_name
       }
 
-      await this.emailService.sendDenialEmail(
-        request.requester_email,
-        {
-          teamPath: denialTeamPath,
-          firstName: request.requested_first_name || request.requester_first_name || '',
-          denialReason
-        }
-      );
-      
       await client.query('COMMIT');
+
+      // Requirement 12.4: the denial decision is committed BEFORE the
+      // notification is attempted, and a failed send is logged rather than
+      // rethrown -- so a refused SMTP connection leaves the row `denied`
+      // and the route's response at 200. Previously this send sat inside
+      // the transaction, so any email failure rolled the decision back and
+      // surfaced as a 500, silently discarding a decision the admin had
+      // already made. Mirrors `approveRequest`'s own post-COMMIT,
+      // try/caught approval email.
+      try {
+        await this.emailService.sendDenialEmail(
+          request.requester_email,
+          {
+            teamPath: denialTeamPath,
+            firstName: request.requested_first_name || request.requester_first_name || '',
+            denialReason
+          }
+        );
+      } catch (emailErr) {
+        getLogger().error({ err: emailErr }, 'Failed to send denial email');
+      }
+
       return { success: true };
       
     } catch (error) {
@@ -661,7 +721,7 @@ class RequestApprovalService {
     }
   }
 
-  async processApprovedRequest(client, request, { newAccountAuthentikUser, adminId, resolvedCallsignSuffix = null } = {}) {
+  async processApprovedRequest(client, request, { newAccountAuthentikUser, adminId, resolvedCallsignSuffix = null, callsignSuffixOverride = null, approverIsGlobalManager = false } = {}) {
     switch (request.request_type) {
       case 'new_account': {
         // Requirement 18.1 (task 38.1): the Authentik user was already
@@ -696,21 +756,56 @@ class RequestApprovalService {
           createdBy: adminId ?? null
         });
       }
-      case 'team_change':
-        // Requirement 18.2 (task 38.2): moves the user identified by
-        // `existing_user_id` to the team identified by `target_team_id`
-        // using `TeamMembershipService.addUserToTeam`, passing this
-        // transaction's already-open `client` through so the membership
-        // change commits/rolls back atomically with the request's status
-        // update to `approved` (Requirement 18.6/18.7).
-        await TeamMembershipService.addUserToTeam(
-          request.existing_user_id,
-          request.target_team_id,
-          'member',
-          adminId ?? null,
-          client
-        );
-        break;
+      case 'team_change': {
+        // Requirement 6.1 (task 10.1): the approval path and the
+        // immediate path go through ONE method, so the outcome cannot
+        // depend on which path was taken.
+        //
+        // This replaces a bare `TeamMembershipService.addUserToTeam`
+        // call, which performed only the ADDITIVE half of a move (the
+        // direct membership row, the inherited ancestor rows, the
+        // destination channel rows). `executeTransfer` wraps that same
+        // call and adds the missing halves around it: the locked
+        // precondition re-check (Requirements 11.1, 11.6), the
+        // Callsign_Suffix resolution (Requirement 9.7), and the
+        // subtractive revocation of Source_Team channel access
+        // (Requirement 7).
+        //
+        // `client` is this transaction's own client, so every membership
+        // write commits with the `status = 'approved'` update above or
+        // neither does (Requirement 6.6). A throw from here -- including
+        // `StaleTransferRequestError`, `CrossOrganisationTransferError`,
+        // and `CallsignSuffixConflictError` -- propagates to
+        // `approveRequest`'s existing catch/ROLLBACK, which leaves the
+        // row `pending` with no extra handling.
+        const outcome = await TeamTransferService.executeTransfer(client, {
+          userId: request.existing_user_id,
+          destinationTeamId: request.target_team_id,
+          actorId: adminId ?? null,
+          // Requirement 11.6: evaluated against the APPROVING user.
+          actorIsGlobalManager: approverIsGlobalManager,
+          // Requirement 11.1: the Source_Team this request was created
+          // against, re-checked under the Direct_Membership row lock.
+          expectedSourceTeamId: request.current_team_id,
+          // Requirement 9.7's links (a) and (b), passed SEPARATELY rather
+          // than pre-collapsed with `||`. The chain's third link is the
+          // user's stored `users.callsign_suffix`, which is only readable
+          // inside this transaction, so `executeTransfer` step 3 owns the
+          // whole precedence chain -- collapsing (a) and (b) here would
+          // split one rule across two files.
+          callsignSuffix: callsignSuffixOverride || null,
+          requestCallsignSuffix: request.callsign_suffix || null,
+          // Requirement 14.3: recorded in the audit `details` only
+          // because this transfer went through a Transfer_Request.
+          transferRequestId: request.id,
+          initiatedBy: request.initiated_by
+        });
+
+        // Returned rather than `break`ing, mirroring the `new_account`
+        // branch's `{ localUserId }`, so `approveRequest` can run
+        // `applyPostCommitEffects` after COMMIT.
+        return { transferOutcome: outcome };
+      }
       case 'role_change': {
         // Requirement 18.3 (task 38.3): a role_change request never moves
         // the user to a different team -- it only changes the `role`

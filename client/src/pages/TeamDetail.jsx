@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import React from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { PlusIcon, UsersIcon, UserPlusIcon, ShieldCheckIcon, BuildingOfficeIcon, FolderPlusIcon, HashtagIcon, XMarkIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, TrashIcon, PencilIcon, CheckIcon, ArrowLeftOnRectangleIcon, EnvelopeIcon } from '@heroicons/react/24/outline'
+import { PlusIcon, UsersIcon, UserPlusIcon, ShieldCheckIcon, BuildingOfficeIcon, FolderPlusIcon, HashtagIcon, XMarkIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, TrashIcon, PencilIcon, CheckIcon, ArrowLeftOnRectangleIcon, EnvelopeIcon, ArrowRightCircleIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import { teamsAPI, channelsAPI, usersAPI, configAPI } from '../services/api'
 import api from '../services/api'
@@ -10,6 +10,7 @@ import { computeTeamDepth } from '../utils/teamDepth'
 import TeamFormDialog from '../components/TeamFormDialog'
 import SignupCodeManager from '../components/SignupCodeManager'
 import OrgDomainManager from '../components/OrgDomainManager'
+import TransferMemberDialog from '../components/TransferMemberDialog'
 
 // Requirement 5's two new `callsign_name_format` values need example
 // strings alongside the three existing ones, matching the "J Doe"/"John D"
@@ -292,6 +293,11 @@ export default function TeamDetail({ user, refreshUser }) {
   // GET /api/config/public's `takRoleValues` field so this Client never
   // hardcodes a second copy of settings.js's ROLE_KEY_LABELS allow-list.
   const [takRoleValues, setTakRoleValues] = useState(DEFAULT_TAK_ROLE_VALUES)
+  // Requirement 15.1 (task 13.3): the Member_List row whose transfer action
+  // was activated, i.e. the member `TransferMemberDialog` is open for. Null
+  // when the dialog is closed. Shared between the Members and Team Admins
+  // tabs, since at most one transfer dialog is ever open.
+  const [transferringMember, setTransferringMember] = useState(null)
 
   const handleCreateSubTeam = async (e) => {
     e.preventDefault()
@@ -605,6 +611,30 @@ export default function TeamDetail({ user, refreshUser }) {
       toast.error('Failed to remove user: ' + (error.response?.data?.error || error.message))
     } finally {
       setRemovingUser(false)
+    }
+  }
+
+  // Requirement 15.5 (task 13.3): a completed transfer moved the member out
+  // of this team and revoked the Channel memberships they held here, so the
+  // Member_List and the channel member counts are both refetched -- the same
+  // refresh `confirmRemoveUser` performs, for the same reasons. Only invoked
+  // for a `completed` transfer; a 202 (awaiting the other team's approval)
+  // never reaches this handler, leaving the list untouched per
+  // Requirement 15.6.
+  const handleTransferCompleted = async () => {
+    try {
+      const teamResponse = await teamsAPI.getById(team.id)
+      const allMembers = teamResponse.data.members || []
+      setMembers(allMembers.filter(m => m.role === 'member' || m.role === 'inherited'))
+      setAdmins(allMembers.filter(m => m.role === 'admin'))
+
+      const channelsResponse = await channelsAPI.getByTeam(team.id)
+      setChannels(channelsResponse.data.channels || [])
+
+      // Notify Dashboard to refresh
+      window.dispatchEvent(new CustomEvent('userAssignmentChanged'))
+    } catch (error) {
+      console.error('Failed to refresh team data after transfer:', error)
     }
   }
 
@@ -1155,6 +1185,15 @@ export default function TeamDetail({ user, refreshUser }) {
                             >
                               <EnvelopeIcon className="h-4 w-4" />
                             </button>
+                            {/* Requirement 15.1 */}
+                            <button
+                              onClick={() => setTransferringMember(member)}
+                              className="text-gray-600 hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300"
+                              title="Transfer member to another team"
+                              aria-label="Transfer member to another team"
+                            >
+                              <ArrowRightCircleIcon className="h-4 w-4" aria-hidden="true" />
+                            </button>
                             {member.inherited_from_team_name ? (
                               <button
                                 onClick={() => handleRemoveUser(member.id, 'member')}
@@ -1271,6 +1310,15 @@ export default function TeamDetail({ user, refreshUser }) {
                               title="Resend welcome email"
                             >
                               <EnvelopeIcon className="h-4 w-4" />
+                            </button>
+                            {/* Requirement 15.1 */}
+                            <button
+                              onClick={() => setTransferringMember(admin)}
+                              className="text-gray-600 hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300"
+                              title="Transfer member to another team"
+                              aria-label="Transfer member to another team"
+                            >
+                              <ArrowRightCircleIcon className="h-4 w-4" aria-hidden="true" />
                             </button>
                             {admin.inherited_from_team_name ? (
                               <button
@@ -2054,6 +2102,21 @@ export default function TeamDetail({ user, refreshUser }) {
         )
       })()}
 
+
+      {/* Requirement 15.1: Transfer Member Dialog (Members and Team Admins tabs) */}
+      {transferringMember && (
+        <TransferMemberDialog
+          member={transferringMember}
+          team={team}
+          // Requirement 15.9: the dialog's all-teams fallback is gated on the
+          // operating user being a Global_Manager, so it needs this page's
+          // own `user` -- the Organisation-scoped call returns [] for a
+          // Global_Manager holding no team membership of their own.
+          user={user}
+          onClose={() => setTransferringMember(null)}
+          onCompleted={handleTransferCompleted}
+        />
+      )}
 
       {/* Edit Team Dialog (shared with Teams.jsx) */}
       <TeamFormDialog

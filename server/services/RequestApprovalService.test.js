@@ -26,8 +26,17 @@ jest.mock('./UserProvisioningService', () => ({
   createAndAddUser: jest.fn()
 }));
 
-jest.mock('./TeamMembershipService', () => ({
-  addUserToTeam: jest.fn()
+// Task 10.1 (Requirement 6.1): the `team_change` branch no longer calls
+// `TeamMembershipService.addUserToTeam` directly -- it delegates the whole
+// move to `TeamTransferService.executeTransfer`, which wraps that call and
+// adds the revocation, staleness, and Callsign_Suffix halves around it. The
+// mock mirrors the module's real shape (a named export holding static
+// methods) so the service's destructuring require resolves.
+jest.mock('./TeamTransferService', () => ({
+  TeamTransferService: {
+    executeTransfer: jest.fn(),
+    applyPostCommitEffects: jest.fn()
+  }
 }));
 
 jest.mock('../models/Team', () => ({
@@ -57,7 +66,7 @@ jest.mock('../middleware/requestContext', () => ({
 
 const pool = require('../config/database');
 const UserProvisioningService = require('./UserProvisioningService');
-const TeamMembershipService = require('./TeamMembershipService');
+const { TeamTransferService } = require('./TeamTransferService');
 const UserAttributesService = require('./userAttributes');
 const EmailService = require('./EmailService');
 const EventPublisher = require('./EventPublisher');
@@ -588,17 +597,27 @@ describe('RequestApprovalService.approveRequest - callsign_suffix resolution (ta
     expect(UserProvisioningService.createAndAddUser).not.toHaveBeenCalled();
   });
 
-  it('ignores a callsignSuffixOverride supplied on a team_change approval', async () => {
+  // Requirement 9.4 (task 10.1): a `callsignSuffixOverride` on a
+  // `team_change` approval is no longer ignored -- it is Requirement 9.7's
+  // highest-precedence link and is handed to `executeTransfer` as
+  // `callsignSuffix`. It is NOT resolved here: `new_account`'s
+  // `computeDefaultCallsignSuffix`/`getFullMemberList` path stays
+  // untouched, because a transfer's resolution needs the user's stored
+  // suffix, which is only readable inside the transaction.
+  it('passes a callsignSuffixOverride supplied on a team_change approval through to executeTransfer without resolving it here', async () => {
     const client = { query: jest.fn() };
-    TeamMembershipService.addUserToTeam.mockResolvedValue({ success: true, groupsQueued: 0 });
+    TeamTransferService.executeTransfer.mockResolvedValue({ userId: 42 });
 
     await service.processApprovedRequest(
       client,
-      { request_type: 'team_change', existing_user_id: 42, target_team_id: 7 },
-      { adminId: 9 }
+      { id: 2, request_type: 'team_change', existing_user_id: 42, target_team_id: 7, current_team_id: 3, callsign_suffix: 'Stored-On-Request' },
+      { adminId: 9, callsignSuffixOverride: 'Override-Suffix' }
     );
 
-    expect(TeamMembershipService.addUserToTeam).toHaveBeenCalledWith(42, 7, 'member', 9, client);
+    expect(TeamTransferService.executeTransfer).toHaveBeenCalledWith(client, expect.objectContaining({
+      callsignSuffix: 'Override-Suffix',
+      requestCallsignSuffix: 'Stored-On-Request'
+    }));
     expect(CallsignService.computeDefaultCallsignSuffix).not.toHaveBeenCalled();
     expect(Team.getFullMemberList).not.toHaveBeenCalled();
   });
@@ -612,55 +631,113 @@ describe('RequestApprovalService.processApprovedRequest - other request types un
     service = new RequestApprovalService();
   });
 
-  it('does not call createAndAddUser/addUserToTeam for an unrecognized request_type and issues no queries', async () => {
+  it('does not call createAndAddUser/executeTransfer for an unrecognized request_type and issues no queries', async () => {
     const client = { query: jest.fn() };
     await service.processApprovedRequest(client, { request_type: 'some_unknown_type' }, { adminId: 9 });
 
     expect(UserProvisioningService.createAndAddUser).not.toHaveBeenCalled();
-    expect(TeamMembershipService.addUserToTeam).not.toHaveBeenCalled();
+    expect(TeamTransferService.executeTransfer).not.toHaveBeenCalled();
     expect(client.query).not.toHaveBeenCalled();
   });
 });
 
 /**
  * Unit tests for `RequestApprovalService.processApprovedRequest`'s
- * `team_change` branch (Requirement 18.2 / task 38.2): moves the user
- * identified by `existing_user_id` to the team identified by
- * `target_team_id` via `TeamMembershipService.addUserToTeam`, passing the
- * already-open transactional `client` through so the membership change
- * commits/rolls back atomically with the request's status update.
+ * `team_change` branch, rewired by task 10.1 (Requirements 6.1, 6.6, 9.4,
+ * 9.7, 11.1, 11.6, 14.3).
+ *
+ * The branch previously called `TeamMembershipService.addUserToTeam`
+ * directly, which performed only the additive half of a move. It now
+ * delegates to `TeamTransferService.executeTransfer` -- the single method
+ * both transfer paths go through (Requirement 6.1) -- on the already-open
+ * transactional `client` (Requirement 6.6), and returns the outcome rather
+ * than `break`ing so `approveRequest` can run the post-commit effects.
  */
 describe('RequestApprovalService.processApprovedRequest - team_change', () => {
   let service;
+
+  const TEAM_CHANGE_REQUEST = {
+    id: 2,
+    request_type: 'team_change',
+    existing_user_id: 42,
+    target_team_id: 7,
+    current_team_id: 3,
+    callsign_suffix: null,
+    initiated_by: 11
+  };
 
   beforeEach(() => {
     jest.clearAllMocks();
     service = new RequestApprovalService();
   });
 
-  it('calls TeamMembershipService.addUserToTeam with the open transactional client', async () => {
+  it('delegates the whole move to executeTransfer on the open transactional client, with every parameter the design specifies', async () => {
     const client = { query: jest.fn() };
-    TeamMembershipService.addUserToTeam.mockResolvedValue({ success: true, groupsQueued: 1 });
+    const outcome = { userId: 42, sourceTeamId: 3, destinationTeamId: 7, priorRole: 'admin' };
+    TeamTransferService.executeTransfer.mockResolvedValue(outcome);
+
+    const result = await service.processApprovedRequest(
+      client,
+      TEAM_CHANGE_REQUEST,
+      { adminId: 9, approverIsGlobalManager: true }
+    );
+
+    expect(TeamTransferService.executeTransfer).toHaveBeenCalledWith(client, {
+      userId: 42,
+      destinationTeamId: 7,
+      actorId: 9,
+      // Requirement 11.6: the exemption follows the APPROVING user.
+      actorIsGlobalManager: true,
+      // Requirement 11.1: the recorded Source_Team, re-checked under lock.
+      expectedSourceTeamId: 3,
+      callsignSuffix: null,
+      requestCallsignSuffix: null,
+      // Requirement 14.3.
+      transferRequestId: 2,
+      initiatedBy: 11
+    });
+
+    // Returned rather than `break`ing, mirroring `new_account`'s
+    // `{ localUserId }`, so approveRequest can run the post-commit effects.
+    expect(result).toEqual({ transferOutcome: outcome });
+  });
+
+  it('defaults actorIsGlobalManager to false when the approver flag is not supplied, so the Organisation check fails closed', async () => {
+    const client = { query: jest.fn() };
+    TeamTransferService.executeTransfer.mockResolvedValue({ userId: 42 });
+
+    await service.processApprovedRequest(client, TEAM_CHANGE_REQUEST, { adminId: 9 });
+
+    expect(TeamTransferService.executeTransfer).toHaveBeenCalledWith(client, expect.objectContaining({
+      actorIsGlobalManager: false
+    }));
+  });
+
+  it('passes the two Callsign_Suffix links separately rather than pre-collapsing them with ||', async () => {
+    const client = { query: jest.fn() };
+    TeamTransferService.executeTransfer.mockResolvedValue({ userId: 42 });
 
     await service.processApprovedRequest(
       client,
-      { request_type: 'team_change', existing_user_id: 42, target_team_id: 7 },
-      { adminId: 9 }
+      { ...TEAM_CHANGE_REQUEST, callsign_suffix: 'From-Request' },
+      { adminId: 9, callsignSuffixOverride: 'From-Approval' }
     );
 
-    expect(TeamMembershipService.addUserToTeam).toHaveBeenCalledWith(42, 7, 'member', 9, client);
+    // Requirement 9.7: the precedence chain is resolved in one place --
+    // executeTransfer step 3 -- because its third link is only readable
+    // inside the transaction. Both links therefore arrive intact.
+    expect(TeamTransferService.executeTransfer).toHaveBeenCalledWith(client, expect.objectContaining({
+      callsignSuffix: 'From-Approval',
+      requestCallsignSuffix: 'From-Request'
+    }));
   });
 
-  it('propagates a failure from addUserToTeam so the caller (approveRequest) rolls back atomically', async () => {
+  it('propagates a failure from executeTransfer so the caller (approveRequest) rolls back atomically', async () => {
     const client = { query: jest.fn() };
-    TeamMembershipService.addUserToTeam.mockRejectedValue(new Error('membership insert failed'));
+    TeamTransferService.executeTransfer.mockRejectedValue(new Error('membership insert failed'));
 
     await expect(
-      service.processApprovedRequest(
-        client,
-        { request_type: 'team_change', existing_user_id: 42, target_team_id: 7 },
-        { adminId: 9 }
-      )
+      service.processApprovedRequest(client, TEAM_CHANGE_REQUEST, { adminId: 9 })
     ).rejects.toThrow('membership insert failed');
   });
 });
@@ -833,9 +910,11 @@ describe('RequestApprovalService.approveRequest - role_change end-to-end transac
 /**
  * Integration-style test (still using mocked `pool`/`client`, per this
  * file's existing pattern) verifying `approveRequest`'s `team_change` path
- * end-to-end: the status update and the membership change share the same
- * transactional client, and a failure in `addUserToTeam` rolls back the
- * status update too.
+ * end-to-end: the status update and the transfer share the same
+ * transactional client (Requirement 6.6), the post-commit effects run
+ * strictly after COMMIT (Requirements 8.4, 13, 14) and never turn a
+ * committed transfer into a failure, and a failure inside
+ * `executeTransfer` rolls the status update back too (Requirement 6.5).
  */
 describe('RequestApprovalService.approveRequest - team_change end-to-end transaction sharing', () => {
   let service;
@@ -846,13 +925,30 @@ describe('RequestApprovalService.approveRequest - team_change end-to-end transac
     status: 'pending',
     requester_email: 'existing@example.com',
     existing_user_id: 42,
-    target_team_id: 7
+    target_team_id: 7,
+    current_team_id: 3,
+    callsign_suffix: null,
+    initiated_by: 11
+  };
+
+  const TRANSFER_OUTCOME = {
+    userId: 42,
+    sourceTeamId: 3,
+    destinationTeamId: 7,
+    priorRole: 'admin',
+    demotedFromAdmin: true,
+    actorId: 9,
+    revokedChannelIds: [],
+    transferRequestId: 2,
+    initiatedBy: 11,
+    viaRequest: true
   };
 
   beforeEach(() => {
     jest.clearAllMocks();
     service = new RequestApprovalService();
     service.emailService.sendApprovalEmail = jest.fn().mockResolvedValue(true);
+    TeamTransferService.applyPostCommitEffects.mockResolvedValue({ callsign: 'ALPHA-Jane', emailSent: true, audited: true });
 
     pool.query.mockImplementation((sql) => {
       if (sql.includes('SELECT * FROM access_requests WHERE id = $1 AND status = $2')) {
@@ -862,7 +958,7 @@ describe('RequestApprovalService.approveRequest - team_change end-to-end transac
     });
   });
 
-  it('commits the status update and the membership change together when addUserToTeam succeeds', async () => {
+  it('commits the status update and the transfer together when executeTransfer succeeds', async () => {
     const mockClient = {
       query: jest.fn().mockImplementation((sql) => {
         if (sql.includes('SELECT ar.*, t.name as team_name')) {
@@ -883,17 +979,86 @@ describe('RequestApprovalService.approveRequest - team_change end-to-end transac
       release: jest.fn()
     };
     pool.connect.mockResolvedValue(mockClient);
-    TeamMembershipService.addUserToTeam.mockResolvedValue({ success: true, groupsQueued: 1 });
+    TeamTransferService.executeTransfer.mockResolvedValue(TRANSFER_OUTCOME);
 
-    const result = await service.approveRequest(2, 9);
+    const result = await service.approveRequest(2, 9, '', null, true);
 
     expect(result).toEqual({ success: true });
-    expect(TeamMembershipService.addUserToTeam).toHaveBeenCalledWith(42, 7, 'member', 9, mockClient);
+    expect(TeamTransferService.executeTransfer).toHaveBeenCalledWith(mockClient, expect.objectContaining({
+      userId: 42,
+      destinationTeamId: 7,
+      actorId: 9,
+      actorIsGlobalManager: true,
+      expectedSourceTeamId: 3
+    }));
     expect(mockClient.query).toHaveBeenCalledWith('COMMIT');
     expect(mockClient.release).toHaveBeenCalledTimes(1);
   });
 
-  it('rolls back the request status update when addUserToTeam fails', async () => {
+  it('runs applyPostCommitEffects with the returned outcome, strictly after COMMIT and after the approval email', async () => {
+    const callOrder = [];
+    const mockClient = {
+      query: jest.fn().mockImplementation((sql) => {
+        if (sql === 'COMMIT') {
+          callOrder.push('COMMIT');
+          return Promise.resolve();
+        }
+        if (sql.includes('SELECT ar.*, t.name as team_name')) {
+          return Promise.resolve({
+            rows: [{ ...PENDING_TEAM_CHANGE_REQUEST, team_name: null, admin_first_name: 'Admin', admin_last_name: 'Istrator' }]
+          });
+        }
+        if (sql.includes('SELECT 1 FROM users') || sql.includes('SELECT 1 FROM teams')) {
+          return Promise.resolve({ rows: [{}] });
+        }
+        return Promise.resolve({ rows: [] });
+      }),
+      release: jest.fn()
+    };
+    pool.connect.mockResolvedValue(mockClient);
+    TeamTransferService.executeTransfer.mockResolvedValue(TRANSFER_OUTCOME);
+    service.emailService.sendApprovalEmail = jest.fn().mockImplementation(async () => {
+      callOrder.push('approvalEmail');
+      return true;
+    });
+    TeamTransferService.applyPostCommitEffects.mockImplementation(async () => {
+      callOrder.push('postCommitEffects');
+      return { callsign: 'ALPHA-Jane', emailSent: true, audited: true };
+    });
+
+    await expect(service.approveRequest(2, 9)).resolves.toEqual({ success: true });
+
+    expect(TeamTransferService.applyPostCommitEffects).toHaveBeenCalledWith(TRANSFER_OUTCOME);
+    expect(callOrder).toEqual(['COMMIT', 'approvalEmail', 'postCommitEffects']);
+  });
+
+  it('does not run applyPostCommitEffects when the transaction rolled back', async () => {
+    const mockClient = {
+      query: jest.fn().mockImplementation((sql) => {
+        if (sql === 'BEGIN' || sql === 'ROLLBACK') {
+          return Promise.resolve();
+        }
+        if (sql.includes('SELECT ar.*, t.name as team_name')) {
+          return Promise.resolve({
+            rows: [{ ...PENDING_TEAM_CHANGE_REQUEST, team_name: null, admin_first_name: 'Admin', admin_last_name: 'Istrator' }]
+          });
+        }
+        if (sql.includes('SELECT 1 FROM users') || sql.includes('SELECT 1 FROM teams')) {
+          return Promise.resolve({ rows: [{}] });
+        }
+        return Promise.resolve({ rows: [] });
+      }),
+      release: jest.fn()
+    };
+    pool.connect.mockResolvedValue(mockClient);
+    TeamTransferService.executeTransfer.mockRejectedValue(new Error("The user's team changed since the request was created"));
+
+    await expect(service.approveRequest(2, 9)).rejects.toThrow("The user's team changed since the request was created");
+
+    expect(TeamTransferService.applyPostCommitEffects).not.toHaveBeenCalled();
+  });
+
+  it('rolls back the request status update when executeTransfer fails', async () => {
     const mockClient = {
       query: jest.fn().mockImplementation((sql) => {
         if (sql === 'BEGIN' || sql === 'ROLLBACK') {
@@ -917,7 +1082,7 @@ describe('RequestApprovalService.approveRequest - team_change end-to-end transac
       release: jest.fn()
     };
     pool.connect.mockResolvedValue(mockClient);
-    TeamMembershipService.addUserToTeam.mockRejectedValue(new Error('membership insert failed'));
+    TeamTransferService.executeTransfer.mockRejectedValue(new Error('membership insert failed'));
 
     await expect(service.approveRequest(2, 9)).rejects.toThrow('membership insert failed');
 
@@ -1338,7 +1503,7 @@ describe('RequestApprovalService.approveRequest - up-front reference validation 
       expect(mockClient.query).toHaveBeenCalledWith('ROLLBACK');
       expect(mockClient.query).not.toHaveBeenCalledWith('COMMIT');
       expect(statusUpdateCalls(mockClient)).toHaveLength(0);
-      expect(TeamMembershipService.addUserToTeam).not.toHaveBeenCalled();
+      expect(TeamTransferService.executeTransfer).not.toHaveBeenCalled();
       expect(service.emailService.sendApprovalEmail).not.toHaveBeenCalled();
     }
   );
@@ -1403,7 +1568,7 @@ describe('RequestApprovalService.approveRequest - up-front reference validation 
       expect(mockClient.query).not.toHaveBeenCalledWith('COMMIT');
       expect(statusUpdateCalls(mockClient)).toHaveLength(0);
       expect(UserProvisioningService.createAndAddUser).not.toHaveBeenCalled();
-      expect(TeamMembershipService.addUserToTeam).not.toHaveBeenCalled();
+      expect(TeamTransferService.executeTransfer).not.toHaveBeenCalled();
       expect(service.emailService.sendApprovalEmail).not.toHaveBeenCalled();
     }
   );
@@ -1578,5 +1743,177 @@ describe('RequestApprovalService.approveRequest - rollback atomicity for later t
     expect(mockClient.query).not.toHaveBeenCalledWith('COMMIT');
     expect(mockClient.release).toHaveBeenCalledTimes(1);
     expect(service.emailService.sendApprovalEmail).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Unit tests for the row lock on `approveRequest`'s transactional
+ * re-fetch (Requirement 11.5 / task 4.1). Without `FOR UPDATE OF ar`,
+ * two concurrent approvals of the same request can both observe
+ * `status = 'pending'` under READ COMMITTED and both proceed; with it,
+ * the second blocks until the first commits and then matches zero rows.
+ *
+ * The lock applies to EVERY request type, not just `team_change`, so it
+ * is asserted across all four -- and it must stay scoped with `OF ar`:
+ * a bare `FOR UPDATE` would also try to lock the nullable side of the
+ * query's `LEFT JOIN`s, which Postgres rejects outright.
+ */
+describe('RequestApprovalService.approveRequest - transactional re-fetch row lock (Requirement 11.5)', () => {
+  let service;
+  let originalFetch;
+
+  const PENDING_REQUESTS = {
+    new_account: {
+      id: 20,
+      request_type: 'new_account',
+      status: 'pending',
+      requester_email: 'newuser@example.com',
+      requester_first_name: 'New',
+      requester_last_name: 'User',
+      requested_first_name: null,
+      requested_last_name: null,
+      callsign_suffix: null,
+      target_team_id: 7
+    },
+    team_change: {
+      id: 21,
+      request_type: 'team_change',
+      status: 'pending',
+      requester_email: 'existing@example.com',
+      existing_user_id: 42,
+      target_team_id: 7
+    },
+    role_change: {
+      id: 22,
+      request_type: 'role_change',
+      status: 'pending',
+      requester_email: 'existing@example.com',
+      existing_user_id: 42,
+      current_team_id: 7,
+      requested_role: 'admin'
+    },
+    name_change: {
+      id: 23,
+      request_type: 'name_change',
+      status: 'pending',
+      requester_email: 'existing@example.com',
+      existing_user_id: 42,
+      requested_first_name: 'Jane',
+      requested_last_name: 'Doe'
+    }
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    service = new RequestApprovalService();
+    service.emailService.sendApprovalEmail = jest.fn().mockResolvedValue(true);
+    originalFetch = global.fetch;
+    Team.getAncestorChain.mockResolvedValue([{ id: 1, name: 'Org', callsign_name_format: 'full_name' }]);
+    Team.getFullMemberList.mockResolvedValue([]);
+    CallsignService.computeDefaultCallsignSuffix.mockReturnValue('New-User');
+    UserAttributesService.generateCallsign.mockResolvedValue(null);
+    UserProvisioningService.createAndAddUser.mockResolvedValue({ localUserId: 55, queuedGroups: 0 });
+    TeamTransferService.executeTransfer.mockResolvedValue({ userId: 42, sourceTeamId: 3, destinationTeamId: 7, priorRole: 'member' });
+    TeamTransferService.applyPostCommitEffects.mockResolvedValue({ callsign: null, emailSent: false, audited: true });
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  function mockPhaseOne(request) {
+    pool.query.mockImplementation((sql) => {
+      if (sql.includes('SELECT * FROM access_requests WHERE id = $1 AND status = $2')) {
+        return Promise.resolve({ rows: [request] });
+      }
+      if (sql.includes('SELECT authentik_user_id FROM users')) {
+        return Promise.resolve({ rows: [{ authentik_user_id: 4242 }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    if (request.request_type === 'new_account') {
+      mockAuthentikSuccess();
+    } else if (request.request_type === 'name_change') {
+      global.fetch = jest.fn().mockResolvedValue({ ok: true, json: async () => ({}) });
+    }
+  }
+
+  function buildClient(request) {
+    return {
+      query: jest.fn().mockImplementation((sql) => {
+        if (sql.includes('SELECT ar.*, t.name as team_name')) {
+          return Promise.resolve({
+            rows: [{
+              ...request,
+              team_name: 'Alpha Team',
+              admin_first_name: 'Admin',
+              admin_last_name: 'Istrator'
+            }]
+          });
+        }
+        if (sql.includes('SELECT 1 FROM users') || sql.includes('SELECT 1 FROM teams')) {
+          return Promise.resolve({ rows: [{}] });
+        }
+        if (sql.includes('UPDATE users SET first_name')) {
+          return Promise.resolve({ rowCount: 1, rows: [{ authentik_user_id: 4242 }] });
+        }
+        if (sql.includes('UPDATE team_memberships')) {
+          return Promise.resolve({ rowCount: 1 });
+        }
+        return Promise.resolve({ rows: [], rowCount: 1 });
+      }),
+      release: jest.fn()
+    };
+  }
+
+  function refetchCalls(mockClient) {
+    return mockClient.query.mock.calls.filter(([sql]) =>
+      typeof sql === 'string' && sql.includes('SELECT ar.*, t.name as team_name')
+    );
+  }
+
+  it.each(Object.keys(PENDING_REQUESTS))(
+    'locks the access_requests row with FOR UPDATE OF ar when re-fetching a %s request inside the transaction',
+    async (requestType) => {
+      const request = PENDING_REQUESTS[requestType];
+      mockPhaseOne(request);
+      const mockClient = buildClient(request);
+      pool.connect.mockResolvedValue(mockClient);
+
+      await expect(service.approveRequest(request.id, 9)).resolves.toEqual({ success: true });
+
+      const calls = refetchCalls(mockClient);
+      expect(calls).toHaveLength(1);
+
+      const [sql, params] = calls[0];
+      expect(sql).toContain('FOR UPDATE OF ar');
+      // The lock supplements, rather than replaces, the pending filter:
+      // the second approval still has to match zero rows once it unblocks.
+      expect(sql).toContain("ar.status = 'pending'");
+      expect(params).toEqual([request.id, 9]);
+
+      // The lock is acquired inside the transaction, not before it.
+      const sqlSequence = mockClient.query.mock.calls.map(([s]) => s);
+      expect(sqlSequence.indexOf('BEGIN')).toBeLessThan(
+        sqlSequence.findIndex((s) => typeof s === 'string' && s.includes('FOR UPDATE OF ar'))
+      );
+    }
+  );
+
+  it('scopes the lock to access_requests, never issuing a bare FOR UPDATE over the LEFT JOINed tables', async () => {
+    const request = PENDING_REQUESTS.team_change;
+    mockPhaseOne(request);
+    const mockClient = buildClient(request);
+    pool.connect.mockResolvedValue(mockClient);
+
+    await service.approveRequest(request.id, 9);
+
+    const [sql] = refetchCalls(mockClient)[0];
+    // A `FOR UPDATE` not followed by `OF ar` would try to lock the
+    // LEFT JOINed teams/users rows, which Postgres rejects.
+    expect(sql).not.toMatch(/FOR\s+UPDATE(?!\s+OF\s+ar)/);
+    expect(sql).toContain('LEFT JOIN teams t');
+    expect(sql).toContain('LEFT JOIN users u');
   });
 });

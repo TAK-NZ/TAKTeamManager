@@ -213,6 +213,11 @@ export const usersAPI = {
   removeFromTeam: (userId, teamId) => api.delete(`/users/remove-from-team/${userId}`, { data: { teamId } }),
   moveToHoldingPen: (userId) => api.post(`/users/${userId}/holding-pen`),
   resendWelcome: (userId, teamId) => api.post(`/users/${userId}/resend-welcome`, { teamId }),
+  // data: { targetTeamId, justification?, callsignSuffix? }. Resolves 200 with
+  // { status: 'completed', ... } when the caller administers both sides, or 202
+  // with { status: 'pending_approval', ... } when the move needs the other
+  // team's approval; 400/403/404/409 reject with { error } in the body.
+  transfer: (userId, data) => api.post(`/users/${userId}/transfer`, data),
 };
 
 export const channelsAPI = {

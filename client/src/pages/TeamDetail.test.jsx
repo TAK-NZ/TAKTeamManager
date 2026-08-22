@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { formatCallsignLevels, formatCallsignNameFormatExample, computeTeamDepth, getInitialMemberEditForm, isValidMemberCallsignSuffix, isValidSubTeamCallsignPrefix } from './TeamDetail.jsx';
 
 // Validates: Requirements 1.1, 1.2, 2.4, 2.5
@@ -199,5 +202,150 @@ describe('isValidSubTeamCallsignPrefix (Req 3.10)', () => {
   it('rejects a value containing any other disallowed character', () => {
     expect(isValidSubTeamCallsignPrefix('ST.L')).toBe(false)
     expect(isValidSubTeamCallsignPrefix('ST L')).toBe(false)
+  })
+})
+// Validates: Requirement 15.1
+//
+// Task 13.3 added a `transferringMember` state plus an
+// `ArrowRightCircleIcon` transfer button inside the existing
+// `canManageTeam &&` action cell of BOTH the Members table and the Team
+// Admins table, so the action is offered on rows whose `role` is `member`
+// and on rows whose `role` is `admin`.
+//
+// `canManageTeam` is computed inside the component body
+// (`isGlobalAdmin || isTeamAdmin`) and is not exported, and this project
+// has no component-render harness (`@testing-library/react` is not a
+// dependency -- see the file header comment above). So Requirement 15.1's
+// gate is covered in two halves that together pin the behaviour without
+// rendering:
+//
+//   1. `computeCanManageTeam` below mirrors TeamDetail.jsx's gate
+//      expression and is exercised over every combination of
+//      Global_Manager status and Team_Admin membership, following the
+//      source-contract convention already used in
+//      src/components/TeamFormDialog.test.jsx.
+//   2. The structural tests read TeamDetail.jsx's own source and assert
+//      the transfer button in each of the two tables actually sits inside
+//      a `canManageTeam &&`-gated action cell, and is gated by nothing
+//      else. That is what makes half 1 more than a restatement: if the
+//      button were ever moved outside the gate, or given an extra
+//      condition, these fail.
+
+// Mirrors TeamDetail.jsx:
+//   const isGlobalAdmin = user?.isAdmin
+//   const isTeamAdmin = admins.some(a => String(a.id) === String(user?.userId))
+//   const canManageTeam = isGlobalAdmin || isTeamAdmin
+function computeCanManageTeam(user, admins) {
+  const isGlobalAdmin = user?.isAdmin
+  const isTeamAdmin = admins.some(a => String(a.id) === String(user?.userId))
+  return isGlobalAdmin || isTeamAdmin
+}
+
+describe('canManageTeam gate for the transfer action (Req 15.1)', () => {
+  const admins = [{ id: 7 }, { id: 9 }]
+
+  it('offers the transfer action to a Global_Manager who is not a Team_Admin of the displayed team', () => {
+    expect(computeCanManageTeam({ userId: 42, isAdmin: true }, admins)).toBe(true)
+  })
+
+  it('offers the transfer action to a Team_Admin of the displayed team who is not a Global_Manager', () => {
+    expect(computeCanManageTeam({ userId: 9, isAdmin: false }, admins)).toBe(true)
+  })
+
+  it('offers the transfer action when the user is both a Global_Manager and a Team_Admin', () => {
+    expect(computeCanManageTeam({ userId: 7, isAdmin: true }, admins)).toBe(true)
+  })
+
+  it('withholds the transfer action when the user is neither a Global_Manager nor a Team_Admin', () => {
+    expect(computeCanManageTeam({ userId: 42, isAdmin: false }, admins)).toBe(false)
+  })
+
+  it('matches a Team_Admin across the number/string id boundary (String() coercion on both sides)', () => {
+    // The admins list comes from the API as numeric ids; `user.userId` may
+    // arrive as a string from the JWT payload.
+    expect(computeCanManageTeam({ userId: '9', isAdmin: false }, admins)).toBe(true)
+    expect(computeCanManageTeam({ userId: 9, isAdmin: false }, [{ id: '9' }])).toBe(true)
+  })
+
+  it('withholds the transfer action while the admins list is still empty (not yet loaded)', () => {
+    expect(computeCanManageTeam({ userId: 9, isAdmin: false }, [])).toBe(false)
+  })
+
+  it('withholds the transfer action for a null/undefined user without throwing', () => {
+    expect(computeCanManageTeam(null, admins)).toBeFalsy()
+    expect(computeCanManageTeam(undefined, admins)).toBeFalsy()
+  })
+
+  it('withholds the transfer action for a user with no userId against real admin rows', () => {
+    // Documents the one caveat in the `String(a.id) === String(user?.userId)`
+    // comparison: it is only id-absence-safe because every admins row the
+    // API returns carries an id. Two absent ids would coerce to the same
+    // 'undefined' string and match -- unreachable here, but the reason this
+    // case is asserted against real rows rather than a synthetic idless one.
+    expect(computeCanManageTeam({ isAdmin: false }, admins)).toBe(false)
+  })
+})
+
+describe('transfer action placement in TeamDetail.jsx (Req 15.1)', () => {
+  // `fileURLToPath` on the string form: the jsdom test environment replaces
+  // the global `URL` with whatwg-url, whose instances node:fs rejects.
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  // Returns the `<td>...</td>` cell that encloses `index`.
+  function enclosingTableCell(index) {
+    const start = source.lastIndexOf('<td', index)
+    const end = source.indexOf('</td>', index)
+    expect(start).toBeGreaterThan(-1)
+    expect(end).toBeGreaterThan(start)
+    return source.slice(start, end)
+  }
+
+  // `role` of `member` -> the Members table row; `role` of `admin` -> the
+  // Team Admins table row. Each table's row variable is what the button's
+  // onClick passes to `setTransferringMember`.
+  const rows = [
+    { role: 'member', rowVar: 'member' },
+    { role: 'admin', rowVar: 'admin' }
+  ]
+
+  it.each(rows)('renders exactly one transfer action on a $role row', ({ rowVar }) => {
+    const occurrences = source.split(`setTransferringMember(${rowVar})`).length - 1
+    expect(occurrences).toBe(1)
+  })
+
+  it.each(rows)('places the $role row transfer action inside a canManageTeam-gated action cell', ({ rowVar }) => {
+    const index = source.indexOf(`setTransferringMember(${rowVar})`)
+    expect(index).toBeGreaterThan(-1)
+
+    const cell = enclosingTableCell(index)
+    expect(cell).toContain('{canManageTeam && (')
+  })
+
+  it.each(rows)('gates the $role row transfer action on canManageTeam alone, with no additional condition', ({ rowVar }) => {
+    const index = source.indexOf(`setTransferringMember(${rowVar})`)
+    const cell = enclosingTableCell(index)
+    const gateStart = cell.indexOf('{canManageTeam && (')
+    const between = cell.slice(gateStart + '{canManageTeam && ('.length, cell.indexOf(`setTransferringMember(${rowVar})`))
+
+    // No nested conditional render opens between the gate and the button,
+    // so `canManageTeam` is the whole condition on the transfer action.
+    expect(between).not.toContain('&& (')
+    expect(between).not.toContain('? (')
+  })
+
+  it.each(rows)('renders the transfer action on a $role row as the ArrowRightCircleIcon button', ({ rowVar }) => {
+    const index = source.indexOf(`setTransferringMember(${rowVar})`)
+    const button = source.slice(index, source.indexOf('</button>', index))
+    expect(button).toContain('ArrowRightCircleIcon')
+    expect(button).toContain('aria-label="Transfer member to another team"')
+  })
+
+  it('renders the transfer dialog only while a member has been selected for transfer', () => {
+    expect(source).toContain('{transferringMember && (')
+    const index = source.indexOf('{transferringMember && (')
+    const block = source.slice(index, source.indexOf('/>', index))
+    expect(block).toContain('<TransferMemberDialog')
+    expect(block).toContain('member={transferringMember}')
+    expect(block).toContain('onCompleted={handleTransferCompleted}')
   })
 })

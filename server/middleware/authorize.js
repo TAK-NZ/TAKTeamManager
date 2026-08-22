@@ -72,6 +72,89 @@ function logAuthzFailure(req, reason) {
 }
 
 /**
+ * Shared row-scoped resolver backing BOTH `request:approve` and
+ * `request:deny` (Requirement 5, team-member-transfer). Both identifiers
+ * already have Permission_Registry entries
+ * (`POST /api/requests/:requestId/approve` and `.../deny`) but neither is
+ * in `roleDefaults.authenticated_user` and neither had a resolver, so
+ * every non-Global_Manager acting on a pending request was denied — the
+ * Requests page could list rows it could not act on. Adding the
+ * identifiers to `roleDefaults` would grant a blanket approve permission
+ * to every authenticated user; a resolver keeps Global_Manager access
+ * flowing through the `'*'` wildcard and Team_Admin access flowing
+ * through this per-request, row-level check.
+ *
+ * Modelled directly on `channel_request:process` below: load the row named
+ * by `:requestId`, pick the team column that gates it, delegate to
+ * `Team.isAdmin` (which walks the Ancestor_Chain, so a Team_Admin above
+ * the gating Team also qualifies). The only addition is that the gating
+ * column depends on `request_type`:
+ *
+ *   - `team_change`  -> `approval_team_id` (Req 5.2) — the side of the
+ *                       transfer the initiator does NOT administer
+ *   - `new_account`  -> `target_team_id`   (Req 5.3)
+ *   - `role_change`  -> `current_team_id`  (Req 5.4)
+ *   - `name_change`  -> `current_team_id`  (Req 5.4)
+ *
+ * Both approve and deny share one implementation because Requirement 5
+ * states one rule for both: whoever may approve a request may also deny
+ * it.
+ *
+ * Denials (zero rows for `:requestId` per Req 5.5, an unrecognised
+ * `request_type`, or a `NULL` gating column — e.g. a legacy `team_change`
+ * row predating the `approval_team_id` migration) all return `false` and
+ * so respond with `authorize()`'s standard 403: `request:approve` and
+ * `request:deny` are deliberately NOT added to
+ * `PERMISSION_DENIALS_MAPPED_TO_404`, which stays reserved for
+ * `'team:read'` (Req 5.6).
+ *
+ * Uses the module-scope `pool` import. Per this module's contract a throw
+ * propagates to `isSatisfiedWithRowScopedChecks`, which logs it and fails
+ * closed, so there is deliberately no local try/catch.
+ *
+ * @param {import('express').Request} req
+ * @returns {Promise<boolean>}
+ */
+async function resolveRequestActionPermission(req) {
+  if (req.user && req.user.is_global_manager) {
+    return true;
+  }
+
+  const result = await pool.query(
+    'SELECT request_type, approval_team_id, target_team_id, current_team_id FROM access_requests WHERE id = $1',
+    [req.params && req.params.requestId]
+  );
+
+  if (result.rows.length === 0) {
+    return false;
+  }
+
+  const row = result.rows[0];
+  let gatingTeamId;
+  switch (row.request_type) {
+    case 'team_change':
+      gatingTeamId = row.approval_team_id;
+      break;
+    case 'new_account':
+      gatingTeamId = row.target_team_id;
+      break;
+    case 'role_change':
+    case 'name_change':
+      gatingTeamId = row.current_team_id;
+      break;
+    default:
+      gatingTeamId = null;
+  }
+
+  if (gatingTeamId === null || gatingTeamId === undefined) {
+    return false;
+  }
+
+  // LOCAL users.id, never req.user.id (the Authentik id).
+  return Team.isAdmin(gatingTeamId, req.user && req.user.userId);
+}
+
+/**
  * Row-scoped permission resolver functions.
  *
  * `resolveAccess` (server/config/permissions.registry.js) only checks
@@ -279,6 +362,73 @@ const rowScopedResolvers = {
 
     return false;
   },
+
+  /**
+   * `user:team:transfer` — Requirement 2.2/2.3/2.6 (team-member-transfer):
+   * satisfied if the requesting user is a Global_Manager, OR is an admin
+   * (per `Team.isAdmin`, so a Team_Admin anywhere in either Team's
+   * Ancestor_Chain counts — Req 2.6) of the Destination_Team named by
+   * `req.body.targetTeamId`, OR is an admin of the Source_Team named by
+   * the `:userId` route param's Direct_Membership.
+   *
+   * The destination leg is evaluated first because it needs no extra
+   * query when it succeeds. Reading `req.body` here has precedent in
+   * `channel_request:create` and `team:create:root_or_sub`;
+   * `express.json()` runs before route middleware, so the body is
+   * populated by the time this runs.
+   *
+   * A `:userId` naming no `users` row, or naming a user with no
+   * Direct_Membership, yields no source-team leg at all — such a request
+   * is authorized only via the destination leg or Global_Manager status,
+   * and is otherwise denied. Note this resolver grants the *ability to
+   * attempt* a transfer; whether the transfer executes immediately or
+   * becomes a pending Transfer_Request is a separate Dual_Admin
+   * determination made by the route handler (Req 2.4/2.5), and a
+   * self-transfer is rejected there with 400 rather than here with 403
+   * (Req 1.8).
+   *
+   * Per this module's contract, a throw propagates to
+   * `isSatisfiedWithRowScopedChecks`, which logs it and fails closed — so
+   * there is deliberately no local try/catch here.
+   *
+   * @param {import('express').Request} req
+   * @returns {Promise<boolean>}
+   */
+  'user:team:transfer': async (req) => {
+    if (req.user && req.user.is_global_manager) {
+      return true;
+    }
+
+    // LOCAL users.id, never req.user.id (the Authentik id).
+    const actorId = req.user && req.user.userId;
+
+    const targetTeamId = req.body && req.body.targetTeamId;
+    if (targetTeamId && await Team.isAdmin(targetTeamId, actorId)) {
+      return true;
+    }
+
+    const direct = await pool.query(
+      'SELECT team_id FROM team_memberships WHERE user_id = $1 AND inherited_from_team_id IS NULL',
+      [req.params && req.params.userId]
+    );
+
+    if (direct.rows.length === 0) {
+      return false;
+    }
+
+    return Team.isAdmin(direct.rows[0].team_id, actorId);
+  },
+
+  /**
+   * `request:approve` / `request:deny` — Requirement 5
+   * (team-member-transfer). Both identifiers share the single
+   * `resolveRequestActionPermission` implementation defined above this
+   * object: Global_Manager, or a Team_Admin of the Team named by the
+   * gating column that this `access_requests` row's `request_type`
+   * selects.
+   */
+  'request:approve': resolveRequestActionPermission,
+  'request:deny': resolveRequestActionPermission,
 
   /**
    * `channel_request:create` — satisfied if the requesting user is a
