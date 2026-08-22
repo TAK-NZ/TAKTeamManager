@@ -74,7 +74,14 @@ jest.mock('../config/permissions.registry', () => {
       // mirrored here so the shared `request:approve` / `request:deny`
       // resolver can be exercised through the middleware.
       'POST /api/requests/:requestId/approve': ['request:approve'],
-      'POST /api/requests/:requestId/deny': ['request:deny']
+      'POST /api/requests/:requestId/deny': ['request:deny'],
+      // The three user-directory LISTING routes, mirrored from the
+      // production registry so the `user:read:team_admin` resolver can be
+      // exercised through the middleware. All three share one entry and
+      // one resolver.
+      'GET /api/users': ['user:read:team_admin'],
+      'GET /api/users/search': ['user:read:team_admin'],
+      'GET /api/users/available': ['user:read:team_admin']
     },
     roleDefaults: {
       global_manager: ['*'],
@@ -123,6 +130,13 @@ function buildApp(user) {
   // runs against each of them.
   app.post('/api/requests/:requestId/approve', authorize, (req, res) => res.status(200).json({ ok: true }));
   app.post('/api/requests/:requestId/deny', authorize, (req, res) => res.status(200).json({ ok: true }));
+  // The three user-directory listing routes gated by
+  // `user:read:team_admin`. All three carry the same registry entry and
+  // resolver, so all three are mounted and every assertion below runs
+  // against each of them.
+  app.get('/api/users', authorize, (req, res) => res.status(200).json({ ok: true }));
+  app.get('/api/users/search', authorize, (req, res) => res.status(200).json({ ok: true }));
+  app.get('/api/users/available', authorize, (req, res) => res.status(200).json({ ok: true }));
   return app;
 }
 
@@ -898,6 +912,171 @@ describe('authorize (task 3.5: request:approve / request:deny gating column reso
         route: `/api/requests/${REQUEST_ID}/${action}`,
         reason: 'permission_denied'
       });
+    });
+  });
+});
+
+/**
+ * The `user:read:team_admin` row-scoped resolver, backing the three
+ * user-directory LISTING routes (`GET /api/users`,
+ * `GET /api/users/search`, `GET /api/users/available`).
+ *
+ * Those three previously required a plain `user:read` that also sat in
+ * `roleDefaults.authenticated_user`, so `resolveAccess` permitted them
+ * outright for every authenticated user -- a plain non-admin team member
+ * could enumerate the whole user directory (names, emails) and the pool of
+ * unassigned users. The resolver restricts them to a Global_Manager or a
+ * Team_Admin of ANY team.
+ *
+ * Unlike the other `:team_admin` resolvers exercised above, this one is
+ * NOT row-scoped: there is no target row on a listing route, so the check
+ * is "administers something", expressed as a single existence query
+ * against `team_memberships` rather than a `Team.isAdmin` call -- which is
+ * why `mockIsAdmin` is asserted to stay untouched throughout.
+ *
+ * `simulateAdminMembershipLookup` below stands in for the database: it
+ * applies the resolver's own predicate to a fixture set of
+ * `team_memberships` rows, but applies each clause ONLY if that clause is
+ * actually present in the SQL the resolver issued. So dropping
+ * `inherited_from_team_id IS NULL` from the query makes the
+ * inherited-admin case return a row and its test fail, rather than the
+ * test silently agreeing with a looser implementation.
+ */
+const ADMIN_MEMBERSHIP_EXISTS_SQL = /SELECT 1[\s\S]*FROM team_memberships[\s\S]*user_id = \$1/;
+
+/**
+ * Installs a `pool.query` implementation over `membershipRows`, asserting
+ * the resolver's query shape and returning whichever rows the SQL's own
+ * clauses select for `params[0]`.
+ *
+ * @param {Array<{user_id: number, role: string, inherited_from_team_id: number|null}>} membershipRows
+ */
+function simulateAdminMembershipLookup(membershipRows) {
+  pool.query.mockImplementation(async (sql, params) => {
+    expect(sql).toMatch(ADMIN_MEMBERSHIP_EXISTS_SQL);
+
+    const filtersOnAdminRole = sql.includes("role = 'admin'");
+    const filtersOnDirectMembership = sql.includes('inherited_from_team_id IS NULL');
+
+    const rows = membershipRows.filter(
+      (row) =>
+        String(row.user_id) === String(params[0]) &&
+        (!filtersOnAdminRole || row.role === 'admin') &&
+        (!filtersOnDirectMembership || row.inherited_from_team_id === null)
+    );
+
+    return { rows: rows.map(() => ({ '?column?': 1 })) };
+  });
+}
+
+describe('authorize (user:read:team_admin resolver for the user-directory listing routes)', () => {
+  // The LOCAL users.id, and a deliberately different Authentik id, so a
+  // resolver reading the wrong one is observable.
+  const LOCAL_USER_ID = 1;
+  const AUTHENTIK_ID = 9001;
+
+  const LISTING_PATHS = ['/api/users', '/api/users/search', '/api/users/available'];
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  afterEach(() => {
+    // Shared with the suites above, which rely on per-test
+    // `mockResolvedValueOnce` queues rather than standing implementations.
+    mockIsAdmin.mockReset();
+    pool.query.mockReset();
+  });
+
+  describe.each(LISTING_PATHS)('GET %s', (path) => {
+    function list(user) {
+      return request(buildApp(user)).get(path).set('X-Forwarded-For', TEST_IP);
+    }
+
+    it('permits a Global_Manager without issuing the admin-membership query at all', async () => {
+      // A standing implementation that would DENY if it were reached, so a
+      // passing assertion can only mean the short-circuit fired.
+      simulateAdminMembershipLookup([]);
+
+      const res = await list({ id: AUTHENTIK_ID, userId: LOCAL_USER_ID, is_global_manager: true });
+
+      expect(res.status).toBe(200);
+      expect(pool.query).not.toHaveBeenCalled();
+      expect(mockIsAdmin).not.toHaveBeenCalled();
+      expect(mockWarn).not.toHaveBeenCalled();
+    });
+
+    it('permits a user holding a direct role=admin membership', async () => {
+      simulateAdminMembershipLookup([
+        { user_id: LOCAL_USER_ID, role: 'admin', inherited_from_team_id: null }
+      ]);
+
+      const res = await list({ id: AUTHENTIK_ID, userId: LOCAL_USER_ID, is_global_manager: false });
+
+      expect(res.status).toBe(200);
+      expect(pool.query).toHaveBeenCalledTimes(1);
+      expect(mockIsAdmin).not.toHaveBeenCalled();
+      expect(mockWarn).not.toHaveBeenCalled();
+    });
+
+    it('looks the membership up by the LOCAL users.id (req.user.userId), never the Authentik id', async () => {
+      simulateAdminMembershipLookup([
+        { user_id: LOCAL_USER_ID, role: 'admin', inherited_from_team_id: null }
+      ]);
+
+      await list({ id: AUTHENTIK_ID, userId: LOCAL_USER_ID, is_global_manager: false });
+
+      const [, params] = pool.query.mock.calls[0];
+      expect(params).toEqual([LOCAL_USER_ID]);
+      expect(params).not.toContain(AUTHENTIK_ID);
+    });
+
+    it('denies a user holding only a member (non-admin) membership', async () => {
+      simulateAdminMembershipLookup([
+        { user_id: LOCAL_USER_ID, role: 'member', inherited_from_team_id: null }
+      ]);
+
+      const res = await list({ id: AUTHENTIK_ID, userId: LOCAL_USER_ID, is_global_manager: false });
+
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: 'Forbidden' });
+      expect(mockWarn).toHaveBeenCalledTimes(1);
+      const [payload] = mockWarn.mock.calls[0];
+      expect(payload).toEqual({ ip: TEST_IP, route: path, reason: 'permission_denied' });
+    });
+
+    it('denies a user whose only admin row is INHERITED (non-null inherited_from_team_id)', async () => {
+      // Pins the stricter `inherited_from_team_id IS NULL` filter, i.e. the
+      // glossary's Team_Admin, matching Team.isAdmin's own predicate --
+      // rather than auth.js /auth/me's looser `role = 'admin'` alone.
+      simulateAdminMembershipLookup([
+        { user_id: LOCAL_USER_ID, role: 'admin', inherited_from_team_id: 42 }
+      ]);
+
+      const res = await list({ id: AUTHENTIK_ID, userId: LOCAL_USER_ID, is_global_manager: false });
+
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: 'Forbidden' });
+    });
+
+    it('denies a user with no memberships at all', async () => {
+      simulateAdminMembershipLookup([]);
+
+      const res = await list({ id: AUTHENTIK_ID, userId: LOCAL_USER_ID, is_global_manager: false });
+
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: 'Forbidden' });
+      expect(pool.query).toHaveBeenCalledTimes(1);
+    });
+
+    it('denies a user whose admin row belongs to somebody else', async () => {
+      simulateAdminMembershipLookup([
+        { user_id: LOCAL_USER_ID + 1, role: 'admin', inherited_from_team_id: null }
+      ]);
+
+      const res = await list({ id: AUTHENTIK_ID, userId: LOCAL_USER_ID, is_global_manager: false });
+
+      expect(res.status).toBe(403);
     });
   });
 });

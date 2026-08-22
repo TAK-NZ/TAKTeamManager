@@ -72,13 +72,37 @@ const routes = {
   'DELETE /api/teams/:teamId': ['team:delete:global'],
 
   // --- /api/users (server/routes/users.js) ---
-  'GET /api/users': ['user:read'],
+  // The three user-directory LISTING routes (`GET /api/users`,
+  // `GET /api/users/search`, `GET /api/users/available`) require
+  // 'user:read:team_admin': a Global_Manager, or a Team_Admin of ANY team.
+  // They previously required a plain 'user:read' that also sat in
+  // `roleDefaults.authenticated_user`, which let every authenticated user
+  // -- including a plain non-admin team member -- enumerate the whole user
+  // directory (names, emails) and the full pool of unassigned users, even
+  // though all three routes only back admin-only UI
+  // (client/src/pages/Users.jsx, client/src/pages/Admin.jsx, and the Add
+  // Member dialog in client/src/pages/TeamDetail.jsx).
+  //
+  // These are LISTING routes with no target row, so the resolver
+  // (server/middleware/authorize.js) checks "administers something", not
+  // "administers this" -- see that resolver's own comment. Scoping the
+  // CONTENTS of the response by organisation (so a Team_Admin sees only
+  // their org's users rather than the whole directory) is a SEPARATE,
+  // still-open concern, not addressed by this entry: it needs org
+  // provenance on `users`, which does not exist yet.
+  //
+  // Deliberately NOT added to `roleDefaults.authenticated_user` below, for
+  // the same reason as the transfer and callsign-suffix-preview routes: a
+  // statically-held identifier satisfies `resolveAccess` outright, so
+  // `authorize.js` would never consult the resolver at all and the gate
+  // would be bypassed.
+  'GET /api/users': ['user:read:team_admin'],
   'GET /api/users/me': ['user:read:own'],
   'POST /api/users': ['user:create:team_admin'],
   'POST /api/users/:userId/holding-pen': ['user:holding_pen:team_admin'],
   'POST /api/users/:userId/resend-welcome': ['user:resend_welcome:team_admin'],
-  'GET /api/users/search': ['user:read'],
-  'GET /api/users/available': ['user:read'],
+  'GET /api/users/search': ['user:read:team_admin'],
+  'GET /api/users/available': ['user:read:team_admin'],
   'POST /api/users/create-and-add': ['user:create'],
   // Read-only callsign_suffix preview for the create-and-add flow. Shares
   // the SAME 'user:create' identifier as the create route above, on
@@ -367,8 +391,12 @@ const roleDefaults = {
   // the current inline implementation), so the registry stays internally
   // consistent with the routes it describes.
   authenticated_user: [
+    // 'user:read:own' stays: `GET /api/auth/me` and `GET /api/users/me`
+    // must keep working for every authenticated user. The plain
+    // 'user:read' that used to sit here was REMOVED -- it gated the three
+    // user-directory listing routes above, which are now
+    // 'user:read:team_admin' and resolver-gated (see those entries).
     'user:read:own',
-    'user:read',
     'team:read:own',
     'channel:read',
     'channel:subscribe:deployment',

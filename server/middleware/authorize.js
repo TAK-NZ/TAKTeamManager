@@ -364,6 +364,70 @@ const rowScopedResolvers = {
   },
 
   /**
+   * `user:read:team_admin` — satisfied if the requesting user is a
+   * Global_Manager OR holds at least one DIRECT admin membership, i.e. is
+   * a Team_Admin of *some* team. Backs the three user-directory LISTING
+   * routes (`GET /api/users`, `GET /api/users/search`,
+   * `GET /api/users/available`), which previously required the plain
+   * `user:read` identifier — and that identifier lived in
+   * `roleDefaults.authenticated_user`, so EVERY authenticated user,
+   * including a plain non-admin team member, could enumerate the user
+   * directory (names, emails) and the full pool of unassigned users. All
+   * three routes back admin-only UI (`client/src/pages/Users.jsx`,
+   * `client/src/pages/Admin.jsx`, and the Add Member dialog in
+   * `client/src/pages/TeamDetail.jsx`), so the disclosure bought nothing.
+   *
+   * WHY THIS ONE IS NOT ROW-SCOPED: unlike every other `:team_admin`
+   * resolver in this object, there is no target row to scope against —
+   * these are listing routes with no `:teamId`/`:userId` subject — so the
+   * question answered here is "does this user administer SOMETHING",
+   * not "does this user administer THIS". The per-row narrowing of WHICH
+   * users appear in the response is deliberately NOT addressed here: doing
+   * that properly needs organisation provenance on `users`, which does not
+   * exist yet, so a Team_Admin still sees the whole directory. That
+   * narrowing is a separate, still-open concern; this resolver only closes
+   * the "any authenticated user at all" hole.
+   *
+   * `role = 'admin' AND inherited_from_team_id IS NULL` is the glossary's
+   * Team_Admin condition, matching `Team.isAdmin`'s own filter
+   * (server/models/Team.js) and `BroadcastEmailService`'s
+   * `getAdministeredTeamIds` — an INHERITED admin row never confers admin
+   * status. Note the divergence from `server/routes/auth.js`'s `/auth/me`
+   * team-admin flag, which uses the looser `role = 'admin'` with no
+   * `inherited_from_team_id` filter: the stricter form is used here on
+   * purpose (it is the authorization boundary, not a UI hint), and
+   * `auth.js` is intentionally left unchanged.
+   *
+   * The query is issued through the module-scope `pool` import, the way
+   * `user:team:transfer` and `channel_request:process` above do, because
+   * neither existing helper fits: `Team.isAdmin` answers a per-team
+   * question and needs a `teamId`, and `BroadcastEmailService`'s
+   * `getAdministeredTeamIds` is module-private (not exported) as well as
+   * doing more work than a `LIMIT 1` existence check needs. Per this
+   * module's contract a throw propagates to
+   * `isSatisfiedWithRowScopedChecks`, which logs it and fails closed, so
+   * there is deliberately no local try/catch.
+   *
+   * @param {import('express').Request} req
+   * @returns {Promise<boolean>}
+   */
+  'user:read:team_admin': async (req) => {
+    if (req.user && req.user.is_global_manager) {
+      return true;
+    }
+
+    const result = await pool.query(
+      `SELECT 1 FROM team_memberships
+        WHERE user_id = $1 AND role = 'admin' AND inherited_from_team_id IS NULL
+        LIMIT 1`,
+      // LOCAL users.id, never req.user.id (the Authentik id).
+      [req.user && req.user.userId]
+    );
+
+    return result.rows.length > 0;
+  },
+
+  /**
    * `user:team:transfer` — Requirement 2.2/2.3/2.6 (team-member-transfer):
    * satisfied if the requesting user is a Global_Manager, OR is an admin
    * (per `Team.isAdmin`, so a Team_Admin anywhere in either Team's

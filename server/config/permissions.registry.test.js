@@ -255,3 +255,68 @@ describe('callsign_suffix preview registry entry', () => {
     expect(resolveAccess(PREVIEW_ROUTE_KEY, roleDefaults.global_manager, registry)).toBe(true);
   });
 });
+
+/**
+ * Registry assertions for the three user-directory LISTING routes.
+ *
+ * `GET /api/users`, `GET /api/users/search` and `GET /api/users/available`
+ * were all mapped to a plain `user:read` that ALSO sat in
+ * `roleDefaults.authenticated_user`, so `resolveAccess` permitted them
+ * outright for every authenticated user -- a plain non-admin team member
+ * could enumerate the whole user directory (names, emails) and the full
+ * pool of unassigned users, even though all three back admin-only UI. They
+ * now require `user:read:team_admin`, granted per-request by the row-scoped
+ * resolver in `server/middleware/authorize.js` (Global_Manager, or a
+ * Team_Admin of any team).
+ *
+ * As with `user:team:transfer` above, the negative assertions carry the
+ * weight: putting `user:read:team_admin` into
+ * `roleDefaults.authenticated_user` would satisfy `resolveAccess` outright,
+ * so `authorize.js` would never consult the resolver and the disclosure
+ * would silently return. `user:read:own` must stay, though -- `/auth/me`
+ * and `GET /api/users/me` depend on it for every authenticated user.
+ */
+describe('user-directory listing route registry entries', () => {
+  const registry = { routes, roleDefaults };
+  const LISTING_ROUTE_KEYS = [
+    'GET /api/users',
+    'GET /api/users/search',
+    'GET /api/users/available'
+  ];
+
+  it.each(LISTING_ROUTE_KEYS)('maps %s to exactly user:read:team_admin', (routeKey) => {
+    expect(routes[routeKey]).toEqual(['user:read:team_admin']);
+  });
+
+  it.each(LISTING_ROUTE_KEYS)(
+    'resolves %s only for a caller holding user:read:team_admin or the wildcard',
+    (routeKey) => {
+      expect(resolveAccess(routeKey, ['user:read:team_admin'], registry)).toBe(true);
+      expect(resolveAccess(routeKey, roleDefaults.global_manager, registry)).toBe(true);
+      expect(resolveAccess(routeKey, roleDefaults.authenticated_user, registry)).toBe(false);
+      expect(resolveAccess(routeKey, [], registry)).toBe(false);
+      // The retired identifier must not still open the route.
+      expect(resolveAccess(routeKey, ['user:read'], registry)).toBe(false);
+    }
+  );
+
+  it('keeps both user:read and user:read:team_admin out of roleDefaults.authenticated_user', () => {
+    expect(roleDefaults.authenticated_user).not.toContain('user:read');
+    expect(roleDefaults.authenticated_user).not.toContain('user:read:team_admin');
+  });
+
+  it('keeps user:read:own in roleDefaults.authenticated_user for the self-read routes', () => {
+    // `/auth/me` and `GET /api/users/me` must keep working for every
+    // authenticated user, admin or not.
+    expect(roleDefaults.authenticated_user).toContain('user:read:own');
+    expect(routes['GET /api/auth/me']).toEqual(['user:read:own']);
+    expect(routes['GET /api/users/me']).toEqual(['user:read:own']);
+    expect(resolveAccess('GET /api/auth/me', roleDefaults.authenticated_user, registry)).toBe(true);
+    expect(resolveAccess('GET /api/users/me', roleDefaults.authenticated_user, registry)).toBe(true);
+  });
+
+  it('no longer references the retired user:read identifier anywhere in the registry', () => {
+    const allRequired = Object.values(routes).flat();
+    expect(allRequired).not.toContain('user:read');
+  });
+});
