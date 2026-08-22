@@ -320,3 +320,213 @@ describe('user-directory listing route registry entries', () => {
     expect(allRequired).not.toContain('user:read');
   });
 });
+
+/**
+ * Registry assertions for the three body-`teamId`-scoped user routes.
+ *
+ * `POST /api/users/create-and-add`,
+ * `POST /api/users/callsign-suffix-preview` (both `user:create`) and
+ * `POST /api/users/add-to-team` (`user:team:add`) all had registry entries
+ * whose identifiers had NO resolver in `server/middleware/authorize.js`
+ * and were NOT in `roleDefaults.authenticated_user` -- so nothing but a
+ * Global_Manager's `'*'` wildcard could satisfy them and every Team_Admin
+ * was denied 403. The shared `resolveTeamAdminOfBodyTeamId` resolver now
+ * grants a Team_Admin of `req.body.teamId`.
+ *
+ * As with `user:team:transfer` above, the negative assertions carry the
+ * weight: adding any of these identifiers to
+ * `roleDefaults.authenticated_user` would satisfy `resolveAccess`
+ * outright, so `authorize.js` would never consult the resolver and every
+ * authenticated user could create users in, and add users to, any team.
+ */
+describe('body-teamId-scoped user route registry entries', () => {
+  const registry = { routes, roleDefaults };
+  const BODY_SCOPED_ROUTE_KEYS = {
+    'POST /api/users/create-and-add': 'user:create',
+    'POST /api/users/callsign-suffix-preview': 'user:create',
+    'POST /api/users/add-to-team': 'user:team:add'
+  };
+
+  it.each(Object.entries(BODY_SCOPED_ROUTE_KEYS))(
+    'still maps %s to exactly [%s]',
+    (routeKey, identifier) => {
+      expect(routes[routeKey]).toEqual([identifier]);
+    }
+  );
+
+  it.each(Object.keys(BODY_SCOPED_ROUTE_KEYS))(
+    'resolves %s statically for a Global_Manager but not for a plain authenticated user',
+    (routeKey) => {
+      // false for authenticated_user is the POINT: the row-scoped resolver,
+      // not a static grant, is what opens these routes to a Team_Admin.
+      expect(resolveAccess(routeKey, roleDefaults.authenticated_user, registry)).toBe(false);
+      expect(resolveAccess(routeKey, roleDefaults.global_manager, registry)).toBe(true);
+    }
+  );
+
+  it('keeps user:create, user:team:add and user:team:remove out of roleDefaults.authenticated_user', () => {
+    expect(roleDefaults.authenticated_user).not.toContain('user:create');
+    expect(roleDefaults.authenticated_user).not.toContain('user:team:add');
+    expect(roleDefaults.authenticated_user).not.toContain('user:team:remove');
+  });
+
+  it('leaves the remove-from-team mapping unchanged (still Global_Manager-only)', () => {
+    // Deliberately NOT given a resolver: this route deletes the Authentik
+    // user plus the local `users`/`user_cache` rows outright, and widening
+    // who may destroy an account is a separate, unmade decision.
+    expect(routes['DELETE /api/users/remove-from-team/:userId']).toEqual(['user:team:remove']);
+    expect(
+      resolveAccess('DELETE /api/users/remove-from-team/:userId', roleDefaults.authenticated_user, registry)
+    ).toBe(false);
+  });
+});
+
+/**
+ * Registry completeness: every permission identifier a route requires must
+ * actually be SATISFIABLE by someone other than a Global_Manager, unless
+ * that is a reviewed, deliberate decision.
+ *
+ * This is the check whose absence let the `user:create` / `user:team:add`
+ * bug exist. An identifier can only ever be satisfied three ways:
+ *   1. it sits in `roleDefaults.authenticated_user` (static grant), or
+ *   2. it has a row-scoped resolver key in `server/middleware/authorize.js`
+ *      (per-request grant), or
+ *   3. nothing but `roleDefaults.global_manager`'s `'*'` wildcard.
+ *
+ * Case 3 is legitimate for genuinely Global_Manager-only routes, but it is
+ * ALSO exactly what a forgotten resolver looks like -- indistinguishable
+ * from the registry alone. So case 3 is allowed here only via the explicit
+ * named lists below, which forces any NEW identifier to be a conscious
+ * choice rather than a silent 403 for every team admin.
+ *
+ * `authorize.js` exports only the middleware function, so the resolver
+ * keys are extracted from its source text, the same way the
+ * `PERMISSION_DENIALS_MAPPED_TO_404` test above reads that module-private
+ * const. The extraction is asserted to have actually matched something
+ * plausible, so a renamed or reshaped declaration fails loudly instead of
+ * producing an empty key list that would make every identifier look
+ * unresolved (or, worse, an empty MISSING list that asserts nothing).
+ */
+describe('registry completeness: every required identifier is satisfiable', () => {
+  /**
+   * REVIEWED deliberate exception. `user:team:remove`
+   * (`DELETE /api/users/remove-from-team/:userId`) has exactly the same
+   * missing-resolver shape as the `user:create` / `user:team:add` bug this
+   * test was written for, and is left Global_Manager-only ON PURPOSE: that
+   * route deletes the Authentik user along with the local
+   * `users`/`user_cache` rows outright, so widening who may destroy an
+   * account is a separate decision that has not been made.
+   */
+  const REVIEWED_GLOBAL_MANAGER_ONLY = ['user:team:remove'];
+
+  /**
+   * UNREVIEWED pre-existing exceptions. Each of these is satisfiable only
+   * by `roleDefaults.global_manager`'s wildcard today. Most are documented
+   * as intentionally Global_Manager-only in `permissions.registry.js`'s
+   * own comments, but none has been audited against this check, so they
+   * are listed rather than silently allowed. Anything genuinely
+   * Global_Manager-only should be promoted to
+   * `REVIEWED_GLOBAL_MANAGER_ONLY` once looked at; anything that a
+   * Team_Admin was supposed to reach needs a resolver.
+   */
+  const UNREVIEWED_GLOBAL_MANAGER_ONLY = [
+    'channel:create:custom',
+    'config:read:all',
+    'config:update',
+    'sync:trigger',
+    'sync:read',
+    'operations:read',
+    'operations:retry',
+    'global_channel:manage',
+    'global_channel:credentials',
+    'vendor_channel:manage',
+    'deployment_channel:manage',
+    'audit_log:read',
+    'communication:template:read',
+    'communication:template:manage',
+    'communication:test_email:send',
+    'mou:manage',
+    'settings:manage',
+    'settings:tak_server:read',
+    'settings:tak_server:manage',
+    'bulk_import:teams'
+  ];
+
+  const ALLOWED_WILDCARD_ONLY = new Set([
+    ...REVIEWED_GLOBAL_MANAGER_ONLY,
+    ...UNREVIEWED_GLOBAL_MANAGER_ONLY
+  ]);
+
+  /**
+   * Extracts the `rowScopedResolvers` object's top-level keys from
+   * `authorize.js`'s source text. Keys are matched at exactly the object's
+   * two-space indentation, so nothing inside a resolver body or JSDoc
+   * comment can be mistaken for a key.
+   *
+   * @returns {string[]}
+   */
+  function readRowScopedResolverKeys() {
+    const authorizeSource = fs.readFileSync(
+      path.join(__dirname, '..', 'middleware', 'authorize.js'),
+      'utf8'
+    );
+
+    const declaration = authorizeSource.match(/const rowScopedResolvers = \{([\s\S]*?)\n\};/);
+
+    // Fail loudly rather than vacuously if the declaration is renamed or
+    // reshaped -- an unmatched regex would yield zero keys and turn this
+    // whole suite into noise.
+    expect(declaration).not.toBeNull();
+
+    const keys = Array.from(declaration[1].matchAll(/^ {2}'([^']+)':/gm), (m) => m[1]);
+
+    // Sanity-pin the extraction itself: a shape change that still matched
+    // the regex but stopped yielding keys would otherwise pass silently.
+    expect(keys.length).toBeGreaterThan(10);
+    expect(keys).toContain('team:update');
+    expect(keys).toContain('team:read');
+
+    return keys;
+  }
+
+  it('extracts a plausible resolver key list from authorize.js source', () => {
+    const keys = readRowScopedResolverKeys();
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it('has a resolver or a static grant for every identifier any route requires', () => {
+    const resolverKeys = new Set(readRowScopedResolverKeys());
+    const staticGrants = new Set(roleDefaults.authenticated_user);
+
+    const unsatisfiable = [...new Set(Object.values(routes).flat())].filter(
+      (identifier) =>
+        !staticGrants.has(identifier) &&
+        !resolverKeys.has(identifier) &&
+        !ALLOWED_WILDCARD_ONLY.has(identifier)
+    );
+
+    expect(unsatisfiable).toEqual([]);
+  });
+
+  it('covers the previously-unsatisfiable identifiers with real resolvers, not exceptions', () => {
+    const resolverKeys = new Set(readRowScopedResolverKeys());
+
+    expect(resolverKeys.has('user:create')).toBe(true);
+    expect(resolverKeys.has('user:team:add')).toBe(true);
+    expect(ALLOWED_WILDCARD_ONLY.has('user:create')).toBe(false);
+    expect(ALLOWED_WILDCARD_ONLY.has('user:team:add')).toBe(false);
+
+    // The one reviewed exception stays an exception: no resolver.
+    expect(resolverKeys.has('user:team:remove')).toBe(false);
+    expect(ALLOWED_WILDCARD_ONLY.has('user:team:remove')).toBe(true);
+  });
+
+  it('keeps the exception lists free of identifiers no route requires any more', () => {
+    // Stops the lists rotting into a permanent allow-list of dead
+    // identifiers that quietly weakens the check above.
+    const requiredIdentifiers = new Set(Object.values(routes).flat());
+    for (const identifier of ALLOWED_WILDCARD_ONLY) {
+      expect(requiredIdentifiers.has(identifier)).toBe(true);
+    }
+  });
+});

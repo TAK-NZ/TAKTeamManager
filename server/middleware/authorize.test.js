@@ -81,7 +81,16 @@ jest.mock('../config/permissions.registry', () => {
       // one resolver.
       'GET /api/users': ['user:read:team_admin'],
       'GET /api/users/search': ['user:read:team_admin'],
-      'GET /api/users/available': ['user:read:team_admin']
+      'GET /api/users/available': ['user:read:team_admin'],
+      // The three body-`teamId`-scoped user routes, mirrored from the
+      // production registry so the shared `resolveTeamAdminOfBodyTeamId`
+      // resolver behind `user:create` and `user:team:add` can be exercised
+      // through the middleware. All three previously had registry entries
+      // with no resolver at all, so only a Global_Manager's '*' wildcard
+      // could satisfy them.
+      'POST /api/users/create-and-add': ['user:create'],
+      'POST /api/users/callsign-suffix-preview': ['user:create'],
+      'POST /api/users/add-to-team': ['user:team:add']
     },
     roleDefaults: {
       global_manager: ['*'],
@@ -137,6 +146,29 @@ function buildApp(user) {
   app.get('/api/users', authorize, (req, res) => res.status(200).json({ ok: true }));
   app.get('/api/users/search', authorize, (req, res) => res.status(200).json({ ok: true }));
   app.get('/api/users/available', authorize, (req, res) => res.status(200).json({ ok: true }));
+  // The three routes gated by the shared `resolveTeamAdminOfBodyTeamId`
+  // resolver. `express.json()` is mounted per-route here (exactly as the
+  // transfer route above does it, and for the same reason) because the
+  // resolver reads `req.body.teamId` and therefore needs a parsed body;
+  // in production `express.json()` runs before any route middleware.
+  app.post(
+    '/api/users/create-and-add',
+    express.json(),
+    authorize,
+    (req, res) => res.status(200).json({ ok: true })
+  );
+  app.post(
+    '/api/users/callsign-suffix-preview',
+    express.json(),
+    authorize,
+    (req, res) => res.status(200).json({ ok: true })
+  );
+  app.post(
+    '/api/users/add-to-team',
+    express.json(),
+    authorize,
+    (req, res) => res.status(200).json({ ok: true })
+  );
   return app;
 }
 
@@ -1077,6 +1109,132 @@ describe('authorize (user:read:team_admin resolver for the user-directory listin
       const res = await list({ id: AUTHENTIK_ID, userId: LOCAL_USER_ID, is_global_manager: false });
 
       expect(res.status).toBe(403);
+    });
+  });
+});
+
+/**
+ * The shared `resolveTeamAdminOfBodyTeamId` resolver behind `user:create`
+ * and `user:team:add`.
+ *
+ * Both identifiers had Permission_Registry entries but NO resolver and no
+ * place in `roleDefaults.authenticated_user`, so nothing except a
+ * Global_Manager's `'*'` wildcard could satisfy them: every Team_Admin got
+ * 403 on `POST /api/users/create-and-add`,
+ * `POST /api/users/callsign-suffix-preview` (which inherits the
+ * `user:create` gate) and `POST /api/users/add-to-team`. The visible
+ * symptom was the Add Member dialog's Callsign Suffix field staying empty
+ * because the preview 403'd.
+ *
+ * Mirrors the `team:members:add` (BUG-015) coverage above, with the one
+ * difference that the team is named in the request BODY rather than a
+ * route param -- hence the `.send({ teamId })` calls and the
+ * missing-body-teamId case.
+ *
+ * `user:team:remove` (`DELETE /api/users/remove-from-team/:userId`) has
+ * the same missing-resolver shape and is deliberately NOT covered here:
+ * it stays Global_Manager-only pending a separate decision about who may
+ * delete an account outright.
+ */
+describe('authorize (shared body-teamId resolver for user:create and user:team:add)', () => {
+  // The LOCAL users.id, and a deliberately different Authentik id, so a
+  // resolver reading the wrong one is observable.
+  const LOCAL_USER_ID = 1;
+  const AUTHENTIK_ID = 9001;
+  const BODY_TEAM_ID = 42;
+
+  const BODY_SCOPED_PATHS = [
+    '/api/users/create-and-add',
+    '/api/users/callsign-suffix-preview',
+    '/api/users/add-to-team'
+  ];
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  afterEach(() => {
+    // Shared with the suites above, which rely on per-test
+    // `mockResolvedValueOnce` queues rather than standing implementations.
+    mockIsAdmin.mockReset();
+    pool.query.mockReset();
+  });
+
+  describe.each(BODY_SCOPED_PATHS)('POST %s', (path) => {
+    function post(user, body) {
+      return request(buildApp(user))
+        .post(path)
+        .set('X-Forwarded-For', TEST_IP)
+        .send(body);
+    }
+
+    it('permits a Global_Manager without consulting Team.isAdmin at all', async () => {
+      // A standing implementation that would DENY if it were reached, so a
+      // passing assertion can only mean the short-circuit fired.
+      mockIsAdmin.mockResolvedValue(false);
+
+      const res = await post(
+        { id: AUTHENTIK_ID, userId: LOCAL_USER_ID, is_global_manager: true },
+        { teamId: BODY_TEAM_ID }
+      );
+
+      expect(res.status).toBe(200);
+      expect(mockIsAdmin).not.toHaveBeenCalled();
+      expect(mockWarn).not.toHaveBeenCalled();
+    });
+
+    it('permits a Team_Admin of the body teamId', async () => {
+      mockIsAdmin.mockResolvedValueOnce(true);
+
+      const res = await post(
+        { id: AUTHENTIK_ID, userId: LOCAL_USER_ID, is_global_manager: false },
+        { teamId: BODY_TEAM_ID }
+      );
+
+      expect(res.status).toBe(200);
+      expect(mockIsAdmin).toHaveBeenCalledTimes(1);
+      expect(mockWarn).not.toHaveBeenCalled();
+    });
+
+    it('passes the LOCAL users.id (req.user.userId) to Team.isAdmin, never the Authentik id', async () => {
+      mockIsAdmin.mockResolvedValueOnce(true);
+
+      await post(
+        { id: AUTHENTIK_ID, userId: LOCAL_USER_ID, is_global_manager: false },
+        { teamId: BODY_TEAM_ID }
+      );
+
+      expect(mockIsAdmin).toHaveBeenCalledWith(BODY_TEAM_ID, LOCAL_USER_ID);
+      expect(mockIsAdmin).not.toHaveBeenCalledWith(BODY_TEAM_ID, AUTHENTIK_ID);
+    });
+
+    it('denies a non-admin, non-Global_Manager with 403 permission_denied', async () => {
+      mockIsAdmin.mockResolvedValueOnce(false);
+
+      const res = await post(
+        { id: AUTHENTIK_ID, userId: LOCAL_USER_ID, is_global_manager: false },
+        { teamId: BODY_TEAM_ID }
+      );
+
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: 'Forbidden' });
+      expect(mockWarn).toHaveBeenCalledTimes(1);
+      const [payload] = mockWarn.mock.calls[0];
+      expect(payload).toEqual({ ip: TEST_IP, route: path, reason: 'permission_denied' });
+    });
+
+    it('denies a request with no body teamId without calling Team.isAdmin', async () => {
+      const res = await post(
+        { id: AUTHENTIK_ID, userId: LOCAL_USER_ID, is_global_manager: false },
+        {}
+      );
+
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: 'Forbidden' });
+      expect(mockIsAdmin).not.toHaveBeenCalled();
+      expect(mockWarn).toHaveBeenCalledTimes(1);
+      const [payload] = mockWarn.mock.calls[0];
+      expect(payload).toEqual({ ip: TEST_IP, route: path, reason: 'permission_denied' });
     });
   });
 });

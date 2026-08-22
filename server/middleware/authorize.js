@@ -155,6 +155,71 @@ async function resolveRequestActionPermission(req) {
 }
 
 /**
+ * Shared row-scoped resolver backing THREE identifiers, all of which ask
+ * the identical question — "is the requester a Global_Manager, or a
+ * Team_Admin of the `teamId` named in the request body?":
+ *
+ *   - `user:create:team_admin` — `POST /api/users` (the older create-user
+ *     route). This was the original home of the logic.
+ *   - `user:create`            — `POST /api/users/create-and-add` AND
+ *     `POST /api/users/callsign-suffix-preview`.
+ *   - `user:team:add`          — `POST /api/users/add-to-team`. Adding an
+ *     EXISTING user to a team is the same authorization boundary as
+ *     creating one in it, so it shares this implementation rather than
+ *     getting a near-identical copy.
+ *
+ * `user:create` and `user:team:add` both had Permission_Registry entries
+ * but NO resolver and no place in `roleDefaults.authenticated_user`, so
+ * nothing except a Global_Manager's `'*'` wildcard could satisfy them:
+ * every Team_Admin was denied 403 on all three routes. The user-visible
+ * symptom was the Add Member dialog's Callsign Suffix field staying empty
+ * (showing only its placeholder) because the preview request 403'd, and
+ * "Add Existing User" failing outright.
+ *
+ * `POST /api/users/callsign-suffix-preview` deliberately INHERITS the
+ * `user:create` gate rather than getting a looser identifier of its own: a
+ * successful preview discloses whether someone on the target team already
+ * holds a given callsign_suffix, so it must be reachable by exactly the
+ * admins who can perform the create it previews. That was the original
+ * intent recorded in `permissions.registry.js`, and it was silently broken
+ * by the missing resolver — the gate was not "too tight", it was
+ * unsatisfiable.
+ *
+ * NOT covered here on purpose: `user:team:remove`
+ * (`DELETE /api/users/remove-from-team/:userId`) has the same
+ * missing-resolver shape, but that route deletes the Authentik user along
+ * with the local `users`/`user_cache` rows outright. Widening who may
+ * destroy an account is a separate decision that has not been made, so
+ * that identifier is intentionally left resolver-less and therefore
+ * Global_Manager-only. See the matching note in
+ * `permissions.registry.js`, and the named exception list in
+ * `server/config/permissions.registry.test.js`'s registry-completeness
+ * test, which documents the gap rather than hiding it.
+ *
+ * Returns `false` when the body carries no `teamId` — there is no team to
+ * scope against, so there is nothing a Team_Admin could be an admin OF.
+ * Per this module's contract a throw propagates to
+ * `isSatisfiedWithRowScopedChecks`, which logs it and fails closed, so
+ * there is deliberately no local try/catch.
+ *
+ * @param {import('express').Request} req
+ * @returns {Promise<boolean>}
+ */
+async function resolveTeamAdminOfBodyTeamId(req) {
+  if (req.user && req.user.is_global_manager) {
+    return true;
+  }
+  const teamId = req.body && req.body.teamId;
+  if (!teamId) {
+    return false;
+  }
+  // LOCAL users.id, never req.user.id (the Authentik id): `Team.isAdmin`
+  // compares against `team_memberships.user_id`. The inline check this
+  // logic replaced got that wrong.
+  return Team.isAdmin(teamId, req.user && req.user.userId);
+}
+
+/**
  * Row-scoped permission resolver functions.
  *
  * `resolveAccess` (server/config/permissions.registry.js) only checks
@@ -286,27 +351,29 @@ const rowScopedResolvers = {
   },
 
   /**
-   * `user:create:team_admin` — satisfied if the requesting user is a
-   * Global_Manager OR is an admin (per `Team.isAdmin`) of the `teamId`
-   * named in the request body. Mirrors the inline check that used to live
-   * in `users.js`'s `POST /` (older create-user route). The original
-   * inline check incorrectly compared against `req.user.id` (the
-   * Authentik id); this resolver correctly uses `req.user.userId` (the
-   * local `users.id` that `team_memberships.user_id` references).
+   * `user:create:team_admin` — `POST /api/users` (the older create-user
+   * route). Mirrors the inline check that used to live in `users.js`'s
+   * `POST /`; that inline check incorrectly compared against
+   * `req.user.id` (the Authentik id), while the shared implementation
+   * correctly uses `req.user.userId` (the local `users.id` that
+   * `team_memberships.user_id` references).
    *
-   * @param {import('express').Request} req
-   * @returns {Promise<boolean>}
+   * `user:create` — `POST /api/users/create-and-add` and
+   * `POST /api/users/callsign-suffix-preview`.
+   *
+   * `user:team:add` — `POST /api/users/add-to-team`.
+   *
+   * All three are the same rule (Global_Manager, or `Team.isAdmin` of
+   * `req.body.teamId`) and therefore share the single
+   * `resolveTeamAdminOfBodyTeamId` implementation defined above this
+   * object — see its doc comment for why `user:create`/`user:team:add`
+   * previously 403'd for every Team_Admin, why the preview inherits the
+   * `user:create` gate, and why `user:team:remove` is deliberately still
+   * resolver-less.
    */
-  'user:create:team_admin': async (req) => {
-    if (req.user && req.user.is_global_manager) {
-      return true;
-    }
-    const teamId = req.body && req.body.teamId;
-    if (!teamId) {
-      return false;
-    }
-    return Team.isAdmin(teamId, req.user && req.user.userId);
-  },
+  'user:create:team_admin': resolveTeamAdminOfBodyTeamId,
+  'user:create': resolveTeamAdminOfBodyTeamId,
+  'user:team:add': resolveTeamAdminOfBodyTeamId,
 
   /**
    * `user:resend_welcome:team_admin` — satisfied if the requesting user is a

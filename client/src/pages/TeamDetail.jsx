@@ -2074,7 +2074,7 @@ export default function TeamDetail({ user, refreshUser }) {
                       className="input w-full"
                       pattern={CALLSIGN_SUFFIX_PATTERN}
                       title="Only letters, digits, - and . are allowed"
-                      placeholder="J.Bloggs"
+                      placeholder="Filled in automatically"
                       required={newUserCallsignRequired}
                       aria-invalid={newUserCallsignError ? 'true' : undefined}
                       aria-describedby={newUserCallsignError ? 'new-user-callsign-suffix-error' : (newUserCallsignRequired ? 'new-user-callsign-suffix-help' : undefined)}

@@ -102,15 +102,41 @@ const routes = {
   'POST /api/users/:userId/resend-welcome': ['user:resend_welcome:team_admin'],
   'GET /api/users/search': ['user:read:team_admin'],
   'GET /api/users/available': ['user:read:team_admin'],
+  // The next three entries ('user:create' twice, then 'user:team:add') are
+  // resolver-gated: the shared `resolveTeamAdminOfBodyTeamId` resolver in
+  // server/middleware/authorize.js permits a Global_Manager OR a Team_Admin
+  // (per `Team.isAdmin`, so an admin anywhere in the Ancestor_Chain
+  // qualifies) of the `teamId` in the REQUEST BODY. Both identifiers
+  // previously had these registry entries but no resolver and no place in
+  // `roleDefaults.authenticated_user`, so nothing but a Global_Manager's
+  // '*' wildcard could satisfy them and every Team_Admin was denied 403 --
+  // visibly, the Add Member dialog's Callsign Suffix field never filled in
+  // because the preview 403'd, and "Add Existing User" failed outright.
+  //
+  // Deliberately still NOT in `roleDefaults.authenticated_user`: a
+  // statically-held identifier satisfies `resolveAccess` outright, so
+  // `authorize.js` would never consult the resolver and the team-scoped
+  // gate would be bypassed entirely.
   'POST /api/users/create-and-add': ['user:create'],
   // Read-only callsign_suffix preview for the create-and-add flow. Shares
   // the SAME 'user:create' identifier as the create route above, on
   // purpose: a successful preview discloses whether someone on the target
   // team already holds a given callsign_suffix, so it must not be reachable
-  // any more broadly than the create action it previews. Deliberately NOT
-  // added to `roleDefaults.authenticated_user`, for the same reason.
+  // any more broadly than the create action it previews -- it is reachable
+  // by exactly the admins who can perform the create it previews.
   'POST /api/users/callsign-suffix-preview': ['user:create'],
+  // Adding an EXISTING user to a team: same authorization boundary as
+  // creating one in it, so it shares the resolver described above.
   'POST /api/users/add-to-team': ['user:team:add'],
+  // INTENTIONALLY still Global_Manager-only: 'user:team:remove' has the
+  // same missing-resolver shape as the two identifiers above (no resolver,
+  // not in roleDefaults, so only the '*' wildcard satisfies it) but this
+  // route DELETES the Authentik user along with the local `users` /
+  // `user_cache` rows outright. Widening who may destroy an account is a
+  // separate decision that has not been made, so no resolver is added
+  // here. The registry-completeness test in permissions.registry.test.js
+  // carries this identifier in an explicit, named exception list so the
+  // gap stays documented rather than hidden.
   'DELETE /api/users/remove-from-team/:userId': ['user:team:remove'],
   // Requirement 2.1 (team-member-transfer): Team_Transfer route. The
   // 'user:team:transfer' row-scoped resolver
