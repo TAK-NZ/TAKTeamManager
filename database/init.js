@@ -37,13 +37,6 @@ async function initializeDatabase() {
 
     console.log('Database migrations applied successfully');
     
-    // Create default holding pen team
-    await pool.query(`
-      INSERT INTO teams (name, description) 
-      VALUES ('Holding Pen', 'Default team for users without specific team assignment')
-      ON CONFLICT DO NOTHING
-    `);
-    
     // Insert initial sync status
     await pool.query(`
       INSERT INTO sync_status (sync_type, status) 

@@ -223,7 +223,6 @@ export const usersAPI = {
   previewCallsignSuffix: (data) => api.post('/users/callsign-suffix-preview', data),
   addToTeam: (userId, teamId) => api.post('/users/add-to-team', { userId, teamId }),
   removeFromTeam: (userId, teamId) => api.delete(`/users/remove-from-team/${userId}`, { data: { teamId } }),
-  moveToHoldingPen: (userId) => api.post(`/users/${userId}/holding-pen`),
   resendWelcome: (userId, teamId) => api.post(`/users/${userId}/resend-welcome`, { teamId }),
   // data: { targetTeamId, justification?, callsignSuffix? }. Resolves 200 with
   // { status: 'completed', ... } when the caller administers both sides, or 202

@@ -99,7 +99,6 @@ const routes = {
   'GET /api/users': ['user:read:team_admin'],
   'GET /api/users/me': ['user:read:own'],
   'POST /api/users': ['user:create:team_admin'],
-  'POST /api/users/:userId/holding-pen': ['user:holding_pen:team_admin'],
   'POST /api/users/:userId/resend-welcome': ['user:resend_welcome:team_admin'],
   'GET /api/users/search': ['user:read:team_admin'],
   'GET /api/users/available': ['user:read:team_admin'],

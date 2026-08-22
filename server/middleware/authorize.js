@@ -309,19 +309,6 @@ const rowScopedResolvers = {
   },
 
   /**
-   * `user:holding_pen:team_admin` — satisfied if the requesting user is a
-   * Global_Manager OR is an admin (per `Team.isAdmin`) of at least one of
-   * the target user's (`:userId` route param) current teams. Mirrors the
-   * inline loop that used to live in `users.js`'s
-   * `POST /:userId/holding-pen`. The original inline check incorrectly
-   * compared against `req.user.id` (the Authentik id); this resolver
-   * correctly uses `req.user.userId` (the local `users.id`).
-   *
-   * @param {import('express').Request} req
-   * @returns {Promise<boolean>}
-   */
-
-  /**
    * `user:resend_welcome:team_admin` — satisfied if the requesting user is a
    * Global_Manager OR is an admin (per `Team.isAdmin`) of at least one of
    * the target user's (`:userId` route param) current teams.
@@ -330,23 +317,6 @@ const rowScopedResolvers = {
    * @returns {Promise<boolean>}
    */
   'user:resend_welcome:team_admin': async (req) => {
-    if (req.user && req.user.is_global_manager) {
-      return true;
-    }
-
-    const targetUserId = req.params && req.params.userId;
-    const userTeams = await User.getTeamMemberships(targetUserId);
-
-    for (const team of userTeams) {
-      if (await Team.isAdmin(team.id, req.user && req.user.userId)) {
-        return true;
-      }
-    }
-
-    return false;
-  },
-
-  'user:holding_pen:team_admin': async (req) => {
     if (req.user && req.user.is_global_manager) {
       return true;
     }

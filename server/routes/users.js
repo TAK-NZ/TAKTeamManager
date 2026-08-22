@@ -296,26 +296,6 @@ router.post('/', authenticateToken, authorize, [
   }
 });
 
-// Move user to holding pen (remove from all teams)
-router.post('/:userId/holding-pen', authenticateToken, authorize, async (req, res) => {
-  try {
-    const { userId } = req.params;
-
-    // Authorization (admin of at least one of the target user's current
-    // teams, or global manager) is enforced centrally by authorize.js via
-    // the 'POST /api/users/:userId/holding-pen': ['user:holding_pen:team_admin']
-    // Permission_Registry entry.
-
-    // Remove from all teams and channels
-    await pool.query('DELETE FROM team_memberships WHERE user_id = $1', [userId]);
-    await pool.query('DELETE FROM channel_memberships WHERE user_id = $1', [userId]);
-
-    res.json({ message: 'User moved to holding pen' });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to move user' });
-  }
-});
-
 // Search users
 router.get('/search', authenticateToken, authorize, async (req, res) => {
   try {
