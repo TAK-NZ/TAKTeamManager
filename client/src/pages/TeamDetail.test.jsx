@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { formatCallsignLevels, formatCallsignNameFormatExample, computeTeamDepth, getInitialMemberEditForm, isValidMemberCallsignSuffix, isValidSubTeamCallsignPrefix } from './TeamDetail.jsx';
+import { formatCallsignLevels, formatCallsignNameFormatExample, computeTeamDepth, getInitialMemberEditForm, isValidMemberCallsignSuffix, isValidSubTeamCallsignPrefix, decideCallsignSuffixPreview, extractCallsignSuffixServerError } from './TeamDetail.jsx';
 
 // Validates: Requirements 1.1, 1.2, 2.4, 2.5
 //
@@ -347,5 +347,149 @@ describe('transfer action placement in TeamDetail.jsx (Req 15.1)', () => {
     expect(block).toContain('<TransferMemberDialog')
     expect(block).toContain('member={transferringMember}')
     expect(block).toContain('onCompleted={handleTransferCompleted}')
+  })
+})
+
+// The Add Member Dialog's "Create New User" tab gains a Callsign Suffix
+// field fed by the advisory `POST /api/users/callsign-suffix-preview` check.
+// `decideCallsignSuffixPreview` is the whole decision that check drives
+// (pre-fill / required / inline conflict / leave-alone), extracted as a pure
+// helper and tested directly per this file's no-render convention;
+// `extractCallsignSuffixServerError` is the submit-time 400 mapping. The
+// structural tests below pin the wiring the helpers cannot see: that the
+// preview runs on blur rather than per keystroke, and that the suffix is
+// actually sent to `usersAPI.createAndAdd`.
+
+describe('decideCallsignSuffixPreview', () => {
+  it('pre-fills the field with the resolved suffix when there is no conflict and none is required', () => {
+    const decision = decideCallsignSuffixPreview(
+      { suffix: 'J.Bloggs', required: false, conflict: null },
+      { currentValue: '', manuallyEdited: false }
+    )
+    expect(decision).toEqual({ callsignSuffix: 'J.Bloggs', required: false, error: null })
+  })
+
+  it('does not clobber a value the admin typed themselves', () => {
+    const decision = decideCallsignSuffixPreview(
+      { suffix: 'Joe.B', required: false, conflict: null },
+      { currentValue: 'Joe.B2', manuallyEdited: true }
+    )
+    expect(decision.callsignSuffix).toBe('Joe.B2')
+    expect(decision.error).toBeNull()
+  })
+
+  it('marks the field required and leaves it empty for a user_defined Organisation', () => {
+    const decision = decideCallsignSuffixPreview(
+      { suffix: null, required: true, conflict: null },
+      { currentValue: '', manuallyEdited: false }
+    )
+    expect(decision).toEqual({ callsignSuffix: '', required: true, error: null })
+  })
+
+  it('surfaces the conflict message inline without pre-filling the field', () => {
+    const decision = decideCallsignSuffixPreview(
+      { suffix: 'J.Bloggs', required: false, conflict: { value: 'J.Bloggs', message: 'Callsign suffix J.Bloggs is already used in this team' } },
+      { currentValue: '', manuallyEdited: false }
+    )
+    expect(decision.error).toBe('Callsign suffix J.Bloggs is already used in this team')
+    expect(decision.callsignSuffix).toBe('')
+  })
+
+  it('surfaces a conflict against a manually typed value while keeping that value', () => {
+    const decision = decideCallsignSuffixPreview(
+      { suffix: 'Joe.B', required: false, conflict: { value: 'Joe.B', message: 'Already taken' } },
+      { currentValue: 'Joe.B', manuallyEdited: true }
+    )
+    expect(decision).toEqual({ callsignSuffix: 'Joe.B', required: false, error: 'Already taken' })
+  })
+
+  it('falls back to a generic message when a conflict carries no message', () => {
+    const decision = decideCallsignSuffixPreview(
+      { suffix: 'J.Bloggs', required: false, conflict: { value: 'J.Bloggs' } },
+      { currentValue: '', manuallyEdited: false }
+    )
+    expect(decision.error).toBe('That callsign suffix is already in use in this team')
+  })
+
+  it('changes nothing when the preview call failed (no body), so submission is never blocked', () => {
+    expect(decideCallsignSuffixPreview(undefined, { currentValue: 'Joe.B', manuallyEdited: true })).toBeNull()
+    expect(decideCallsignSuffixPreview(null, { currentValue: '', manuallyEdited: false })).toBeNull()
+    expect(decideCallsignSuffixPreview('Internal Server Error', { currentValue: '' })).toBeNull()
+  })
+
+  it('empties a stale pre-filled value when the server resolves no suffix at all', () => {
+    const decision = decideCallsignSuffixPreview(
+      { suffix: null, required: false, conflict: null },
+      { currentValue: 'J.Bloggs', manuallyEdited: false }
+    )
+    expect(decision.callsignSuffix).toBe('')
+  })
+})
+
+describe('extractCallsignSuffixServerError', () => {
+  it('returns the server message for a 400 (suffix required, or per-team collision)', () => {
+    const error = { response: { status: 400, data: { error: 'Callsign suffix is required for this Organisation' } } }
+    expect(extractCallsignSuffixServerError(error)).toBe('Callsign suffix is required for this Organisation')
+  })
+
+  it('returns null for any non-400 failure, leaving the generic toast in place', () => {
+    expect(extractCallsignSuffixServerError({ response: { status: 500, data: { error: 'boom' } } })).toBeNull()
+    expect(extractCallsignSuffixServerError({ response: { status: 403, data: { error: 'nope' } } })).toBeNull()
+  })
+
+  it('returns null for a 400 with no string error body, and for a network failure', () => {
+    expect(extractCallsignSuffixServerError({ response: { status: 400, data: {} } })).toBeNull()
+    expect(extractCallsignSuffixServerError({ message: 'Network Error' })).toBeNull()
+    expect(extractCallsignSuffixServerError(undefined)).toBeNull()
+  })
+})
+
+describe('Callsign Suffix field wiring in the Create New User tab', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  function inputFor(id) {
+    const index = source.indexOf(`id="${id}"`)
+    expect(index).toBeGreaterThan(-1)
+    const start = source.lastIndexOf('<input', index)
+    return source.slice(start, source.indexOf('/>', index))
+  }
+
+  it.each(['new-user-first-name', 'new-user-last-name', 'new-user-callsign-suffix'])(
+    'runs the preview on blur of %s, not on every keystroke',
+    (id) => {
+      const input = inputFor(id)
+      expect(input).toContain('onBlur={() => runCallsignSuffixPreview(newUserForm)}')
+      expect(input.slice(input.indexOf('onChange='), input.indexOf('onBlur='))).not.toContain('runCallsignSuffixPreview')
+    }
+  )
+
+  it('associates the Callsign Suffix input with its label and applies the shared character-class pattern', () => {
+    const input = inputFor('new-user-callsign-suffix')
+    expect(source).toContain('htmlFor="new-user-callsign-suffix"')
+    expect(input).toContain('pattern={CALLSIGN_SUFFIX_PATTERN}')
+    expect(input).toContain('required={newUserCallsignRequired}')
+  })
+
+  it('announces the inline Callsign Suffix error', () => {
+    const index = source.indexOf('{newUserCallsignError && (')
+    expect(index).toBeGreaterThan(-1)
+    const block = source.slice(index, source.indexOf('</p>', index))
+    expect(block).toContain('role="alert"')
+    expect(block).toContain('{newUserCallsignError}')
+  })
+
+  it('sends the suffix through to usersAPI.createAndAdd', () => {
+    const index = source.indexOf('usersAPI.createAndAdd(')
+    expect(index).toBeGreaterThan(-1)
+    const call = source.slice(index, source.indexOf(')', source.indexOf('newUserForm.callsignSuffix', index)))
+    expect(call).toContain('newUserForm.callsignSuffix || undefined')
+  })
+
+  it('validates the suffix character class before submitting, inline rather than as a toast', () => {
+    expect(source).toContain('if (!isValidMemberCallsignSuffix(newUserForm.callsignSuffix)) {')
+    const index = source.indexOf('if (!isValidMemberCallsignSuffix(newUserForm.callsignSuffix)) {')
+    const block = source.slice(index, source.indexOf('}', index))
+    expect(block).toContain('setNewUserCallsignError(')
+    expect(block).not.toContain('toast.')
   })
 })

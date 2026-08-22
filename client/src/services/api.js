@@ -207,8 +207,20 @@ export const usersAPI = {
   create: (data) => api.post('/users', data),
   search: (query) => api.get(`/users/search?q=${query}`),
   getAvailable: (search) => api.get(`/users/available${search ? `?search=${encodeURIComponent(search)}` : ''}`),
-  createAndAdd: (email, firstName, lastName, teamId, role) =>
-    api.post('/users/create-and-add', { email, firstName, lastName, teamId, role }),
+  // `callsignSuffix` is optional: omitted (or empty) lets the server compute
+  // the Organisation's default, and is rejected with 400 when the
+  // Organisation's `callsign_name_format` is `user_defined`. Trailing so
+  // existing 5-argument call sites keep working unchanged.
+  createAndAdd: (email, firstName, lastName, teamId, role, callsignSuffix) =>
+    api.post('/users/create-and-add', { email, firstName, lastName, teamId, role, callsignSuffix }),
+  // Advisory pre-submit check for the Callsign_Suffix a new team member would
+  // be given. data: { teamId, firstName, lastName, callsignSuffix? }. Resolves
+  // 200 with { suffix: string|null, required: boolean, conflict: { value,
+  // message }|null } -- `suffix` is the value the server would store,
+  // `required` is true only when the Organisation's format is `user_defined`
+  // and no suffix was supplied, and `conflict` is non-null when the resolved
+  // value collides case-insensitively with an existing member of that team.
+  previewCallsignSuffix: (data) => api.post('/users/callsign-suffix-preview', data),
   addToTeam: (userId, teamId) => api.post('/users/add-to-team', { userId, teamId }),
   removeFromTeam: (userId, teamId) => api.delete(`/users/remove-from-team/${userId}`, { data: { teamId } }),
   moveToHoldingPen: (userId) => api.post(`/users/${userId}/holding-pen`),

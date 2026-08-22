@@ -424,3 +424,143 @@ describe('POST /api/users/create-and-add callsign_suffix resolution (task 22.2)'
     expect(pool.connect).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * `POST /api/users/callsign-suffix-preview`: the read-only companion to
+ * `POST /api/users/create-and-add`, reporting what the submit path WOULD
+ * assign (or why it would reject) before the Client submits.
+ *
+ * The preview is required to delegate to the exact same
+ * `UserProvisioningService.resolveCallsignSuffixForNewUser` the submit
+ * path uses, so these tests drive the route entirely through that
+ * (already-mocked) service call and assert on the translation of its
+ * result / typed errors into the response report -- plus that the route
+ * performs no write and never touches Authentik.
+ */
+describe('POST /api/users/callsign-suffix-preview', () => {
+  let app;
+  let originalFetch;
+
+  const PREVIEW_BODY = { teamId: 7, firstName: 'New', lastName: 'User' };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    app = buildApp();
+    originalFetch = global.fetch;
+    global.fetch = jest.fn();
+    pool.query.mockResolvedValue({ rows: [] });
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it('reports the computed default suffix for a team whose Organisation derives it', async () => {
+    UserProvisioningService.resolveCallsignSuffixForNewUser.mockResolvedValue('N.User');
+
+    const res = await request(app).post('/api/users/callsign-suffix-preview').send(PREVIEW_BODY);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ suffix: 'N.User', required: false, conflict: null });
+    expect(UserProvisioningService.resolveCallsignSuffixForNewUser).toHaveBeenCalledWith(null, {
+      firstName: 'New',
+      lastName: 'User',
+      teamId: 7,
+      requestedCallsignSuffix: undefined
+    });
+  });
+
+  it('passes a supplied callsignSuffix through to the resolver and reports it back', async () => {
+    UserProvisioningService.resolveCallsignSuffixForNewUser.mockResolvedValue('Bravo1');
+
+    const res = await request(app)
+      .post('/api/users/callsign-suffix-preview')
+      .send({ ...PREVIEW_BODY, callsignSuffix: 'Bravo1' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ suffix: 'Bravo1', required: false, conflict: null });
+    expect(UserProvisioningService.resolveCallsignSuffixForNewUser).toHaveBeenCalledWith(null, {
+      firstName: 'New',
+      lastName: 'User',
+      teamId: 7,
+      requestedCallsignSuffix: 'Bravo1'
+    });
+  });
+
+  it('reports required: true (and no suffix) for a user_defined Organisation with no suffix supplied', async () => {
+    UserProvisioningService.resolveCallsignSuffixForNewUser.mockRejectedValue(
+      new UserProvisioningService.CallsignSuffixRequiredError()
+    );
+
+    const res = await request(app).post('/api/users/callsign-suffix-preview').send(PREVIEW_BODY);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ suffix: null, required: true, conflict: null });
+  });
+
+  it('reports the conflicting value and message on a per-Team uniqueness collision', async () => {
+    const { CallsignSuffixConflictError } = jest.requireActual('../services/CallsignSuffixUniquenessService');
+    const conflictError = new CallsignSuffixConflictError('J.Doe');
+    UserProvisioningService.resolveCallsignSuffixForNewUser.mockRejectedValue(conflictError);
+
+    const res = await request(app)
+      .post('/api/users/callsign-suffix-preview')
+      .send({ ...PREVIEW_BODY, callsignSuffix: 'J.Doe' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      suffix: 'J.Doe',
+      required: false,
+      conflict: { value: 'J.Doe', message: conflictError.message }
+    });
+  });
+
+  it('returns 400 with an errors array when teamId is missing or not an integer', async () => {
+    const missing = await request(app)
+      .post('/api/users/callsign-suffix-preview')
+      .send({ firstName: 'New', lastName: 'User' });
+
+    expect(missing.status).toBe(400);
+    expect(Array.isArray(missing.body.errors)).toBe(true);
+    expect(missing.body.errors.length).toBeGreaterThan(0);
+
+    const nonInteger = await request(app)
+      .post('/api/users/callsign-suffix-preview')
+      .send({ ...PREVIEW_BODY, teamId: 'not-a-number' });
+
+    expect(nonInteger.status).toBe(400);
+    expect(Array.isArray(nonInteger.body.errors)).toBe(true);
+
+    // Validation failure short-circuits before any resolution work.
+    expect(UserProvisioningService.resolveCallsignSuffixForNewUser).not.toHaveBeenCalled();
+  });
+
+  it('issues no write and no Authentik call -- the preview is strictly read-only', async () => {
+    UserProvisioningService.resolveCallsignSuffixForNewUser.mockResolvedValue('N.User');
+
+    const res = await request(app).post('/api/users/callsign-suffix-preview').send(PREVIEW_BODY);
+
+    expect(res.status).toBe(200);
+
+    // No transaction was opened...
+    expect(pool.connect).not.toHaveBeenCalled();
+    // ...no Authentik HTTP call was made...
+    expect(global.fetch).not.toHaveBeenCalled();
+    // ...and no mutating statement reached the pool.
+    for (const [sql] of pool.query.mock.calls) {
+      expect(String(sql)).not.toMatch(/\b(INSERT|UPDATE|DELETE)\b/i);
+    }
+  });
+
+  it('responds 500 and logs when the resolver fails for an unexpected reason', async () => {
+    UserProvisioningService.resolveCallsignSuffixForNewUser.mockRejectedValue(
+      new Error('database unreachable')
+    );
+
+    const res = await request(app).post('/api/users/callsign-suffix-preview').send(PREVIEW_BODY);
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBeDefined();
+    expect(mockLoggerError).toHaveBeenCalled();
+  });
+});

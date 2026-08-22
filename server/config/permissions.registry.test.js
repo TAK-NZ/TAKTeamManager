@@ -230,3 +230,28 @@ describe('team-member-transfer registry entries (Requirements 2.1, 5.6)', () => 
     expect(mappedTo404).not.toContain('user:team:transfer');
   });
 });
+
+/**
+ * Registry assertion for the read-only callsign_suffix preview route.
+ *
+ * The preview reveals whether a given callsign_suffix is already held by
+ * someone on the target team, so it is mapped to the SAME 'user:create'
+ * identifier as `POST /api/users/create-and-add` -- never a broader one,
+ * and never granted statically to every authenticated user.
+ */
+describe('callsign_suffix preview registry entry', () => {
+  const registry = { routes, roleDefaults };
+  const PREVIEW_ROUTE_KEY = 'POST /api/users/callsign-suffix-preview';
+
+  it('maps the preview route to exactly user:create, matching create-and-add', () => {
+    expect(routes[PREVIEW_ROUTE_KEY]).toEqual(['user:create']);
+    expect(routes[PREVIEW_ROUTE_KEY]).toEqual(routes['POST /api/users/create-and-add']);
+  });
+
+  it('keeps user:create out of roleDefaults.authenticated_user', () => {
+    expect(roleDefaults.authenticated_user).not.toContain('user:create');
+    expect(resolveAccess(PREVIEW_ROUTE_KEY, roleDefaults.authenticated_user, registry)).toBe(false);
+    expect(resolveAccess(PREVIEW_ROUTE_KEY, ['user:create'], registry)).toBe(true);
+    expect(resolveAccess(PREVIEW_ROUTE_KEY, roleDefaults.global_manager, registry)).toBe(true);
+  });
+});

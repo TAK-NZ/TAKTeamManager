@@ -108,6 +108,52 @@ export function isValidMemberCallsignSuffix(value) {
   return CALLSIGN_SUFFIX_REGEX.test(value)
 }
 
+// Pure decision helper for the Add Member Dialog's "Create New User" tab:
+// given a `POST /api/users/callsign-suffix-preview` response body
+// ({ suffix, required, conflict }) plus the current state of the Callsign
+// Suffix input, returns the state that input should move to, or `null` when
+// nothing should change. The preview is advisory only -- a failed call (no
+// body) leaves the field exactly as-is and never blocks submission, since
+// the server re-validates authoritatively on submit.
+//
+//   - conflict === null && required === false -> pre-fill with the resolved
+//     `suffix`, unless the admin has already typed a value themselves
+//     (`manuallyEdited`), which is never clobbered.
+//   - required === true -> the Organisation's format is `user_defined` and no
+//     suffix was supplied; leave the value alone and mark the field required.
+//   - conflict !== null -> surface `conflict.message` inline (the field stays
+//     editable so the admin can correct it).
+export function decideCallsignSuffixPreview(preview, { currentValue = '', manuallyEdited = false } = {}) {
+  if (!preview || typeof preview !== 'object') {
+    return null
+  }
+
+  const required = preview.required === true
+  const error = preview.conflict ? (preview.conflict.message || 'That callsign suffix is already in use in this team') : null
+  const canPrefill = !required && !preview.conflict && !manuallyEdited
+
+  return {
+    callsignSuffix: canPrefill ? (preview.suffix || '') : currentValue,
+    required,
+    error
+  }
+}
+
+// Pure helper extracting an inline Callsign Suffix error message from a
+// rejected `usersAPI.createAndAdd` call, or `null` when the failure is not a
+// shaped 400 (the server returns `{ error: <message> }` with status 400 for
+// both the `user_defined`-suffix-required and the per-team collision cases;
+// every other failure keeps the existing generic-toast behavior). Mirrors
+// Requests.jsx's `extractCallsignSuffixConflictError` convention.
+export function extractCallsignSuffixServerError(error) {
+  const status = error?.response?.status
+  const serverError = error?.response?.data?.error
+  if (status === 400 && typeof serverError === 'string') {
+    return serverError
+  }
+  return null
+}
+
 // Requirements 11.13, 13.1, 13.2, 13.3, 13.5 (task 33.2): the per-row
 // inline Member_List edit form, rendered as a single wide table row in
 // place of the member/admin's normal row when its "Edit" pencil icon has
@@ -271,8 +317,20 @@ export default function TeamDetail({ user, refreshUser }) {
   const [newUserForm, setNewUserForm] = useState({
     email: '',
     firstName: '',
-    lastName: ''
+    lastName: '',
+    callsignSuffix: ''
   })
+  // Add Member Dialog / "Create New User" tab: advisory Callsign_Suffix
+  // preview state. `newUserCallsignRequired` mirrors the preview's `required`
+  // flag (the Organisation's `callsign_name_format` is `user_defined`, so the
+  // admin must choose a suffix themselves); `newUserCallsignError` holds the
+  // inline message for a previewed collision, a client-side character-class
+  // rejection, or the server's own 400 on submit; `newUserCallsignEdited`
+  // records that the admin has typed in the field, so a later preview never
+  // clobbers their value.
+  const [newUserCallsignRequired, setNewUserCallsignRequired] = useState(false)
+  const [newUserCallsignError, setNewUserCallsignError] = useState(null)
+  const [newUserCallsignEdited, setNewUserCallsignEdited] = useState(false)
   const [addingMember, setAddingMember] = useState(false)
   const [removeUserId, setRemoveUserId] = useState(null)
   const [removeUserRole, setRemoveUserRole] = useState('')
@@ -444,18 +502,72 @@ export default function TeamDetail({ user, refreshUser }) {
     }
   }
 
+  // Resets the "Create New User" tab, including the Callsign Suffix field and
+  // its advisory preview state, so a reopened dialog never shows a stale
+  // pre-filled suffix or a collision error against a value that is gone.
+  const resetNewUserForm = () => {
+    setNewUserForm({ email: '', firstName: '', lastName: '', callsignSuffix: '' })
+    setNewUserCallsignRequired(false)
+    setNewUserCallsignError(null)
+    setNewUserCallsignEdited(false)
+  }
+
+  // Advisory pre-submit check of the Callsign_Suffix the new member would be
+  // given, run on blur of First Name / Last Name / Callsign Suffix (never per
+  // keystroke) and only once both names are present, since the server cannot
+  // compute a default without them. Failures are logged and ignored: the
+  // preview is advisory and the server re-validates on submit.
+  const runCallsignSuffixPreview = async (form) => {
+    if (!team) return
+
+    const firstName = (form.firstName || '').trim()
+    const lastName = (form.lastName || '').trim()
+    if (!firstName || !lastName) return
+
+    const callsignSuffix = form.callsignSuffix || ''
+    try {
+      const response = await usersAPI.previewCallsignSuffix({
+        teamId: team.id,
+        firstName,
+        lastName,
+        ...(callsignSuffix ? { callsignSuffix } : {})
+      })
+      const decision = decideCallsignSuffixPreview(response?.data, {
+        currentValue: callsignSuffix,
+        manuallyEdited: newUserCallsignEdited
+      })
+      if (!decision) return
+
+      setNewUserForm((prev) => ({ ...prev, callsignSuffix: decision.callsignSuffix }))
+      setNewUserCallsignRequired(decision.required)
+      setNewUserCallsignError(decision.error)
+    } catch (error) {
+      console.error('Failed to preview callsign suffix:', error)
+    }
+  }
+
   const handleCreateNewUser = async (e) => {
     e.preventDefault()
+
+    // Same point-of-entry character-class check the Member_List edit row
+    // applies, surfaced inline against the field rather than as a toast.
+    if (!isValidMemberCallsignSuffix(newUserForm.callsignSuffix)) {
+      setNewUserCallsignError('Callsign suffix may only contain letters, digits, "-", and "."')
+      return
+    }
+
     setAddingMember(true)
+    setNewUserCallsignError(null)
     try {
       // Creates the user as a member (with upward membership propagation).
       // When addMemberRole === 'admin', also grants admin role on this team.
-      await usersAPI.createAndAdd(
+      const response = await usersAPI.createAndAdd(
         newUserForm.email,
         newUserForm.firstName,
         newUserForm.lastName,
         team.id,
-        addMemberRole === 'admin' ? 'admin' : undefined
+        addMemberRole === 'admin' ? 'admin' : undefined,
+        newUserForm.callsignSuffix || undefined
       )
       
       // Refresh team data
@@ -466,13 +578,31 @@ export default function TeamDetail({ user, refreshUser }) {
       
       // Notify Dashboard to refresh
       window.dispatchEvent(new CustomEvent('userAssignmentChanged'))
-      
+
+      // Report the Callsign_Suffix the server actually assigned (the admin's
+      // own value, or the Organisation's computed default they never typed).
+      const assignedSuffix = response?.data?.user?.callsign_suffix
+      toast.success(
+        assignedSuffix
+          ? `User created with callsign suffix ${assignedSuffix}`
+          : 'User created and added to this team'
+      )
+
       setShowAddMemberDialog(false)
-      setNewUserForm({ email: '', firstName: '', lastName: '' })
+      resetNewUserForm()
       setAddMemberRole('member')
     } catch (error) {
       console.error('Failed to create user:', error)
-      toast.error('Failed to create user: ' + (error.response?.data?.error || error.message))
+      // A 400 carrying the server's own message is either the
+      // `user_defined`-format "suffix required" rejection or a per-team
+      // collision -- both belong against the Callsign Suffix field, with the
+      // dialog left open to correct, rather than in a generic toast.
+      const inlineError = extractCallsignSuffixServerError(error)
+      if (inlineError) {
+        setNewUserCallsignError(inlineError)
+      } else {
+        toast.error('Failed to create user: ' + (error.response?.data?.error || error.message))
+      }
     } finally {
       setAddingMember(false)
     }
@@ -1754,7 +1884,7 @@ export default function TeamDetail({ user, refreshUser }) {
                   setAddMemberTab('existing')
                   setSelectedUserId('')
                   setUserSearch('')
-                  setNewUserForm({ email: '', firstName: '', lastName: '' })
+                  resetNewUserForm()
                   setAddMemberRole('member')
                 }}
                 className="text-gray-400 hover:text-gray-500 dark:hover:text-gray-300"
@@ -1878,32 +2008,76 @@ export default function TeamDetail({ user, refreshUser }) {
                   
                   <div className="grid grid-cols-2 gap-4">
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                      <label htmlFor="new-user-first-name" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                         First Name *
                       </label>
                       <input
+                        id="new-user-first-name"
                         type="text"
                         required
                         value={newUserForm.firstName}
                         onChange={(e) => setNewUserForm({...newUserForm, firstName: e.target.value})}
+                        onBlur={() => runCallsignSuffixPreview(newUserForm)}
                         className="input w-full"
                         placeholder="Joe"
                       />
                     </div>
                     
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                      <label htmlFor="new-user-last-name" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                         Last Name *
                       </label>
                       <input
+                        id="new-user-last-name"
                         type="text"
                         required
                         value={newUserForm.lastName}
                         onChange={(e) => setNewUserForm({...newUserForm, lastName: e.target.value})}
+                        onBlur={() => runCallsignSuffixPreview(newUserForm)}
                         className="input w-full"
                         placeholder="Bloggs"
                       />
                     </div>
+                  </div>
+
+                  {/* Callsign Suffix: pre-filled from the advisory
+                      `POST /api/users/callsign-suffix-preview` check on blur of
+                      the name inputs, required when the Organisation's
+                      `callsign_name_format` is `user_defined`, and re-checked on
+                      its own blur so a manually typed value is collision-checked
+                      before submit. */}
+                  <div>
+                    <label htmlFor="new-user-callsign-suffix" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                      Callsign Suffix {newUserCallsignRequired ? '*' : ''}
+                    </label>
+                    <input
+                      id="new-user-callsign-suffix"
+                      type="text"
+                      value={newUserForm.callsignSuffix}
+                      onChange={(e) => {
+                        setNewUserCallsignEdited(true)
+                        setNewUserCallsignError(null)
+                        setNewUserForm({...newUserForm, callsignSuffix: e.target.value})
+                      }}
+                      onBlur={() => runCallsignSuffixPreview(newUserForm)}
+                      className="input w-full"
+                      pattern={CALLSIGN_SUFFIX_PATTERN}
+                      title="Only letters, digits, - and . are allowed"
+                      placeholder="J.Bloggs"
+                      required={newUserCallsignRequired}
+                      aria-invalid={newUserCallsignError ? 'true' : undefined}
+                      aria-describedby={newUserCallsignError ? 'new-user-callsign-suffix-error' : (newUserCallsignRequired ? 'new-user-callsign-suffix-help' : undefined)}
+                    />
+                    {newUserCallsignRequired && !newUserCallsignError && (
+                      <p id="new-user-callsign-suffix-help" className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                        This Organisation requires a manually chosen callsign suffix.
+                      </p>
+                    )}
+                    {newUserCallsignError && (
+                      <p id="new-user-callsign-suffix-error" role="alert" className="text-red-600 text-sm mt-1">
+                        {newUserCallsignError}
+                      </p>
+                    )}
                   </div>
                   
                   <div className="bg-blue-50 dark:bg-blue-900 p-4 rounded-lg">

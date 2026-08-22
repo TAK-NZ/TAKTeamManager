@@ -80,6 +80,13 @@ const routes = {
   'GET /api/users/search': ['user:read'],
   'GET /api/users/available': ['user:read'],
   'POST /api/users/create-and-add': ['user:create'],
+  // Read-only callsign_suffix preview for the create-and-add flow. Shares
+  // the SAME 'user:create' identifier as the create route above, on
+  // purpose: a successful preview discloses whether someone on the target
+  // team already holds a given callsign_suffix, so it must not be reachable
+  // any more broadly than the create action it previews. Deliberately NOT
+  // added to `roleDefaults.authenticated_user`, for the same reason.
+  'POST /api/users/callsign-suffix-preview': ['user:create'],
   'POST /api/users/add-to-team': ['user:team:add'],
   'DELETE /api/users/remove-from-team/:userId': ['user:team:remove'],
   // Requirement 2.1 (team-member-transfer): Team_Transfer route. The

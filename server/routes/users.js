@@ -368,6 +368,75 @@ router.get('/available', authenticateToken, authorize, async (req, res) => {
   }
 });
 
+// Read-only callsign_suffix preview for the create-and-add flow.
+//
+// Reports what `POST /api/users/create-and-add` WOULD assign as the new
+// user's `callsign_suffix` for the given name/team, whether the
+// Organisation requires the caller to supply one, and whether the
+// candidate value collides with an existing Member_List entry -- so the
+// Client can show the computed value and surface a collision before the
+// user submits (the affordance `GET /api/requests/pending`'s
+// `effective_callsign_suffix` already gives the approve flow).
+//
+// This is deliberately implemented by calling the exact same
+// `UserProvisioningService.resolveCallsignSuffixForNewUser` the submit
+// path calls, and translating its typed errors into the report -- rather
+// than re-deriving the default or re-running the uniqueness check here.
+// A parallel implementation could disagree with the submit path, which
+// would make the preview worse than no preview at all.
+//
+// Strictly read-only: no INSERT/UPDATE/DELETE, no Authentik call, no
+// transaction. `resolveCallsignSuffixForNewUser` only reads
+// (Team.getAncestorChain / Team.getFullMemberList via the shared pool).
+//
+// Declared alongside `/search` and `/available` (i.e. ahead of any
+// parameterised sibling) so no `/:userId`-style pattern can capture it.
+router.post('/callsign-suffix-preview', authenticateToken, authorize, [
+  body('teamId').isInt(),
+  body('firstName').optional().trim().isLength({ max: 150 }),
+  body('lastName').optional().trim().isLength({ max: 150 }),
+  body('callsignSuffix').optional().trim().isLength({ max: 150 })
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
+  const { teamId, firstName, lastName, callsignSuffix } = req.body;
+
+  try {
+    const suffix = await UserProvisioningService.resolveCallsignSuffixForNewUser(null, {
+      firstName,
+      lastName,
+      teamId,
+      requestedCallsignSuffix: callsignSuffix
+    });
+
+    return res.json({ suffix, required: false, conflict: null });
+  } catch (error) {
+    if (error instanceof UserProvisioningService.CallsignSuffixRequiredError) {
+      // Organisation's callsign_name_format is 'user_defined' and no
+      // value was supplied: there is nothing to preview, the Client must
+      // prompt for one.
+      return res.json({ suffix: null, required: true, conflict: null });
+    }
+
+    if (error instanceof CallsignSuffixConflictError) {
+      // `conflictingValue` is carried by the error itself (see
+      // server/services/CallsignSuffixUniquenessService.js) -- reported
+      // as-is rather than re-derived.
+      return res.json({
+        suffix: error.conflictingValue,
+        required: false,
+        conflict: { value: error.conflictingValue, message: error.message }
+      });
+    }
+
+    getLogger().error({ err: error }, 'Failed to preview callsign_suffix for new user');
+    return res.status(500).json({ error: 'Failed to preview callsign suffix' });
+  }
+});
+
 // Create new user in Authentik and add to team
 //
 // Requirement 17.1: the Authentik-side user-creation call happens strictly
@@ -600,7 +669,10 @@ router.post('/create-and-add', authenticateToken, authorize, [
       username,
       email,
       first_name: firstName,
-      last_name: lastName
+      last_name: lastName,
+      // The suffix actually assigned (supplied value, or the computed
+      // default), so the Client can report it rather than guess.
+      callsign_suffix: resolvedCallsignSuffix
     }
   });
 });
