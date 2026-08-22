@@ -353,7 +353,8 @@ describe('transfer action placement in TeamDetail.jsx (Req 15.1)', () => {
 // The Add Member Dialog's "Create New User" tab gains a Callsign Suffix
 // field fed by the advisory `POST /api/users/callsign-suffix-preview` check.
 // `decideCallsignSuffixPreview` is the whole decision that check drives
-// (pre-fill / required / inline conflict / leave-alone), extracted as a pure
+// (pre-fill / required / inline conflict pre-filled with the colliding value
+// so it can be edited / leave-alone), extracted as a pure
 // helper and tested directly per this file's no-render convention;
 // `extractCallsignSuffixServerError` is the submit-time 400 mapping. The
 // structural tests below pin the wiring the helpers cannot see: that the
@@ -386,13 +387,38 @@ describe('decideCallsignSuffixPreview', () => {
     expect(decision).toEqual({ callsignSuffix: '', required: true, error: null })
   })
 
-  it('surfaces the conflict message inline without pre-filling the field', () => {
+  it('surfaces the conflict message inline and pre-fills the colliding value so it can be edited', () => {
     const decision = decideCallsignSuffixPreview(
       { suffix: 'J.Bloggs', required: false, conflict: { value: 'J.Bloggs', message: 'Callsign suffix J.Bloggs is already used in this team' } },
       { currentValue: '', manuallyEdited: false }
     )
-    expect(decision.error).toBe('Callsign suffix J.Bloggs is already used in this team')
-    expect(decision.callsignSuffix).toBe('')
+    expect(decision).toEqual({
+      callsignSuffix: 'J.Bloggs',
+      required: false,
+      error: 'Callsign suffix J.Bloggs is already used in this team'
+    })
+  })
+
+  it('keeps the current value, and still reports the error, when a conflict omits its value', () => {
+    const decision = decideCallsignSuffixPreview(
+      { suffix: null, required: false, conflict: { message: 'Already taken' } },
+      { currentValue: 'Joe.B', manuallyEdited: false }
+    )
+    expect(decision).toEqual({ callsignSuffix: 'Joe.B', required: false, error: 'Already taken' })
+
+    const emptyValue = decideCallsignSuffixPreview(
+      { suffix: null, required: false, conflict: { value: '', message: 'Already taken' } },
+      { currentValue: 'Joe.B', manuallyEdited: false }
+    )
+    expect(emptyValue).toEqual({ callsignSuffix: 'Joe.B', required: false, error: 'Already taken' })
+  })
+
+  it('never pre-fills anything on the required path, which has no colliding value to offer', () => {
+    const decision = decideCallsignSuffixPreview(
+      { suffix: null, required: true, conflict: null },
+      { currentValue: 'Joe.B', manuallyEdited: false }
+    )
+    expect(decision).toEqual({ callsignSuffix: 'Joe.B', required: true, error: null })
   })
 
   it('surfaces a conflict against a manually typed value while keeping that value', () => {

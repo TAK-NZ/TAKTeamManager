@@ -121,19 +121,30 @@ export function isValidMemberCallsignSuffix(value) {
 //     (`manuallyEdited`), which is never clobbered.
 //   - required === true -> the Organisation's format is `user_defined` and no
 //     suffix was supplied; leave the value alone and mark the field required.
-//   - conflict !== null -> surface `conflict.message` inline (the field stays
-//     editable so the admin can correct it).
+//   - conflict !== null -> surface `conflict.message` inline AND pre-fill the
+//     colliding `conflict.value`, so the admin edits the actual value that
+//     clashed rather than reading a warning over an empty field. When the
+//     admin typed that value themselves this is a no-op; the fall back to
+//     `currentValue` covers a response that omits `conflict.value`.
 export function decideCallsignSuffixPreview(preview, { currentValue = '', manuallyEdited = false } = {}) {
   if (!preview || typeof preview !== 'object') {
     return null
   }
 
   const required = preview.required === true
-  const error = preview.conflict ? (preview.conflict.message || 'That callsign suffix is already in use in this team') : null
-  const canPrefill = !required && !preview.conflict && !manuallyEdited
+  const conflict = preview.conflict || null
+  const error = conflict ? (conflict.message || 'That callsign suffix is already in use in this team') : null
+  const canPrefill = !required && !conflict && !manuallyEdited
+
+  let callsignSuffix = currentValue
+  if (canPrefill) {
+    callsignSuffix = preview.suffix || ''
+  } else if (conflict && typeof conflict.value === 'string' && conflict.value) {
+    callsignSuffix = conflict.value
+  }
 
   return {
-    callsignSuffix: canPrefill ? (preview.suffix || '') : currentValue,
+    callsignSuffix,
     required,
     error
   }
