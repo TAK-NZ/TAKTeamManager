@@ -29,6 +29,15 @@ export function extractCallsignSuffixConflictError(error) {
   return null
 }
 
+// Requirement 16.1: a `team_change` card names the Transferred_User and the
+// Initiating_Admin. Both come from the server as separate first/last columns
+// (`transferred_user_*` / `initiated_by_*` -- see server/routes/requests.js's
+// enrichPendingRequests), either of which may be null, so joining them is a
+// small pure helper rather than inline JSX.
+export function formatPersonName(firstName, lastName) {
+  return [firstName, lastName].filter(Boolean).join(' ').trim()
+}
+
 export default function Requests({ user }) {
   const [requests, setRequests] = useState([])
   const [loading, setLoading] = useState(true)
@@ -95,8 +104,18 @@ export default function Requests({ user }) {
   }
 
   const handleApprove = async (requestId) => {
+    // A `team_change` row shows no First Name / Last Name / Callsign Suffix
+    // inputs, so it must not submit those fields either: on the server
+    // `firstName`/`lastName` overwrite the request's `requested_*` columns
+    // (which hold the Initiating_Admin's name on a Transfer_Request) and
+    // `callsignSuffix` becomes the Callsign_Suffix applied to the
+    // Transferred_User. Sending the seeded values would apply the
+    // Initiating_Admin's suffix to the transferred member.
+    const isTeamChange = requests.find((r) => r.id === requestId)?.request_type === 'team_change'
     try {
-      await requestsAPI.approveRequest(requestId, {
+      await requestsAPI.approveRequest(requestId, isTeamChange ? {
+        additionalDetails: ''
+      } : {
         additionalDetails: '',
         callsignSuffix: callsignSuffixByRequestId[requestId] || '',
         firstName: namesByRequestId[requestId]?.firstName || '',
@@ -113,7 +132,14 @@ export default function Requests({ user }) {
       // other approve failure (which does close/remove nothing either, but
       // gives no field-specific feedback).
       const conflictMessage = extractCallsignSuffixConflictError(error)
-      if (conflictMessage) {
+      if (isTeamChange) {
+        // Requirement 16.6: a `team_change` card renders no Callsign Suffix
+        // field to hang an inline error off, so its failures (a 400 suffix
+        // conflict, a 409 stale or cross-Organisation rejection) surface as a
+        // toast carrying the server's own message. The row stays in the list
+        // either way, since nothing is removed before the await resolves.
+        toast.error(error?.response?.data?.error || 'Failed to approve request')
+      } else if (conflictMessage) {
         setCallsignSuffixErrorByRequestId((prev) => ({ ...prev, [requestId]: conflictMessage }))
       } else {
         toast.error('Failed to approve request')
@@ -172,77 +198,122 @@ export default function Requests({ user }) {
                     <span className="px-2 py-1 text-xs font-medium bg-yellow-100 text-yellow-800 rounded-full">
                       Pending
                     </span>
-                  </div>
-                  
-                  <div className="space-y-2 text-sm text-gray-600 dark:text-gray-400">
-                    <p><span className="font-medium">Email:</span> {request.requester_email}</p>
-                    <p><span className="font-medium">Requested Team:</span> {request.team_path || request.team_name}</p>
-                    <p><span className="font-medium">Submitted:</span> {formatDate(request.created_at)}</p>
-                  </div>
-                  
-                  <div className="mt-4">
-                    <p className="font-medium text-gray-900 dark:text-gray-100 mb-2">Reason for Access:</p>
-                    <p className="text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-700 p-3 rounded-lg">{request.justification}</p>
+                    {request.request_type === 'team_change' && (
+                      <span className="px-2 py-1 text-xs font-medium bg-blue-100 text-blue-800 rounded-full">
+                        Team Transfer
+                      </span>
+                    )}
                   </div>
 
-                  <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-4 max-w-2xl">
-                    <div>
-                      <label
-                        htmlFor={`first-name-${request.id}`}
-                        className="block font-medium text-gray-900 dark:text-gray-100 mb-1 text-sm"
-                      >
-                        First Name
-                      </label>
-                      <input
-                        id={`first-name-${request.id}`}
-                        type="text"
-                        className="input w-full"
-                        value={namesByRequestId[request.id]?.firstName ?? ''}
-                        onChange={(e) => setNamesByRequestId((prev) => ({
-                          ...prev,
-                          [request.id]: { ...prev[request.id], firstName: e.target.value }
-                        }))}
-                      />
-                    </div>
-                    <div>
-                      <label
-                        htmlFor={`last-name-${request.id}`}
-                        className="block font-medium text-gray-900 dark:text-gray-100 mb-1 text-sm"
-                      >
-                        Last Name
-                      </label>
-                      <input
-                        id={`last-name-${request.id}`}
-                        type="text"
-                        className="input w-full"
-                        value={namesByRequestId[request.id]?.lastName ?? ''}
-                        onChange={(e) => setNamesByRequestId((prev) => ({
-                          ...prev,
-                          [request.id]: { ...prev[request.id], lastName: e.target.value }
-                        }))}
-                      />
-                    </div>
-                    <div>
-                      <label
-                        htmlFor={`callsign-suffix-${request.id}`}
-                        className="block font-medium text-gray-900 dark:text-gray-100 mb-1 text-sm"
-                      >
-                        Callsign Suffix
-                      </label>
-                      <input
-                        id={`callsign-suffix-${request.id}`}
-                        type="text"
-                        className="input w-full"
-                        value={callsignSuffixByRequestId[request.id] ?? ''}
-                        onChange={(e) => handleCallsignSuffixChange(request.id, e.target.value)}
-                      />
-                      {callsignSuffixErrorByRequestId[request.id] && (
-                        <p className="text-red-600 text-sm mt-1">
-                          {callsignSuffixErrorByRequestId[request.id]}
+                  {request.request_type === 'team_change' ? (
+                    /* Requirement 16.1/16.3: a Transfer_Request describes an
+                       existing user moving between two teams, so the card names
+                       the Transferred_User (not `requester_*`, which on this row
+                       holds the Initiating_Admin's values), both hierarchy paths,
+                       and the admin-rights consequence of approval. The First
+                       Name / Last Name / Callsign Suffix inputs are deliberately
+                       absent -- they edit the Initiating_Admin's columns and are
+                       meaningful only for `new_account`. */
+                    <>
+                      <div className="space-y-2 text-sm text-gray-600 dark:text-gray-400">
+                        <p>
+                          <span className="font-medium">Member:</span>{' '}
+                          {formatPersonName(request.transferred_user_first_name, request.transferred_user_last_name)}
                         </p>
-                      )}
-                    </div>
-                  </div>
+                        <p><span className="font-medium">Email:</span> {request.transferred_user_email}</p>
+                        <p><span className="font-medium">Current Team:</span> {request.source_team_path}</p>
+                        <p><span className="font-medium">Destination Team:</span> {request.team_path}</p>
+                        <p>
+                          <span className="font-medium">Requested By:</span>{' '}
+                          {formatPersonName(request.initiated_by_first_name, request.initiated_by_last_name)}
+                        </p>
+                        <p><span className="font-medium">Submitted:</span> {formatDate(request.created_at)}</p>
+                      </div>
+
+                      <div className="mt-4">
+                        <p className="font-medium text-gray-900 dark:text-gray-100 mb-2">Reason for Transfer:</p>
+                        <p className="text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-700 p-3 rounded-lg">{request.justification}</p>
+                      </div>
+
+                      <p className="mt-4 text-sm text-amber-800 dark:text-amber-200 bg-amber-50 dark:bg-amber-900 p-3 rounded-lg">
+                        Approving this transfer removes this member&apos;s admin rights in their current
+                        team{request.source_team_path ? ` (${request.source_team_path})` : ''}. Admin rights
+                        must be granted again in the destination team if required.
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <div className="space-y-2 text-sm text-gray-600 dark:text-gray-400">
+                        <p><span className="font-medium">Email:</span> {request.requester_email}</p>
+                        <p><span className="font-medium">Requested Team:</span> {request.team_path || request.team_name}</p>
+                        <p><span className="font-medium">Submitted:</span> {formatDate(request.created_at)}</p>
+                      </div>
+
+                      <div className="mt-4">
+                        <p className="font-medium text-gray-900 dark:text-gray-100 mb-2">Reason for Access:</p>
+                        <p className="text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-700 p-3 rounded-lg">{request.justification}</p>
+                      </div>
+
+                      <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-4 max-w-2xl">
+                        <div>
+                          <label
+                            htmlFor={`first-name-${request.id}`}
+                            className="block font-medium text-gray-900 dark:text-gray-100 mb-1 text-sm"
+                          >
+                            First Name
+                          </label>
+                          <input
+                            id={`first-name-${request.id}`}
+                            type="text"
+                            className="input w-full"
+                            value={namesByRequestId[request.id]?.firstName ?? ''}
+                            onChange={(e) => setNamesByRequestId((prev) => ({
+                              ...prev,
+                              [request.id]: { ...prev[request.id], firstName: e.target.value }
+                            }))}
+                          />
+                        </div>
+                        <div>
+                          <label
+                            htmlFor={`last-name-${request.id}`}
+                            className="block font-medium text-gray-900 dark:text-gray-100 mb-1 text-sm"
+                          >
+                            Last Name
+                          </label>
+                          <input
+                            id={`last-name-${request.id}`}
+                            type="text"
+                            className="input w-full"
+                            value={namesByRequestId[request.id]?.lastName ?? ''}
+                            onChange={(e) => setNamesByRequestId((prev) => ({
+                              ...prev,
+                              [request.id]: { ...prev[request.id], lastName: e.target.value }
+                            }))}
+                          />
+                        </div>
+                        <div>
+                          <label
+                            htmlFor={`callsign-suffix-${request.id}`}
+                            className="block font-medium text-gray-900 dark:text-gray-100 mb-1 text-sm"
+                          >
+                            Callsign Suffix
+                          </label>
+                          <input
+                            id={`callsign-suffix-${request.id}`}
+                            type="text"
+                            className="input w-full"
+                            value={callsignSuffixByRequestId[request.id] ?? ''}
+                            onChange={(e) => handleCallsignSuffixChange(request.id, e.target.value)}
+                          />
+                          {callsignSuffixErrorByRequestId[request.id] && (
+                            <p className="text-red-600 text-sm mt-1">
+                              {callsignSuffixErrorByRequestId[request.id]}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    </>
+                  )}
                 </div>
                 
                 <div className="flex space-x-2 ml-6">

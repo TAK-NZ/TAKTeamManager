@@ -1,6 +1,7 @@
 const pool = require('../config/database');
 const logger = require('../config/logger').createLogger('Team');
 const EventPublisher = require('../services/EventPublisher');
+const { isCloudTakEnabled } = require('../config/cloudtak');
 const { MAX_TEAM_DEPTH } = require('../config/constants');
 
 /**
@@ -146,7 +147,30 @@ class Team {
       
       // Auto-create team channel
       await this.createTeamChannel(team.id);
-      
+
+      // Requirement 2.1/2.6/9.1 (task 6.1): enqueue a CloudTAK_Group
+      // creation Sync_Operation for the newly created Team (root
+      // Organisation or Sub_Team, identically). Guarded by
+      // isCloudTakEnabled() so nothing is enqueued while the integration
+      // is off (Requirement 1.4). Team.create does NOT run inside an
+      // explicit transaction for the INSERT (design.md "Exact enqueue
+      // points" #1), so this enqueues on the default pool (no client).
+      // A transient enqueue failure must never fail the whole team
+      // creation -- a Team with no group is self-healed by the backfill
+      // and by any later update -- so this is wrapped in its own
+      // try/catch that logs and does NOT rethrow.
+      if (isCloudTakEnabled()) {
+        try {
+          await EventPublisher.publishOperation(
+            'create_cloudtak_group',
+            { team_id: team.id },
+            created_by || null
+          );
+        } catch (enqueueError) {
+          logger.error({ err: enqueueError, teamId: team.id }, 'Error enqueuing create_cloudtak_group');
+        }
+      }
+
       return team;
     } catch (error) {
       logger.error({ err: error }, 'Error creating team');
@@ -386,6 +410,18 @@ class Team {
         'INSERT INTO team_memberships (team_id, user_id, role) VALUES ($1, $2, $3) ON CONFLICT (user_id, team_id) DO UPDATE SET role = $3 RETURNING *',
         [teamId, userId, role]
       );
+      // Requirement 5.1/5.2/5.3 (task 8.1): re-reconcile the Team's CloudTAK
+      // group membership after any direct-admin add/promote/demote. This single
+      // upsert site covers all three cases (design "Exact enqueue points" #4).
+      // Non-transactional (default pool) and non-rethrowing so a queue failure
+      // never breaks membership changes.
+      if (isCloudTakEnabled()) {
+        try {
+          await EventPublisher.publishOperation('update_cloudtak_group', { team_id: teamId }, null);
+        } catch (enqueueError) {
+          logger.error({ err: enqueueError, teamId }, 'Error enqueuing update_cloudtak_group');
+        }
+      }
       return result.rows[0];
     } catch (error) {
       logger.error({ err: error, teamId }, 'Error adding team member');
@@ -708,6 +744,30 @@ class Team {
         );
       }
 
+      // Requirement 6.1/6.2/9.1 (task 6.2): enqueue a CloudTAK_Group
+      // update Sync_Operation after a successful `teams` UPDATE, but only
+      // when this update actually touched the Team's `name` or
+      // `description` -- the two fields mirrored into the CloudTAK_Group's
+      // Agency_Attributes. Given the COALESCE pattern above, a field left
+      // out of `updateData` arrives here as `undefined` ("not being
+      // updated"), so guarding on `name !== undefined || description !==
+      // undefined` skips needless operations for unrelated updates (e.g.
+      // a visibility-only or reparent-only change). Guarded by
+      // isCloudTakEnabled() so nothing is enqueued while the integration
+      // is off (Requirement 1.4). `Team.update`'s UPDATE does not run
+      // inside an explicit transaction (design.md "Exact enqueue points"
+      // #2), so this enqueues on the default pool (no client). A transient
+      // enqueue failure must not break the team update -- it is
+      // self-healed by the Backfill and by any later update -- so this is
+      // wrapped in its own try/catch that logs and does NOT rethrow.
+      if (isCloudTakEnabled() && (name !== undefined || description !== undefined)) {
+        try {
+          await EventPublisher.publishOperation('update_cloudtak_group', { team_id: teamId }, null);
+        } catch (enqueueError) {
+          logger.error({ err: enqueueError, teamId }, 'Error enqueuing update_cloudtak_group');
+        }
+      }
+
       return updatedTeam;
     } catch (error) {
       logger.error({ err: error, teamId }, 'Error updating team');
@@ -845,6 +905,29 @@ class Team {
         await EventPublisher.publishOperation(
           'revoke_tak_certificates',
           { tak_usernames: affectedTakUsernames },
+          deletedBy,
+          client
+        );
+      }
+
+      // Requirement 7.1/9.1/9.2 (task 7.1): enqueue a CloudTAK_Group
+      // deletion Sync_Operation for the just-deleted Team, inside this
+      // same transaction (design.md "Exact enqueue points" #3), passing
+      // the open `client` through so the `sync_operations` row
+      // commits/rolls back atomically with the deletion above -- this is
+      // the intentional transactional-site behaviour (Requirement 9.2),
+      // distinct from the non-transactional Team.create/update/addMember
+      // sites which omit the client. Guarded by isCloudTakEnabled() so
+      // nothing is enqueued while the integration is off (Requirement
+      // 1.4). `deletedTeamId` is captured/coerced to a number from the
+      // deleted row (falling back to the coerced `teamId` argument) so
+      // the payload's `team_id` satisfies the schema's `number` type even
+      // though the row is already removed by the DELETE above.
+      if (isCloudTakEnabled()) {
+        const deletedTeamId = Number(result.rows[0]?.id ?? teamId);
+        await EventPublisher.publishOperation(
+          'delete_cloudtak_group',
+          { team_id: deletedTeamId },
           deletedBy,
           client
         );

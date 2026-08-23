@@ -46,7 +46,7 @@ jest.mock('../services/UserProvisioningService', () => {
 jest.mock('../services/CallsignSuffixUniquenessService', () => {
   class CallsignSuffixConflictError extends Error {
     constructor(conflictingValue) {
-      super(`callsign_suffix "${conflictingValue}" is already in use within this Team`);
+      super(`Callsign Suffix "${conflictingValue}" is already in use within this Team`);
       this.name = 'CallsignSuffixConflictError';
       this.conflictingValue = conflictingValue;
     }

@@ -249,10 +249,26 @@ router.get('/callback', authCallbackFailureLimiter, async (req, res) => {
     }
 
     // Get cached user data (now freshly updated)
-    const cachedUser = await authentikSync.getUserFromCache(basicUser.preferred_username);
-    
+    let cachedUser = await authentikSync.getUserFromCache(basicUser.preferred_username);
+
     if (!cachedUser) {
-      getLogger().warn({ username: basicUser.preferred_username }, 'User not found in cache, may need sync');
+      // Self-heal: the user exists in Authentik (we just fetched authentikUser
+      // above) but has no user_cache row yet — e.g. first boot before the
+      // initial periodic sync completed, or a user added to Authentik since the
+      // last sync. Run one on-demand sync and retry the lookup once, rather than
+      // bouncing a valid user to ?error=user_not_synced and making them wait for
+      // the next periodic sync (up to SYNC_INTERVAL_MINUTES).
+      getLogger().warn({ username: basicUser.preferred_username }, 'User not found in cache; running on-demand Authentik sync');
+      try {
+        await authentikSync.syncUsers();
+      } catch (syncErr) {
+        getLogger().error({ err: syncErr.message, username: basicUser.preferred_username }, 'On-demand Authentik sync failed during login');
+      }
+      cachedUser = await authentikSync.getUserFromCache(basicUser.preferred_username);
+    }
+
+    if (!cachedUser) {
+      getLogger().warn({ username: basicUser.preferred_username }, 'User still not in cache after on-demand sync; redirecting');
       return res.redirect(process.env.FRONTEND_URL + '?error=user_not_synced');
     }
 

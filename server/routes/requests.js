@@ -6,15 +6,170 @@ const { getLogger } = require('../middleware/requestContext');
 const { textField } = require('../middleware/validators');
 const { requestAccessLimiter, emailWindowLimiter } = require('../middleware/rateLimiters');
 const { verifyCaptcha } = require('../middleware/captcha');
-const User = require('../models/User');
 const Team = require('../models/Team');
 const RequestApprovalService = require('../services/RequestApprovalService');
 const CallsignService = require('../services/CallsignService');
 const { CallsignSuffixConflictError } = require('../services/CallsignSuffixUniquenessService');
+const {
+  StaleTransferRequestError,
+  CrossOrganisationTransferError
+} = require('../services/TeamTransferService');
 const pool = require('../config/database');
 const router = express.Router();
 
 const requestService = new RequestApprovalService();
+
+// Shared SELECT + JOIN list for `GET /api/requests/pending`. Both the
+// Global_Manager and non-Global_Manager branches return the same row shape
+// and differ only in their WHERE clause, so the projection lives in one
+// place -- duplicating the join-derived `team_change` fields into two
+// queries is how the two branches drift.
+//
+// Requirement 4.3: a `team_change` row needs the Transferred_User's name and
+// email (`tu`, joined on `existing_user_id`), the Initiating_Admin's name
+// (`iu`, joined on `initiated_by`), and the Source_Team (`st`, joined on
+// `current_team_id`). All three are LEFT JOINs: the columns are nullable and
+// are always NULL for `new_account`/`role_change`/`name_change` rows, which
+// must keep flowing through unchanged.
+const PENDING_REQUESTS_SELECT = `
+  SELECT ar.*,
+         t.name as team_name,
+         st.name as source_team_name,
+         tu.first_name as transferred_user_first_name,
+         tu.last_name as transferred_user_last_name,
+         tu.email as transferred_user_email,
+         iu.first_name as initiated_by_first_name,
+         iu.last_name as initiated_by_last_name
+  FROM access_requests ar
+  LEFT JOIN teams t ON ar.target_team_id = t.id
+  LEFT JOIN teams st ON ar.current_team_id = st.id
+  LEFT JOIN users tu ON ar.existing_user_id = tu.id
+  LEFT JOIN users iu ON ar.initiated_by = iu.id
+`;
+
+/**
+ * Shared enrichment for `GET /api/requests/pending` rows.
+ *
+ * Extracted from the two near-identical blocks that previously sat in the
+ * Global_Manager and non-Global_Manager branches. Both branches need the
+ * same derived fields, so they now share one implementation.
+ *
+ * Resolves the hierarchy path for the union of the distinct destination
+ * (`target_team_id`) and source (`current_team_id`) team ids in a single
+ * pass, since `Team.getAncestorChain` supplies both the path segments and
+ * the Organisation's `callsign_name_format`. The union is what Requirement
+ * 4.3 needs: a `team_change` row carries a Source_Team as well as a
+ * Destination_Team, and both are rendered as paths. `team_path` keeps its
+ * existing name and meaning (the destination); `source_team_path` is new and
+ * is `''` for every row without a `current_team_id`.
+ *
+ * `effective_callsign_suffix` is unchanged: it is keyed off the destination
+ * team's Organisation and is only meaningful for `new_account` rows, since a
+ * `team_change` row's `requested_*`/`requester_*` name columns hold the
+ * Initiating_Admin's values rather than the Transferred_User's.
+ *
+ * @param {Array<object>} rows Raw `access_requests` rows from PENDING_REQUESTS_SELECT.
+ * @returns {Promise<Array<object>>} The enriched rows, in input order.
+ */
+async function enrichPendingRequests(rows) {
+  const distinctTeamIds = [...new Set(
+    rows
+      .flatMap((row) => [row.target_team_id, row.current_team_id])
+      .filter((id) => id !== null && id !== undefined)
+  )];
+
+  const teamPathByTeamId = new Map();
+  const callsignNameFormatByTeamId = new Map();
+  await Promise.all(distinctTeamIds.map(async (teamId) => {
+    const ancestorChain = await Team.getAncestorChain(teamId);
+    const organisation = ancestorChain[0];
+    callsignNameFormatByTeamId.set(teamId, organisation?.callsign_name_format);
+    const path = ancestorChain.map((t, i) => {
+      if (i === ancestorChain.length - 1) return t.name;
+      return t.callsign_prefix || t.name;
+    }).join(' > ');
+    teamPathByTeamId.set(teamId, path);
+  }));
+
+  return rows.map((row) => {
+    const base = {
+      ...row,
+      team_path: teamPathByTeamId.get(row.target_team_id) || row.team_name || '',
+      source_team_path: teamPathByTeamId.get(row.current_team_id) || row.source_team_name || ''
+    };
+
+    if (row.callsign_suffix) {
+      return { ...base, effective_callsign_suffix: row.callsign_suffix };
+    }
+
+    const firstName = row.requested_first_name || row.requester_first_name;
+    const lastName = row.requested_last_name || row.requester_last_name;
+    const callsignNameFormat = callsignNameFormatByTeamId.get(row.target_team_id);
+
+    return {
+      ...base,
+      effective_callsign_suffix: CallsignService.computeDefaultCallsignSuffix(firstName, lastName, callsignNameFormat) || ''
+    };
+  });
+}
+
+/**
+ * The Team whose Team_Admins may see one pending `access_requests` row.
+ *
+ * Requirement 4.2: the gating column varies by request type. A `team_change`
+ * row records its Approval_Team explicitly on `approval_team_id` -- the side
+ * of the transfer the Initiating_Admin is NOT an admin of -- so gating it on
+ * `target_team_id` would show it to the initiating side and hide it from the
+ * side that has to decide. Every other request type keeps its existing
+ * gating on the Team the request is aimed at.
+ *
+ * Returns `null` when the row names no gating Team at all (a `team_change`
+ * row with a NULL `approval_team_id`, or any row with a NULL
+ * `target_team_id`), which the filter below treats as invisible: a row whose
+ * approver cannot be identified fails closed rather than open.
+ *
+ * @param {object} row An `access_requests` row.
+ * @returns {number|null} The gating team id, or `null` when there is none.
+ */
+function pendingRequestGatingTeamId(row) {
+  const teamId = row.request_type === 'team_change'
+    ? row.approval_team_id
+    : row.target_team_id;
+  return teamId === null || teamId === undefined ? null : teamId;
+}
+
+/**
+ * Restricts candidate pending rows to those `userId` is a Team_Admin of, for
+ * a caller who is not a Global_Manager.
+ *
+ * Requirement 4.4: admin status is decided by `Team.isAdmin`, which walks the
+ * gating Team's Ancestor_Chain, so a Team_Admin of a Team *above* the gating
+ * Team sees the row. That is what the previous implementation could not do:
+ * it intersected the row's `target_team_id` with the caller's own direct
+ * `role === 'admin'` membership rows, which sees only the exact Teams the
+ * caller holds an admin row on.
+ *
+ * `Team.isAdmin` runs one recursive CTE per call, so results are memoised by
+ * team id: the query count is bounded by the number of distinct gating Teams
+ * among the candidate rows, not by the number of rows. The same batching
+ * instinct as `enrichPendingRequests`'s pass over distinct team ids.
+ *
+ * @param {Array<object>} rows Candidate `access_requests` rows.
+ * @param {number} userId The caller's local `users.id`.
+ * @returns {Promise<Array<object>>} The visible subset, in input order.
+ */
+async function filterPendingRequestsVisibleTo(rows, userId) {
+  const distinctGatingTeamIds = [...new Set(
+    rows.map(pendingRequestGatingTeamId).filter((id) => id !== null)
+  )];
+
+  const isAdminByTeamId = new Map();
+  await Promise.all(distinctGatingTeamIds.map(async (teamId) => {
+    isAdminByTeamId.set(teamId, await Team.isAdmin(teamId, userId));
+  }));
+
+  return rows.filter((row) => isAdminByTeamId.get(pendingRequestGatingTeamId(row)) === true);
+}
 
 // Public route - request team access (unauthenticated)
 //
@@ -144,123 +299,31 @@ router.post('/team-access', requestAccessLimiter, verifyCaptcha, [
 // Get pending requests for team admin
 router.get('/pending', authenticateToken, authorize, async (req, res) => {
   try {
-    // Global Admin sees ALL pending requests across all orgs/teams
-    if (req.user.is_global_manager) {
-      const result = await pool.query(`
-        SELECT ar.*, t.name as team_name
-        FROM access_requests ar
-        LEFT JOIN teams t ON ar.target_team_id = t.id
-        WHERE ar.status = 'pending' 
-          AND ar.email_verified = true
-        ORDER BY ar.created_at ASC
-      `);
-
-      // Resolve full hierarchy path AND callsign_name_format for each
-      // distinct target team in a single pass (both need the ancestor chain).
-      const distinctTargetTeamIds = [...new Set(
-        result.rows
-          .map((row) => row.target_team_id)
-          .filter((id) => id !== null && id !== undefined)
-      )];
-
-      const teamPathByTeamId = new Map();
-      const callsignNameFormatByTargetTeamId = new Map();
-      await Promise.all(distinctTargetTeamIds.map(async (targetTeamId) => {
-        const ancestorChain = await Team.getAncestorChain(targetTeamId);
-        const organisation = ancestorChain[0];
-        callsignNameFormatByTargetTeamId.set(targetTeamId, organisation?.callsign_name_format);
-        const path = ancestorChain.map((t, i) => {
-          if (i === ancestorChain.length - 1) return t.name;
-          return t.callsign_prefix || t.name;
-        }).join(' > ');
-        teamPathByTeamId.set(targetTeamId, path);
-      }));
-
-      const requests = result.rows.map((row) => {
-        const base = {
-          ...row,
-          team_path: teamPathByTeamId.get(row.target_team_id) || row.team_name || ''
-        };
-
-        if (row.callsign_suffix) {
-          return { ...base, effective_callsign_suffix: row.callsign_suffix };
-        }
-
-        const firstName = row.requested_first_name || row.requester_first_name;
-        const lastName = row.requested_last_name || row.requester_last_name;
-        const callsignNameFormat = callsignNameFormatByTargetTeamId.get(row.target_team_id);
-
-        return {
-          ...base,
-          effective_callsign_suffix: CallsignService.computeDefaultCallsignSuffix(firstName, lastName, callsignNameFormat) || ''
-        };
-      });
-
-      return res.json({ requests });
-    }
-
-    // req.user.userId is the local users.id -- team_memberships.user_id
-    // is a foreign key to that column, NOT the Authentik id (req.user.id).
-    const userTeams = await User.getTeamMemberships(req.user.userId);
-    const adminTeams = userTeams.filter(t => t.role === 'admin');
-    
-    if (adminTeams.length === 0) {
-      return res.json({ requests: [] });
-    }
-
-    const teamIds = adminTeams.map(t => t.id);
-    const placeholders = teamIds.map((_, i) => `$${i + 1}`).join(',');
-    
+    // Both branches read the same candidate set -- every verified pending
+    // row (Requirements 4.1, 4.2). The non-Global_Manager branch can no
+    // longer narrow in SQL: the gating column varies per row (see
+    // `pendingRequestGatingTeamId`) and admin status is an Ancestor_Chain
+    // walk rather than an id intersection, so a single
+    // `target_team_id IN (...)` predicate cannot express it. Pending volume
+    // is small and `idx_access_requests_status_new` covers this predicate.
     const result = await pool.query(`
-      SELECT ar.*, t.name as team_name
-      FROM access_requests ar
-      LEFT JOIN teams t ON ar.target_team_id = t.id
-      WHERE ar.target_team_id IN (${placeholders}) 
-        AND ar.status = 'pending' 
+      ${PENDING_REQUESTS_SELECT}
+      WHERE ar.status = 'pending'
         AND ar.email_verified = true
       ORDER BY ar.created_at ASC
-    `, teamIds);
+    `);
 
-    // Resolve full hierarchy path AND callsign_name_format for each
-    // distinct target team in a single pass (both need the ancestor chain).
-    const distinctTargetTeamIds = [...new Set(
-      result.rows
-        .map((row) => row.target_team_id)
-        .filter((id) => id !== null && id !== undefined)
-    )];
+    // A Global_Manager keeps the whole set (Requirement 4.1); everyone else
+    // has it filtered here, before the response body is built, so a row the
+    // caller may not see never reaches enrichment let alone the response.
+    //
+    // req.user.userId is the local users.id -- team_memberships.user_id is a
+    // foreign key to that column, NOT the Authentik id (req.user.id).
+    const visibleRows = req.user.is_global_manager
+      ? result.rows
+      : await filterPendingRequestsVisibleTo(result.rows, req.user.userId);
 
-    const teamPathByTeamId = new Map();
-    const callsignNameFormatByTargetTeamId = new Map();
-    await Promise.all(distinctTargetTeamIds.map(async (targetTeamId) => {
-      const ancestorChain = await Team.getAncestorChain(targetTeamId);
-      const organisation = ancestorChain[0];
-      callsignNameFormatByTargetTeamId.set(targetTeamId, organisation?.callsign_name_format);
-      const path = ancestorChain.map((t, i) => {
-        if (i === ancestorChain.length - 1) return t.name;
-        return t.callsign_prefix || t.name;
-      }).join(' > ');
-      teamPathByTeamId.set(targetTeamId, path);
-    }));
-
-    const requests = result.rows.map((row) => {
-      const base = {
-        ...row,
-        team_path: teamPathByTeamId.get(row.target_team_id) || row.team_name || ''
-      };
-
-      if (row.callsign_suffix) {
-        return { ...base, effective_callsign_suffix: row.callsign_suffix };
-      }
-
-      const firstName = row.requested_first_name || row.requester_first_name;
-      const lastName = row.requested_last_name || row.requester_last_name;
-      const callsignNameFormat = callsignNameFormatByTargetTeamId.get(row.target_team_id);
-
-      return {
-        ...base,
-        effective_callsign_suffix: CallsignService.computeDefaultCallsignSuffix(firstName, lastName, callsignNameFormat)
-      };
-    });
+    const requests = await enrichPendingRequests(visibleRows);
 
     res.json({ requests });
   } catch (error) {
@@ -317,7 +380,18 @@ router.post('/:requestId/approve', authenticateToken, authorize, [
 
     // req.user.userId is the local users.id -- access_requests.processed_by
     // is a foreign key to that column, NOT the Authentik id (req.user.id).
-    await requestService.approveRequest(requestId, req.user.userId, additionalDetails, callsignSuffix);
+    //
+    // Requirement 11.6: the Organisation boundary is re-evaluated at
+    // execution time against the APPROVING user, so the approver's
+    // Global_Manager status has to travel into the transaction. A
+    // Team_Admin of the Approval_Team is not exempt.
+    await requestService.approveRequest(
+      requestId,
+      req.user.userId,
+      additionalDetails,
+      callsignSuffix,
+      !!req.user.is_global_manager
+    );
 
     try {
       await pool.query(
@@ -337,14 +411,38 @@ router.post('/:requestId/approve', authenticateToken, authorize, [
     if (error instanceof CallsignSuffixConflictError) {
       return res.status(400).json({ error: error.message });
     }
+    // Requirement 11.1: the Transferred_User moved between the
+    // Transfer_Request's creation and this approval, so the transaction
+    // rolled back and the row is still `pending`. 409 rather than 400 --
+    // the submitted payload was fine, the world changed underneath it.
+    if (error instanceof StaleTransferRequestError) {
+      return res.status(409).json({
+        error: "The user's team changed since the request was created, so this transfer was not applied"
+      });
+    }
+    // Requirement 11.6: a Team was reparented while the Transfer_Request
+    // sat pending, so the two sides now belong to different Organisations
+    // and the approving user is not a Global_Manager. Same 409 reasoning;
+    // the immediate path in `server/routes/users.js` maps this same error
+    // to 400 because there it is a caller mistake at request time.
+    if (error instanceof CrossOrganisationTransferError) {
+      return res.status(409).json({
+        error: `The source and destination teams are now in different organisations (${error.sourceOrganisationId} and ${error.destinationOrganisationId}), so this transfer was not applied`
+      });
+    }
     getLogger().error({ err: error }, 'Approval failed');
     res.status(500).json({ error: 'Failed to approve request' });
   }
 });
 
 // Deny request
+//
+// Requirements 12.5 and 12.6: the reason must be present and at most 1000
+// characters. The previous validator enforced the non-empty minimum only
+// and accepted a reason of unbounded length, which `access_requests
+// .denial_reason` (a `TEXT` column) would have stored in full.
 router.post('/:requestId/deny', authenticateToken, authorize, [
-  body('denialReason').trim().isLength({ min: 1 })
+  body('denialReason').trim().isLength({ min: 1, max: 1000 })
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {

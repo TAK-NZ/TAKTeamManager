@@ -21,7 +21,8 @@ jest.mock('../config/database', () => ({
   query: jest.fn()
 }));
 jest.mock('../services/authentikSync', () => ({
-  getUserFromCache: jest.fn()
+  getUserFromCache: jest.fn(),
+  syncUsers: jest.fn()
 }));
 
 const axios = require('axios');
@@ -130,6 +131,116 @@ describe('Auth rate limiters (Requirements 7.1, 7.5, 7.6)', () => {
       // Requirement 7.6: no token exchange happens for the rate-limited request.
       expect(axios.post).not.toHaveBeenCalled();
     });
+  });
+});
+
+/**
+ * Tests for the OAuth2 callback's cache-miss self-heal on
+ * `GET /api/auth/callback` (eliminating the `?error=user_not_synced`
+ * bounce for valid users whose `user_cache` row hasn't been written yet --
+ * first boot before the initial sync completes, or a user added to
+ * Authentik since the last periodic sync).
+ *
+ * On a cache miss, the callback runs ONE on-demand `authentikSync.syncUsers()`
+ * and retries `getUserFromCache` ONCE before redirecting to the error page.
+ *
+ * The harness's `axios.get` mock answers BOTH the userinfo call (returning
+ * `preferred_username`) and the subsequent user-detail group-refresh call;
+ * since the mocked payload has no `.results`, the group refresh throws
+ * "User not found in Authentik" and is swallowed by its own non-fatal
+ * catch -- that path is unrelated to the cache-miss self-heal under test.
+ */
+describe('GET /api/auth/callback cache-miss self-heal', () => {
+  const ORIGINAL_ENV = process.env;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    authLimiterStore.resetAll();
+    authCallbackFailureStore.resetAll();
+
+    process.env = {
+      ...ORIGINAL_ENV,
+      AUTHENTIK_URL: 'https://authentik.example.com',
+      AUTHENTIK_CLIENT_ID: 'client-id',
+      AUTHENTIK_CLIENT_SECRET: 'client-secret',
+      AUTHENTIK_TOKEN_URL: 'https://authentik.example.com/token',
+      AUTHENTIK_USERINFO_URL: 'https://authentik.example.com/userinfo',
+      AUTHENTIK_ADMIN_TOKEN: 'admin-token',
+      APP_URL: 'https://app.example.com',
+      FRONTEND_URL: 'https://app.example.com',
+      JWT_SECRET: 'a'.repeat(32),
+      JWT_EXPIRES_IN: '1h'
+    };
+
+    axios.post.mockResolvedValue({ data: { access_token: 'tok' } });
+    axios.get.mockResolvedValue({ data: { preferred_username: 'jdoe' } });
+  });
+
+  afterAll(() => {
+    process.env = ORIGINAL_ENV;
+  });
+
+  it('(a) cache hit: issues a JWT cookie and never runs an on-demand sync', async () => {
+    const app = buildApp();
+
+    authentikSync.getUserFromCache.mockResolvedValue({ id: 1, username: 'jdoe' });
+
+    const res = await request(app).get('/api/auth/callback').query({ code: 'abc' });
+
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe('https://app.example.com/dashboard');
+    expect(res.headers['set-cookie'][0]).toContain('tak_session=');
+    expect(authentikSync.syncUsers).not.toHaveBeenCalled();
+    expect(authentikSync.getUserFromCache).toHaveBeenCalledTimes(1);
+  });
+
+  it('(b) miss then hit: runs exactly one on-demand sync, issues a JWT cookie, and does not redirect to the error page', async () => {
+    const app = buildApp();
+
+    authentikSync.getUserFromCache
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: 2, username: 'jdoe' });
+    authentikSync.syncUsers.mockResolvedValue(undefined);
+
+    const res = await request(app).get('/api/auth/callback').query({ code: 'abc' });
+
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe('https://app.example.com/dashboard');
+    expect(res.headers.location).not.toContain('error=user_not_synced');
+    expect(res.headers['set-cookie'][0]).toContain('tak_session=');
+    expect(authentikSync.syncUsers).toHaveBeenCalledTimes(1);
+    expect(authentikSync.getUserFromCache).toHaveBeenCalledTimes(2);
+  });
+
+  it('(c) miss + syncUsers throws: swallows the sync error, still redirects to ?error=user_not_synced, and does not crash', async () => {
+    const app = buildApp();
+
+    authentikSync.getUserFromCache.mockResolvedValue(null);
+    authentikSync.syncUsers.mockRejectedValue(new Error('authentik unreachable'));
+
+    const res = await request(app).get('/api/auth/callback').query({ code: 'abc' });
+
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe('https://app.example.com?error=user_not_synced');
+    expect(res.headers['set-cookie']).toBeUndefined();
+    expect(authentikSync.syncUsers).toHaveBeenCalledTimes(1);
+    // Retry still happens even though the sync failed.
+    expect(authentikSync.getUserFromCache).toHaveBeenCalledTimes(2);
+  });
+
+  it('(d) miss before and after sync: redirects to ?error=user_not_synced', async () => {
+    const app = buildApp();
+
+    authentikSync.getUserFromCache.mockResolvedValue(null);
+    authentikSync.syncUsers.mockResolvedValue(undefined);
+
+    const res = await request(app).get('/api/auth/callback').query({ code: 'abc' });
+
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe('https://app.example.com?error=user_not_synced');
+    expect(res.headers['set-cookie']).toBeUndefined();
+    expect(authentikSync.syncUsers).toHaveBeenCalledTimes(1);
+    expect(authentikSync.getUserFromCache).toHaveBeenCalledTimes(2);
   });
 });
 

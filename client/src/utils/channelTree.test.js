@@ -114,8 +114,28 @@ describe('buildFolderTree', () => {
         return trimmed.length > 0 && !trimmed.includes(separator) && trimmed === s;
       });
 
+    // Array-level precondition: the folder-path encoding buildFolderTree uses
+    // (join with `separator`, then split on `separator`, then `.trim()` each
+    // part) is only unambiguous for inputs that actually round-trip through
+    // that encoding. A per-segment filter cannot catch ambiguity introduced
+    // between *adjacent* segments (e.g. `["! -", "!"]` joins to `"! - - !"`,
+    // which re-splits to `["!", "- !"]`), so we filter at the array level:
+    //   1. join -> split reproduces the exact segment list (no ambiguous
+    //      separator boundaries formed by neighboring segments), AND
+    //   2. every segment is already trimmed, so the implementation's per-part
+    //      `.trim()` is a no-op and cannot rewrite any segment.
+    const segmentsArb = fc
+      .array(segmentArb, { minLength: 1, maxLength: 6 })
+      .filter(segments => {
+        const roundTripped = segments.join(separator).split(separator);
+        if (roundTripped.length !== segments.length) return false;
+        return segments.every(
+          (seg, i) => roundTripped[i] === seg && seg.trim() === seg
+        );
+      });
+
     fc.assert(
-      fc.property(fc.array(segmentArb, { minLength: 1, maxLength: 6 }), segments => {
+      fc.property(segmentsArb, segments => {
         const originalName = segments.join(separator);
         const channel = { id: 'prop-channel', display_name: originalName };
 

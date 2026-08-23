@@ -28,10 +28,13 @@ jest.mock('./CallsignService', () => ({
   computeDefaultCallsignSuffix: jest.fn()
 }));
 
+const fc = require('fast-check');
+const { test } = require('@fast-check/jest');
 const EventPublisher = require('./EventPublisher');
 const Team = require('../models/Team');
 const CallsignService = require('./CallsignService');
 const { CallsignSuffixConflictError } = require('./CallsignSuffixUniquenessService');
+const { hierarchyArb } = require('./__fixtures__/transferArbitraries');
 const UserProvisioningService = require('./UserProvisioningService');
 
 function buildMockClient(queryImpl) {
@@ -339,4 +342,120 @@ describe('UserProvisioningService.resolveCallsignSuffixForNewUser', () => {
     expect(Team.getFullMemberList).toHaveBeenCalledWith(9);
     expect(result).toBe('J Doe');
   });
+});
+
+/**
+ * Property 19: Provenance is the target Team's Organisation and is written
+ * once (task 13.3). Over any Team hierarchy, any target Team at any depth,
+ * and any prior `origin_org_id` value, `createAndAddUser` must write into the
+ * users upsert an `origin_org_id` VALUE equal to the Organisation at the root
+ * of the target Team's Ancestor_Chain (Requirement 13.3), and the upsert's
+ * ON CONFLICT DO UPDATE SET clause must guard that write with
+ * `COALESCE(users.origin_org_id, EXCLUDED.origin_org_id)` so a prior non-null
+ * value is never overwritten (Requirement 13.9, the write-once guarantee).
+ *
+ * The transactional `client` is mocked, exactly as the createAndAddUser
+ * tests above do. The reference root Organisation id is computed by walking
+ * the generated hierarchy directly (`hierarchy.rootOf`), never by calling
+ * `resolveOrganisationIdForTeam`; the mocked `WITH RECURSIVE chain` query is
+ * simply told to return that reference id, and the test then asserts that
+ * this is the value the INSERT is parameterised with. Every other query the
+ * function issues (the `SELECT id FROM users`, the `parent_teams` CTE, and
+ * the channel SELECTs) is mocked to a benign result so the function runs to
+ * completion.
+ */
+describe('UserProvisioningService.createAndAddUser provenance', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    EventPublisher.publishOperation.mockResolvedValue('op-id');
+  });
+
+  // Feature: member-visibility-and-callsign-recompute, Property 19: Provenance is the target Team's Organisation and is written once
+  // Validates: Requirements 13.3, 13.4, 13.5, 13.9
+  test.prop(
+    [
+      hierarchyArb({ minOrganisations: 1, maxOrganisations: 3 }).chain((hierarchy) =>
+        fc.record({
+          hierarchy: fc.constant(hierarchy),
+          // The target Team is any Team in the forest, at any depth (an
+          // Organisation root, a leaf, or anywhere between).
+          targetTeamId: fc.constantFrom(...hierarchy.teamIds),
+          // Any prior `origin_org_id`: `null` (a first-time provision) or a
+          // non-null value (a returning user being re-provisioned). This
+          // value is not consumed by the mocked client -- it only exists to
+          // let the property state the write-once claim over "any prior
+          // value" -- but is drawn so the intent is explicit.
+          priorOriginOrgId: fc.oneof(
+            fc.constant(null),
+            fc.constantFrom(...hierarchy.teamIds)
+          )
+        })
+      )
+    ],
+    { numRuns: 100 }
+  )(
+    'writes the target Team\'s Organisation as origin_org_id, guarded by a write-once COALESCE',
+    async ({ hierarchy, targetTeamId }) => {
+      jest.clearAllMocks();
+      EventPublisher.publishOperation.mockResolvedValue('op-id');
+
+      // The expected provenance, computed by walking the generated hierarchy
+      // directly: the root of the target Team's Ancestor_Chain.
+      const expectedRootOrgId = hierarchy.rootOf(targetTeamId);
+
+      let capturedInsertSql = null;
+      let capturedOriginOrgIdParam;
+
+      const client = {
+        query: jest.fn((sql, params) => {
+          // The resolveOrganisationIdForTeam recursive query: return the
+          // reference root org id for the target Team. The service uses this
+          // return value as the origin_org_id it writes.
+          if (sql.includes('WITH RECURSIVE chain')) {
+            return Promise.resolve({ rows: [{ id: expectedRootOrgId }] });
+          }
+          // The users upsert: capture its SQL and the origin_org_id param
+          // (the 7th positional parameter, $7).
+          if (sql.includes('INSERT INTO users')) {
+            capturedInsertSql = sql;
+            capturedOriginOrgIdParam = params[6];
+            return Promise.resolve({ rows: [] });
+          }
+          if (sql.includes('SELECT id FROM users WHERE authentik_user_id')) {
+            return Promise.resolve({ rows: [{ id: 4242 }] });
+          }
+          // Benign: no parent teams, no channels.
+          if (sql.includes('WITH RECURSIVE parent_teams')) {
+            return Promise.resolve({ rows: [] });
+          }
+          return Promise.resolve({ rows: [] });
+        })
+      };
+
+      await UserProvisioningService.createAndAddUser(client, {
+        authentikUserId: 12345,
+        username: 'provenance.user',
+        email: 'provenance.user@example.com',
+        firstName: 'Prov',
+        lastName: 'Enance',
+        teamId: targetTeamId,
+        createdBy: 1
+      });
+
+      // Requirement 13.3: the origin_org_id VALUE passed to the upsert equals
+      // the target Team's Organisation (the root of its Ancestor_Chain).
+      expect(capturedOriginOrgIdParam).toBe(expectedRootOrgId);
+
+      // Requirement 13.9 (write-once): the upsert's ON CONFLICT DO UPDATE SET
+      // clause guards origin_org_id with
+      // COALESCE(users.origin_org_id, EXCLUDED.origin_org_id). At the SQL
+      // level this is the write-once guarantee: COALESCE(prior, new) = prior
+      // whenever `prior` is non-null, so a returning user's existing
+      // provenance is never overwritten regardless of the target Team.
+      expect(capturedInsertSql).not.toBeNull();
+      expect(capturedInsertSql).toContain(
+        'origin_org_id = COALESCE(users.origin_org_id, EXCLUDED.origin_org_id)'
+      );
+    }
+  );
 });

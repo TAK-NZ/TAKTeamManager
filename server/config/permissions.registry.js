@@ -72,16 +72,84 @@ const routes = {
   'DELETE /api/teams/:teamId': ['team:delete:global'],
 
   // --- /api/users (server/routes/users.js) ---
-  'GET /api/users': ['user:read'],
+  // The three user-directory LISTING routes (`GET /api/users`,
+  // `GET /api/users/search`, `GET /api/users/available`) require
+  // 'user:read:team_admin': a Global_Manager, or a Team_Admin of ANY team.
+  // They previously required a plain 'user:read' that also sat in
+  // `roleDefaults.authenticated_user`, which let every authenticated user
+  // -- including a plain non-admin team member -- enumerate the whole user
+  // directory (names, emails) and the full pool of unassigned users, even
+  // though all three routes only back admin-only UI
+  // (client/src/pages/Users.jsx, client/src/pages/Admin.jsx, and the Add
+  // Member dialog in client/src/pages/TeamDetail.jsx).
+  //
+  // These are LISTING routes with no target row, so the resolver
+  // (server/middleware/authorize.js) checks "administers something", not
+  // "administers this" -- see that resolver's own comment. Scoping the
+  // CONTENTS of the response by organisation (so a Team_Admin sees only
+  // their org's users rather than the whole directory) is a SEPARATE,
+  // still-open concern, not addressed by this entry: it needs org
+  // provenance on `users`, which does not exist yet.
+  //
+  // Deliberately NOT added to `roleDefaults.authenticated_user` below, for
+  // the same reason as the transfer and callsign-suffix-preview routes: a
+  // statically-held identifier satisfies `resolveAccess` outright, so
+  // `authorize.js` would never consult the resolver at all and the gate
+  // would be bypassed.
+  'GET /api/users': ['user:read:team_admin'],
   'GET /api/users/me': ['user:read:own'],
   'POST /api/users': ['user:create:team_admin'],
-  'POST /api/users/:userId/holding-pen': ['user:holding_pen:team_admin'],
   'POST /api/users/:userId/resend-welcome': ['user:resend_welcome:team_admin'],
-  'GET /api/users/search': ['user:read'],
-  'GET /api/users/available': ['user:read'],
+  'GET /api/users/search': ['user:read:team_admin'],
+  'GET /api/users/available': ['user:read:team_admin'],
+  // The next three entries ('user:create' twice, then 'user:team:add') are
+  // resolver-gated: the shared `resolveTeamAdminOfBodyTeamId` resolver in
+  // server/middleware/authorize.js permits a Global_Manager OR a Team_Admin
+  // (per `Team.isAdmin`, so an admin anywhere in the Ancestor_Chain
+  // qualifies) of the `teamId` in the REQUEST BODY. Both identifiers
+  // previously had these registry entries but no resolver and no place in
+  // `roleDefaults.authenticated_user`, so nothing but a Global_Manager's
+  // '*' wildcard could satisfy them and every Team_Admin was denied 403 --
+  // visibly, the Add Member dialog's Callsign Suffix field never filled in
+  // because the preview 403'd, and "Add Existing User" failed outright.
+  //
+  // Deliberately still NOT in `roleDefaults.authenticated_user`: a
+  // statically-held identifier satisfies `resolveAccess` outright, so
+  // `authorize.js` would never consult the resolver and the team-scoped
+  // gate would be bypassed entirely.
   'POST /api/users/create-and-add': ['user:create'],
+  // Read-only callsign_suffix preview for the create-and-add flow. Shares
+  // the SAME 'user:create' identifier as the create route above, on
+  // purpose: a successful preview discloses whether someone on the target
+  // team already holds a given callsign_suffix, so it must not be reachable
+  // any more broadly than the create action it previews -- it is reachable
+  // by exactly the admins who can perform the create it previews.
+  'POST /api/users/callsign-suffix-preview': ['user:create'],
+  // Adding an EXISTING user to a team: same authorization boundary as
+  // creating one in it, so it shares the resolver described above.
   'POST /api/users/add-to-team': ['user:team:add'],
+  // INTENTIONALLY still Global_Manager-only: 'user:team:remove' has the
+  // same missing-resolver shape as the two identifiers above (no resolver,
+  // not in roleDefaults, so only the '*' wildcard satisfies it) but this
+  // route DELETES the Authentik user along with the local `users` /
+  // `user_cache` rows outright. Widening who may destroy an account is a
+  // separate decision that has not been made, so no resolver is added
+  // here. The registry-completeness test in permissions.registry.test.js
+  // carries this identifier in an explicit, named exception list so the
+  // gap stays documented rather than hidden.
   'DELETE /api/users/remove-from-team/:userId': ['user:team:remove'],
+  // Requirement 2.1 (team-member-transfer): Team_Transfer route. The
+  // 'user:team:transfer' row-scoped resolver
+  // (server/middleware/authorize.js) permits a Global_Manager, a
+  // Team_Admin of the Destination_Team (`req.body.targetTeamId`), or a
+  // Team_Admin of the Source_Team (the Transferred_User's
+  // Direct_Membership team) -- all via `Team.isAdmin`, so an admin
+  // anywhere in either Team's Ancestor_Chain qualifies (Req 2.2, 2.6).
+  // Deliberately NOT added to `roleDefaults.authenticated_user` below: a
+  // statically-held identifier would satisfy `resolveAccess` outright and
+  // bypass the row-scoped resolver entirely, granting every authenticated
+  // user the ability to move any member between teams.
+  'POST /api/users/:userId/transfer': ['user:team:transfer'],
 
   // --- /api/channels (server/routes/channels.js) ---
   'GET /api/channels/descriptions': ['channel:read'],
@@ -184,6 +252,11 @@ const routes = {
   // Requirement 30.4: Global_Manager-only GET/PUT surface for editing
   // existing email_templates rows' subject_template/body_template
   // columns.
+  // admin-settings-management list endpoint: returns every email_templates
+  // row so the Template_Editor has a single source of truth for the set of
+  // template keys. Shares the `communication:template:read` identifier with
+  // the `:key` read route below (same underlying data, read-only).
+  'GET /api/communications/templates': ['communication:template:read'],
   'GET /api/communications/templates/:key': ['communication:template:read'],
   'PUT /api/communications/templates/:key': ['communication:template:manage'],
   // Requirement 30.5: Global_Manager-only "send test email" endpoint,
@@ -348,8 +421,12 @@ const roleDefaults = {
   // the current inline implementation), so the registry stays internally
   // consistent with the routes it describes.
   authenticated_user: [
+    // 'user:read:own' stays: `GET /api/auth/me` and `GET /api/users/me`
+    // must keep working for every authenticated user. The plain
+    // 'user:read' that used to sit here was REMOVED -- it gated the three
+    // user-directory listing routes above, which are now
+    // 'user:read:team_admin' and resolver-gated (see those entries).
     'user:read:own',
-    'user:read',
     'team:read:own',
     'channel:read',
     'channel:subscribe:deployment',

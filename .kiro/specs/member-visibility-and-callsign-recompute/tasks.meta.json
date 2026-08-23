@@ -1,0 +1,1013 @@
+{
+  "pbtResults": {
+    "6.5 Write property test for the Global_Manager superset": {
+      "status": "passed",
+      "lastRunTimestamp": 1787438045222
+    },
+    "7.3 Write property test for Scoped_Organisations resolution": {
+      "status": "passed",
+      "lastRunTimestamp": 1787438897700
+    },
+    "1.9 Write property test for when a preview is issued": {
+      "status": "passed",
+      "lastRunTimestamp": 1787439066966
+    },
+    "1.13 Write property test for conflict handling": {
+      "status": "passed",
+      "lastRunTimestamp": 1787439869479
+    },
+    "11.3 Write property test for the empty-list explanation": {
+      "status": "passed",
+      "lastRunTimestamp": 1787454899844
+    }
+  },
+  "executionHistory": {
+    "1.1 Create `client/src/utils/callsignSuffixPreview.js` with the three-state constants and the request-body builders": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436830062
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436927297
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787437128833
+      }
+    ],
+    "1.2 Implement `applyPreviewResponse` in `client/src/utils/callsignSuffixPreview.js`": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436831531
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787437140171
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787437293391
+      }
+    ],
+    "1.3 Implement `newUserFormReducer` in `client/src/utils/callsignSuffixPreview.js`": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436832987
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787437307031
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787437548505
+      }
+    ],
+    "1.4 Write reducer-sequence and example tests": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436834449
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787437562222
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787437914559
+      }
+    ],
+    "1.5 Write property test for the recompute reflecting the current names": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436835957
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787437928130
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787438201417
+      }
+    ],
+    "1.6 Write property test for the two request bodies agreeing and never echoing": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436837325
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787438269125
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787438485678
+      }
+    ],
+    "1.7 Write property test for recompute idempotence": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436838722
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787438507015
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787438736761
+      }
+    ],
+    "1.8 Write property test for a typed suffix surviving": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436840469
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787438749147
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787438947123
+      }
+    ],
+    "1.9 Write property test for when a preview is issued": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436842101
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787438960870
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787439120066
+      }
+    ],
+    "1.10 Write property test for the Recompute_Control's disabled condition": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436843533
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787439133824
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787439296680
+      }
+    ],
+    "1.11 Write property test for out-of-order and post-reset responses": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436844926
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787439310853
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787439609545
+      }
+    ],
+    "1.12 Write property test for a failed preview being a no-op": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436846446
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787439632432
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787439766554
+      }
+    ],
+    "1.13 Write property test for conflict handling": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436847877
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787439775556
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787440006387
+      }
+    ],
+    "2. Checkpoint - pure callsign logic": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436849330
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787440027254
+      }
+    ],
+    "3.1 Replace the four `useState` hooks with one `useReducer` in `client/src/pages/TeamDetail.jsx`": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436851309
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787440035143
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787440413415
+      }
+    ],
+    "3.2 Add the single request-issuing effect in `client/src/pages/TeamDetail.jsx`": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436852384
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787440420896
+      }
+    ],
+    "3.3 Add the Recompute_Control and the busy indication to the dialog JSX in `client/src/pages/TeamDetail.jsx`": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436854496
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787440427271
+      }
+    ],
+    "3.4 Wire submission through the shared body builder in `client/src/pages/TeamDetail.jsx`": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436855873
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787440433512
+      }
+    ],
+    "3.5 Rewrite the affected assertions in `client/src/pages/TeamDetail.test.jsx`": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436857908
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787440447341
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787440701519
+      }
+    ],
+    "4.1 Write property test for the checked value being the assigned value": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436859042
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787440735303
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787441068888
+      }
+    ],
+    "4.2 Write the read-only and `user_defined` regression examples": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436860676
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787441076297
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787441565369
+      }
+    ],
+    "5. Checkpoint - Defect 1 complete and independently shippable": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436862367
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787441588771
+      }
+    ],
+    "6.1 Create `server/utils/directoryScope.js` with the predicate and scope construction": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436864502
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436933335
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787437133918
+      }
+    ],
+    "6.2 Implement the LIKE-pattern builder as the single producer in `server/utils/directoryScope.js`": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436866427
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787437146543
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787437300191
+      }
+    ],
+    "6.3 Create the scoping arbitraries fixture module": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436867614
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787437314119
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787437554735
+      }
+    ],
+    "6.4 Write property test for no cross-organisation disclosure": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436869192
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787437567936
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787437921027
+      }
+    ],
+    "6.5 Write property test for the Global_Manager superset": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436870502
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787437934207
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787438260891
+      }
+    ],
+    "6.6 Write the edge-shape and escaping examples": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436872510
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787438275077
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787438491849
+      }
+    ],
+    "7.1 Create `server/services/DirectoryScopeService.js` with `resolveScope`": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436874197
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787438281063
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787438500218
+      }
+    ],
+    "7.2 Add the shared CTE, the response fragment, and the log line to `server/services/DirectoryScopeService.js`": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436875462
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787438513708
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787438742965
+      }
+    ],
+    "7.3 Write property test for Scoped_Organisations resolution": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436877534
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787438755101
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787438953582
+      }
+    ],
+    "7.4 Write property test for the scope response object": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436878727
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787438967252
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787439127273
+      }
+    ],
+    "7.5 Write the resolver examples": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436880733
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787439139281
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787439302135
+      }
+    ],
+    "8.1 Return the empty scope rather than `UNSCOPED` in `server/services/DirectoryScopeService.js`": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436881920
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787439317280
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787439409693
+      }
+    ],
+    "8.2 Write property test for failing closed": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436883901
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787439617526
+      }
+    ],
+    "9.1 Add the `candidates` CTE with the scope predicate ahead of the `LIMIT` in `server/routes/users.js`": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436885842
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787439783113
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787440013956
+      }
+    ],
+    "9.2 Add the empty-result count query in `server/routes/users.js`": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436887291
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787440041980
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787440440351
+      }
+    ],
+    "9.3 Run the predicate over the returned rows and attach the `scope` object in `server/routes/users.js`": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436888854
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787440453906
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787440709606
+      }
+    ],
+    "9.4 Write property test for scoping being read-only": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436890367
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787440728607
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787441062113
+      }
+    ],
+    "9.5 Write the `/available` response and integration examples": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436891734
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787441082606
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787441573903
+      }
+    ],
+    "10.1 Scope `/search` in `server/routes/users.js`": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436893263
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787441595606
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787441794952
+      }
+    ],
+    "10.2 Scope `GET /api/users` in `server/routes/users.js`": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436894717
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787441802321
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787441993064
+      }
+    ],
+    "10.3 Write property test for the SQL pre-narrowing agreeing with the predicate": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436896180
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787442000661
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787443153039
+      }
+    ],
+    "10.4 Write the `/search` and `/users` examples": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436897543
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787443161106
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787443544742
+      }
+    ],
+    "11.1 Create `client/src/utils/directoryScopeMessage.js`": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436898954
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787443167165
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787443553173
+      }
+    ],
+    "11.2 Wire the scope into the \"Add Existing User\" tab in `client/src/pages/TeamDetail.jsx`": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436900752
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787443560195
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787454706167
+      }
+    ],
+    "11.3 Write property test for the empty-list explanation": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436902383
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787454728502
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787454962770
+      }
+    ],
+    "11.4 Write the exact-wording tests": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436904068
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787454978894
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787455164774
+      }
+    ],
+    "12. Checkpoint - Defect 2 domain scoping complete and independently shippable": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436905021
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787455188300
+      }
+    ],
+    "13.1 Create the `origin_org_id` migration": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436906319
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787443566823
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787454719548
+      }
+    ],
+    "13.2 Populate `origin_org_id` in `UserProvisioningService.createAndAddUser`": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436908140
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787454735787
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787454971168
+      }
+    ],
+    "13.3 Write property test for provenance resolution and write-once behaviour": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436909171
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787454986093
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787455173787
+      }
+    ],
+    "13.4 Write the two other creation-path examples": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436911294
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787455194433
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787455281467
+      }
+    ],
+    "13.5 Write the migration integration test": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436912383
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787455287414
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787455817963
+      }
+    ],
+    "13.6 Add the provenance disjunct to the three Directory_Routes": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436914560
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787455823610
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787458484165
+      }
+    ],
+    "14. Final verification": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787436915712
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787458490410
+      },
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787459093065
+      }
+    ],
+    "6. Directory scope predicate (pure server module)": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787438494142
+      }
+    ],
+    "7. `DirectoryScopeService` (the only DB reader in the scoping half)": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787439303602
+      }
+    ],
+    "8. Fail-closed behaviour for an Organisation with no configured domains": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787439618969
+      }
+    ],
+    "1. Callsign_Suffix state machine (pure Client module)": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787440007946
+      }
+    ],
+    "3. Rewire the Add_Member_Dialog to the state machine": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787440703149
+      }
+    ],
+    "4. Pin the server preview route's existing correctness (tests only — no implementation)": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787441567187
+      }
+    ],
+    "9. Scope `GET /api/users/available` (the reported route)": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787441575458
+      }
+    ],
+    "10. Scope `GET /api/users/search` and `GET /api/users`": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787443546809
+      }
+    ],
+    "11. Client explanation of an empty scoped list": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787455166552
+      }
+    ],
+    "13. Organisation provenance on `users` (durable layer, additive)": [
+      {
+        "executionId": "6669cc7f-10d6-48f6-8ad0-a527ed7fc15f",
+        "chatSessionId": "sess_909d5a1f-2b5d-48b5-bdcd-7d3b1536770e",
+        "timestamp": 1787458485467
+      }
+    ]
+  }
+}

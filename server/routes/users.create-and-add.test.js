@@ -424,3 +424,264 @@ describe('POST /api/users/create-and-add callsign_suffix resolution (task 22.2)'
     expect(pool.connect).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * `POST /api/users/callsign-suffix-preview`: the read-only companion to
+ * `POST /api/users/create-and-add`, reporting what the submit path WOULD
+ * assign (or why it would reject) before the Client submits.
+ *
+ * The preview is required to delegate to the exact same
+ * `UserProvisioningService.resolveCallsignSuffixForNewUser` the submit
+ * path uses, so these tests drive the route entirely through that
+ * (already-mocked) service call and assert on the translation of its
+ * result / typed errors into the response report -- plus that the route
+ * performs no write and never touches Authentik.
+ */
+describe('POST /api/users/callsign-suffix-preview', () => {
+  let app;
+  let originalFetch;
+
+  const PREVIEW_BODY = { teamId: 7, firstName: 'New', lastName: 'User' };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    app = buildApp();
+    originalFetch = global.fetch;
+    global.fetch = jest.fn();
+    pool.query.mockResolvedValue({ rows: [] });
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it('reports the computed default suffix for a team whose Organisation derives it', async () => {
+    UserProvisioningService.resolveCallsignSuffixForNewUser.mockResolvedValue('N.User');
+
+    const res = await request(app).post('/api/users/callsign-suffix-preview').send(PREVIEW_BODY);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ suffix: 'N.User', required: false, conflict: null });
+    expect(UserProvisioningService.resolveCallsignSuffixForNewUser).toHaveBeenCalledWith(null, {
+      firstName: 'New',
+      lastName: 'User',
+      teamId: 7,
+      requestedCallsignSuffix: undefined
+    });
+  });
+
+  it('passes a supplied callsignSuffix through to the resolver and reports it back', async () => {
+    UserProvisioningService.resolveCallsignSuffixForNewUser.mockResolvedValue('Bravo1');
+
+    const res = await request(app)
+      .post('/api/users/callsign-suffix-preview')
+      .send({ ...PREVIEW_BODY, callsignSuffix: 'Bravo1' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ suffix: 'Bravo1', required: false, conflict: null });
+    expect(UserProvisioningService.resolveCallsignSuffixForNewUser).toHaveBeenCalledWith(null, {
+      firstName: 'New',
+      lastName: 'User',
+      teamId: 7,
+      requestedCallsignSuffix: 'Bravo1'
+    });
+  });
+
+  it('reports required: true (and no suffix) for a user_defined Organisation with no suffix supplied', async () => {
+    UserProvisioningService.resolveCallsignSuffixForNewUser.mockRejectedValue(
+      new UserProvisioningService.CallsignSuffixRequiredError()
+    );
+
+    const res = await request(app).post('/api/users/callsign-suffix-preview').send(PREVIEW_BODY);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ suffix: null, required: true, conflict: null });
+  });
+
+  it('reports the conflicting value and message on a per-Team uniqueness collision', async () => {
+    const { CallsignSuffixConflictError } = jest.requireActual('../services/CallsignSuffixUniquenessService');
+    const conflictError = new CallsignSuffixConflictError('J.Doe');
+    UserProvisioningService.resolveCallsignSuffixForNewUser.mockRejectedValue(conflictError);
+
+    const res = await request(app)
+      .post('/api/users/callsign-suffix-preview')
+      .send({ ...PREVIEW_BODY, callsignSuffix: 'J.Doe' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      suffix: 'J.Doe',
+      required: false,
+      conflict: { value: 'J.Doe', message: conflictError.message }
+    });
+  });
+
+  it('returns 400 with an errors array when teamId is missing or not an integer', async () => {
+    const missing = await request(app)
+      .post('/api/users/callsign-suffix-preview')
+      .send({ firstName: 'New', lastName: 'User' });
+
+    expect(missing.status).toBe(400);
+    expect(Array.isArray(missing.body.errors)).toBe(true);
+    expect(missing.body.errors.length).toBeGreaterThan(0);
+
+    const nonInteger = await request(app)
+      .post('/api/users/callsign-suffix-preview')
+      .send({ ...PREVIEW_BODY, teamId: 'not-a-number' });
+
+    expect(nonInteger.status).toBe(400);
+    expect(Array.isArray(nonInteger.body.errors)).toBe(true);
+
+    // Validation failure short-circuits before any resolution work.
+    expect(UserProvisioningService.resolveCallsignSuffixForNewUser).not.toHaveBeenCalled();
+  });
+
+  it('issues no write and no Authentik call -- the preview is strictly read-only', async () => {
+    UserProvisioningService.resolveCallsignSuffixForNewUser.mockResolvedValue('N.User');
+
+    const res = await request(app).post('/api/users/callsign-suffix-preview').send(PREVIEW_BODY);
+
+    expect(res.status).toBe(200);
+
+    // No transaction was opened...
+    expect(pool.connect).not.toHaveBeenCalled();
+    // ...no Authentik HTTP call was made...
+    expect(global.fetch).not.toHaveBeenCalled();
+    // ...and no mutating statement reached the pool.
+    for (const [sql] of pool.query.mock.calls) {
+      expect(String(sql)).not.toMatch(/\b(INSERT|UPDATE|DELETE)\b/i);
+    }
+  });
+
+  it('responds 500 and logs when the resolver fails for an unexpected reason', async () => {
+    UserProvisioningService.resolveCallsignSuffixForNewUser.mockRejectedValue(
+      new Error('database unreachable')
+    );
+
+    const res = await request(app).post('/api/users/callsign-suffix-preview').send(PREVIEW_BODY);
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBeDefined();
+    expect(mockLoggerError).toHaveBeenCalled();
+  });
+});
+
+/**
+ * CloudTAK Agency group enqueue at the create-and-add admin promotion
+ * (Requirement 5.2 / 9.1 / 9.2 / 1.4, task 8.2/8.4).
+ *
+ * When the caller creates-and-adds a user as `role: 'admin'`, the route
+ * promotes the just-created membership row to `'admin'` on the
+ * transactional client and -- ONLY when CloudTAK is enabled -- enqueues
+ * one `update_cloudtak_group` with `{ team_id }` on that SAME client so
+ * the enqueue commits/rolls back atomically with the promotion. Nothing
+ * enqueues when the flag is off, and nothing enqueues for a non-admin
+ * (`role: 'member'`) creation.
+ *
+ * `isCloudTakEnabled()` reads `process.env` at call time, so toggling
+ * `process.env.CLOUDTAK_ENABLED` here is sufficient; it is saved and
+ * restored around each test.
+ */
+describe('POST /api/users/create-and-add CloudTAK admin-promotion enqueue (Requirement 5.2 / 9.2 / 1.4)', () => {
+  let app;
+  let originalFetch;
+  let savedFlag;
+
+  function buildAdminMockClient() {
+    return {
+      query: jest.fn().mockImplementation((sql) => {
+        if (sql.includes('SELECT id FROM users WHERE authentik_user_id')) {
+          return Promise.resolve({ rows: [{ id: 55 }] });
+        }
+        return Promise.resolve({ rows: [] });
+      }),
+      release: jest.fn()
+    };
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    app = buildApp();
+    originalFetch = global.fetch;
+    savedFlag = process.env.CLOUDTAK_ENABLED;
+    pool.query.mockResolvedValue({ rows: [] });
+    // `jest.clearAllMocks()` clears recorded calls but NOT implementations,
+    // so restore the benign Phase-0 default here in case an earlier test in
+    // this file left `resolveCallsignSuffixForNewUser` rejecting.
+    UserProvisioningService.resolveCallsignSuffixForNewUser.mockResolvedValue(null);
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    if (savedFlag === undefined) {
+      delete process.env.CLOUDTAK_ENABLED;
+    } else {
+      process.env.CLOUDTAK_ENABLED = savedFlag;
+    }
+  });
+
+  it("enqueues one update_cloudtak_group with { team_id } on the transactional client for a role='admin' creation when the flag is on", async () => {
+    process.env.CLOUDTAK_ENABLED = 'true';
+    mockAuthentikSuccess();
+    const mockClient = buildAdminMockClient();
+    pool.connect.mockResolvedValue(mockClient);
+    EventPublisher.publishOperation.mockResolvedValue('op-id');
+
+    const res = await request(app)
+      .post('/api/users/create-and-add')
+      .send({ ...VALID_BODY, role: 'admin' });
+
+    expect(res.status).toBe(201);
+    // The membership row was promoted to 'admin' on the transactional client.
+    expect(mockClient.query).toHaveBeenCalledWith(
+      expect.stringContaining('UPDATE team_memberships SET role = $3'),
+      [7, 55, 'admin']
+    );
+    // ...and the CloudTAK enqueue rides the SAME transactional client.
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'update_cloudtak_group',
+      { team_id: 7 },
+      1,
+      mockClient
+    );
+  });
+
+  it("enqueues NOTHING when the flag is off, even for a role='admin' creation (Requirement 1.4)", async () => {
+    process.env.CLOUDTAK_ENABLED = 'false';
+    mockAuthentikSuccess();
+    const mockClient = buildAdminMockClient();
+    pool.connect.mockResolvedValue(mockClient);
+    EventPublisher.publishOperation.mockResolvedValue('op-id');
+
+    const res = await request(app)
+      .post('/api/users/create-and-add')
+      .send({ ...VALID_BODY, role: 'admin' });
+
+    expect(res.status).toBe(201);
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalledWith(
+      'update_cloudtak_group',
+      expect.anything(),
+      expect.anything(),
+      expect.anything()
+    );
+  });
+
+  it("enqueues no update_cloudtak_group for a non-admin (role='member') creation, even with the flag on", async () => {
+    process.env.CLOUDTAK_ENABLED = 'true';
+    mockAuthentikSuccess();
+    const mockClient = buildAdminMockClient();
+    pool.connect.mockResolvedValue(mockClient);
+    EventPublisher.publishOperation.mockResolvedValue('op-id');
+
+    const res = await request(app)
+      .post('/api/users/create-and-add')
+      .send({ ...VALID_BODY, role: 'member' });
+
+    expect(res.status).toBe(201);
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalledWith(
+      'update_cloudtak_group',
+      expect.anything(),
+      expect.anything(),
+      expect.anything()
+    );
+  });
+});

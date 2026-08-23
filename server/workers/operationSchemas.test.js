@@ -84,6 +84,26 @@ describe('operationSchemas completeness', () => {
   });
 });
 
+describe('CloudTAK operation schemas (Requirement 9.5, task 3.1)', () => {
+  // The three CloudTAK operation types each carry only a numeric `team_id`
+  // (see design.md "operationSchemas.js entries"). This is distinct from the
+  // completeness test above: it pins the concrete required-field shape the
+  // Sync_Worker handlers (tasks 4.1/4.2) read off the payload, independent
+  // of whether their switch cases exist yet.
+  const CLOUDTAK_OPERATION_TYPES = [
+    'create_cloudtak_group',
+    'update_cloudtak_group',
+    'delete_cloudtak_group'
+  ];
+
+  it.each(CLOUDTAK_OPERATION_TYPES)('%s has requiredFields.team_id === \'number\'', (operationType) => {
+    const schema = operationSchemas[operationType];
+    expect(schema).toBeInstanceOf(Object);
+    expect(schema.requiredFields).toBeInstanceOf(Object);
+    expect(schema.requiredFields.team_id).toBe('number');
+  });
+});
+
 describe('operationSchemas structure', () => {
   const entries = Object.entries(operationSchemas);
 

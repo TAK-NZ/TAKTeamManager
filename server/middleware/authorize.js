@@ -72,6 +72,154 @@ function logAuthzFailure(req, reason) {
 }
 
 /**
+ * Shared row-scoped resolver backing BOTH `request:approve` and
+ * `request:deny` (Requirement 5, team-member-transfer). Both identifiers
+ * already have Permission_Registry entries
+ * (`POST /api/requests/:requestId/approve` and `.../deny`) but neither is
+ * in `roleDefaults.authenticated_user` and neither had a resolver, so
+ * every non-Global_Manager acting on a pending request was denied — the
+ * Requests page could list rows it could not act on. Adding the
+ * identifiers to `roleDefaults` would grant a blanket approve permission
+ * to every authenticated user; a resolver keeps Global_Manager access
+ * flowing through the `'*'` wildcard and Team_Admin access flowing
+ * through this per-request, row-level check.
+ *
+ * Modelled directly on `channel_request:process` below: load the row named
+ * by `:requestId`, pick the team column that gates it, delegate to
+ * `Team.isAdmin` (which walks the Ancestor_Chain, so a Team_Admin above
+ * the gating Team also qualifies). The only addition is that the gating
+ * column depends on `request_type`:
+ *
+ *   - `team_change`  -> `approval_team_id` (Req 5.2) — the side of the
+ *                       transfer the initiator does NOT administer
+ *   - `new_account`  -> `target_team_id`   (Req 5.3)
+ *   - `role_change`  -> `current_team_id`  (Req 5.4)
+ *   - `name_change`  -> `current_team_id`  (Req 5.4)
+ *
+ * Both approve and deny share one implementation because Requirement 5
+ * states one rule for both: whoever may approve a request may also deny
+ * it.
+ *
+ * Denials (zero rows for `:requestId` per Req 5.5, an unrecognised
+ * `request_type`, or a `NULL` gating column — e.g. a legacy `team_change`
+ * row predating the `approval_team_id` migration) all return `false` and
+ * so respond with `authorize()`'s standard 403: `request:approve` and
+ * `request:deny` are deliberately NOT added to
+ * `PERMISSION_DENIALS_MAPPED_TO_404`, which stays reserved for
+ * `'team:read'` (Req 5.6).
+ *
+ * Uses the module-scope `pool` import. Per this module's contract a throw
+ * propagates to `isSatisfiedWithRowScopedChecks`, which logs it and fails
+ * closed, so there is deliberately no local try/catch.
+ *
+ * @param {import('express').Request} req
+ * @returns {Promise<boolean>}
+ */
+async function resolveRequestActionPermission(req) {
+  if (req.user && req.user.is_global_manager) {
+    return true;
+  }
+
+  const result = await pool.query(
+    'SELECT request_type, approval_team_id, target_team_id, current_team_id FROM access_requests WHERE id = $1',
+    [req.params && req.params.requestId]
+  );
+
+  if (result.rows.length === 0) {
+    return false;
+  }
+
+  const row = result.rows[0];
+  let gatingTeamId;
+  switch (row.request_type) {
+    case 'team_change':
+      gatingTeamId = row.approval_team_id;
+      break;
+    case 'new_account':
+      gatingTeamId = row.target_team_id;
+      break;
+    case 'role_change':
+    case 'name_change':
+      gatingTeamId = row.current_team_id;
+      break;
+    default:
+      gatingTeamId = null;
+  }
+
+  if (gatingTeamId === null || gatingTeamId === undefined) {
+    return false;
+  }
+
+  // LOCAL users.id, never req.user.id (the Authentik id).
+  return Team.isAdmin(gatingTeamId, req.user && req.user.userId);
+}
+
+/**
+ * Shared row-scoped resolver backing THREE identifiers, all of which ask
+ * the identical question — "is the requester a Global_Manager, or a
+ * Team_Admin of the `teamId` named in the request body?":
+ *
+ *   - `user:create:team_admin` — `POST /api/users` (the older create-user
+ *     route). This was the original home of the logic.
+ *   - `user:create`            — `POST /api/users/create-and-add` AND
+ *     `POST /api/users/callsign-suffix-preview`.
+ *   - `user:team:add`          — `POST /api/users/add-to-team`. Adding an
+ *     EXISTING user to a team is the same authorization boundary as
+ *     creating one in it, so it shares this implementation rather than
+ *     getting a near-identical copy.
+ *
+ * `user:create` and `user:team:add` both had Permission_Registry entries
+ * but NO resolver and no place in `roleDefaults.authenticated_user`, so
+ * nothing except a Global_Manager's `'*'` wildcard could satisfy them:
+ * every Team_Admin was denied 403 on all three routes. The user-visible
+ * symptom was the Add Member dialog's Callsign Suffix field staying empty
+ * (showing only its placeholder) because the preview request 403'd, and
+ * "Add Existing User" failing outright.
+ *
+ * `POST /api/users/callsign-suffix-preview` deliberately INHERITS the
+ * `user:create` gate rather than getting a looser identifier of its own: a
+ * successful preview discloses whether someone on the target team already
+ * holds a given callsign_suffix, so it must be reachable by exactly the
+ * admins who can perform the create it previews. That was the original
+ * intent recorded in `permissions.registry.js`, and it was silently broken
+ * by the missing resolver — the gate was not "too tight", it was
+ * unsatisfiable.
+ *
+ * NOT covered here on purpose: `user:team:remove`
+ * (`DELETE /api/users/remove-from-team/:userId`) has the same
+ * missing-resolver shape, but that route deletes the Authentik user along
+ * with the local `users`/`user_cache` rows outright. Widening who may
+ * destroy an account is a separate decision that has not been made, so
+ * that identifier is intentionally left resolver-less and therefore
+ * Global_Manager-only. See the matching note in
+ * `permissions.registry.js`, and the named exception list in
+ * `server/config/permissions.registry.test.js`'s registry-completeness
+ * test, which documents the gap rather than hiding it.
+ *
+ * Returns `false` when the body carries no `teamId` — there is no team to
+ * scope against, so there is nothing a Team_Admin could be an admin OF.
+ * Per this module's contract a throw propagates to
+ * `isSatisfiedWithRowScopedChecks`, which logs it and fails closed, so
+ * there is deliberately no local try/catch.
+ *
+ * @param {import('express').Request} req
+ * @returns {Promise<boolean>}
+ */
+async function resolveTeamAdminOfBodyTeamId(req) {
+  if (req.user && req.user.is_global_manager) {
+    return true;
+  }
+  const teamId = req.body && req.body.teamId;
+  if (!teamId) {
+    return false;
+  }
+  // LOCAL users.id, never req.user.id (the Authentik id): `Team.isAdmin`
+  // compares against `team_memberships.user_id`. The inline check this
+  // logic replaced got that wrong.
+  return Team.isAdmin(teamId, req.user && req.user.userId);
+}
+
+/**
  * Row-scoped permission resolver functions.
  *
  * `resolveAccess` (server/config/permissions.registry.js) only checks
@@ -203,40 +351,29 @@ const rowScopedResolvers = {
   },
 
   /**
-   * `user:create:team_admin` — satisfied if the requesting user is a
-   * Global_Manager OR is an admin (per `Team.isAdmin`) of the `teamId`
-   * named in the request body. Mirrors the inline check that used to live
-   * in `users.js`'s `POST /` (older create-user route). The original
-   * inline check incorrectly compared against `req.user.id` (the
-   * Authentik id); this resolver correctly uses `req.user.userId` (the
-   * local `users.id` that `team_memberships.user_id` references).
+   * `user:create:team_admin` — `POST /api/users` (the older create-user
+   * route). Mirrors the inline check that used to live in `users.js`'s
+   * `POST /`; that inline check incorrectly compared against
+   * `req.user.id` (the Authentik id), while the shared implementation
+   * correctly uses `req.user.userId` (the local `users.id` that
+   * `team_memberships.user_id` references).
    *
-   * @param {import('express').Request} req
-   * @returns {Promise<boolean>}
-   */
-  'user:create:team_admin': async (req) => {
-    if (req.user && req.user.is_global_manager) {
-      return true;
-    }
-    const teamId = req.body && req.body.teamId;
-    if (!teamId) {
-      return false;
-    }
-    return Team.isAdmin(teamId, req.user && req.user.userId);
-  },
-
-  /**
-   * `user:holding_pen:team_admin` — satisfied if the requesting user is a
-   * Global_Manager OR is an admin (per `Team.isAdmin`) of at least one of
-   * the target user's (`:userId` route param) current teams. Mirrors the
-   * inline loop that used to live in `users.js`'s
-   * `POST /:userId/holding-pen`. The original inline check incorrectly
-   * compared against `req.user.id` (the Authentik id); this resolver
-   * correctly uses `req.user.userId` (the local `users.id`).
+   * `user:create` — `POST /api/users/create-and-add` and
+   * `POST /api/users/callsign-suffix-preview`.
    *
-   * @param {import('express').Request} req
-   * @returns {Promise<boolean>}
+   * `user:team:add` — `POST /api/users/add-to-team`.
+   *
+   * All three are the same rule (Global_Manager, or `Team.isAdmin` of
+   * `req.body.teamId`) and therefore share the single
+   * `resolveTeamAdminOfBodyTeamId` implementation defined above this
+   * object — see its doc comment for why `user:create`/`user:team:add`
+   * previously 403'd for every Team_Admin, why the preview inherits the
+   * `user:create` gate, and why `user:team:remove` is deliberately still
+   * resolver-less.
    */
+  'user:create:team_admin': resolveTeamAdminOfBodyTeamId,
+  'user:create': resolveTeamAdminOfBodyTeamId,
+  'user:team:add': resolveTeamAdminOfBodyTeamId,
 
   /**
    * `user:resend_welcome:team_admin` — satisfied if the requesting user is a
@@ -263,22 +400,139 @@ const rowScopedResolvers = {
     return false;
   },
 
-  'user:holding_pen:team_admin': async (req) => {
+  /**
+   * `user:read:team_admin` — satisfied if the requesting user is a
+   * Global_Manager OR holds at least one DIRECT admin membership, i.e. is
+   * a Team_Admin of *some* team. Backs the three user-directory LISTING
+   * routes (`GET /api/users`, `GET /api/users/search`,
+   * `GET /api/users/available`), which previously required the plain
+   * `user:read` identifier — and that identifier lived in
+   * `roleDefaults.authenticated_user`, so EVERY authenticated user,
+   * including a plain non-admin team member, could enumerate the user
+   * directory (names, emails) and the full pool of unassigned users. All
+   * three routes back admin-only UI (`client/src/pages/Users.jsx`,
+   * `client/src/pages/Admin.jsx`, and the Add Member dialog in
+   * `client/src/pages/TeamDetail.jsx`), so the disclosure bought nothing.
+   *
+   * WHY THIS ONE IS NOT ROW-SCOPED: unlike every other `:team_admin`
+   * resolver in this object, there is no target row to scope against —
+   * these are listing routes with no `:teamId`/`:userId` subject — so the
+   * question answered here is "does this user administer SOMETHING",
+   * not "does this user administer THIS". The per-row narrowing of WHICH
+   * users appear in the response is deliberately NOT addressed here: it is
+   * handled in the route handlers via `server/services/DirectoryScopeService.js`,
+   * which resolves the caller's Scoped_Organisations from the same cached
+   * `is_global_manager` attribute and the same `role = 'admin' AND
+   * inherited_from_team_id IS NULL` condition this resolver uses, then scopes
+   * the response by Organisation provenance and Email_Domain. This resolver
+   * only closes the "any authenticated user at all" hole; DirectoryScopeService
+   * closes the per-row hole.
+   *
+   * `role = 'admin' AND inherited_from_team_id IS NULL` is the glossary's
+   * Team_Admin condition, matching `Team.isAdmin`'s own filter
+   * (server/models/Team.js) and `BroadcastEmailService`'s
+   * `getAdministeredTeamIds` — an INHERITED admin row never confers admin
+   * status. Note the divergence from `server/routes/auth.js`'s `/auth/me`
+   * team-admin flag, which uses the looser `role = 'admin'` with no
+   * `inherited_from_team_id` filter: the stricter form is used here on
+   * purpose (it is the authorization boundary, not a UI hint), and
+   * `auth.js` is intentionally left unchanged.
+   *
+   * The query is issued through the module-scope `pool` import, the way
+   * `user:team:transfer` and `channel_request:process` above do, because
+   * neither existing helper fits: `Team.isAdmin` answers a per-team
+   * question and needs a `teamId`, and `BroadcastEmailService`'s
+   * `getAdministeredTeamIds` is module-private (not exported) as well as
+   * doing more work than a `LIMIT 1` existence check needs. Per this
+   * module's contract a throw propagates to
+   * `isSatisfiedWithRowScopedChecks`, which logs it and fails closed, so
+   * there is deliberately no local try/catch.
+   *
+   * @param {import('express').Request} req
+   * @returns {Promise<boolean>}
+   */
+  'user:read:team_admin': async (req) => {
     if (req.user && req.user.is_global_manager) {
       return true;
     }
 
-    const targetUserId = req.params && req.params.userId;
-    const userTeams = await User.getTeamMemberships(targetUserId);
+    const result = await pool.query(
+      `SELECT 1 FROM team_memberships
+        WHERE user_id = $1 AND role = 'admin' AND inherited_from_team_id IS NULL
+        LIMIT 1`,
+      // LOCAL users.id, never req.user.id (the Authentik id).
+      [req.user && req.user.userId]
+    );
 
-    for (const team of userTeams) {
-      if (await Team.isAdmin(team.id, req.user && req.user.userId)) {
-        return true;
-      }
+    return result.rows.length > 0;
+  },
+
+  /**
+   * `user:team:transfer` — Requirement 2.2/2.3/2.6 (team-member-transfer):
+   * satisfied if the requesting user is a Global_Manager, OR is an admin
+   * (per `Team.isAdmin`, so a Team_Admin anywhere in either Team's
+   * Ancestor_Chain counts — Req 2.6) of the Destination_Team named by
+   * `req.body.targetTeamId`, OR is an admin of the Source_Team named by
+   * the `:userId` route param's Direct_Membership.
+   *
+   * The destination leg is evaluated first because it needs no extra
+   * query when it succeeds. Reading `req.body` here has precedent in
+   * `channel_request:create` and `team:create:root_or_sub`;
+   * `express.json()` runs before route middleware, so the body is
+   * populated by the time this runs.
+   *
+   * A `:userId` naming no `users` row, or naming a user with no
+   * Direct_Membership, yields no source-team leg at all — such a request
+   * is authorized only via the destination leg or Global_Manager status,
+   * and is otherwise denied. Note this resolver grants the *ability to
+   * attempt* a transfer; whether the transfer executes immediately or
+   * becomes a pending Transfer_Request is a separate Dual_Admin
+   * determination made by the route handler (Req 2.4/2.5), and a
+   * self-transfer is rejected there with 400 rather than here with 403
+   * (Req 1.8).
+   *
+   * Per this module's contract, a throw propagates to
+   * `isSatisfiedWithRowScopedChecks`, which logs it and fails closed — so
+   * there is deliberately no local try/catch here.
+   *
+   * @param {import('express').Request} req
+   * @returns {Promise<boolean>}
+   */
+  'user:team:transfer': async (req) => {
+    if (req.user && req.user.is_global_manager) {
+      return true;
     }
 
-    return false;
+    // LOCAL users.id, never req.user.id (the Authentik id).
+    const actorId = req.user && req.user.userId;
+
+    const targetTeamId = req.body && req.body.targetTeamId;
+    if (targetTeamId && await Team.isAdmin(targetTeamId, actorId)) {
+      return true;
+    }
+
+    const direct = await pool.query(
+      'SELECT team_id FROM team_memberships WHERE user_id = $1 AND inherited_from_team_id IS NULL',
+      [req.params && req.params.userId]
+    );
+
+    if (direct.rows.length === 0) {
+      return false;
+    }
+
+    return Team.isAdmin(direct.rows[0].team_id, actorId);
   },
+
+  /**
+   * `request:approve` / `request:deny` — Requirement 5
+   * (team-member-transfer). Both identifiers share the single
+   * `resolveRequestActionPermission` implementation defined above this
+   * object: Global_Manager, or a Team_Admin of the Team named by the
+   * gating column that this `access_requests` row's `request_type`
+   * selects.
+   */
+  'request:approve': resolveRequestActionPermission,
+  'request:deny': resolveRequestActionPermission,
 
   /**
    * `channel_request:create` — satisfied if the requesting user is a

@@ -1,3 +1,15 @@
+// Install-time entry point: runs all pending migrations and seeds baseline
+// data, then exits. This is intentionally scoped to SCHEMA + SEED ONLY; it
+// does NOT warm the user_cache table.
+//
+// DEPLOY NOTE: after this script completes, the deploy should also run
+// `npm run sync:users` (i.e. `node database/init.js && npm run sync:users`)
+// to perform one full Authentik user sync BEFORE the app starts serving
+// logins. Warming user_cache up front means first-boot users (or users
+// added to Authentik since the last periodic sync) don't hit
+// `?error=user_not_synced` while waiting for the initial/next periodic sync.
+// Schema-init and cache-sync are kept as separate composable steps so a
+// deploy (e.g. CDK) can chain them explicitly rather than coupling them here.
 const { runner } = require('node-pg-migrate');
 const pool = require('../server/config/database');
 const migrateConfig = require('./migrate-config');
@@ -37,13 +49,6 @@ async function initializeDatabase() {
 
     console.log('Database migrations applied successfully');
     
-    // Create default holding pen team
-    await pool.query(`
-      INSERT INTO teams (name, description) 
-      VALUES ('Holding Pen', 'Default team for users without specific team assignment')
-      ON CONFLICT DO NOTHING
-    `);
-    
     // Insert initial sync status
     await pool.query(`
       INSERT INTO sync_status (sync_type, status) 
@@ -61,15 +66,48 @@ async function initializeDatabase() {
       ON CONFLICT (config_key) DO NOTHING
     `);
     
-    // Insert default email templates
+    // Insert default email templates.
+    //
+    // NOTE: the access_request_verification and access_request_approved
+    // body_template values below carry the STYLED HTML content that a former
+    // migration (1786910000000_update-email-templates-styling.cjs) used to
+    // apply via UPDATE. In the squashed world, migrations run BEFORE these
+    // INSERTs (init.js calls runMigrations() first, then seeds), so an UPDATE
+    // in the baseline migration would run before these rows exist and no-op.
+    // To preserve the final styled content, that styling has been folded
+    // directly into these INSERT bodies (dollar-quoted so the embedded HTML
+    // quotes/apostrophes need no escaping). See the baseline migration header.
     await pool.query(`
       INSERT INTO email_templates (template_key, subject_template, body_template, description) VALUES 
       ('access_request_verification', 'Verify your TAK Team Manager access request', 
-      'Please click the following link to verify your email and complete your access request: {{verification_link}}\n\nThis link will expire in {{expiry_hours}} hours.\n\nIf you did not make this request, please ignore this email.',
+      $tpl$Hi {{first_name}},
+
+Please verify your email to complete your account request.
+
+<a href="{{verification_link}}" class="btn-primary" style="text-decoration: none; color: #FFF; background-color: #348eda; border: solid #348eda; border-width: 10px 20px; font-weight: bold; display: inline-block; border-radius: 4px;">Verify my email</a>
+
+<span style="font-size: 12px; color: #999;">If the button above doesn't work, copy and paste this link into your browser:</span>
+{{verification_link}}
+
+This link will expire in {{expiry_hours}} hours.
+
+If you did not make this request, you can safely ignore this email.$tpl$,
       'Email verification for new access requests'),
       
       ('access_request_approved', 'Your TAK Team Manager access request has been approved',
-      'Your request to {{request_description}} has been approved by {{admin_name}}.\n\n{{additional_details}}\n\nYou can now log in to TAK Team Manager.',
+      $tpl$Hi {{first_name}},
+
+Your request for an account has been approved.
+
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin: 16px 0;"><tr><td style="background-color: #f0f7ff; border-radius: 8px; border-left: 4px solid #348eda; padding: 16px 20px;"><b>Team:</b> {{team_path}}<br><b>Username:</b> <a href="#" style="color: #212124; text-decoration: none; cursor: default; pointer-events: none;">{{username}}</a><br><b>TAK Callsign:</b> <code>{{callsign}}</code></td></tr></table>
+
+Get started: <a href="{{password_reset_url}}">Set a password</a>, or sign in with an Apple or Google account linked to your username above.
+
+Login at: {{login_url}}
+
+If you have questions, contact your team administrator.
+
+<span style="font-size: 12px; color: #999;">If you did not expect this email, you can safely ignore it.</span>$tpl$,
       'Notification when access request is approved'),
       
       ('access_request_denied', 'Your TAK Team Manager access request has been denied',

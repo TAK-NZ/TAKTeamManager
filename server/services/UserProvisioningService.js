@@ -49,6 +49,35 @@ class CallsignSuffixRequiredError extends Error {
   }
 }
 
+/**
+ * Requirement 13.3/13.4/13.5: resolves the Organisation at the root of
+ * `teamId`'s Ancestor_Chain on the caller's transaction client.
+ *
+ * Not `Team.getAncestorChain`: that reads through the shared `pool`, and this
+ * value is written inside the caller's open transaction. Not the existing
+ * `parent_teams` CTE in this file either -- that projects parent ids
+ * without an ORDER BY, and taking "the last row" from a recursive CTE relies
+ * on evaluation order Postgres does not guarantee. This predicate
+ * (`parent_team_id IS NULL`) is order-independent and returns exactly one row.
+ *
+ * @param {import('pg').PoolClient} client - the caller's already-open
+ *   transactional client.
+ * @param {number} teamId
+ * @returns {Promise<number|null>} the root Organisation's team id, or `null`
+ *   when the chain cannot be resolved.
+ */
+async function resolveOrganisationIdForTeam(client, teamId) {
+  const result = await client.query(`
+    WITH RECURSIVE chain AS (
+      SELECT id, parent_team_id FROM teams WHERE id = $1
+      UNION ALL
+      SELECT t.id, t.parent_team_id FROM teams t JOIN chain c ON t.id = c.parent_team_id
+    )
+    SELECT id FROM chain WHERE parent_team_id IS NULL
+  `, [teamId]);
+  return result.rows.length > 0 ? result.rows[0].id : null;
+}
+
 class UserProvisioningService {
   /**
    * Upserts the local `users` row for an already-created Authentik user,
@@ -80,10 +109,18 @@ class UserProvisioningService {
    * @returns {Promise<{localUserId: number, queuedGroups: number}>}
    */
   static async createAndAddUser(client, { authentikUserId, username, email, firstName, lastName, teamId, callsign_suffix = null, createdBy = null }) {
-    // Upsert local user record.
+    // Requirement 13.3/13.4/13.5: resolve the target Team's Organisation
+    // (the root of its Ancestor_Chain) on the caller's transaction client
+    // and record it as the user's provenance.
+    const originOrgId = await resolveOrganisationIdForTeam(client, teamId);
+
+    // Upsert local user record. Requirement 13.9: `origin_org_id` is
+    // write-once -- `COALESCE(users.origin_org_id, EXCLUDED.origin_org_id)`
+    // never overwrites an existing non-null value, so a returning user being
+    // re-provisioned into another Organisation is never reclassified.
     await client.query(
-      'INSERT INTO users (authentik_user_id, username, email, first_name, last_name, is_active, callsign_suffix) VALUES ($1, $2, $3, $4, $5, true, $6) ON CONFLICT (authentik_user_id) DO UPDATE SET username = $2, email = $3, first_name = $4, last_name = $5, is_active = true, callsign_suffix = $6',
-      [authentikUserId, username, email, firstName, lastName, callsign_suffix]
+      'INSERT INTO users (authentik_user_id, username, email, first_name, last_name, is_active, callsign_suffix, origin_org_id) VALUES ($1, $2, $3, $4, $5, true, $6, $7) ON CONFLICT (authentik_user_id) DO UPDATE SET username = $2, email = $3, first_name = $4, last_name = $5, is_active = true, callsign_suffix = $6, origin_org_id = COALESCE(users.origin_org_id, EXCLUDED.origin_org_id)',
+      [authentikUserId, username, email, firstName, lastName, callsign_suffix, originOrgId]
     );
 
     const localUserResult = await client.query(
