@@ -196,4 +196,19 @@ describe('SiteConfig.getPublicConfig', () => {
       'Team Member', 'Team Lead', 'Sniper', 'Medic', 'Forward Observer', 'RTO', 'K9', 'HQ'
     ]);
   });
+
+  // Requirement 1.3 (cloudtak-agency-groups): CLOUDTAK_ENABLED is a
+  // server-side-only flag and must NEVER be surfaced through the
+  // Public_Config_Endpoint. Assert the returned object carries no
+  // cloudtak-related key and does not leak the CLOUDTAK_ENABLED value,
+  // regardless of whether the flag is set.
+  test('never includes a cloudtak/CLOUDTAK key, even when CLOUDTAK_ENABLED=true', async () => {
+    process.env.CLOUDTAK_ENABLED = 'true';
+
+    const config = await SiteConfig.getPublicConfig();
+
+    const cloudtakKeys = Object.keys(config).filter(key => /cloudtak/i.test(key));
+    expect(cloudtakKeys).toEqual([]);
+    expect(JSON.stringify(config)).not.toMatch(/cloudtak/i);
+  });
 });

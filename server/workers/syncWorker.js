@@ -59,6 +59,20 @@ const RetentionCleanupJob = require('../services/RetentionCleanupJob');
 // "single bulk batch fetching the certificate catalog once" design intent.
 const TakServerService = require('../services/TakServerService');
 const { matchesCreatorDn } = TakServerService;
+// Feature cloudtak-agency-groups (tasks 4.1/4.2): the pure CloudTAK
+// helpers -- `groupName(teamId)` (`CloudTAKAgency<id>`),
+// `agencyAttributes(team)` (the three Agency_Attributes), and
+// `getDirectAdmins(teamId, client?)` (the Direct_Admin_Set resolver) --
+// used by the `createCloudTakGroup`/`updateCloudTakGroup`/
+// `deleteCloudTakGroup` handlers below. `computeMembershipDiff` is the
+// pure add/remove diff extracted for the membership reconcile (also
+// property-tested).
+const {
+  groupName,
+  agencyAttributes,
+  getDirectAdmins,
+  computeMembershipDiff
+} = require('../services/CloudTakAgencyGroup');
 
 /**
  * Requirement 9.4: thrown by `executeOperation` when a payload fails
@@ -751,6 +765,18 @@ class SyncWorker {
 
       case 'revoke_tak_certificates':
         await this.revokeTakCertificates(payload);
+        break;
+
+      case 'create_cloudtak_group':
+        await this.createCloudTakGroup(payload);
+        break;
+
+      case 'update_cloudtak_group':
+        await this.updateCloudTakGroup(payload);
+        break;
+
+      case 'delete_cloudtak_group':
+        await this.deleteCloudTakGroup(payload);
         break;
 
       default:
@@ -1743,6 +1769,351 @@ class SyncWorker {
     logger.debug(
       { channelId: payload.channel_id, targetGroupId, memberCount: memberPks.length },
       'Removed all members from Authentik group'
+    );
+  }
+
+  /**
+   * Feature cloudtak-agency-groups (task 4.1): the `create_cloudtak_group`
+   * handler. Both create and update do the SAME idempotent work
+   * (create-or-reuse the group, set the Agency_Attributes authoritatively,
+   * reconcile membership to the Team's current Direct_Admin_Set), so both
+   * delegate to `ensureCloudTakGroup`. `create_cloudtak_group` is enqueued
+   * by `Team.create` and the Backfill; because `ensureCloudTakGroup`
+   * performs Create_Or_Reuse, running it against an already-existing group
+   * is safe (Requirements 2.4, 8.3, 10.1).
+   *
+   * @param {{ team_id: number }} payload
+   */
+  async createCloudTakGroup(payload) {
+    await this.ensureCloudTakGroup(payload.team_id);
+  }
+
+  /**
+   * Feature cloudtak-agency-groups (task 4.1): the `update_cloudtak_group`
+   * handler, enqueued on a Team rename/re-description and on every
+   * direct-admin membership change (add/promote/demote/remove). It shares
+   * `ensureCloudTakGroup` with `create_cloudtak_group`: it too performs
+   * Create_Or_Reuse, so it can safely run even if the create operation has
+   * not yet been processed (Requirements 5.5, 6.3, 10.4, 10.5).
+   *
+   * @param {{ team_id: number }} payload
+   */
+  async updateCloudTakGroup(payload) {
+    await this.ensureCloudTakGroup(payload.team_id);
+  }
+
+  /**
+   * Feature cloudtak-agency-groups (task 4.1): the shared, idempotent
+   * reconcile driving both `createCloudTakGroup` and `updateCloudTakGroup`.
+   *
+   * Steps:
+   *   1. Load the Team's current `name`/`description` from the database.
+   *      If the Team row is gone (deleted between enqueue and processing),
+   *      treat this as an already-satisfied no-op and return -- a later
+   *      `delete_cloudtak_group`, or the group's mere absence, is fine.
+   *   2. Compute the group name (`CloudTAKAgency<id>`) and the
+   *      Agency_Attributes from the Team's current values.
+   *   3. Create-or-reuse the group (POST `/core/groups/`; on a non-2xx
+   *      name-conflict, GET `?name=` and reuse the exact-name match),
+   *      mirroring `Team.createTeamChannel` (Requirements 2.3, 2.4, 10.1).
+   *   4. Set the Agency_Attributes authoritatively via PATCH, so a
+   *      pre-existing group that lacked them gets them (Requirement 2.5).
+   *      Skipped only when the fresh POST already carried them.
+   *   5. Reconcile membership to the Direct_Admin_Set (Requirements 4.5,
+   *      5.5, 10.5).
+   *
+   * @param {number} teamId
+   */
+  async ensureCloudTakGroup(teamId) {
+    // Step 1: load the Team's current stored values.
+    const teamResult = await this.pool.query(
+      'SELECT id, name, description FROM teams WHERE id = $1',
+      [teamId]
+    );
+    const team = teamResult.rows[0];
+    if (!team) {
+      // The Team was deleted between enqueue and processing. There is
+      // nothing to mirror; a later delete op (or the group's absence) is
+      // the correct end state, so this is a no-op success.
+      logger.info(
+        { teamId },
+        'Team no longer exists; CloudTAK group ensure is a no-op'
+      );
+      return;
+    }
+
+    const name = groupName(team.id);
+    const attributes = agencyAttributes(team);
+
+    // Step 3: create-or-reuse the group by name (mirrors
+    // Team.createTeamChannel).
+    let group;
+    let createdFresh = false;
+    const createResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ name, attributes })
+    });
+
+    if (createResponse.ok) {
+      group = await createResponse.json();
+      createdFresh = true;
+    } else {
+      // Create_Or_Reuse: a name-conflict (or any non-2xx) triggers a
+      // lookup by exact name. This is NOT treated as a permanent failure
+      // (Requirement 10.1).
+      const lookupResponse = await fetch(
+        `${process.env.AUTHENTIK_URL}/api/v3/core/groups/?name=${encodeURIComponent(name)}`,
+        { headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` } }
+      );
+      const lookupData = lookupResponse.ok ? await lookupResponse.json() : null;
+      group = lookupData?.results?.find((g) => g.name === name);
+
+      if (!group) {
+        // Neither create nor lookup produced a group: classify off the
+        // original create failure so a 5xx retries and a non-conflict 4xx
+        // is permanent (Requirements 9.3, 10.2, 10.3).
+        const classification = classifyFailure(createResponse.status);
+        throw new AuthentikApiError(
+          `Failed to create or find CloudTAK group "${name}": ${createResponse.status} ${createResponse.statusText}`,
+          classification
+        );
+      }
+      logger.info(
+        { teamId, name, groupId: group.pk },
+        'Reused existing CloudTAK group instead of creating a duplicate'
+      );
+    }
+
+    const groupPk = group.pk;
+
+    // Step 4: set the Agency_Attributes authoritatively on reuse (so a
+    // pre-existing group without attributes gets them -- Requirement 2.5).
+    // Skipped on the fresh-create path, where the POST already set them.
+    if (!createdFresh) {
+      const patchResponse = await fetch(
+        `${process.env.AUTHENTIK_URL}/api/v3/core/groups/${groupPk}/`,
+        {
+          method: 'PATCH',
+          headers: {
+            'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ attributes })
+        }
+      );
+
+      if (!patchResponse.ok) {
+        const classification = classifyFailure(patchResponse.status);
+        throw new AuthentikApiError(
+          `Failed to set attributes on CloudTAK group "${name}": ${patchResponse.status} ${patchResponse.statusText}`,
+          classification
+        );
+      }
+    }
+
+    // Step 5: reconcile membership to the Direct_Admin_Set.
+    await this.reconcileCloudTakMembers(teamId, groupPk, name);
+
+    logger.info(
+      { teamId, name, groupId: groupPk },
+      'Ensured CloudTAK group (attributes set, membership reconciled)'
+    );
+  }
+
+  /**
+   * Feature cloudtak-agency-groups (task 4.1): reconciles a
+   * CloudTAK_Group's membership to the Team's current Direct_Admin_Set
+   * (Requirements 5.5, 10.5).
+   *
+   * Reads the group's current member pks (`GET /core/groups/{pk}/` ->
+   * `group.users`), resolves the target set as the Team's Direct_Admin_Set
+   * `authentik_user_id` values, and issues `add_user`/`remove_user` for the
+   * diff (via the pure `computeMembershipDiff`). Both id spaces are
+   * Authentik user pks, so they compare directly. An individual add/remove
+   * returning 404 (membership changed mid-flight) is a no-op `continue`;
+   * any other non-2xx aborts via `AuthentikApiError` so the whole op
+   * retries and re-reconciles.
+   *
+   * @param {number} teamId
+   * @param {number|string} groupPk
+   * @param {string} name
+   */
+  async reconcileCloudTakMembers(teamId, groupPk, name) {
+    // Target: the Team's current Direct_Admin_Set (authentik_user_id).
+    const directAdmins = await getDirectAdmins(teamId, this.pool);
+    const target = directAdmins
+      .map((admin) => admin.authentik_user_id)
+      .filter((id) => id !== null && id !== undefined);
+
+    // Current: the group's member pks.
+    const groupResponse = await fetch(
+      `${process.env.AUTHENTIK_URL}/api/v3/core/groups/${groupPk}/`,
+      {
+        headers: {
+          'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    if (!groupResponse.ok) {
+      const classification = classifyFailure(groupResponse.status);
+      throw new AuthentikApiError(
+        `Failed to fetch CloudTAK group members for "${name}": ${groupResponse.statusText}`,
+        classification
+      );
+    }
+
+    const group = await groupResponse.json();
+    const current = Array.isArray(group.users) ? group.users : [];
+
+    const { toAdd, toRemove } = computeMembershipDiff(current, target);
+
+    for (const memberPk of toAdd) {
+      await this.reconcileMembership(groupPk, memberPk, 'add_user', name);
+    }
+    for (const memberPk of toRemove) {
+      await this.reconcileMembership(groupPk, memberPk, 'remove_user', name);
+    }
+
+    logger.debug(
+      { teamId, name, groupId: groupPk, added: toAdd.length, removed: toRemove.length },
+      'Reconciled CloudTAK group membership to the Direct_Admin_Set'
+    );
+  }
+
+  /**
+   * Feature cloudtak-agency-groups (task 4.1): issues a single
+   * `add_user`/`remove_user` call for the membership reconcile. A 404
+   * (membership changed between the GET and this call) is a no-op; any
+   * other non-2xx throws `AuthentikApiError(classifyFailure(status))`.
+   *
+   * @param {number|string} groupPk
+   * @param {number|string} memberPk
+   * @param {'add_user'|'remove_user'} action
+   * @param {string} name
+   */
+  async reconcileMembership(groupPk, memberPk, action, name) {
+    const response = await fetch(
+      `${process.env.AUTHENTIK_URL}/api/v3/core/groups/${groupPk}/${action}/`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ pk: memberPk })
+      }
+    );
+
+    if (response.status === 404) {
+      logger.debug(
+        { name, groupId: groupPk, memberPk, action },
+        'CloudTAK group membership changed mid-reconcile; individual member op is a no-op'
+      );
+      return;
+    }
+
+    if (!response.ok) {
+      const classification = classifyFailure(response.status);
+      throw new AuthentikApiError(
+        `Failed to ${action} user ${memberPk} for CloudTAK group "${name}": ${response.statusText}`,
+        classification
+      );
+    }
+  }
+
+  /**
+   * Feature cloudtak-agency-groups (task 4.2): the `delete_cloudtak_group`
+   * handler, enqueued by `Team.delete` inside the deletion transaction
+   * (Requirement 7.1). By the time this runs the `teams` row is already
+   * gone, so the group name is derived purely from `payload.team_id`
+   * (`CloudTAKAgency<team_id>`), never from a DB lookup.
+   *
+   * Steps (Requirement 7.2, 7.3):
+   *   1. Resolve the CloudTAK_Group by exact name via
+   *      `GET /core/groups/?name=<encoded>`.
+   *   2. If the lookup finds the exact-name group, `DELETE /core/groups/{pk}/`.
+   *   3. If the lookup returns no matching group, OR the DELETE returns a
+   *      404, treat the deletion as already satisfied and complete
+   *      successfully -- mirroring `removeTeamChannelGroup`/
+   *      `cleanupOrphanedAuthentikUser`'s 404 handling.
+   *   4. A non-404 non-2xx on the lookup or the DELETE throws
+   *      `AuthentikApiError(classifyFailure(status))`, so a 5xx retries and
+   *      a non-404 4xx is permanent (Requirements 9.3, 10.2, 10.3).
+   *
+   * @param {{ team_id: number }} payload
+   */
+  async deleteCloudTakGroup(payload) {
+    const name = groupName(payload.team_id);
+
+    // Step 1: resolve the group by exact name.
+    const lookupResponse = await fetch(
+      `${process.env.AUTHENTIK_URL}/api/v3/core/groups/?name=${encodeURIComponent(name)}`,
+      { headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` } }
+    );
+
+    if (lookupResponse.status === 404) {
+      logger.debug(
+        { teamId: payload.team_id, name },
+        'CloudTAK group lookup returned 404; deletion already satisfied (no-op)'
+      );
+      return;
+    }
+
+    if (!lookupResponse.ok) {
+      const classification = classifyFailure(lookupResponse.status);
+      throw new AuthentikApiError(
+        `Failed to look up CloudTAK group "${name}" for deletion: ${lookupResponse.statusText}`,
+        classification
+      );
+    }
+
+    const lookupData = await lookupResponse.json();
+    const group = lookupData?.results?.find((g) => g.name === name);
+
+    if (!group) {
+      // Absent group = already-satisfied deletion (Requirement 7.3).
+      logger.debug(
+        { teamId: payload.team_id, name },
+        'CloudTAK group already absent; deletion is a no-op'
+      );
+      return;
+    }
+
+    // Step 2: delete the resolved group.
+    const deleteResponse = await fetch(
+      `${process.env.AUTHENTIK_URL}/api/v3/core/groups/${group.pk}/`,
+      {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }
+      }
+    );
+
+    if (deleteResponse.status === 404) {
+      // Group vanished between lookup and delete; already satisfied.
+      logger.debug(
+        { teamId: payload.team_id, name, groupId: group.pk },
+        'CloudTAK group already absent on delete; deletion is a no-op'
+      );
+      return;
+    }
+
+    if (!deleteResponse.ok) {
+      const classification = classifyFailure(deleteResponse.status);
+      throw new AuthentikApiError(
+        `Failed to delete CloudTAK group "${name}": ${deleteResponse.statusText}`,
+        classification
+      );
+    }
+
+    logger.info(
+      { teamId: payload.team_id, name, groupId: group.pk },
+      'Deleted CloudTAK group'
     );
   }
 

@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { formatCallsignLevels, formatCallsignNameFormatExample, computeTeamDepth, getInitialMemberEditForm, isValidMemberCallsignSuffix, isValidSubTeamCallsignPrefix, decideCallsignSuffixPreview, extractCallsignSuffixServerError } from './TeamDetail.jsx';
+import { formatCallsignLevels, formatCallsignNameFormatExample, computeTeamDepth, getInitialMemberEditForm, isValidMemberCallsignSuffix, isValidSubTeamCallsignPrefix, extractCallsignSuffixServerError, isValidNewUserEmail } from './TeamDetail.jsx';
 
 // Validates: Requirements 1.1, 1.2, 2.4, 2.5
 //
@@ -352,105 +352,24 @@ describe('transfer action placement in TeamDetail.jsx (Req 15.1)', () => {
 
 // The Add Member Dialog's "Create New User" tab gains a Callsign Suffix
 // field fed by the advisory `POST /api/users/callsign-suffix-preview` check.
-// `decideCallsignSuffixPreview` is the whole decision that check drives
-// (pre-fill / required / inline conflict pre-filled with the colliding value
-// so it can be edited / leave-alone), extracted as a pure
-// helper and tested directly per this file's no-render convention;
-// `extractCallsignSuffixServerError` is the submit-time 400 mapping. The
-// structural tests below pin the wiring the helpers cannot see: that the
-// preview runs on blur rather than per keystroke, and that the suffix is
-// actually sent to `usersAPI.createAndAdd`.
-
-describe('decideCallsignSuffixPreview', () => {
-  it('pre-fills the field with the resolved suffix when there is no conflict and none is required', () => {
-    const decision = decideCallsignSuffixPreview(
-      { suffix: 'J.Bloggs', required: false, conflict: null },
-      { currentValue: '', manuallyEdited: false }
-    )
-    expect(decision).toEqual({ callsignSuffix: 'J.Bloggs', required: false, error: null })
-  })
-
-  it('does not clobber a value the admin typed themselves', () => {
-    const decision = decideCallsignSuffixPreview(
-      { suffix: 'Joe.B', required: false, conflict: null },
-      { currentValue: 'Joe.B2', manuallyEdited: true }
-    )
-    expect(decision.callsignSuffix).toBe('Joe.B2')
-    expect(decision.error).toBeNull()
-  })
-
-  it('marks the field required and leaves it empty for a user_defined Organisation', () => {
-    const decision = decideCallsignSuffixPreview(
-      { suffix: null, required: true, conflict: null },
-      { currentValue: '', manuallyEdited: false }
-    )
-    expect(decision).toEqual({ callsignSuffix: '', required: true, error: null })
-  })
-
-  it('surfaces the conflict message inline and pre-fills the colliding value so it can be edited', () => {
-    const decision = decideCallsignSuffixPreview(
-      { suffix: 'J.Bloggs', required: false, conflict: { value: 'J.Bloggs', message: 'Callsign suffix J.Bloggs is already used in this team' } },
-      { currentValue: '', manuallyEdited: false }
-    )
-    expect(decision).toEqual({
-      callsignSuffix: 'J.Bloggs',
-      required: false,
-      error: 'Callsign suffix J.Bloggs is already used in this team'
-    })
-  })
-
-  it('keeps the current value, and still reports the error, when a conflict omits its value', () => {
-    const decision = decideCallsignSuffixPreview(
-      { suffix: null, required: false, conflict: { message: 'Already taken' } },
-      { currentValue: 'Joe.B', manuallyEdited: false }
-    )
-    expect(decision).toEqual({ callsignSuffix: 'Joe.B', required: false, error: 'Already taken' })
-
-    const emptyValue = decideCallsignSuffixPreview(
-      { suffix: null, required: false, conflict: { value: '', message: 'Already taken' } },
-      { currentValue: 'Joe.B', manuallyEdited: false }
-    )
-    expect(emptyValue).toEqual({ callsignSuffix: 'Joe.B', required: false, error: 'Already taken' })
-  })
-
-  it('never pre-fills anything on the required path, which has no colliding value to offer', () => {
-    const decision = decideCallsignSuffixPreview(
-      { suffix: null, required: true, conflict: null },
-      { currentValue: 'Joe.B', manuallyEdited: false }
-    )
-    expect(decision).toEqual({ callsignSuffix: 'Joe.B', required: true, error: null })
-  })
-
-  it('surfaces a conflict against a manually typed value while keeping that value', () => {
-    const decision = decideCallsignSuffixPreview(
-      { suffix: 'Joe.B', required: false, conflict: { value: 'Joe.B', message: 'Already taken' } },
-      { currentValue: 'Joe.B', manuallyEdited: true }
-    )
-    expect(decision).toEqual({ callsignSuffix: 'Joe.B', required: false, error: 'Already taken' })
-  })
-
-  it('falls back to a generic message when a conflict carries no message', () => {
-    const decision = decideCallsignSuffixPreview(
-      { suffix: 'J.Bloggs', required: false, conflict: { value: 'J.Bloggs' } },
-      { currentValue: '', manuallyEdited: false }
-    )
-    expect(decision.error).toBe('That callsign suffix is already in use in this team')
-  })
-
-  it('changes nothing when the preview call failed (no body), so submission is never blocked', () => {
-    expect(decideCallsignSuffixPreview(undefined, { currentValue: 'Joe.B', manuallyEdited: true })).toBeNull()
-    expect(decideCallsignSuffixPreview(null, { currentValue: '', manuallyEdited: false })).toBeNull()
-    expect(decideCallsignSuffixPreview('Internal Server Error', { currentValue: '' })).toBeNull()
-  })
-
-  it('empties a stale pre-filled value when the server resolves no suffix at all', () => {
-    const decision = decideCallsignSuffixPreview(
-      { suffix: null, required: false, conflict: null },
-      { currentValue: 'J.Bloggs', manuallyEdited: false }
-    )
-    expect(decision.callsignSuffix).toBe('')
-  })
-})
+// The decision that check drives now lives in the pure state machine of
+// `client/src/utils/callsignSuffixPreview.js` (`newUserFormReducer`,
+// `applyPreviewResponse`, and the `shouldSendCallsignSuffix`/selector
+// helpers), unit- and property-tested in
+// `client/src/utils/callsignSuffixPreview.test.js` -- the cases that used to
+// live in a `decideCallsignSuffixPreview` describe block here are re-expressed
+// against `applyPreviewResponse` there, and are deliberately not duplicated in
+// this file. `extractCallsignSuffixServerError` remains TeamDetail.jsx's own
+// submit-time 400 mapping and is still exercised here.
+//
+// The source-contract tests below pin the wiring the pure module cannot see:
+// that the preview runs on blur via a `previewRequested` dispatch rather than
+// per keystroke, that the Recompute_Control is a `type="button"` gated on
+// `isRecomputeDisabled`, that neither the Suffix_Field nor the submit button
+// is disabled while a preview is in flight, that the busy indicator is gated
+// on `selectSuffixBusy`, that the inline error is a `role="alert"`, that the
+// suffix reaches `usersAPI.createAndAdd` through the shared body builder, and
+// that both dialog-open handlers reset the reducer.
 
 describe('extractCallsignSuffixServerError', () => {
   it('returns the server message for a 400 (suffix required, or per-team collision)', () => {
@@ -470,6 +389,22 @@ describe('extractCallsignSuffixServerError', () => {
   })
 })
 
+// Validates: Requirements 2.1, 2.2, 3.7, 7.1, 7.2
+//
+// The Callsign_Suffix field is now driven by the `newUserFormReducer` state
+// machine and its selectors (`isRecomputeDisabled`, `selectSuffixBusy`,
+// `buildCreateAndAddSuffixArgument`). These source-contract assertions pin the
+// DOM-to-reducer wiring the pure module's own tests cannot see, reading
+// TeamDetail.jsx's source and asserting on the strings it must contain. Each
+// assertion below preserves the intent of the one it replaces: the blur wiring
+// exists (now a `previewRequested` dispatch), the change handler does not
+// preview, the error is a `role="alert"`, the suffix reaches the API call (now
+// via `buildCreateAndAddSuffixArgument`), and the character-class check sets an
+// inline reducer error rather than a toast. New assertions cover the two traps
+// and the new surface: the Recompute_Control is a `type="button"` gated on
+// `isRecomputeDisabled`; neither the Suffix_Field nor the submit button is
+// disabled while a preview is in flight; the busy indicator is gated on
+// `selectSuffixBusy`; both dialog-open handlers dispatch `{type:'reset'}`.
 describe('Callsign Suffix field wiring in the Create New User tab', () => {
   const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
 
@@ -480,42 +415,211 @@ describe('Callsign Suffix field wiring in the Create New User tab', () => {
     return source.slice(start, source.indexOf('/>', index))
   }
 
-  it.each(['new-user-first-name', 'new-user-last-name', 'new-user-callsign-suffix'])(
-    'runs the preview on blur of %s, not on every keystroke',
-    (id) => {
+  // The name inputs blur-issue a preview via a `names`-trigger dispatch; the
+  // Suffix_Field blur-issues a `suffix`-trigger dispatch. The change handler
+  // must NOT dispatch a preview (Req 1.5 -- on blur, not per keystroke).
+  it.each([
+    { id: 'new-user-first-name', trigger: 'names' },
+    { id: 'new-user-last-name', trigger: 'names' },
+    { id: 'new-user-callsign-suffix', trigger: 'suffix' }
+  ])(
+    'runs the preview on blur of $id via a $trigger-trigger dispatch, not on every keystroke',
+    ({ id, trigger }) => {
       const input = inputFor(id)
-      expect(input).toContain('onBlur={() => runCallsignSuffixPreview(newUserForm)}')
-      expect(input.slice(input.indexOf('onChange='), input.indexOf('onBlur='))).not.toContain('runCallsignSuffixPreview')
+      expect(input).toContain(`onBlur={() => dispatchNewUserForm({ type: 'previewRequested', trigger: '${trigger}', teamId: team?.id })}`)
+      // The onChange handler must not issue a preview -- it only dispatches a
+      // field/suffix edit.
+      const changeToBlur = input.slice(input.indexOf('onChange='), input.indexOf('onBlur='))
+      expect(changeToBlur).not.toContain('previewRequested')
     }
   )
 
-  it('associates the Callsign Suffix input with its label and applies the shared character-class pattern', () => {
+  it('associates the Callsign Suffix input with its label, applies the shared character-class pattern, and marks required from the reducer', () => {
     const input = inputFor('new-user-callsign-suffix')
     expect(source).toContain('htmlFor="new-user-callsign-suffix"')
     expect(input).toContain('pattern={CALLSIGN_SUFFIX_PATTERN}')
-    expect(input).toContain('required={newUserCallsignRequired}')
+    expect(input).toContain('required={newUserFormState.required}')
   })
 
-  it('announces the inline Callsign Suffix error', () => {
-    const index = source.indexOf('{newUserCallsignError && (')
+  it('announces the inline Callsign Suffix error as a role="alert" from the reducer field', () => {
+    const index = source.indexOf('{newUserFormState.error && (')
     expect(index).toBeGreaterThan(-1)
     const block = source.slice(index, source.indexOf('</p>', index))
     expect(block).toContain('role="alert"')
-    expect(block).toContain('{newUserCallsignError}')
+    expect(block).toContain('{newUserFormState.error}')
   })
 
-  it('sends the suffix through to usersAPI.createAndAdd', () => {
+  it('sends the suffix through to usersAPI.createAndAdd via the shared body builder', () => {
     const index = source.indexOf('usersAPI.createAndAdd(')
     expect(index).toBeGreaterThan(-1)
-    const call = source.slice(index, source.indexOf(')', source.indexOf('newUserForm.callsignSuffix', index)))
-    expect(call).toContain('newUserForm.callsignSuffix || undefined')
+    // The suffix argument fed to createAndAdd is the shared body builder, so
+    // the preview body and the submit body cannot drift. Assert it appears
+    // within the call's argument list.
+    const argIndex = source.indexOf('buildCreateAndAddSuffixArgument(newUserFormState)', index)
+    expect(argIndex).toBeGreaterThan(-1)
+    const call = source.slice(index, argIndex + 'buildCreateAndAddSuffixArgument(newUserFormState)'.length)
+    expect(call).toContain('buildCreateAndAddSuffixArgument(newUserFormState)')
   })
 
-  it('validates the suffix character class before submitting, inline rather than as a toast', () => {
-    expect(source).toContain('if (!isValidMemberCallsignSuffix(newUserForm.callsignSuffix)) {')
-    const index = source.indexOf('if (!isValidMemberCallsignSuffix(newUserForm.callsignSuffix)) {')
-    const block = source.slice(index, source.indexOf('}', index))
-    expect(block).toContain('setNewUserCallsignError(')
+  it('validates the suffix character class before submitting, inline via a submitRejected dispatch rather than a toast', () => {
+    expect(source).toContain('if (!isValidMemberCallsignSuffix(newUserFormState.suffix)) {')
+    const index = source.indexOf('if (!isValidMemberCallsignSuffix(newUserFormState.suffix)) {')
+    const block = source.slice(index, source.indexOf('return', index))
+    expect(block).toContain("dispatchNewUserForm({ type: 'submitRejected'")
     expect(block).not.toContain('toast.')
+  })
+
+  // The Recompute_Control (Req 2.1, 2.2) -- forces a `recompute`-trigger
+  // preview, must be `type="button"` so it does not submit the form, carries an
+  // accessible name naming what it does, and is disabled exactly on
+  // `isRecomputeDisabled`.
+  it('renders the Recompute_Control as a type="button" with an accessible name, gated on isRecomputeDisabled', () => {
+    const index = source.indexOf("dispatchNewUserForm({ type: 'previewRequested', trigger: 'recompute', teamId: team?.id })")
+    expect(index).toBeGreaterThan(-1)
+    const start = source.lastIndexOf('<button', index)
+    const button = source.slice(start, source.indexOf('</button>', index))
+    expect(button).toContain('type="button"')
+    expect(button).toContain('aria-label="Recompute callsign suffix from the entered names"')
+    expect(button).toContain('disabled={isRecomputeDisabled(newUserFormState)}')
+  })
+
+  // Req 7.2: an in-flight preview must not disable the Suffix_Field or the
+  // submit control -- `selectSuffixBusy` gates only the busy indicator (Req 7.1).
+  it('does not gate the Suffix_Field on selectSuffixBusy while a preview is in flight', () => {
+    const input = inputFor('new-user-callsign-suffix')
+    expect(input).not.toContain('selectSuffixBusy')
+  })
+
+  it('does not gate the submit button on selectSuffixBusy while a preview is in flight', () => {
+    const index = source.indexOf("{addingMember ? 'Creating...' : 'Create & Add User'}")
+    expect(index).toBeGreaterThan(-1)
+    const start = source.lastIndexOf('<button', index)
+    const button = source.slice(start, index)
+    expect(button).toContain('type="submit"')
+    const disabledStart = button.indexOf('disabled={')
+    expect(disabledStart).toBeGreaterThan(-1)
+    const disabledExpr = button.slice(disabledStart, button.indexOf('}', disabledStart))
+    expect(disabledExpr).not.toContain('selectSuffixBusy')
+  })
+
+  it('gates the busy indicator on selectSuffixBusy(newUserFormState)', () => {
+    const index = source.indexOf('selectSuffixBusy(newUserFormState) && (')
+    expect(index).toBeGreaterThan(-1)
+    const block = source.slice(index, source.indexOf('</span>', index))
+    expect(block).toContain('role="status"')
+    expect(block).toContain('aria-live="polite"')
+  })
+
+  // Req 3.7: opening the dialog from either the "Add Member" or the "Add Admin"
+  // action resets the reducer, so a cancelled half-filled form cannot reappear
+  // with a stale suffix.
+  it('dispatches {type:reset} from both the Add Member and Add Admin open handlers', () => {
+    expect(source).toContain("dispatchNewUserForm({ type: 'reset' }); setNewUserEmailError(null); setAddMemberRole('member'); setAddMemberTab('new'); setShowAddMemberDialog(true)")
+    expect(source).toContain("dispatchNewUserForm({ type: 'reset' }); setNewUserEmailError(null); setAddMemberRole('admin'); setAddMemberTab('existing'); setShowAddMemberDialog(true)")
+  })
+})
+
+// Defect 2: the Create New User form's Email Address input gains an inline
+// validation alert backed by the pure `isValidNewUserEmail` helper, kept
+// separate from the reducer's Callsign-Suffix-only `error` field.
+describe('isValidNewUserEmail (Defect 2)', () => {
+  it('accepts a well-formed address', () => {
+    expect(isValidNewUserEmail('a@b.co')).toBe(true)
+  })
+
+  it('rejects an empty value (the field is required)', () => {
+    expect(isValidNewUserEmail('')).toBe(false)
+    expect(isValidNewUserEmail('   ')).toBe(false)
+  })
+
+  it('rejects non-string values', () => {
+    expect(isValidNewUserEmail(undefined)).toBe(false)
+    expect(isValidNewUserEmail(null)).toBe(false)
+  })
+
+  it('rejects malformed addresses', () => {
+    expect(isValidNewUserEmail('foo')).toBe(false)
+    expect(isValidNewUserEmail('foo@bar')).toBe(false)
+    expect(isValidNewUserEmail('foo@ bar.com')).toBe(false)
+    expect(isValidNewUserEmail('@b.co')).toBe(false)
+  })
+})
+
+// Defect 2 (source contract): the email input clears any stale alert on
+// edit, validates on blur, exposes aria-invalid, and renders a role="alert"
+// message; and handleCreateNewUser rejects an invalid email before the
+// suffix check.
+describe('Email inline validation wiring in the Create New User tab (Defect 2)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  it('validates the email inline before the suffix check in handleCreateNewUser', () => {
+    const emailIdx = source.indexOf('if (!isValidNewUserEmail(newUserFormState.email)) {')
+    const suffixIdx = source.indexOf('if (!isValidMemberCallsignSuffix(newUserFormState.suffix)) {')
+    expect(emailIdx).toBeGreaterThan(-1)
+    expect(suffixIdx).toBeGreaterThan(-1)
+    expect(emailIdx).toBeLessThan(suffixIdx)
+    const block = source.slice(emailIdx, source.indexOf('return', emailIdx))
+    expect(block).toContain("setNewUserEmailError('Please enter a valid email address.')")
+  })
+
+  it('clears the email error on edit and validates on blur, with aria-invalid and an alert', () => {
+    const emailInputIdx = source.indexOf("field: 'email'")
+    expect(emailInputIdx).toBeGreaterThan(-1)
+    const start = source.lastIndexOf('<input', emailInputIdx)
+    const region = source.slice(start, source.indexOf('/>', emailInputIdx) + 200)
+    expect(region).toContain('setNewUserEmailError(null)')
+    expect(region).toContain('onBlur={() => { if (newUserFormState.email && !isValidNewUserEmail(newUserFormState.email))')
+    expect(region).toContain("aria-invalid={newUserEmailError ? 'true' : undefined}")
+    expect(region).toContain('{newUserEmailError && (')
+    expect(region).toContain('role="alert"')
+  })
+})
+
+// Defect 4 (source contract): the Add Member dialog opens on Create New User
+// by default and renders that tab button first.
+describe('Add Member dialog tab order and default (Defect 4)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  it("defaults the addMemberTab state to 'new'", () => {
+    expect(source).toContain("const [addMemberTab, setAddMemberTab] = useState('new')")
+  })
+
+  it('renders the Create New User tab button before the Add Existing User tab button', () => {
+    const navIdx = source.indexOf('<nav className="-mb-px flex">')
+    expect(navIdx).toBeGreaterThan(-1)
+    const nav = source.slice(navIdx, source.indexOf('</nav>', navIdx))
+    const createIdx = nav.indexOf('Create New User')
+    const existingIdx = nav.indexOf('Add Existing User')
+    expect(createIdx).toBeGreaterThan(-1)
+    expect(existingIdx).toBeGreaterThan(-1)
+    expect(createIdx).toBeLessThan(existingIdx)
+  })
+
+  it("resets the tab to 'new' on dialog close", () => {
+    expect(source).toContain("setAddMemberTab('new')")
+  })
+})
+
+// Defect 1 (source contract): the Members list includes admins (an admin is
+// also a member), while the Team Admins list stays admin-only.
+describe('Members list includes admins (Defect 1)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  it('includes admin rows in every setMembers filter', () => {
+    const matches = source.match(/setMembers\(allMembers\.filter\([^)]*\)\)/g) || []
+    expect(matches.length).toBe(5)
+    for (const m of matches) {
+      expect(m).toContain("m.role === 'admin'")
+      expect(m).toContain("m.role === 'member'")
+      expect(m).toContain("m.role === 'inherited'")
+    }
+  })
+
+  it('keeps the Team Admins list admin-only', () => {
+    const matches = source.match(/setAdmins\(allMembers\.filter\([^)]*\)\)/g) || []
+    expect(matches.length).toBe(5)
+    for (const m of matches) {
+      expect(m).toBe("setAdmins(allMembers.filter(m => m.role === 'admin'))")
+    }
   })
 })

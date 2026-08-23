@@ -102,12 +102,12 @@ describe('extractCallsignSuffixConflictError', () => {
     const error = {
       response: {
         status: 400,
-        data: { error: 'callsign_suffix "Smith-J" is already in use within this Team' }
+        data: { error: 'Callsign Suffix "Smith-J" is already in use within this Team' }
       }
     };
 
     expect(extractCallsignSuffixConflictError(error)).toBe(
-      'callsign_suffix "Smith-J" is already in use within this Team'
+      'Callsign Suffix "Smith-J" is already in use within this Team'
     );
   });
 
@@ -451,7 +451,7 @@ describe('Requests page team_change card (mounted)', () => {
   })
 
   it.each([
-    [400, 'callsign_suffix "Hopper-G" is already in use within this Team'],
+    [400, 'Callsign Suffix "Hopper-G" is already in use within this Team'],
     [409, 'This user has moved teams since this request was created'],
     [409, 'The two teams are in different organisations'],
     [500, 'Failed to approve request']

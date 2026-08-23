@@ -507,7 +507,15 @@ describe('Property 3: Payload validation failures never schedule a retry', () =>
     create_vendor_channel_group: 'createVendorChannelGroup',
     create_deployment_channel_group: 'createDeploymentChannelGroup',
     remove_all_members_from_group: 'removeAllMembersFromGroup',
-    revoke_tak_certificates: 'revokeTakCertificates'
+    revoke_tak_certificates: 'revokeTakCertificates',
+    // Feature cloudtak-agency-groups (tasks 4.1/4.2): create/update share
+    // `ensureCloudTakGroup`; delete's handler `deleteCloudTakGroup` is
+    // added in task 4.2. Property 3 stubs the handler by name and never
+    // reaches the switch (validation fails first), so listing all three
+    // keeps this map in lockstep with operationSchemas.
+    create_cloudtak_group: 'createCloudTakGroup',
+    update_cloudtak_group: 'updateCloudTakGroup',
+    delete_cloudtak_group: 'deleteCloudTakGroup'
   };
 
   // Sanity check that the mapping above and operationSchemas.js haven't
@@ -2472,4 +2480,483 @@ describe('SyncWorker.revokeTakCertificates', () => {
     expect(terminalCall[0]).toContain('next_retry_at');
     expect(terminalCall[1][0]).toBe('pending');
   });
+});
+
+/**
+ * Feature cloudtak-agency-groups (task 4.3): unit tests for the
+ * `create_cloudtak_group`/`update_cloudtak_group` Sync_Worker handlers
+ * (`createCloudTakGroup`/`updateCloudTakGroup`, both delegating to
+ * `ensureCloudTakGroup`). `global.fetch` is mocked to stand in for the
+ * Authentik API and `worker.pool.query` is routed by SQL text so the
+ * team-load `SELECT` and the Direct_Admin_Set query
+ * (`getDirectAdmins(teamId, this.pool)`) can return distinct rows.
+ *
+ * The fetch router below recognises each call `ensureCloudTakGroup`
+ * makes by (method, url) and returns a caller-configured response, so a
+ * test can assert on the exact request shapes (Requirements 2.3, 2.4,
+ * 2.5, 3.4, 4.5, 5.5, 9.3, 10.1, 10.2, 10.3).
+ */
+describe('SyncWorker CloudTAK create/update handlers', () => {
+  let worker;
+  let originalFetch;
+
+  // Route worker.pool.query by SQL: the team-load SELECT vs the
+  // Direct_Admin_Set query used by getDirectAdmins. Any other query
+  // (terminal status UPDATEs) resolves to empty rows.
+  function routePool({ teamRow, directAdmins = [] }) {
+    return jest.fn((sql) => {
+      if (typeof sql === 'string' && /FROM teams WHERE id/.test(sql)) {
+        return Promise.resolve({ rows: teamRow ? [teamRow] : [] });
+      }
+      if (typeof sql === 'string' && /FROM team_memberships/.test(sql)) {
+        return Promise.resolve({ rows: directAdmins });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+  }
+
+  // A small helper building a fetch mock that recognises each Authentik
+  // call the handler makes. `handlers` maps a semantic key to a function
+  // returning the mocked Response. Unhandled calls throw so a test fails
+  // loudly rather than silently.
+  function routeFetch(handlers) {
+    return jest.fn((url, options = {}) => {
+      const method = options.method || 'GET';
+      if (method === 'POST' && /\/core\/groups\/$/.test(url)) {
+        return Promise.resolve(handlers.createGroup(url, options));
+      }
+      if (method === 'GET' && /\/core\/groups\/\?name=/.test(url)) {
+        return Promise.resolve(handlers.lookupByName(url, options));
+      }
+      if (method === 'PATCH' && /\/core\/groups\/[^/]+\/$/.test(url)) {
+        return Promise.resolve(handlers.patch(url, options));
+      }
+      if (method === 'POST' && /\/add_user\/$/.test(url)) {
+        return Promise.resolve(handlers.addUser(url, options));
+      }
+      if (method === 'POST' && /\/remove_user\/$/.test(url)) {
+        return Promise.resolve(handlers.removeUser(url, options));
+      }
+      if (method === 'GET' && /\/core\/groups\/[^/?]+\/$/.test(url)) {
+        return Promise.resolve(handlers.getGroup(url, options));
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    });
+  }
+
+  const ok = (body) => ({ ok: true, status: 200, json: async () => body });
+  const created = (body) => ({ ok: true, status: 201, json: async () => body });
+  const conflict = () => ({ ok: false, status: 400, statusText: 'Bad Request', text: async () => 'exists' });
+  const noContent = () => ({ ok: true, status: 204 });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    worker = new SyncWorker();
+    originalFetch = global.fetch;
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it('POST body carries the group name and the three Agency_Attributes (2.3, 3.4)', async () => {
+    worker.pool.query = routePool({
+      teamRow: { id: 7, name: 'Southland', description: 'South Island unit' },
+      directAdmins: []
+    });
+    global.fetch = routeFetch({
+      createGroup: () => created({ pk: 'grp-7' }),
+      getGroup: () => ok({ pk: 'grp-7', users: [] })
+    });
+
+    await worker.createCloudTakGroup({ team_id: 7 });
+
+    const createCall = global.fetch.mock.calls.find(
+      ([url, opts]) => (opts?.method === 'POST') && /\/core\/groups\/$/.test(url)
+    );
+    expect(createCall).toBeDefined();
+    const body = JSON.parse(createCall[1].body);
+    expect(body.name).toBe('CloudTAKAgency7');
+    expect(body.attributes).toEqual({
+      agencyId: 7,
+      agencyName: 'Southland',
+      description: 'South Island unit'
+    });
+  });
+
+  it('Create_Or_Reuse: on a 400 name-conflict it looks up by name, reuses the group, and still sets the attributes via PATCH (2.4, 2.5, 10.1)', async () => {
+    worker.pool.query = routePool({
+      teamRow: { id: 9, name: 'Otago', description: null },
+      directAdmins: []
+    });
+    global.fetch = routeFetch({
+      createGroup: () => conflict(),
+      lookupByName: () => ok({ results: [{ pk: 'grp-9', name: 'CloudTAKAgency9' }] }),
+      patch: () => ok({ pk: 'grp-9' }),
+      getGroup: () => ok({ pk: 'grp-9', users: [] })
+    });
+
+    await worker.updateCloudTakGroup({ team_id: 9 });
+
+    // Looked up by exact name.
+    const lookupCall = global.fetch.mock.calls.find(([url]) => /\/core\/groups\/\?name=/.test(url));
+    expect(lookupCall[0]).toContain(encodeURIComponent('CloudTAKAgency9'));
+
+    // Attributes still set authoritatively on the reused group via PATCH.
+    const patchCall = global.fetch.mock.calls.find(([, opts]) => opts?.method === 'PATCH');
+    expect(patchCall).toBeDefined();
+    const patchBody = JSON.parse(patchCall[1].body);
+    expect(patchBody.attributes).toEqual({
+      agencyId: 9,
+      agencyName: 'Otago',
+      description: null
+    });
+  });
+
+  it('reconciles membership using authentik_user_id: adds missing admins and removes extra members (4.5, 5.5)', async () => {
+    worker.pool.query = routePool({
+      teamRow: { id: 3, name: 'Team 3', description: 'd' },
+      directAdmins: [
+        { user_id: 1, authentik_user_id: 'ak-1' },
+        { user_id: 2, authentik_user_id: 'ak-2' }
+      ]
+    });
+    global.fetch = routeFetch({
+      createGroup: () => created({ pk: 'grp-3' }),
+      // Current membership: ak-2 (keep) and ak-9 (extra -> remove); ak-1 missing -> add.
+      getGroup: () => ok({ pk: 'grp-3', users: ['ak-2', 'ak-9'] }),
+      addUser: () => noContent(),
+      removeUser: () => noContent()
+    });
+
+    await worker.createCloudTakGroup({ team_id: 3 });
+
+    const addCalls = global.fetch.mock.calls.filter(([url]) => /\/add_user\/$/.test(url));
+    const removeCalls = global.fetch.mock.calls.filter(([url]) => /\/remove_user\/$/.test(url));
+
+    expect(addCalls).toHaveLength(1);
+    expect(JSON.parse(addCalls[0][1].body)).toEqual({ pk: 'ak-1' });
+    expect(removeCalls).toHaveLength(1);
+    expect(JSON.parse(removeCalls[0][1].body)).toEqual({ pk: 'ak-9' });
+    // add_user/remove_user target the resolved group pk.
+    expect(addCalls[0][0]).toContain('/core/groups/grp-3/add_user/');
+    expect(removeCalls[0][0]).toContain('/core/groups/grp-3/remove_user/');
+  });
+
+  it('is a no-op success when the team row no longer exists (deleted between enqueue and processing)', async () => {
+    worker.pool.query = routePool({ teamRow: null });
+    global.fetch = jest.fn();
+
+    await expect(worker.createCloudTakGroup({ team_id: 404 })).resolves.toBeUndefined();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it('classifies a 5xx from the create call as a retryable AuthentikApiError (9.3, 10.2)', async () => {
+    worker.pool.query = routePool({ teamRow: { id: 5, name: 'T5', description: 'd' } });
+    global.fetch = routeFetch({
+      createGroup: () => ({ ok: false, status: 503, statusText: 'Service Unavailable' }),
+      // lookup also fails (5xx), so no group is found and the create
+      // failure's classification governs.
+      lookupByName: () => ({ ok: false, status: 503, statusText: 'Service Unavailable' })
+    });
+
+    await expect(worker.createCloudTakGroup({ team_id: 5 })).rejects.toMatchObject({
+      name: 'AuthentikApiError',
+      classification: 'retryable'
+    });
+  });
+
+  it('classifies a non-conflict 4xx (e.g. 403) with no reusable group as a permanent AuthentikApiError (10.3)', async () => {
+    worker.pool.query = routePool({ teamRow: { id: 6, name: 'T6', description: 'd' } });
+    global.fetch = routeFetch({
+      createGroup: () => ({ ok: false, status: 403, statusText: 'Forbidden' }),
+      lookupByName: () => ok({ results: [] })
+    });
+
+    await expect(worker.createCloudTakGroup({ team_id: 6 })).rejects.toMatchObject({
+      name: 'AuthentikApiError',
+      classification: 'permanent'
+    });
+  });
+});
+
+/**
+ * Feature cloudtak-agency-groups (task 4.6): unit tests for the
+ * `delete_cloudtak_group` Sync_Worker handler (`deleteCloudTakGroup`).
+ * `global.fetch` is mocked to stand in for the Authentik API. By delete
+ * time the `teams` row is already gone, so the handler derives the group
+ * name purely from `payload.team_id` (`CloudTAKAgency<team_id>`), resolves
+ * the group by exact name, and DELETEs the resolved pk -- treating an
+ * absent group or a 404 as an already-satisfied no-op (Requirements 7.2,
+ * 7.3), and classifying other failures via `classifyFailure` (5xx
+ * retryable, non-404 4xx permanent).
+ */
+describe('SyncWorker CloudTAK delete handler', () => {
+  let worker;
+  let originalFetch;
+
+  // Recognises the two calls deleteCloudTakGroup makes: the lookup-by-name
+  // GET and the DELETE of the resolved pk. Unhandled calls throw so a test
+  // fails loudly rather than silently.
+  function routeFetch(handlers) {
+    return jest.fn((url, options = {}) => {
+      const method = options.method || 'GET';
+      if (method === 'GET' && /\/core\/groups\/\?name=/.test(url)) {
+        return Promise.resolve(handlers.lookupByName(url, options));
+      }
+      if (method === 'DELETE' && /\/core\/groups\/[^/?]+\/$/.test(url)) {
+        return Promise.resolve(handlers.deleteGroup(url, options));
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    });
+  }
+
+  const ok = (body) => ({ ok: true, status: 200, json: async () => body });
+  const noContent = () => ({ ok: true, status: 204 });
+  const notFound = () => ({ ok: false, status: 404, statusText: 'Not Found' });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    worker = new SyncWorker();
+    originalFetch = global.fetch;
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it('resolves the group by name then DELETEs the resolved pk on the happy path (7.2)', async () => {
+    global.fetch = routeFetch({
+      lookupByName: () => ok({ results: [{ pk: 'grp-10', name: 'CloudTAKAgency10' }] }),
+      deleteGroup: () => noContent()
+    });
+
+    await worker.deleteCloudTakGroup({ team_id: 10 });
+
+    // Looked up by exact name.
+    const lookupCall = global.fetch.mock.calls.find(([url]) => /\/core\/groups\/\?name=/.test(url));
+    expect(lookupCall).toBeDefined();
+    expect(lookupCall[0]).toContain(encodeURIComponent('CloudTAKAgency10'));
+
+    // Deleted the resolved pk.
+    const deleteCall = global.fetch.mock.calls.find(([, opts]) => opts?.method === 'DELETE');
+    expect(deleteCall).toBeDefined();
+    expect(deleteCall[0]).toContain('/core/groups/grp-10/');
+  });
+
+  it('is a no-op success when the lookup returns no matching group (absent group, 7.3)', async () => {
+    global.fetch = routeFetch({
+      lookupByName: () => ok({ results: [] }),
+      // deleteGroup intentionally not provided -- must never be called.
+      deleteGroup: () => { throw new Error('DELETE should not be issued for an absent group'); }
+    });
+
+    await expect(worker.deleteCloudTakGroup({ team_id: 11 })).resolves.toBeUndefined();
+
+    const deleteCall = global.fetch.mock.calls.find(([, opts]) => opts?.method === 'DELETE');
+    expect(deleteCall).toBeUndefined();
+  });
+
+  it('treats a 404 from the DELETE as an already-satisfied deletion (7.3)', async () => {
+    global.fetch = routeFetch({
+      lookupByName: () => ok({ results: [{ pk: 'grp-12', name: 'CloudTAKAgency12' }] }),
+      deleteGroup: () => notFound()
+    });
+
+    await expect(worker.deleteCloudTakGroup({ team_id: 12 })).resolves.toBeUndefined();
+
+    // The DELETE was attempted (then 404'd into a no-op).
+    const deleteCall = global.fetch.mock.calls.find(([, opts]) => opts?.method === 'DELETE');
+    expect(deleteCall).toBeDefined();
+  });
+
+  it('classifies a 5xx from the lookup as a retryable AuthentikApiError', async () => {
+    global.fetch = routeFetch({
+      lookupByName: () => ({ ok: false, status: 503, statusText: 'Service Unavailable' }),
+      deleteGroup: () => noContent()
+    });
+
+    await expect(worker.deleteCloudTakGroup({ team_id: 13 })).rejects.toMatchObject({
+      name: 'AuthentikApiError',
+      classification: 'retryable'
+    });
+  });
+
+  it('classifies a 5xx from the DELETE as a retryable AuthentikApiError', async () => {
+    global.fetch = routeFetch({
+      lookupByName: () => ok({ results: [{ pk: 'grp-14', name: 'CloudTAKAgency14' }] }),
+      deleteGroup: () => ({ ok: false, status: 502, statusText: 'Bad Gateway' })
+    });
+
+    await expect(worker.deleteCloudTakGroup({ team_id: 14 })).rejects.toMatchObject({
+      name: 'AuthentikApiError',
+      classification: 'retryable'
+    });
+  });
+
+  it('classifies a non-404 4xx (e.g. 403) from the lookup as a permanent AuthentikApiError', async () => {
+    global.fetch = routeFetch({
+      lookupByName: () => ({ ok: false, status: 403, statusText: 'Forbidden' }),
+      deleteGroup: () => noContent()
+    });
+
+    await expect(worker.deleteCloudTakGroup({ team_id: 15 })).rejects.toMatchObject({
+      name: 'AuthentikApiError',
+      classification: 'permanent'
+    });
+  });
+
+  it('classifies a non-404 4xx (e.g. 403) from the DELETE as a permanent AuthentikApiError', async () => {
+    global.fetch = routeFetch({
+      lookupByName: () => ok({ results: [{ pk: 'grp-16', name: 'CloudTAKAgency16' }] }),
+      deleteGroup: () => ({ ok: false, status: 403, statusText: 'Forbidden' })
+    });
+
+    await expect(worker.deleteCloudTakGroup({ team_id: 16 })).rejects.toMatchObject({
+      name: 'AuthentikApiError',
+      classification: 'permanent'
+    });
+  });
+});
+
+/**
+ * Feature cloudtak-agency-groups (task 4.4): Property 6 -- membership
+ * reconciliation yields the direct-admin set. Property-tested against the
+ * pure `computeMembershipDiff` helper extracted into
+ * `CloudTakAgencyGroup.js`, which the Sync_Worker reconcile drives.
+ */
+// Feature: cloudtak-agency-groups, Property 6: Membership reconciliation yields the direct-admin set
+describe('Property 6: Membership reconciliation yields the direct-admin set', () => {
+  const { computeMembershipDiff } = require('../services/CloudTakAgencyGroup');
+
+  // Applies a diff to a current set the way the Sync_Worker does: add the
+  // toAdd ids, remove the toRemove ids.
+  function applyDiff(current, { toAdd, toRemove }) {
+    const set = new Set(current);
+    for (const id of toRemove) set.delete(id);
+    for (const id of toAdd) set.add(id);
+    return set;
+  }
+
+  // Ids are Authentik user pks (same id space on both sides). Use small
+  // integers so overlaps between current and target are frequent.
+  const idArb = fc.integer({ min: 1, max: 30 });
+  const setArb = fc.uniqueArray(idArb, { maxLength: 15 });
+
+  test.prop([setArb, setArb], { numRuns: 200 })(
+    'after reconcile the membership equals the target set, and a second reconcile with an unchanged target is a no-op',
+    (current, target) => {
+      const diff = computeMembershipDiff(current, target);
+      const afterFirst = applyDiff(current, diff);
+
+      // Converges exactly to the target set.
+      expect([...afterFirst].sort((a, b) => a - b)).toEqual([...new Set(target)].sort((a, b) => a - b));
+
+      // Second reconcile against the same target: no further changes.
+      const diff2 = computeMembershipDiff([...afterFirst], target);
+      expect(diff2.toAdd).toEqual([]);
+      expect(diff2.toRemove).toEqual([]);
+    }
+  );
+});
+
+/**
+ * Feature cloudtak-agency-groups (task 4.5): Property 7 -- create/update
+ * attribute idempotence. Processing the handler twice against a stateful
+ * mocked Authentik yields identical group name and Agency_Attributes.
+ */
+// Feature: cloudtak-agency-groups, Property 7: Create/update attribute idempotence
+describe('Property 7: Create/update attribute idempotence', () => {
+  let originalFetch;
+
+  beforeEach(() => {
+    originalFetch = global.fetch;
+  });
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  // A stateful in-memory Authentik double: the first create for a name
+  // stores the group; a subsequent create for the same name returns a
+  // 400 conflict (so the handler exercises Create_Or_Reuse + PATCH), and
+  // PATCH overwrites the stored attributes.
+  function makeAuthentikDouble() {
+    const groupsByName = new Map();
+    const groupsByPk = new Map();
+    let nextPk = 1;
+
+    global.fetch = jest.fn((url, options = {}) => {
+      const method = options.method || 'GET';
+      const body = options.body ? JSON.parse(options.body) : undefined;
+
+      if (method === 'POST' && /\/core\/groups\/$/.test(url)) {
+        if (groupsByName.has(body.name)) {
+          return Promise.resolve({ ok: false, status: 400, statusText: 'Bad Request', text: async () => 'exists' });
+        }
+        const pk = `pk-${nextPk++}`;
+        const group = { pk, name: body.name, attributes: body.attributes, users: [] };
+        groupsByName.set(body.name, group);
+        groupsByPk.set(pk, group);
+        return Promise.resolve({ ok: true, status: 201, json: async () => group });
+      }
+      if (method === 'GET' && /\/core\/groups\/\?name=/.test(url)) {
+        const name = decodeURIComponent(url.split('name=')[1]);
+        const group = groupsByName.get(name);
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ results: group ? [group] : [] }) });
+      }
+      if (method === 'PATCH' && /\/core\/groups\/([^/]+)\/$/.test(url)) {
+        const pk = url.match(/\/core\/groups\/([^/]+)\/$/)[1];
+        const group = groupsByPk.get(pk);
+        if (group) group.attributes = body.attributes;
+        return Promise.resolve({ ok: true, status: 200, json: async () => group });
+      }
+      if (method === 'GET' && /\/core\/groups\/([^/?]+)\/$/.test(url)) {
+        const pk = url.match(/\/core\/groups\/([^/?]+)\/$/)[1];
+        const group = groupsByPk.get(pk);
+        return Promise.resolve({ ok: true, status: 200, json: async () => group });
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    });
+
+    return { groupsByName };
+  }
+
+  const teamArb = fc.record({
+    id: fc.integer({ min: 1, max: 100000 }),
+    name: fc.string({ minLength: 1, maxLength: 40 }),
+    description: fc.option(fc.string({ maxLength: 60 }), { nil: null })
+  });
+
+  test.prop([teamArb], { numRuns: 100 })(
+    'processing create/update twice leaves the group name and Agency_Attributes identical',
+    async (team) => {
+      const double = makeAuthentikDouble();
+      const worker = new SyncWorker();
+      // No direct admins for this property: it isolates name + attributes.
+      worker.pool.query = jest.fn((sql) => {
+        if (typeof sql === 'string' && /FROM teams WHERE id/.test(sql)) {
+          return Promise.resolve({ rows: [team] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      await worker.createCloudTakGroup({ team_id: team.id });
+      const name = `CloudTAKAgency${team.id}`;
+      const afterFirst = double.groupsByName.get(name);
+      const firstSnapshot = JSON.stringify({ name: afterFirst.name, attributes: afterFirst.attributes });
+
+      // Second processing (idempotent re-run).
+      await worker.updateCloudTakGroup({ team_id: team.id });
+      const afterSecond = double.groupsByName.get(name);
+      const secondSnapshot = JSON.stringify({ name: afterSecond.name, attributes: afterSecond.attributes });
+
+      expect(secondSnapshot).toBe(firstSnapshot);
+      expect(afterSecond.name).toBe(name);
+      expect(afterSecond.attributes).toEqual({
+        agencyId: team.id,
+        agencyName: team.name,
+        description: team.description
+      });
+    }
+  );
 });

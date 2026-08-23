@@ -82,6 +82,63 @@ function buildApp() {
   return app;
 }
 
+describe('GET /api/communications/templates', () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockUser = { id: 'authentik-1', userId: 1, is_global_manager: true };
+    app = buildApp();
+  });
+
+  it('returns every template row as { templates: [...] } for a Global_Manager', async () => {
+    const rows = [
+      {
+        template_key: 'access_request_approved',
+        subject_template: 'Approved',
+        body_template: 'You are approved {{first_name}}',
+        description: 'Sent when a request is approved',
+        updated_at: '2024-01-02T00:00:00.000Z'
+      },
+      {
+        template_key: 'access_request_verification',
+        subject_template: 'Verify your TAK Team Manager access request',
+        body_template: 'Please click {{verification_link}}',
+        description: 'Sent when a new access request is submitted',
+        updated_at: '2024-01-01T00:00:00.000Z'
+      }
+    ];
+    pool.query.mockResolvedValue({ rows });
+
+    const res = await request(app).get('/api/communications/templates');
+
+    expect(res.status).toBe(200);
+    expect(res.body.templates).toEqual(rows);
+
+    const [sql] = pool.query.mock.calls[0];
+    expect(sql).toContain('FROM email_templates');
+    expect(sql).toContain('ORDER BY template_key');
+  });
+
+  it('returns 500 with an error body when the query rejects', async () => {
+    pool.query.mockRejectedValue(new Error('DB unreachable'));
+
+    const res = await request(app).get('/api/communications/templates');
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBeDefined();
+  });
+
+  it('rejects a non-Global_Manager caller with 403 and never queries email_templates', async () => {
+    mockUser = { id: 'authentik-2', userId: 2, is_global_manager: false };
+
+    const res = await request(app).get('/api/communications/templates');
+
+    expect(res.status).toBe(403);
+    expect(pool.query).not.toHaveBeenCalled();
+  });
+});
+
 describe('GET /api/communications/templates/:key', () => {
   let app;
 

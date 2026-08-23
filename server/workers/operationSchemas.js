@@ -253,5 +253,48 @@ module.exports = {
     optionalFields: {
       target_user_id: 'number'
     }
+  },
+
+  // Requirement 9.5 (task 3.1): enqueued by `Team.create` WHILE
+  // CloudTAK_Enabled is true, after the `teams` row is inserted.
+  // `team_id` is the newly created Team's `teams.id`; the Sync_Worker
+  // handler `createCloudTakGroup` (task 4.1) resolves the CloudTAK_Group
+  // by name (`CloudTAKAgency<team_id>`) via Create_Or_Reuse, sets the
+  // Agency_Attributes from the Team's current stored values, and
+  // reconciles members to the Team's Direct_Admin_Set.
+  create_cloudtak_group: {
+    requiredFields: {
+      team_id: 'number'
+    }
+  },
+
+  // Requirement 9.5 (task 3.1): enqueued by `Team.update` (on a
+  // name/description change), `Team.addMember`, the create-and-add admin
+  // promotion in `server/routes/users.js`, and
+  // `TeamMembershipService.removeUserFromTeam` WHILE CloudTAK_Enabled is
+  // true. `team_id` is the affected Team's `teams.id`; the Sync_Worker
+  // handler `updateCloudTakGroup` (task 4.1) resolves the CloudTAK_Group
+  // by name via Create_Or_Reuse, sets the Agency_Attributes
+  // authoritatively, and re-reconciles members to the current
+  // Direct_Admin_Set (so the single operation type serves attribute and
+  // membership changes alike).
+  update_cloudtak_group: {
+    requiredFields: {
+      team_id: 'number'
+    }
+  },
+
+  // Requirement 9.5 (task 3.1): enqueued by `Team.delete` inside the
+  // deletion transaction (on the same client), before the Team row is
+  // gone. `team_id` is the (now-deleted) Team's `teams.id`, kept in the
+  // payload because the local row no longer exists to look up from -- the
+  // Sync_Worker handler `deleteCloudTakGroup` (task 4.2) derives the group
+  // name (`CloudTAKAgency<team_id>`) purely from `team_id`, resolves the
+  // group by name in Authentik, DELETEs it, and treats a 404/absent group
+  // as an already-satisfied no-op.
+  delete_cloudtak_group: {
+    requiredFields: {
+      team_id: 'number'
+    }
   }
 };

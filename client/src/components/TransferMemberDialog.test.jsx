@@ -140,7 +140,7 @@ describe('TransferMemberDialog pure helpers', () => {
   })
 
   describe('isCallsignSuffixConflictMessage / extractConflictingCallsignSuffix (Req 9.6)', () => {
-    const conflict = 'callsign_suffix "K9" is already in use within this Team'
+    const conflict = 'Callsign Suffix "K9" is already in use within this Team'
 
     it('recognises the server conflict message', () => {
       expect(isCallsignSuffixConflictMessage(conflict)).toBe(true)
@@ -211,7 +211,7 @@ describe('TransferMemberDialog pure helpers', () => {
     })
 
     it('routes a 400 naming a conflicting callsign suffix to the retry prompt', () => {
-      const message = 'callsign_suffix "K9" is already in use within this Team'
+      const message = 'Callsign Suffix "K9" is already in use within this Team'
       const result = interpretTransferError({ response: { status: 400, data: { error: message } } })
       expect(result.kind).toBe('callsign_suffix_conflict')
       expect(result.callsignSuffixPrompt).toBe(message)
@@ -412,7 +412,7 @@ describe('TransferMemberDialog (mounted)', () => {
   )
 
   it('resubmits with the replacement suffix after a callsign-suffix conflict (Req 9.6)', async () => {
-    const conflict = 'callsign_suffix "K9" is already in use within this Team'
+    const conflict = 'Callsign Suffix "K9" is already in use within this Team'
     usersAPI.transfer
       .mockRejectedValueOnce({ response: { status: 400, data: { error: conflict } } })
       .mockResolvedValueOnce({
@@ -441,7 +441,7 @@ describe('TransferMemberDialog (mounted)', () => {
   })
 
   it('blocks the retry until a replacement suffix is entered (Req 9.6)', async () => {
-    const conflict = 'callsign_suffix "K9" is already in use within this Team'
+    const conflict = 'Callsign Suffix "K9" is already in use within this Team'
     usersAPI.transfer.mockRejectedValue({ response: { status: 400, data: { error: conflict } } })
 
     await mount()

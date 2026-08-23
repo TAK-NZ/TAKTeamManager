@@ -1978,3 +1978,376 @@ describe('Property 2: Sub_Team always inherits Organisation-only fields, ignorin
     }
   );
 });
+
+/**
+ * Unit tests for `Team.addMember`'s CloudTAK membership enqueue site
+ * (Requirement 5.1/5.2/5.3, task 8.1/8.4).
+ *
+ * `Team.addMember`'s single `ON CONFLICT ... DO UPDATE SET role` upsert
+ * is the mutation point for adding an admin, promoting a member to admin,
+ * and demoting an admin to member (design "Exact enqueue points" #4).
+ * After that upsert succeeds, and ONLY when CloudTAK is enabled, it must
+ * enqueue exactly one `update_cloudtak_group` Sync_Operation carrying the
+ * `{ team_id }` so the Team's CloudTAK group re-reconciles to the current
+ * Direct_Admin_Set. The enqueue is non-transactional (default pool, no
+ * `client` argument) and must never enqueue when the flag is off
+ * (Requirement 1.4). `isCloudTakEnabled()` reads `process.env` at call
+ * time, so toggling `process.env.CLOUDTAK_ENABLED` here is sufficient; we
+ * save and restore it around each test so no state leaks into other
+ * tests in this file.
+ */
+describe('Team.addMember CloudTAK enqueue (Requirement 5.1/5.2/5.3, 1.4)', () => {
+  let savedFlag;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    savedFlag = process.env.CLOUDTAK_ENABLED;
+    pool.query.mockResolvedValue({ rows: [{ team_id: 5, user_id: 42, role: 'member' }] });
+    EventPublisher.publishOperation.mockResolvedValue('op-id');
+  });
+
+  afterEach(() => {
+    if (savedFlag === undefined) {
+      delete process.env.CLOUDTAK_ENABLED;
+    } else {
+      process.env.CLOUDTAK_ENABLED = savedFlag;
+    }
+  });
+
+  it("enqueues exactly one update_cloudtak_group with { team_id } when the flag is on for role='admin' (add/promote path)", async () => {
+    process.env.CLOUDTAK_ENABLED = 'true';
+
+    await Team.addMember(5, 42, 'admin');
+
+    expect(EventPublisher.publishOperation).toHaveBeenCalledTimes(1);
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'update_cloudtak_group',
+      { team_id: 5 },
+      null
+    );
+  });
+
+  it("enqueues exactly one update_cloudtak_group with { team_id } when the flag is on for role='member' (demote path)", async () => {
+    process.env.CLOUDTAK_ENABLED = 'true';
+
+    await Team.addMember(5, 42, 'member');
+
+    expect(EventPublisher.publishOperation).toHaveBeenCalledTimes(1);
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'update_cloudtak_group',
+      { team_id: 5 },
+      null
+    );
+  });
+
+  it('enqueues on the default pool (no transactional client argument)', async () => {
+    process.env.CLOUDTAK_ENABLED = 'true';
+
+    await Team.addMember(5, 42, 'admin');
+
+    const [, , createdBy, client] = EventPublisher.publishOperation.mock.calls[0];
+    expect(createdBy).toBeNull();
+    expect(client).toBeUndefined();
+  });
+
+  it('enqueues NOTHING when the flag is off, for both admin and member roles (Requirement 1.4)', async () => {
+    process.env.CLOUDTAK_ENABLED = 'false';
+
+    await Team.addMember(5, 42, 'admin');
+    await Team.addMember(5, 42, 'member');
+
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+  });
+
+  it('does not break the addMember result when the enqueue itself fails (non-rethrowing)', async () => {
+    process.env.CLOUDTAK_ENABLED = 'true';
+    EventPublisher.publishOperation.mockRejectedValue(new Error('sync_operations insert failed'));
+
+    // The membership upsert still resolves to its row; the enqueue error
+    // is caught and logged rather than propagated.
+    const member = await Team.addMember(5, 42, 'admin');
+
+    expect(member).toEqual({ team_id: 5, user_id: 42, role: 'member' });
+    expect(mockLoggerInstance.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error), teamId: 5 }),
+      'Error enqueuing update_cloudtak_group'
+    );
+  });
+});
+
+/**
+ * Unit tests for the CloudTAK_Group enqueue sites in `Team.create` and
+ * `Team.update` (Requirement 2.1/2.6/6.1/6.2/1.4/9.1/9.4, task 6.3).
+ *
+ * `Team.create`, after its `teams` INSERT succeeds and ONLY when CloudTAK
+ * is enabled, must enqueue exactly one `create_cloudtak_group`
+ * Sync_Operation carrying `{ team_id: <new id> }` -- identically for a
+ * root Organisation and a Sub_Team. `Team.update`, after its `teams`
+ * UPDATE returns, must enqueue an `update_cloudtak_group` with
+ * `{ team_id }` ONLY when the update actually touched `name` and/or
+ * `description` (the two fields mirrored into the group's
+ * Agency_Attributes), and must NOT enqueue for an update that touched
+ * neither. Both are non-transactional sites (default pool, no `client`
+ * argument, Requirement 9.1) and must enqueue NOTHING when the flag is
+ * off (Requirement 1.4).
+ *
+ * `isCloudTakEnabled()` reads `process.env` at call time, so toggling
+ * `process.env.CLOUDTAK_ENABLED` here is sufficient (matching the
+ * `Team.addMember` CloudTAK enqueue tests above); it is saved/restored
+ * around each test so no state leaks. `createTeamChannel` is stubbed
+ * (its own DB/Authentik concern) so `Team.create`'s only observable
+ * `pool.query` is the INSERT, mirroring the Max_Team_Depth tests'
+ * convention.
+ */
+describe('Team.create / Team.update CloudTAK enqueue (Requirement 2.1/2.6/6.1/6.2, 1.4)', () => {
+  let savedFlag;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    savedFlag = process.env.CLOUDTAK_ENABLED;
+    jest.spyOn(Team, 'createTeamChannel').mockResolvedValue({ id: 999 });
+    EventPublisher.publishOperation.mockResolvedValue('op-id');
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    if (savedFlag === undefined) {
+      delete process.env.CLOUDTAK_ENABLED;
+    } else {
+      process.env.CLOUDTAK_ENABLED = savedFlag;
+    }
+  });
+
+  it('Team.create enqueues exactly one create_cloudtak_group with the new root team id on the default pool when the flag is on (Requirement 2.1)', async () => {
+    process.env.CLOUDTAK_ENABLED = 'true';
+    pool.query.mockResolvedValue({ rows: [{ id: 7, name: 'FENZ', parent_team_id: null }] });
+
+    const team = await Team.create({ name: 'FENZ', parent_team_id: null, created_by: 99 });
+
+    expect(team).toEqual({ id: 7, name: 'FENZ', parent_team_id: null });
+    expect(EventPublisher.publishOperation).toHaveBeenCalledTimes(1);
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'create_cloudtak_group',
+      { team_id: 7 },
+      99
+    );
+    // Non-transactional site: no client (4th) argument (Requirement 9.1).
+    const [, , , client] = EventPublisher.publishOperation.mock.calls[0];
+    expect(client).toBeUndefined();
+  });
+
+  it('Team.create enqueues create_cloudtak_group with the new SUB-team id (identically to a root team) when the flag is on (Requirement 2.6)', async () => {
+    process.env.CLOUDTAK_ENABLED = 'true';
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('WITH RECURSIVE ancestors')) {
+        // Parent at depth 0, so the Sub_Team lands at depth 1 (<= MAX).
+        return Promise.resolve({ rows: [{ id: 1, parent_team_id: null, color: 'Red', callsign_name_format: 'full_name', depth: 0 }] });
+      }
+      if (typeof sql === 'string' && sql.includes('INSERT INTO teams')) {
+        return Promise.resolve({ rows: [{ id: 12, name: 'Station 40', parent_team_id: 1 }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const team = await Team.create({ name: 'Station 40', parent_team_id: 1, created_by: null });
+
+    expect(team).toEqual({ id: 12, name: 'Station 40', parent_team_id: 1 });
+    expect(EventPublisher.publishOperation).toHaveBeenCalledTimes(1);
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'create_cloudtak_group',
+      { team_id: 12 },
+      null
+    );
+  });
+
+  it('Team.create enqueues NOTHING when the flag is off (Requirement 1.4)', async () => {
+    process.env.CLOUDTAK_ENABLED = 'false';
+    pool.query.mockResolvedValue({ rows: [{ id: 7, name: 'FENZ', parent_team_id: null }] });
+
+    await Team.create({ name: 'FENZ', parent_team_id: null, created_by: 99 });
+
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+  });
+
+  it('Team.update enqueues update_cloudtak_group with { team_id } on a name change, on the default pool, when the flag is on (Requirement 6.1)', async () => {
+    process.env.CLOUDTAK_ENABLED = 'true';
+    pool.query.mockResolvedValue({ rows: [{ id: 5, name: 'Renamed', parent_team_id: null }] });
+
+    await Team.update(5, { name: 'Renamed' });
+
+    expect(EventPublisher.publishOperation).toHaveBeenCalledTimes(1);
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'update_cloudtak_group',
+      { team_id: 5 },
+      null
+    );
+    const [, , , client] = EventPublisher.publishOperation.mock.calls[0];
+    expect(client).toBeUndefined();
+  });
+
+  it('Team.update enqueues update_cloudtak_group on a description change when the flag is on (Requirement 6.2)', async () => {
+    process.env.CLOUDTAK_ENABLED = 'true';
+    pool.query.mockResolvedValue({ rows: [{ id: 5, name: 'FENZ', description: 'New desc', parent_team_id: null }] });
+
+    await Team.update(5, { description: 'New desc' });
+
+    expect(EventPublisher.publishOperation).toHaveBeenCalledTimes(1);
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'update_cloudtak_group',
+      { team_id: 5 },
+      null
+    );
+  });
+
+  it('Team.update does NOT enqueue when neither name nor description was part of the update (e.g. visibility-only), even with the flag on (Requirement 6.1/6.2)', async () => {
+    process.env.CLOUDTAK_ENABLED = 'true';
+    pool.query.mockResolvedValue({ rows: [{ id: 5, name: 'FENZ', parent_team_id: null }] });
+
+    await Team.update(5, { visibility: 'private' });
+
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+  });
+
+  it('Team.update enqueues NOTHING when the flag is off, even on a name/description change (Requirement 1.4)', async () => {
+    process.env.CLOUDTAK_ENABLED = 'false';
+    pool.query.mockResolvedValue({ rows: [{ id: 5, name: 'Renamed', description: 'New desc', parent_team_id: null }] });
+
+    await Team.update(5, { name: 'Renamed', description: 'New desc' });
+
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Unit tests for the CloudTAK_Group deletion enqueue site in
+ * `Team.delete` (Requirement 7.1/9.2/1.4, task 7.2).
+ *
+ * Inside `Team.delete`'s existing transaction, before COMMIT and ONLY
+ * when CloudTAK is enabled, it must enqueue exactly one
+ * `delete_cloudtak_group` Sync_Operation carrying `{ team_id }` (a
+ * number, taken from the deleted row) on the SAME transactional `client`
+ * (4th argument) -- the intentional transactional-site behaviour
+ * (Requirement 9.2), so the `sync_operations` row commits/rolls back
+ * atomically with the deletion. This must sit ALONGSIDE the existing
+ * `remove_team_channel_group`/`revoke_tak_certificates` enqueues without
+ * disturbing them, and must NOT enqueue when the flag is off
+ * (Requirement 1.4) -- while those existing channel/cert enqueues still
+ * occur. `process.env.CLOUDTAK_ENABLED` is toggled/restored per test,
+ * matching the other CloudTAK enqueue tests in this file, and the
+ * transactional `client` is mocked exactly as the top-of-file
+ * `Team.delete` tests do.
+ */
+describe('Team.delete CloudTAK enqueue (Requirement 7.1/9.2, 1.4)', () => {
+  let savedFlag;
+  let mockClient;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    savedFlag = process.env.CLOUDTAK_ENABLED;
+    mockClient = {
+      query: jest.fn().mockResolvedValue({ rows: [] }),
+      release: jest.fn()
+    };
+    pool.connect.mockResolvedValue(mockClient);
+    EventPublisher.publishOperation.mockResolvedValue('op-id');
+  });
+
+  afterEach(() => {
+    if (savedFlag === undefined) {
+      delete process.env.CLOUDTAK_ENABLED;
+    } else {
+      process.env.CLOUDTAK_ENABLED = savedFlag;
+    }
+  });
+
+  it('enqueues exactly one delete_cloudtak_group with a numeric { team_id } on the transactional client when the flag is on (Requirement 7.1/9.2)', async () => {
+    process.env.CLOUDTAK_ENABLED = 'true';
+    mockClient.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('SELECT id, authentik_group_id')) {
+        return Promise.resolve({ rows: [] }); // no channels
+      }
+      if (typeof sql === 'string' && sql.includes('WITH RECURSIVE team_and_subteams')) {
+        return Promise.resolve({ rows: [] }); // no affected usernames
+      }
+      if (typeof sql === 'string' && sql.includes('DELETE FROM teams')) {
+        return Promise.resolve({ rows: [{ id: 5 }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await Team.delete(5, 99);
+
+    const deleteCalls = EventPublisher.publishOperation.mock.calls.filter(
+      ([type]) => type === 'delete_cloudtak_group'
+    );
+    expect(deleteCalls).toHaveLength(1);
+    expect(deleteCalls[0]).toEqual([
+      'delete_cloudtak_group',
+      { team_id: 5 },
+      99,
+      mockClient
+    ]);
+    // team_id must be a number (the row is already deleted; the site
+    // coerces via Number(...)).
+    expect(typeof deleteCalls[0][1].team_id).toBe('number');
+    // The enqueue must happen before COMMIT, inside the transaction.
+    const calls = mockClient.query.mock.calls.map(([sql]) => sql);
+    expect(calls).toContain('COMMIT');
+    expect(calls).not.toContain('ROLLBACK');
+  });
+
+  it('enqueues delete_cloudtak_group ALONGSIDE the existing channel/cert enqueues without disturbing them (Requirement 7.1)', async () => {
+    process.env.CLOUDTAK_ENABLED = 'true';
+    const deletedChannels = [
+      { id: 10, authentik_group_id: 100, authentik_read_group_id: null, authentik_write_group_id: null }
+    ];
+    mockClient.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('SELECT id, authentik_group_id')) {
+        return Promise.resolve({ rows: deletedChannels });
+      }
+      if (typeof sql === 'string' && sql.includes('WITH RECURSIVE team_and_subteams')) {
+        return Promise.resolve({ rows: [{ username: 'alice' }] });
+      }
+      if (typeof sql === 'string' && sql.includes('DELETE FROM teams')) {
+        return Promise.resolve({ rows: [{ id: 5 }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await Team.delete(5, 99);
+
+    const types = EventPublisher.publishOperation.mock.calls.map(([type]) => type);
+    expect(types).toContain('remove_team_channel_group');
+    expect(types).toContain('revoke_tak_certificates');
+    expect(types.filter((t) => t === 'delete_cloudtak_group')).toHaveLength(1);
+    // The CloudTAK deletion is enqueued last, after the channel/cert ops.
+    expect(types[types.length - 1]).toBe('delete_cloudtak_group');
+  });
+
+  it('does NOT enqueue delete_cloudtak_group when the flag is off, while the existing channel/cert enqueues still occur (Requirement 1.4)', async () => {
+    process.env.CLOUDTAK_ENABLED = 'false';
+    const deletedChannels = [
+      { id: 10, authentik_group_id: 100, authentik_read_group_id: null, authentik_write_group_id: null }
+    ];
+    mockClient.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('SELECT id, authentik_group_id')) {
+        return Promise.resolve({ rows: deletedChannels });
+      }
+      if (typeof sql === 'string' && sql.includes('WITH RECURSIVE team_and_subteams')) {
+        return Promise.resolve({ rows: [{ username: 'alice' }] });
+      }
+      if (typeof sql === 'string' && sql.includes('DELETE FROM teams')) {
+        return Promise.resolve({ rows: [{ id: 5 }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await Team.delete(5, 99);
+
+    const types = EventPublisher.publishOperation.mock.calls.map(([type]) => type);
+    expect(types).not.toContain('delete_cloudtak_group');
+    // The pre-existing enqueues are unaffected by the flag.
+    expect(types).toContain('remove_team_channel_group');
+    expect(types).toContain('revoke_tak_certificates');
+  });
+});

@@ -419,11 +419,14 @@ const rowScopedResolvers = {
    * these are listing routes with no `:teamId`/`:userId` subject — so the
    * question answered here is "does this user administer SOMETHING",
    * not "does this user administer THIS". The per-row narrowing of WHICH
-   * users appear in the response is deliberately NOT addressed here: doing
-   * that properly needs organisation provenance on `users`, which does not
-   * exist yet, so a Team_Admin still sees the whole directory. That
-   * narrowing is a separate, still-open concern; this resolver only closes
-   * the "any authenticated user at all" hole.
+   * users appear in the response is deliberately NOT addressed here: it is
+   * handled in the route handlers via `server/services/DirectoryScopeService.js`,
+   * which resolves the caller's Scoped_Organisations from the same cached
+   * `is_global_manager` attribute and the same `role = 'admin' AND
+   * inherited_from_team_id IS NULL` condition this resolver uses, then scopes
+   * the response by Organisation provenance and Email_Domain. This resolver
+   * only closes the "any authenticated user at all" hole; DirectoryScopeService
+   * closes the per-row hole.
    *
    * `role = 'admin' AND inherited_from_team_id IS NULL` is the glossary's
    * Team_Admin condition, matching `Team.isAdmin`'s own filter

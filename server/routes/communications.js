@@ -86,6 +86,27 @@ const DEFAULT_TEST_EMAIL_TEMPLATE_KEY = 'admin_notification_digest';
  * -- the routes below follow that same column-naming convention.
  */
 
+// GET /api/communications/templates (admin-settings-management
+// Requirement 2, Global_Manager-only). Returns every row of the
+// `email_templates` table so the Template_Editor has a single source of
+// truth for the set of template keys. Reuses the same `email_templates`
+// table and the same `authenticateToken` + `authorize` gate the
+// `:key` route below uses; introduces no new table, column, or migration.
+// This literal `/templates` path is distinct from the parameterized
+// `/templates/:key` route below and does not collide with it.
+router.get('/templates', authenticateToken, authorize, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT template_key, subject_template, body_template, description, updated_at FROM email_templates ORDER BY template_key'
+    );
+
+    res.json({ templates: result.rows });
+  } catch (error) {
+    getLogger().error({ err: error }, 'Failed to fetch email templates');
+    res.status(500).json({ error: 'Failed to fetch email templates' });
+  }
+});
+
 // GET /api/communications/templates/:key (Requirement 30.4,
 // Global_Manager-only). Looks up an email_templates row by template_key
 // and returns its subject_template/body_template/description fields.

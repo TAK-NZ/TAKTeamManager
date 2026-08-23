@@ -252,6 +252,11 @@ const routes = {
   // Requirement 30.4: Global_Manager-only GET/PUT surface for editing
   // existing email_templates rows' subject_template/body_template
   // columns.
+  // admin-settings-management list endpoint: returns every email_templates
+  // row so the Template_Editor has a single source of truth for the set of
+  // template keys. Shares the `communication:template:read` identifier with
+  // the `:key` read route below (same underlying data, read-only).
+  'GET /api/communications/templates': ['communication:template:read'],
   'GET /api/communications/templates/:key': ['communication:template:read'],
   'PUT /api/communications/templates/:key': ['communication:template:manage'],
   // Requirement 30.5: Global_Manager-only "send test email" endpoint,

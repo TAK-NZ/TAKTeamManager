@@ -9,6 +9,8 @@ const authentikService = require('../services/authentik');
 const UserAttributesService = require('../services/userAttributes');
 const TeamMembershipService = require('../services/TeamMembershipService');
 const UserProvisioningService = require('../services/UserProvisioningService');
+const DirectoryScopeService = require('../services/DirectoryScopeService');
+const { buildEmailDomainLikePatterns, partitionCandidates } = require('../utils/directoryScope');
 const { CallsignSuffixConflictError } = require('../services/CallsignSuffixUniquenessService');
 const {
   TeamTransferService,
@@ -19,6 +21,7 @@ const {
 } = require('../services/TeamTransferService');
 const EventPublisher = require('../services/EventPublisher');
 const EmailService = require('../services/EmailService');
+const { isCloudTakEnabled } = require('../config/cloudtak');
 const pool = require('../config/database');
 const { getLogger } = require('../middleware/requestContext');
 const router = express.Router();
@@ -103,6 +106,13 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
     // SAME batched query below, used to exclude Team_Owned_Device rows
     // from the response after the map is built.
     const isTeamDeviceByAuthentikUserId = new Map();
+    // Requirement 11.2/11.3: authentik_user_id -> the local scoping facts,
+    // built from the SAME batched query below. Each entry carries the
+    // candidate's Direct_Membership Organisation id (the root of its
+    // Ancestor_Chain, projected from the existing `team_root` CTE) so the
+    // scoping predicate can run without an extra round trip, along with the
+    // candidate's `origin_org_id` provenance (Requirement 13.6).
+    const factsByAuthentikUserId = new Map();
 
     if (authentikUserIds.length > 0) {
       const teamNameResult = await pool.query(`
@@ -119,6 +129,8 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
         )
         SELECT u.authentik_user_id AS authentik_user_id,
                u.is_team_device AS is_team_device,
+               u.origin_org_id AS origin_org_id,
+               root.root_id AS direct_membership_org_id,
                CASE
                  WHEN t.parent_team_id IS NOT NULL THEN
                    COALESCE(root.root_callsign_prefix, root.root_name, '') || ' - ' || t.name
@@ -134,6 +146,14 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
       for (const row of teamNameResult.rows) {
         teamNameByAuthentikUserId.set(row.authentik_user_id, row.team_name);
         isTeamDeviceByAuthentikUserId.set(row.authentik_user_id, row.is_team_device === true);
+        // The `users` row exists locally, so its email/first_name are known,
+        // but scoping only needs the org facts here; the email a candidate is
+        // matched on comes from the Authentik payload in `toFacts` below,
+        // which is the only email a candidate WITHOUT a local row has.
+        factsByAuthentikUserId.set(row.authentik_user_id, {
+          originOrgId: row.origin_org_id ?? null,
+          directMembershipOrgId: row.direct_membership_org_id ?? null,
+        });
       }
     }
 
@@ -152,8 +172,55 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
         team_name: teamNameByAuthentikUserId.get(user.pk) ?? null
       }));
 
+    // Requirement 10: a Global_Manager's response is not scoped at all.
+    // `resolveScope` returns the frozen UNSCOPED sentinel for that caller, in
+    // which case the EXISTING behaviour is preserved verbatim -- no scoping
+    // predicate and no scope log line.
+    const scope = await DirectoryScopeService.resolveScope(req.user);
+
+    if (scope === DirectoryScopeService.UNSCOPED) {
+      res.json({
+        users: usersWithTeams,
+        pagination: { page, pageSize, total: totalUsers }
+      });
+      return;
+    }
+
+    // Scoped (non-Global_Manager) caller. No SQL narrowing is possible here --
+    // the page is Authentik's -- so the predicate runs in JS over the page.
+    // The Team_Owned_Device exclusion has ALREADY happened above (Requirement
+    // 11.5), so `partitionCandidates` runs over `usersWithTeams` and its
+    // `excludedCount` counts users excluded BY THE SCOPING, not by the device
+    // filter (Requirement 14.1).
+    //
+    // A candidate with NO local `users` row is absent from
+    // `factsByAuthentikUserId`; it takes its email from the Authentik payload
+    // and carries `null` for both org fields, so domain matching is the only
+    // condition that can admit it (Requirement 13.7).
+    const toFacts = (user) => {
+      const local = factsByAuthentikUserId.get(user.pk);
+      return {
+        email: user.email,
+        originOrgId: local ? local.originOrgId : null,
+        directMembershipOrgId: local ? local.directMembershipOrgId : null,
+      };
+    };
+    const { visible, excludedCount } = partitionCandidates(scope, usersWithTeams, toFacts);
+
+    DirectoryScopeService.logScopedResponse('GET /api/users', {
+      userId: req.user.userId,
+      scope,
+      excludedCount,
+      returnedCount: visible.length,
+    });
+
+    // The response keeps its existing shape (Requirement 10.3: the `scope`
+    // object is `/available` only). `pagination.total` continues to derive from
+    // Authentik's own `count` and is NOT adjusted downward -- the same
+    // documented compromise the `is_team_device` filter already carries
+    // (Requirement 11.4).
     res.json({
-      users: usersWithTeams,
+      users: visible,
       pagination: { page, pageSize, total: totalUsers }
     });
   } catch (error) {
@@ -304,15 +371,124 @@ router.get('/search', authenticateToken, authorize, async (req, res) => {
       return res.status(400).json({ error: 'Search query too short' });
     }
 
-    const result = await pool.query(`
-      SELECT id, username, email, first_name, last_name 
-      FROM users 
-      WHERE (username ILIKE $1 OR email ILIKE $1 OR first_name ILIKE $1 OR last_name ILIKE $1)
-      AND is_active = true
-      LIMIT 20
-    `, [`%${q}%`]);
+    // Requirement 10: a Global_Manager's response is not scoped at all.
+    // `resolveScope` returns the frozen UNSCOPED sentinel for that caller, in
+    // which case the EXISTING unscoped query and behaviour are preserved
+    // verbatim -- no scope predicate, no scope object (Requirement 10.3).
+    const scope = await DirectoryScopeService.resolveScope(req.user);
 
-    res.json({ users: result.rows });
+    if (scope === DirectoryScopeService.UNSCOPED) {
+      const result = await pool.query(`
+        SELECT id, username, email, first_name, last_name 
+        FROM users 
+        WHERE (username ILIKE $1 OR email ILIKE $1 OR first_name ILIKE $1 OR last_name ILIKE $1)
+        AND is_active = true
+        LIMIT 20
+      `, [`%${q}%`]);
+
+      res.json({ users: result.rows });
+      return;
+    }
+
+    // Scoped (non-Global_Manager) caller. Same pre-narrow-then-predicate
+    // structure as `/available`: a `candidates` CTE carries the existing ILIKE
+    // clauses and `is_active = true` PLUS the `in_scope` expression, and the
+    // scope predicate sits INSIDE `candidates`, before the `LIMIT 20`, so
+    // out-of-scope rows cannot consume the page (Requirement 8.8).
+    //
+    // Unlike `/available`, the Direct_Membership condition IS reachable here:
+    // `TEAM_ROOT_CTE` resolves each candidate's Organisation via its direct
+    // membership's Team, projected as `direct_membership_org_id` from
+    // `root.root_id`. The join carries `AND root.parent_team_id IS NULL` so the
+    // one selected `team_root` row is the root of the Ancestor_Chain, matching
+    // the idiom `GET /api/users`' existing batched query uses.
+    //
+    // Every scope sub-expression is individually wrapped in COALESCE(..., false)
+    // because `NULL = ANY(...)` and `x LIKE ANY(...)` over a null are NULL,
+    // which a WHERE treats as not-true but which would silently under-count the
+    // window-function excluded_count.
+    //
+    // Parameter numbering matches the design: $1 is the ILIKE search pattern,
+    // $2 is scope.organisationIds (referenced by BOTH the `origin_org_id`
+    // disjunct `u.origin_org_id = ANY($2::int[])` and the direct_membership
+    // disjunct `root.root_id = ANY($2::int[])`), $3 is
+    // buildEmailDomainLikePatterns(scope). All come from the resolved scope and
+    // nowhere else.
+    //
+    // The `u.origin_org_id` disjunct is added here (Requirement 13.6),
+    // additively to the Direct_Membership and Email_Domain conditions
+    // (Requirement 13.8); `origin_org_id` is projected for the predicate only
+    // and never returned in the response body.
+    const params = [`%${q}%`, scope.organisationIds, buildEmailDomainLikePatterns(scope)];
+
+    const query = `
+      WITH RECURSIVE team_root AS (
+        ${DirectoryScopeService.TEAM_ROOT_CTE}
+      ),
+      candidates AS (
+        SELECT u.id, u.username, u.email, u.first_name, u.last_name,
+               u.origin_org_id, root.root_id AS direct_membership_org_id,
+               (COALESCE(u.origin_org_id = ANY($2::int[]), false)
+                OR COALESCE(root.root_id = ANY($2::int[]), false)
+                OR COALESCE(lower(u.email) LIKE ANY($3::text[]), false)) AS in_scope
+        FROM users u
+        LEFT JOIN team_memberships tm ON u.id = tm.user_id AND tm.inherited_from_team_id IS NULL
+        LEFT JOIN teams t ON tm.team_id = t.id
+        LEFT JOIN team_root root ON root.team_id = t.id AND root.parent_team_id IS NULL
+        WHERE (u.username ILIKE $1 OR u.email ILIKE $1 OR u.first_name ILIKE $1 OR u.last_name ILIKE $1)
+          AND u.is_active = true
+      ),
+      counted AS (
+        SELECT c.*, COUNT(*) FILTER (WHERE NOT c.in_scope) OVER () AS excluded_count
+        FROM candidates c
+      )
+      SELECT id, username, email, first_name, last_name,
+             origin_org_id, direct_membership_org_id, excluded_count
+      FROM counted
+      WHERE in_scope
+      ORDER BY first_name, last_name
+      LIMIT 20
+    `;
+
+    const result = await pool.query(query, params);
+
+    // The window-function excluded_count is present on every returned row when
+    // any row is returned; there is no defined `/search` behaviour for an empty
+    // scoped result beyond returning `{ users: [] }`, so the excluded count is
+    // read from the first row when present and is 0 otherwise.
+    const excludedCount = result.rows.length > 0 ? result.rows[0].excluded_count : 0;
+
+    // Belt-and-braces predicate pass (Requirement 11.3). The SAME `scope`
+    // object is the sole input to both the SQL parameters and this predicate,
+    // so the response is always a subset of what the predicate permits.
+    // `directMembershipOrgId` maps to `root.root_id`; `originOrgId` maps to
+    // `u.origin_org_id` (Requirement 13.6); the email comes from the row.
+    const toFacts = (row) => ({
+      email: row.email,
+      originOrgId: row.origin_org_id ?? null,
+      directMembershipOrgId: row.direct_membership_org_id,
+    });
+    const { visible } = partitionCandidates(scope, result.rows, toFacts);
+
+    // Strip the internal `excluded_count`, `direct_membership_org_id`, and
+    // `origin_org_id` projections -- they are scoping/provenance details, not
+    // part of the `{ users }` response contract (Requirements 10.3, 13.6).
+    const users = visible.map((row) => ({
+      id: row.id,
+      username: row.username,
+      email: row.email,
+      first_name: row.first_name,
+      last_name: row.last_name,
+    }));
+
+    DirectoryScopeService.logScopedResponse('GET /api/users/search', {
+      userId: req.user.userId,
+      scope,
+      excludedCount,
+      returnedCount: users.length,
+    });
+
+    res.json({ users });
   } catch (error) {
     res.status(500).json({ error: 'Search failed' });
   }
@@ -322,26 +498,158 @@ router.get('/search', authenticateToken, authorize, async (req, res) => {
 router.get('/available', authenticateToken, authorize, async (req, res) => {
   try {
     const { search } = req.query;
-    let query = `
-      SELECT uc.authentik_id as id, uc.email, uc.first_name, uc.last_name
-      FROM user_cache uc
-      LEFT JOIN users u ON uc.authentik_id::text = u.authentik_user_id::text
-      LEFT JOIN team_memberships tm ON u.id = tm.user_id AND tm.inherited_from_team_id IS NULL
-      WHERE tm.user_id IS NULL AND uc.is_active = true 
-        AND uc.email IS NOT NULL AND uc.email != ''
-        AND uc.first_name IS NOT NULL AND uc.first_name != ''
-    `;
-    const params = [];
-    
-    if (search) {
-      query += ` AND (uc.first_name ILIKE $1 OR uc.last_name ILIKE $1 OR uc.email ILIKE $1)`;
-      params.push(`%${search}%`);
+
+    // Requirement 10: a Global_Manager's response is not scoped at all.
+    // `resolveScope` returns the frozen UNSCOPED sentinel for that caller, in
+    // which case the EXISTING unscoped query and behaviour are preserved
+    // verbatim -- no scope predicate, no scope object.
+    const scope = await DirectoryScopeService.resolveScope(req.user);
+
+    if (scope === DirectoryScopeService.UNSCOPED) {
+      let query = `
+        SELECT uc.authentik_id as id, uc.email, uc.first_name, uc.last_name
+        FROM user_cache uc
+        LEFT JOIN users u ON uc.authentik_id::text = u.authentik_user_id::text
+        LEFT JOIN team_memberships tm ON u.id = tm.user_id AND tm.inherited_from_team_id IS NULL
+        WHERE tm.user_id IS NULL AND uc.is_active = true 
+          AND uc.email IS NOT NULL AND uc.email != ''
+          AND uc.first_name IS NOT NULL AND uc.first_name != ''
+      `;
+      const params = [];
+
+      if (search) {
+        query += ` AND (uc.first_name ILIKE $1 OR uc.last_name ILIKE $1 OR uc.email ILIKE $1)`;
+        params.push(`%${search}%`);
+      }
+
+      query += ` ORDER BY uc.first_name, uc.last_name LIMIT 50`;
+
+      const result = await pool.query(query, params);
+      res.json({ users: result.rows });
+      return;
     }
-    
-    query += ` ORDER BY uc.first_name, uc.last_name LIMIT 50`;
-    
+
+    // Scoped (non-Global_Manager) caller. The scope predicate lives inside the
+    // `candidates` CTE, BEFORE the LIMIT: filtering after `LIMIT 50` would let
+    // 50 out-of-scope rows consume the whole page and return an empty list
+    // while dozens of in-scope users existed (Requirement 8.8). Every scope
+    // sub-expression is individually wrapped in COALESCE(..., false) because
+    // `NULL = ANY(...)` and `NOT NULL` are NULL, which a WHERE treats as
+    // not-true but which would silently under-count the window-function
+    // excluded_count.
+    //
+    // $1 is scope.organisationIds and $2 is buildEmailDomainLikePatterns(scope);
+    // both come from the resolved scope and nowhere else. The `search` clause,
+    // when present, is appended inside `candidates` IN ADDITION to the scope
+    // predicate (Requirement 8.9), never instead of it.
+    //
+    // `in_scope` is the `u.origin_org_id` disjunct (Requirement 13.6) OR'd
+    // with the email-domain LIKE term; `directMembershipOrgId` is always null
+    // on this route by construction (`tm.user_id IS NULL`).
+    const params = [scope.organisationIds, buildEmailDomainLikePatterns(scope)];
+    let searchClause = '';
+
+    if (search) {
+      params.push(`%${search}%`);
+      searchClause = ` AND (uc.first_name ILIKE $${params.length} OR uc.last_name ILIKE $${params.length} OR uc.email ILIKE $${params.length})`;
+    }
+
+    // The `candidates` CTE text is built once and reused verbatim by both the
+    // main query and the empty-result count query below, so the two can never
+    // drift apart: the count run on the empty path is over EXACTLY the same
+    // candidate set, with the same $1/$2 (and optional search) parameters.
+    //
+    // `$1` (`scope.organisationIds`) now carries the `origin_org_id` disjunct
+    // (Requirement 13.6): a `user_cache` row whose local `users` counterpart
+    // holds an `origin_org_id` naming an Organisation in the caller's scope is
+    // admitted additively to the Email_Domain match (Requirement 13.8). Because
+    // `$1` is now referenced by a real use site, the always-true type-inference
+    // guard that previously existed here (which only kept `$1` referenced to
+    // avoid SQLSTATE 42P18) is removed; the disjunct's `$1::int[]` cast makes
+    // the parameter's type unambiguous. `origin_org_id` is projected only for
+    // the predicate and is never returned in the response body.
+    const candidatesCte = `
+      WITH candidates AS (
+        SELECT uc.authentik_id AS id, uc.email, uc.first_name, uc.last_name,
+               u.origin_org_id,
+               (COALESCE(u.origin_org_id = ANY($1::int[]), false)
+                OR COALESCE(lower(uc.email) LIKE ANY($2::text[]), false)) AS in_scope
+        FROM user_cache uc
+        LEFT JOIN users u ON uc.authentik_id::text = u.authentik_user_id::text
+        LEFT JOIN team_memberships tm ON u.id = tm.user_id AND tm.inherited_from_team_id IS NULL
+        WHERE tm.user_id IS NULL AND uc.is_active = true
+          AND uc.email IS NOT NULL AND uc.email != ''
+          AND uc.first_name IS NOT NULL AND uc.first_name != ''${searchClause}
+      )`;
+
+    const query = `${candidatesCte}, counted AS (
+        SELECT c.*, COUNT(*) FILTER (WHERE NOT c.in_scope) OVER () AS excluded_count
+        FROM candidates c
+      )
+      SELECT id, email, first_name, last_name, origin_org_id, excluded_count
+      FROM counted
+      WHERE in_scope
+      ORDER BY first_name, last_name
+      LIMIT 50
+    `;
+
     const result = await pool.query(query, params);
-    res.json({ users: result.rows });
+
+    // When the scoped result is empty there is no row from which to read
+    // `excluded_count`, so the eventual log line (task 9.3) would have no
+    // genuine count. On EXACTLY that path -- and nowhere else -- run one
+    // additional `SELECT COUNT(*) FROM candidates` reusing the same CTE and the
+    // same parameters, to recover a real excluded/candidate count for the empty
+    // response (Requirements 14.1, 14.3). This count is held for task 9.3's
+    // `logScopedResponse` call to consume.
+    let excludedCount;
+    if (result.rows.length === 0) {
+      const countResult = await pool.query(
+        `${candidatesCte} SELECT COUNT(*)::int AS excluded_count FROM candidates`,
+        params
+      );
+      excludedCount = countResult.rows[0].excluded_count;
+    } else {
+      excludedCount = result.rows[0].excluded_count;
+    }
+
+    // Belt-and-braces predicate pass (Requirement 11.3). The SAME `scope`
+    // object is the sole input to both the SQL parameters ($1/$2 above) and
+    // this predicate, so the response is always a subset of what the predicate
+    // permits: the only reachable divergence is the SQL being NARROWER than the
+    // predicate, which hides a visible user rather than disclosing a hidden
+    // one. Running `isCandidateVisible` over every row about to be returned
+    // guarantees no out-of-scope row can ever leave this handler even if the
+    // SQL and the predicate later drift.
+    //
+    // `origin_org_id` is projected by the query (Requirement 13.6) and passed
+    // as `originOrgId` here; `directMembershipOrgId` is always null on this
+    // route by construction (`tm.user_id IS NULL`).
+    const toFacts = (row) => ({
+      email: row.email,
+      originOrgId: row.origin_org_id ?? null,
+      directMembershipOrgId: null,
+    });
+    const { visible } = partitionCandidates(scope, result.rows, toFacts);
+
+    // Strip the internal `excluded_count` projection from every returned row --
+    // it is a window-function detail, not part of the response contract, and
+    // `origin_org_id` is likewise never projected into the body.
+    const users = visible.map((row) => ({
+      id: row.id,
+      email: row.email,
+      first_name: row.first_name,
+      last_name: row.last_name,
+    }));
+
+    DirectoryScopeService.logScopedResponse('GET /api/users/available', {
+      userId: req.user.userId,
+      scope,
+      excludedCount,
+      returnedCount: users.length,
+    });
+
+    res.json({ users, scope: DirectoryScopeService.buildScopeResponse(scope) });
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to fetch available users');
     res.status(500).json({ error: 'Failed to fetch available users' });
@@ -536,6 +844,19 @@ router.post('/create-and-add', authenticateToken, authorize, [
         'UPDATE team_memberships SET role = $3 WHERE team_id = $1 AND user_id = $2 AND inherited_from_team_id IS NULL',
         [teamId, localUserId, 'admin']
       );
+
+      // Re-reconcile the CloudTAK Agency group's Direct_Admin_Set for this
+      // Team. Enqueued on the same transactional client so it commits/rolls
+      // back atomically with the promotion above (Requirement 9.2). Guarded
+      // by the enablement flag so nothing enqueues when CloudTAK is off.
+      if (isCloudTakEnabled()) {
+        await EventPublisher.publishOperation(
+          'update_cloudtak_group',
+          { team_id: teamId },
+          req.user?.userId ?? null,
+          client
+        );
+      }
     }
 
     await client.query('COMMIT');

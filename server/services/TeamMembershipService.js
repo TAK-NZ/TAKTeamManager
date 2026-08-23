@@ -2,6 +2,7 @@ const pool = require('../config/database');
 const EventPublisher = require('./EventPublisher');
 const GroupMembershipCalculator = require('./GroupMembershipCalculator');
 const { checkCallsignSuffixUniqueness } = require('./CallsignSuffixUniquenessService');
+const { isCloudTakEnabled } = require('../config/cloudtak');
 
 class TeamMembershipService {
   /**
@@ -191,6 +192,22 @@ class TeamMembershipService {
         WHERE tm.user_id = $1 AND c.authentik_group_id IS NOT NULL
       `, [userId]);
       
+      // Requirement 5.4 (task 8.3): removing this user's team_memberships
+      // rows changes the Direct_Admin_Set of every Team where the user
+      // held a DIRECT admin row (`role = 'admin' AND
+      // inherited_from_team_id IS NULL`). Capture those Team ids BEFORE
+      // the delete so the CloudTAK_Group for each can be re-reconciled
+      // afterward. Only run this capture query when CloudTAK is enabled,
+      // to avoid an extra query when the feature is off (Requirement 1.4).
+      let directAdminTeamIds = [];
+      if (isCloudTakEnabled()) {
+        const directAdminResult = await client.query(
+          `SELECT team_id FROM team_memberships WHERE user_id = $1 AND role = 'admin' AND inherited_from_team_id IS NULL`,
+          [userId]
+        );
+        directAdminTeamIds = directAdminResult.rows.map(row => row.team_id);
+      }
+
       // Remove from team and channel memberships
       await client.query('DELETE FROM team_memberships WHERE user_id = $1', [userId]);
       await client.query('DELETE FROM channel_memberships WHERE user_id = $1', [userId]);
@@ -257,6 +274,20 @@ class TeamMembershipService {
             target_user_id: userId,
             tak_usernames: [takUsername]
           }, createdBy, client);
+        }
+      }
+
+      // Requirement 5.4 / 9.1 / 9.2 (task 8.3): re-reconcile the
+      // CloudTAK_Group for each Team where this user held a Direct_Admin
+      // row, since removing them changed those Teams' Direct_Admin_Sets.
+      // Enqueued on this SAME transactional `client` so each enqueue
+      // commits or rolls back atomically with the membership delete above
+      // (Requirement 9.2). Guarded by `isCloudTakEnabled()` so nothing is
+      // enqueued when the feature is off (Requirement 1.4);
+      // `directAdminTeamIds` is only ever populated when the flag is on.
+      if (isCloudTakEnabled()) {
+        for (const teamId of directAdminTeamIds) {
+          await EventPublisher.publishOperation('update_cloudtak_group', { team_id: teamId }, createdBy, client);
         }
       }
       

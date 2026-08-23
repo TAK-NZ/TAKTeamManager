@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { isValidBaseUrl, shouldRedirectToLogin } from './api.js';
 
 // Validates: Requirements 2.7, 2.8
@@ -87,5 +87,81 @@ describe('shouldRedirectToLogin', () => {
     expect(shouldRedirectToLogin(500, '/dashboard')).toBe(false);
     expect(shouldRedirectToLogin(403, '/dashboard')).toBe(false);
     expect(shouldRedirectToLogin(undefined, '/dashboard')).toBe(false);
+  });
+});
+
+// --- Admin settings management wrappers (admin-settings-management spec) ---
+//
+// Validates: Requirements 2.4, 3.1, 4.2, 6.2, 7.2, 8.5
+//
+// These assert the thin `communicationsAPI`/`settingsAPI` wrappers each call
+// the right method on the shared `api` axios instance with the right URL and
+// arguments. The instance is created via `axios.create()` at module load, so
+// we mock `axios` and expose the created instance's spied methods, matching
+// the network-boundary-only mocking used elsewhere in the suite. The wrappers
+// are imported dynamically (after the mock is registered) so the mocked
+// instance is the one they close over.
+describe('communicationsAPI / settingsAPI wrappers', () => {
+  let instance;
+  let communicationsAPI;
+  let settingsAPI;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    instance = {
+      get: vi.fn(() => Promise.resolve({ data: {} })),
+      post: vi.fn(() => Promise.resolve({ data: {} })),
+      put: vi.fn(() => Promise.resolve({ data: {} })),
+      delete: vi.fn(() => Promise.resolve({ data: {} })),
+      patch: vi.fn(() => Promise.resolve({ data: {} })),
+      interceptors: { response: { use: vi.fn() } },
+    };
+    vi.doMock('axios', () => ({
+      default: { create: vi.fn(() => instance) },
+    }));
+    const mod = await import('./api.js');
+    communicationsAPI = mod.communicationsAPI;
+    settingsAPI = mod.settingsAPI;
+  });
+
+  afterEach(() => {
+    vi.doUnmock('axios');
+    vi.resetModules();
+  });
+
+  it('communicationsAPI.listTemplates() GETs /communications/templates', () => {
+    communicationsAPI.listTemplates();
+    expect(instance.get).toHaveBeenCalledWith('/communications/templates');
+  });
+
+  it('communicationsAPI.getTemplate(key) GETs /communications/templates/:key', () => {
+    communicationsAPI.getTemplate('some_key');
+    expect(instance.get).toHaveBeenCalledWith('/communications/templates/some_key');
+  });
+
+  it('communicationsAPI.updateTemplate(key, body) PUTs /communications/templates/:key with the body', () => {
+    const body = { subjectTemplate: 'S', bodyTemplate: 'B' };
+    communicationsAPI.updateTemplate('some_key', body);
+    expect(instance.put).toHaveBeenCalledWith('/communications/templates/some_key', body);
+  });
+
+  it('communicationsAPI.sendTestEmail(body) POSTs /communications/test-email with the body', () => {
+    const body = { targetEmail: 'a@b.co', templateKey: 'k' };
+    communicationsAPI.sendTestEmail(body);
+    expect(instance.post).toHaveBeenCalledWith('/communications/test-email', body);
+  });
+
+  it('settingsAPI.exportSettings() GETs /settings/export with responseType: blob', () => {
+    settingsAPI.exportSettings();
+    expect(instance.get).toHaveBeenCalledWith(
+      '/settings/export',
+      expect.objectContaining({ responseType: 'blob' })
+    );
+  });
+
+  it('settingsAPI.importSettings(payload) POSTs /settings/import with the payload', () => {
+    const payload = { systemConfig: [], siteConfig: [] };
+    settingsAPI.importSettings(payload);
+    expect(instance.post).toHaveBeenCalledWith('/settings/import', payload);
   });
 });

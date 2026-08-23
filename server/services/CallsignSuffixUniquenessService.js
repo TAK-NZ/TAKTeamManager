@@ -18,7 +18,7 @@ class CallsignSuffixConflictError extends Error {
    *   value that was found to collide with an existing Member_List entry.
    */
   constructor(conflictingValue) {
-    super(`callsign_suffix "${conflictingValue}" is already in use within this Team`);
+    super(`Callsign Suffix "${conflictingValue}" is already in use within this Team`);
     this.name = 'CallsignSuffixConflictError';
     this.conflictingValue = conflictingValue;
   }

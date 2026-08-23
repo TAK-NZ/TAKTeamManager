@@ -339,4 +339,22 @@ export const adminAPI = {
   updateOrgInterest: (id, status) => api.patch(`/admin/org-interest/${id}`, { status }),
 };
 
+// --- Admin settings management (admin-settings-management spec) ---
+
+export const communicationsAPI = {
+  listTemplates: () => api.get('/communications/templates'),
+  getTemplate: (key) => api.get(`/communications/templates/${key}`),
+  // body: { subjectTemplate?, bodyTemplate? } -- caller includes only changed fields
+  updateTemplate: (key, body) => api.put(`/communications/templates/${key}`, body),
+  // body: { targetEmail, templateKey?, variables? }
+  sendTestEmail: (body) => api.post('/communications/test-email', body),
+};
+
+export const settingsAPI = {
+  // Blob response so the Admin page can hand the archive to the browser as a download.
+  exportSettings: () => api.get('/settings/export', { responseType: 'blob' }),
+  // payload: { systemConfig, siteConfig, emailTemplates? }
+  importSettings: (payload) => api.post('/settings/import', payload),
+};
+
 export default api;

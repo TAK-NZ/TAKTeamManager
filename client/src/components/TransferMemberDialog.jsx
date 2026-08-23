@@ -114,7 +114,7 @@ export function formatTeamPath(team, allTeams) {
 /**
  * Requirement 9.6: recognises the 400 raised by
  * `CallsignSuffixConflictError`, whose message is
- * `callsign_suffix "<value>" is already in use within this Team`. Matched
+ * `Callsign Suffix "<value>" is already in use within this Team`. Matched
  * on the message rather than a dedicated response field because the route
  * passes the typed error's own message through as `error` and adds nothing
  * machine-readable beside it.

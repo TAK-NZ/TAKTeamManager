@@ -16,6 +16,8 @@
     "migrate:up": "npm run migrate -- up",
     "migrate:down": "npm run migrate -- down",
     "migrate:create": "npm run migrate -- create",
+    "cloudtak:backfill": "node scripts/create-cloudtak-groups.js",
+    "sync:users": "node -e \"require('./server/services/authentikSync').syncUsers().then(() => process.exit(0)).catch((e) => { console.error(e); process.exit(1); })\"",
     "test": "jest --forceExit",
     "lint": "eslint server scripts database/*.js eslint.config.js",
     "lint:pinned-deps": "node scripts/check-pinned-deps.js"

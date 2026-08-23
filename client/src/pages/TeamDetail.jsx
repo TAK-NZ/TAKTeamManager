@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import React from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { PlusIcon, UsersIcon, UserPlusIcon, ShieldCheckIcon, BuildingOfficeIcon, FolderPlusIcon, HashtagIcon, XMarkIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, TrashIcon, PencilIcon, CheckIcon, ArrowLeftOnRectangleIcon, EnvelopeIcon, ArrowRightCircleIcon } from '@heroicons/react/24/outline'
+import { PlusIcon, UsersIcon, UserPlusIcon, ShieldCheckIcon, BuildingOfficeIcon, FolderPlusIcon, HashtagIcon, XMarkIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, TrashIcon, PencilIcon, CheckIcon, ArrowLeftOnRectangleIcon, EnvelopeIcon, ArrowRightCircleIcon, ArrowPathIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import { teamsAPI, channelsAPI, usersAPI, configAPI } from '../services/api'
 import api from '../services/api'
@@ -11,6 +11,14 @@ import TeamFormDialog from '../components/TeamFormDialog'
 import SignupCodeManager from '../components/SignupCodeManager'
 import OrgDomainManager from '../components/OrgDomainManager'
 import TransferMemberDialog from '../components/TransferMemberDialog'
+import {
+  newUserFormReducer,
+  initialNewUserFormState,
+  isRecomputeDisabled,
+  selectSuffixBusy,
+  buildCreateAndAddSuffixArgument
+} from '../utils/callsignSuffixPreview'
+import { describeEmptyAvailableUsers } from '../utils/directoryScopeMessage'
 
 // Requirement 5's two new `callsign_name_format` values need example
 // strings alongside the three existing ones, matching the "J Doe"/"John D"
@@ -108,46 +116,15 @@ export function isValidMemberCallsignSuffix(value) {
   return CALLSIGN_SUFFIX_REGEX.test(value)
 }
 
-// Pure decision helper for the Add Member Dialog's "Create New User" tab:
-// given a `POST /api/users/callsign-suffix-preview` response body
-// ({ suffix, required, conflict }) plus the current state of the Callsign
-// Suffix input, returns the state that input should move to, or `null` when
-// nothing should change. The preview is advisory only -- a failed call (no
-// body) leaves the field exactly as-is and never blocks submission, since
-// the server re-validates authoritatively on submit.
-//
-//   - conflict === null && required === false -> pre-fill with the resolved
-//     `suffix`, unless the admin has already typed a value themselves
-//     (`manuallyEdited`), which is never clobbered.
-//   - required === true -> the Organisation's format is `user_defined` and no
-//     suffix was supplied; leave the value alone and mark the field required.
-//   - conflict !== null -> surface `conflict.message` inline AND pre-fill the
-//     colliding `conflict.value`, so the admin edits the actual value that
-//     clashed rather than reading a warning over an empty field. When the
-//     admin typed that value themselves this is a no-op; the fall back to
-//     `currentValue` covers a response that omits `conflict.value`.
-export function decideCallsignSuffixPreview(preview, { currentValue = '', manuallyEdited = false } = {}) {
-  if (!preview || typeof preview !== 'object') {
-    return null
-  }
-
-  const required = preview.required === true
-  const conflict = preview.conflict || null
-  const error = conflict ? (conflict.message || 'That callsign suffix is already in use in this team') : null
-  const canPrefill = !required && !conflict && !manuallyEdited
-
-  let callsignSuffix = currentValue
-  if (canPrefill) {
-    callsignSuffix = preview.suffix || ''
-  } else if (conflict && typeof conflict.value === 'string' && conflict.value) {
-    callsignSuffix = conflict.value
-  }
-
-  return {
-    callsignSuffix,
-    required,
-    error
-  }
+// Pure email-format validator for the Create New User form's Email
+// Address input. Mirrors the callsign validators' convention. An empty
+// value is treated as invalid here because the field is required.
+export function isValidNewUserEmail(value) {
+  if (typeof value !== 'string') return false
+  const trimmed = value.trim()
+  if (!trimmed) return false
+  // Pragmatic single-@ check with non-empty local part and a dotted domain.
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)
 }
 
 // Pure helper extracting an inline Callsign Suffix error message from a
@@ -315,7 +292,7 @@ export default function TeamDetail({ user, refreshUser }) {
   })
   const [creatingChannel, setCreatingChannel] = useState(false)
   const [showAddMemberDialog, setShowAddMemberDialog] = useState(false)
-  const [addMemberTab, setAddMemberTab] = useState('existing')
+  const [addMemberTab, setAddMemberTab] = useState('new')
   // Bugfix: the "Add Admin" button reuses this same Add Member Dialog
   // rather than a separate dialog -- this tracks which role the dialog's
   // "existing user"/"create new user" flows should add the selected/new
@@ -323,26 +300,34 @@ export default function TeamDetail({ user, refreshUser }) {
   // the "Add Member" button, both just before opening the dialog.
   const [addMemberRole, setAddMemberRole] = useState('member')
   const [availableUsers, setAvailableUsers] = useState([])
+  // Requirements 9.5-9.8: the Directory_Scope the server attached to the
+  // /available response (null for a Global_Manager, and null on the "Add Admin"
+  // path which populates availableUsers from current members). Drives which
+  // explanation the empty available-users list carries.
+  const [availableUsersScope, setAvailableUsersScope] = useState(null)
   const [userSearch, setUserSearch] = useState('')
   const [selectedUserId, setSelectedUserId] = useState('')
-  const [newUserForm, setNewUserForm] = useState({
-    email: '',
-    firstName: '',
-    lastName: '',
-    callsignSuffix: ''
-  })
-  // Add Member Dialog / "Create New User" tab: advisory Callsign_Suffix
-  // preview state. `newUserCallsignRequired` mirrors the preview's `required`
-  // flag (the Organisation's `callsign_name_format` is `user_defined`, so the
-  // admin must choose a suffix themselves); `newUserCallsignError` holds the
-  // inline message for a previewed collision, a client-side character-class
-  // rejection, or the server's own 400 on submit; `newUserCallsignEdited`
-  // records that the admin has typed in the field, so a later preview never
-  // clobbers their value.
-  const [newUserCallsignRequired, setNewUserCallsignRequired] = useState(false)
-  const [newUserCallsignError, setNewUserCallsignError] = useState(null)
-  const [newUserCallsignEdited, setNewUserCallsignEdited] = useState(false)
+  // Add Member Dialog / "Create New User" tab: the entire form (email, names,
+  // suffix) plus its advisory Callsign_Suffix preview state, collapsed into one
+  // `useReducer` so there is a single answer to "what is in the Suffix_Field and
+  // may I overwrite it". The old two-valued `newUserCallsignEdited` flag becomes
+  // the reducer's three-state `origin` (NONE/AUTO/TYPED), which is the whole fix
+  // for Defect 1: an Auto_Filled value is never echoed back as `callsignSuffix`,
+  // so the server recomputes rather than preferring the stale value the Client
+  // itself wrote (member-visibility-and-callsign-recompute, tasks 3.1-3.4).
+  const [newUserFormState, dispatchNewUserForm] = React.useReducer(
+    newUserFormReducer,
+    undefined,
+    initialNewUserFormState
+  )
+  // `addingMember` stays its own `useState`: it is shared with the
+  // "Add Existing User" tab's submit path (`handleAddExistingUser`).
   const [addingMember, setAddingMember] = useState(false)
+  // Inline validation alert for the Create New User form's Email Address
+  // input, kept separate from the reducer's `error` field (which is
+  // dedicated to the Callsign Suffix). Cleared on edit and on
+  // reset/close so a stale alert never persists across opens.
+  const [newUserEmailError, setNewUserEmailError] = useState(null)
   const [removeUserId, setRemoveUserId] = useState(null)
   const [removeUserRole, setRemoveUserRole] = useState('')
   const [removeConfirmInput, setRemoveConfirmInput] = useState('')
@@ -467,6 +452,7 @@ export default function TeamDetail({ user, refreshUser }) {
     try {
       const response = await usersAPI.getAvailable(search)
       setAvailableUsers(response.data.users)
+      setAvailableUsersScope(response.data.scope ?? null)
     } catch (error) {
       console.error('Failed to fetch available users:', error)
     }
@@ -495,7 +481,7 @@ export default function TeamDetail({ user, refreshUser }) {
       // Refresh team data
       const teamResponse = await teamsAPI.getById(team.id)
       const allMembers = teamResponse.data.members || []
-      setMembers(allMembers.filter(m => m.role === 'member' || m.role === 'inherited'))
+      setMembers(allMembers.filter(m => m.role === 'member' || m.role === 'inherited' || m.role === 'admin'))
       setAdmins(allMembers.filter(m => m.role === 'admin'))
       
       // Notify Dashboard to refresh
@@ -513,78 +499,64 @@ export default function TeamDetail({ user, refreshUser }) {
     }
   }
 
-  // Resets the "Create New User" tab, including the Callsign Suffix field and
-  // its advisory preview state, so a reopened dialog never shows a stale
-  // pre-filled suffix or a collision error against a value that is gone.
-  const resetNewUserForm = () => {
-    setNewUserForm({ email: '', firstName: '', lastName: '', callsignSuffix: '' })
-    setNewUserCallsignRequired(false)
-    setNewUserCallsignError(null)
-    setNewUserCallsignEdited(false)
-  }
-
-  // Advisory pre-submit check of the Callsign_Suffix the new member would be
-  // given, run on blur of First Name / Last Name / Callsign Suffix (never per
-  // keystroke) and only once both names are present, since the server cannot
-  // compute a default without them. Failures are logged and ignored: the
-  // preview is advisory and the server re-validates on submit.
-  const runCallsignSuffixPreview = async (form) => {
-    if (!team) return
-
-    const firstName = (form.firstName || '').trim()
-    const lastName = (form.lastName || '').trim()
-    if (!firstName || !lastName) return
-
-    const callsignSuffix = form.callsignSuffix || ''
-    try {
-      const response = await usersAPI.previewCallsignSuffix({
-        teamId: team.id,
-        firstName,
-        lastName,
-        ...(callsignSuffix ? { callsignSuffix } : {})
+  // The single request-issuing effect (task 3.2). Keyed on the reducer's
+  // `pendingRequest` identity: the reducer sets a fresh object whenever a
+  // Suffix_Preview should fly, so this re-runs, issues the request, and
+  // dispatches `previewSettled` on resolve / `previewFailed` on reject. No
+  // cleanup, no `cancelled` flag, no AbortController -- every settled request
+  // must dispatch so `inFlight` decrements, and the reducer decides whether to
+  // apply the response (Requirement 7.1, 7.3, 7.5).
+  React.useEffect(() => {
+    const pending = newUserFormState.pendingRequest
+    if (!pending) return
+    usersAPI.previewCallsignSuffix(pending.body)
+      .then((response) => dispatchNewUserForm({ type: 'previewSettled', seq: pending.seq, response: response?.data }))
+      .catch((error) => {
+        // Requirement 7.3: recorded through the console, never surfaced.
+        console.error('Failed to preview callsign suffix:', error)
+        dispatchNewUserForm({ type: 'previewFailed', seq: pending.seq })
       })
-      const decision = decideCallsignSuffixPreview(response?.data, {
-        currentValue: callsignSuffix,
-        manuallyEdited: newUserCallsignEdited
-      })
-      if (!decision) return
-
-      setNewUserForm((prev) => ({ ...prev, callsignSuffix: decision.callsignSuffix }))
-      setNewUserCallsignRequired(decision.required)
-      setNewUserCallsignError(decision.error)
-    } catch (error) {
-      console.error('Failed to preview callsign suffix:', error)
-    }
-  }
+  }, [newUserFormState.pendingRequest])
 
   const handleCreateNewUser = async (e) => {
     e.preventDefault()
 
+    // Inline email-format validation, surfaced against the Email Address
+    // field rather than relying on native validation alone.
+    if (!isValidNewUserEmail(newUserFormState.email)) {
+      setNewUserEmailError('Please enter a valid email address.')
+      return
+    }
+    setNewUserEmailError(null)
+
     // Same point-of-entry character-class check the Member_List edit row
     // applies, surfaced inline against the field rather than as a toast.
-    if (!isValidMemberCallsignSuffix(newUserForm.callsignSuffix)) {
-      setNewUserCallsignError('Callsign suffix may only contain letters, digits, "-", and "."')
+    if (!isValidMemberCallsignSuffix(newUserFormState.suffix)) {
+      dispatchNewUserForm({ type: 'submitRejected', message: 'Callsign suffix may only contain letters, digits, "-", and "."' })
       return
     }
 
     setAddingMember(true)
-    setNewUserCallsignError(null)
     try {
       // Creates the user as a member (with upward membership propagation).
       // When addMemberRole === 'admin', also grants admin role on this team.
+      // The suffix argument comes from the shared body builder so a preview and
+      // a submit for one form cannot disagree; `undefined` is dropped by
+      // JSON.stringify, so an Auto_Filled or empty value is never echoed
+      // (Requirement 5.3, 7.7).
       const response = await usersAPI.createAndAdd(
-        newUserForm.email,
-        newUserForm.firstName,
-        newUserForm.lastName,
+        newUserFormState.email,
+        newUserFormState.firstName,
+        newUserFormState.lastName,
         team.id,
         addMemberRole === 'admin' ? 'admin' : undefined,
-        newUserForm.callsignSuffix || undefined
+        buildCreateAndAddSuffixArgument(newUserFormState)
       )
       
       // Refresh team data
       const teamResponse = await teamsAPI.getById(team.id)
       const allMembers = teamResponse.data.members || []
-      setMembers(allMembers.filter(m => m.role === 'member' || m.role === 'inherited'))
+      setMembers(allMembers.filter(m => m.role === 'member' || m.role === 'inherited' || m.role === 'admin'))
       setAdmins(allMembers.filter(m => m.role === 'admin'))
       
       // Notify Dashboard to refresh
@@ -600,7 +572,8 @@ export default function TeamDetail({ user, refreshUser }) {
       )
 
       setShowAddMemberDialog(false)
-      resetNewUserForm()
+      dispatchNewUserForm({ type: 'reset' })
+      setNewUserEmailError(null)
       setAddMemberRole('member')
     } catch (error) {
       console.error('Failed to create user:', error)
@@ -610,7 +583,7 @@ export default function TeamDetail({ user, refreshUser }) {
       // dialog left open to correct, rather than in a generic toast.
       const inlineError = extractCallsignSuffixServerError(error)
       if (inlineError) {
-        setNewUserCallsignError(inlineError)
+        dispatchNewUserForm({ type: 'submitRejected', message: inlineError })
       } else {
         toast.error('Failed to create user: ' + (error.response?.data?.error || error.message))
       }
@@ -642,6 +615,10 @@ export default function TeamDetail({ user, refreshUser }) {
           last_name: m.last_name
         }))
         setAvailableUsers(candidates)
+        // The "Add Admin" path draws from current members, not the scoped
+        // /available route, so it has no Directory_Scope: leave it null so the
+        // empty-list explanation falls to the unscoped statement (Req 9.8).
+        setAvailableUsersScope(null)
       } else {
         fetchAvailableUsers(userSearch)
       }
@@ -735,7 +712,7 @@ export default function TeamDetail({ user, refreshUser }) {
       // Refresh team data
       const teamResponse = await teamsAPI.getById(team.id)
       const allMembers = teamResponse.data.members || []
-      setMembers(allMembers.filter(m => m.role === 'member' || m.role === 'inherited'))
+      setMembers(allMembers.filter(m => m.role === 'member' || m.role === 'inherited' || m.role === 'admin'))
       setAdmins(allMembers.filter(m => m.role === 'admin'))
       
       // Refresh channels to update member counts
@@ -766,7 +743,7 @@ export default function TeamDetail({ user, refreshUser }) {
     try {
       const teamResponse = await teamsAPI.getById(team.id)
       const allMembers = teamResponse.data.members || []
-      setMembers(allMembers.filter(m => m.role === 'member' || m.role === 'inherited'))
+      setMembers(allMembers.filter(m => m.role === 'member' || m.role === 'inherited' || m.role === 'admin'))
       setAdmins(allMembers.filter(m => m.role === 'admin'))
 
       const channelsResponse = await channelsAPI.getByTeam(team.id)
@@ -818,7 +795,7 @@ export default function TeamDetail({ user, refreshUser }) {
         const allMembers = teamResponse.data.members || []
         
         setTeam(teamData)
-        setMembers(allMembers.filter(m => m.role === 'member' || m.role === 'inherited'))
+        setMembers(allMembers.filter(m => m.role === 'member' || m.role === 'inherited' || m.role === 'admin'))
         setAdmins(allMembers.filter(m => m.role === 'admin'))
         // Channels will be fetched separately with member counts
         
@@ -1132,14 +1109,14 @@ export default function TeamDetail({ user, refreshUser }) {
                 Edit {teamLabel}
               </button>
               <button 
-                onClick={() => { setAddMemberRole('member'); setShowAddMemberDialog(true) }}
+                onClick={() => { dispatchNewUserForm({ type: 'reset' }); setNewUserEmailError(null); setAddMemberRole('member'); setAddMemberTab('new'); setShowAddMemberDialog(true) }}
                 className="btn-secondary flex items-center"
               >
                 <UserPlusIcon className="h-4 w-4 mr-2" />
                 Add Member
               </button>
               <button
-                onClick={() => { setAddMemberRole('admin'); setShowAddMemberDialog(true) }}
+                onClick={() => { dispatchNewUserForm({ type: 'reset' }); setNewUserEmailError(null); setAddMemberRole('admin'); setAddMemberTab('existing'); setShowAddMemberDialog(true) }}
                 className="btn-secondary flex items-center"
               >
                 <ShieldCheckIcon className="h-4 w-4 mr-2" />
@@ -1892,10 +1869,11 @@ export default function TeamDetail({ user, refreshUser }) {
               <button
                 onClick={() => {
                   setShowAddMemberDialog(false)
-                  setAddMemberTab('existing')
+                  setAddMemberTab('new')
                   setSelectedUserId('')
                   setUserSearch('')
-                  resetNewUserForm()
+                  dispatchNewUserForm({ type: 'reset' })
+                  setNewUserEmailError(null)
                   setAddMemberRole('member')
                 }}
                 className="text-gray-400 hover:text-gray-500 dark:hover:text-gray-300"
@@ -1908,16 +1886,6 @@ export default function TeamDetail({ user, refreshUser }) {
             <div className="border-b border-gray-200 dark:border-gray-700">
               <nav className="-mb-px flex">
                 <button
-                  onClick={() => setAddMemberTab('existing')}
-                  className={`py-4 px-6 border-b-2 font-medium text-sm ${
-                    addMemberTab === 'existing'
-                      ? 'border-primary-500 text-primary-600 dark:text-primary-400'
-                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'
-                  }`}
-                >
-                  Add Existing User
-                </button>
-                <button
                   onClick={() => setAddMemberTab('new')}
                   className={`py-4 px-6 border-b-2 font-medium text-sm ${
                     addMemberTab === 'new'
@@ -1926,6 +1894,16 @@ export default function TeamDetail({ user, refreshUser }) {
                   }`}
                 >
                   Create New User
+                </button>
+                <button
+                  onClick={() => setAddMemberTab('existing')}
+                  className={`py-4 px-6 border-b-2 font-medium text-sm ${
+                    addMemberTab === 'existing'
+                      ? 'border-primary-500 text-primary-600 dark:text-primary-400'
+                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'
+                  }`}
+                >
+                  Add Existing User
                 </button>
               </nav>
             </div>
@@ -1953,7 +1931,7 @@ export default function TeamDetail({ user, refreshUser }) {
                     <div className="max-h-64 overflow-y-auto border border-gray-200 dark:border-gray-600 rounded-lg">
                       {availableUsers.length === 0 ? (
                         <div className="p-4 text-center text-gray-500 dark:text-gray-400">
-                          {userSearch ? 'No users found matching your search.' : 'No available users (all users are already in teams).'}
+                          {describeEmptyAvailableUsers({ scope: availableUsersScope, search: userSearch }).message}
                         </div>
                       ) : (
                         <div className="space-y-1 p-2">
@@ -2010,11 +1988,19 @@ export default function TeamDetail({ user, refreshUser }) {
                     <input
                       type="email"
                       required
-                      value={newUserForm.email}
-                      onChange={(e) => setNewUserForm({...newUserForm, email: e.target.value})}
+                      value={newUserFormState.email}
+                      onChange={(e) => {
+                        dispatchNewUserForm({ type: 'fieldChanged', field: 'email', value: e.target.value })
+                        setNewUserEmailError(null)
+                      }}
+                      onBlur={() => { if (newUserFormState.email && !isValidNewUserEmail(newUserFormState.email)) setNewUserEmailError('Please enter a valid email address.') }}
+                      aria-invalid={newUserEmailError ? 'true' : undefined}
                       className="input w-full"
                       placeholder="user@organisation.nz"
                     />
+                    {newUserEmailError && (
+                      <p role="alert" className="text-red-600 text-sm mt-1">{newUserEmailError}</p>
+                    )}
                   </div>
                   
                   <div className="grid grid-cols-2 gap-4">
@@ -2026,9 +2012,9 @@ export default function TeamDetail({ user, refreshUser }) {
                         id="new-user-first-name"
                         type="text"
                         required
-                        value={newUserForm.firstName}
-                        onChange={(e) => setNewUserForm({...newUserForm, firstName: e.target.value})}
-                        onBlur={() => runCallsignSuffixPreview(newUserForm)}
+                        value={newUserFormState.firstName}
+                        onChange={(e) => dispatchNewUserForm({ type: 'fieldChanged', field: 'firstName', value: e.target.value })}
+                        onBlur={() => dispatchNewUserForm({ type: 'previewRequested', trigger: 'names', teamId: team?.id })}
                         className="input w-full"
                         placeholder="Joe"
                       />
@@ -2042,9 +2028,9 @@ export default function TeamDetail({ user, refreshUser }) {
                         id="new-user-last-name"
                         type="text"
                         required
-                        value={newUserForm.lastName}
-                        onChange={(e) => setNewUserForm({...newUserForm, lastName: e.target.value})}
-                        onBlur={() => runCallsignSuffixPreview(newUserForm)}
+                        value={newUserFormState.lastName}
+                        onChange={(e) => dispatchNewUserForm({ type: 'fieldChanged', field: 'lastName', value: e.target.value })}
+                        onBlur={() => dispatchNewUserForm({ type: 'previewRequested', trigger: 'names', teamId: team?.id })}
                         className="input w-full"
                         placeholder="Bloggs"
                       />
@@ -2059,34 +2045,53 @@ export default function TeamDetail({ user, refreshUser }) {
                       before submit. */}
                   <div>
                     <label htmlFor="new-user-callsign-suffix" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                      Callsign Suffix {newUserCallsignRequired ? '*' : ''}
+                      Callsign Suffix {newUserFormState.required ? '*' : ''}
                     </label>
-                    <input
-                      id="new-user-callsign-suffix"
-                      type="text"
-                      value={newUserForm.callsignSuffix}
-                      onChange={(e) => {
-                        setNewUserCallsignEdited(true)
-                        setNewUserCallsignError(null)
-                        setNewUserForm({...newUserForm, callsignSuffix: e.target.value})
-                      }}
-                      onBlur={() => runCallsignSuffixPreview(newUserForm)}
-                      className="input w-full"
-                      pattern={CALLSIGN_SUFFIX_PATTERN}
-                      title="Only letters, digits, - and . are allowed"
-                      placeholder="Filled in automatically"
-                      required={newUserCallsignRequired}
-                      aria-invalid={newUserCallsignError ? 'true' : undefined}
-                      aria-describedby={newUserCallsignError ? 'new-user-callsign-suffix-error' : (newUserCallsignRequired ? 'new-user-callsign-suffix-help' : undefined)}
-                    />
-                    {newUserCallsignRequired && !newUserCallsignError && (
+                    <div className="flex items-center gap-2">
+                      <input
+                        id="new-user-callsign-suffix"
+                        type="text"
+                        value={newUserFormState.suffix}
+                        onChange={(e) => dispatchNewUserForm({ type: 'suffixEdited', value: e.target.value })}
+                        onBlur={() => dispatchNewUserForm({ type: 'previewRequested', trigger: 'suffix', teamId: team?.id })}
+                        className="input w-full"
+                        pattern={CALLSIGN_SUFFIX_PATTERN}
+                        title="Only letters, digits, - and . are allowed"
+                        placeholder="Filled in automatically"
+                        required={newUserFormState.required}
+                        aria-invalid={newUserFormState.error ? 'true' : undefined}
+                        aria-describedby={newUserFormState.error ? 'new-user-callsign-suffix-error' : (newUserFormState.required ? 'new-user-callsign-suffix-help' : undefined)}
+                      />
+                      {/* Recompute_Control: forces a Suffix_Preview that omits
+                          `callsignSuffix`, discarding any Admin_Typed_Suffix and
+                          resuming automatic tracking (Requirement 2). MUST be
+                          `type="button"` -- inside this <form onSubmit=...>, a
+                          typeless button defaults to submit and would create the
+                          user instead of recomputing. */}
+                      <button
+                        type="button"
+                        onClick={() => dispatchNewUserForm({ type: 'previewRequested', trigger: 'recompute', teamId: team?.id })}
+                        disabled={isRecomputeDisabled(newUserFormState)}
+                        aria-label="Recompute callsign suffix from the entered names"
+                        title="Recompute callsign suffix from the entered names"
+                        className="btn-secondary px-3 disabled:opacity-50"
+                      >
+                        <ArrowPathIcon className="h-4 w-4" aria-hidden="true" />
+                      </button>
+                    </div>
+                    {selectSuffixBusy(newUserFormState) && (
+                      <span role="status" aria-live="polite" className="text-xs text-gray-500 dark:text-gray-400 mt-1 inline-block">
+                        Checking callsign suffix…
+                      </span>
+                    )}
+                    {newUserFormState.required && !newUserFormState.error && (
                       <p id="new-user-callsign-suffix-help" className="text-sm text-gray-500 dark:text-gray-400 mt-1">
                         This Organisation requires a manually chosen callsign suffix.
                       </p>
                     )}
-                    {newUserCallsignError && (
+                    {newUserFormState.error && (
                       <p id="new-user-callsign-suffix-error" role="alert" className="text-red-600 text-sm mt-1">
-                        {newUserCallsignError}
+                        {newUserFormState.error}
                       </p>
                     )}
                   </div>
@@ -2101,14 +2106,14 @@ export default function TeamDetail({ user, refreshUser }) {
                   <div className="flex justify-end space-x-3 pt-4">
                     <button
                       type="button"
-                      onClick={() => setShowAddMemberDialog(false)}
+                      onClick={() => { setShowAddMemberDialog(false); setNewUserEmailError(null) }}
                       className="btn-secondary px-6 py-2"
                     >
                       Cancel
                     </button>
                     <button
                       type="submit"
-                      disabled={!newUserForm.email || !newUserForm.firstName || !newUserForm.lastName || addingMember}
+                      disabled={!newUserFormState.email || !newUserFormState.firstName || !newUserFormState.lastName || addingMember}
                       className="btn-primary px-6 py-2"
                     >
                       {addingMember ? 'Creating...' : 'Create & Add User'}

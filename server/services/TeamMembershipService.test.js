@@ -210,7 +210,7 @@ describe('TeamMembershipService.addUserToTeam - callsign_suffix uniqueness (Requ
 
     await expect(
       TeamMembershipService.addUserToTeam(1, 2, 'member', 9)
-    ).rejects.toThrow('callsign_suffix "J.Doe" is already in use within this Team');
+    ).rejects.toThrow('Callsign Suffix "J.Doe" is already in use within this Team');
 
     const sqlCalls = mockClient.query.mock.calls.map(([sql]) => sql);
     expect(sqlCalls.some((sql) => sql.trim().startsWith('DELETE FROM team_memberships'))).toBe(false);
@@ -314,7 +314,7 @@ describe('TeamMembershipService.addUserToTeam - callsign_suffix uniqueness (Requ
 
     await expect(
       TeamMembershipService.addUserToTeam(1, 2, 'member', 9, externalClient)
-    ).rejects.toThrow('callsign_suffix "J.Doe" is already in use within this Team');
+    ).rejects.toThrow('Callsign Suffix "J.Doe" is already in use within this Team');
 
     expect(pool.connect).not.toHaveBeenCalled();
     const sqlCalls = externalClient.query.mock.calls.map(([sql]) => sql);
@@ -769,5 +769,139 @@ describe('TeamMembershipService.removeUserFromTeam', () => {
 
     expect(mockClient.query).toHaveBeenCalledWith('ROLLBACK');
     expect(mockClient.query).not.toHaveBeenCalledWith('COMMIT');
+  });
+});
+
+/**
+ * Unit tests for `TeamMembershipService.removeUserFromTeam`'s CloudTAK
+ * membership enqueue site (Requirement 5.4 / 9.1 / 9.2 / 1.4, task
+ * 8.3/8.4).
+ *
+ * Before deleting the user's `team_memberships` rows, the method captures
+ * the Team ids where the user held a DIRECT admin row (`role = 'admin'
+ * AND inherited_from_team_id IS NULL`). After deletion, and ONLY when
+ * CloudTAK is enabled, it enqueues one `update_cloudtak_group` per such
+ * Team id on the SAME transactional client so each affected group
+ * re-reconciles without the removed user. When the flag is off, the
+ * capture query never runs and no `update_cloudtak_group` is enqueued
+ * (Requirement 1.4).
+ *
+ * `isCloudTakEnabled()` reads `process.env` at call time, so toggling
+ * `process.env.CLOUDTAK_ENABLED` here is sufficient; it is saved and
+ * restored around each test so no state leaks into other tests.
+ */
+describe('TeamMembershipService.removeUserFromTeam CloudTAK enqueue (Requirement 5.4 / 9.2 / 1.4)', () => {
+  let savedFlag;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    savedFlag = process.env.CLOUDTAK_ENABLED;
+  });
+
+  afterEach(() => {
+    if (savedFlag === undefined) {
+      delete process.env.CLOUDTAK_ENABLED;
+    } else {
+      process.env.CLOUDTAK_ENABLED = savedFlag;
+    }
+  });
+
+  it('enqueues one update_cloudtak_group per direct-admin Team on the same transactional client when the flag is on', async () => {
+    process.env.CLOUDTAK_ENABLED = 'true';
+
+    const mockClient = buildMockClient((sql) => {
+      if (sql.includes('SELECT c.authentik_group_id')) {
+        return Promise.resolve({ rows: [] });
+      }
+      // The direct-admin capture query: user held direct admin on Teams 3 and 7.
+      if (sql.includes("role = 'admin' AND inherited_from_team_id IS NULL")) {
+        return Promise.resolve({ rows: [{ team_id: 3 }, { team_id: 7 }] });
+      }
+      if (sql.includes('SELECT COUNT(*) as count FROM team_memberships')) {
+        return Promise.resolve({ rows: [{ count: '1' }] }); // still has other teams
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    pool.connect.mockResolvedValue(mockClient);
+    EventPublisher.publishOperation.mockResolvedValue('op-id');
+
+    await TeamMembershipService.removeUserFromTeam(42, 9);
+
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'update_cloudtak_group',
+      { team_id: 3 },
+      9,
+      mockClient
+    );
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'update_cloudtak_group',
+      { team_id: 7 },
+      9,
+      mockClient
+    );
+    // Exactly one enqueue per captured direct-admin Team.
+    const cloudtakCalls = EventPublisher.publishOperation.mock.calls.filter(
+      ([op]) => op === 'update_cloudtak_group'
+    );
+    expect(cloudtakCalls).toHaveLength(2);
+    expect(mockClient.query).toHaveBeenCalledWith('COMMIT');
+  });
+
+  it('enqueues no update_cloudtak_group when the user held no direct-admin rows, even with the flag on', async () => {
+    process.env.CLOUDTAK_ENABLED = 'true';
+
+    const mockClient = buildMockClient((sql) => {
+      if (sql.includes('SELECT c.authentik_group_id')) {
+        return Promise.resolve({ rows: [] });
+      }
+      if (sql.includes("role = 'admin' AND inherited_from_team_id IS NULL")) {
+        return Promise.resolve({ rows: [] }); // no direct-admin rows
+      }
+      if (sql.includes('SELECT COUNT(*) as count FROM team_memberships')) {
+        return Promise.resolve({ rows: [{ count: '1' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    pool.connect.mockResolvedValue(mockClient);
+    EventPublisher.publishOperation.mockResolvedValue('op-id');
+
+    await TeamMembershipService.removeUserFromTeam(42, 9);
+
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalledWith(
+      'update_cloudtak_group',
+      expect.anything(),
+      expect.anything(),
+      expect.anything()
+    );
+  });
+
+  it('enqueues NOTHING (and never runs the direct-admin capture query) when the flag is off (Requirement 1.4)', async () => {
+    process.env.CLOUDTAK_ENABLED = 'false';
+
+    const mockClient = buildMockClient((sql) => {
+      if (sql.includes('SELECT c.authentik_group_id')) {
+        return Promise.resolve({ rows: [] });
+      }
+      if (sql.includes('SELECT COUNT(*) as count FROM team_memberships')) {
+        return Promise.resolve({ rows: [{ count: '1' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    pool.connect.mockResolvedValue(mockClient);
+    EventPublisher.publishOperation.mockResolvedValue('op-id');
+
+    await TeamMembershipService.removeUserFromTeam(42, 9);
+
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalledWith(
+      'update_cloudtak_group',
+      expect.anything(),
+      expect.anything(),
+      expect.anything()
+    );
+    // The direct-admin capture query is guarded by the flag and must not run.
+    const capturedCapture = mockClient.query.mock.calls.some(([sql]) =>
+      typeof sql === 'string' && sql.includes("role = 'admin' AND inherited_from_team_id IS NULL")
+    );
+    expect(capturedCapture).toBe(false);
   });
 });
