@@ -112,3 +112,67 @@ describe('Admin.jsx Global_Manager gating (task 9.1)', () => {
     expect(guardIndex).toBeLessThan(listCallIndex)
   })
 })
+
+// ══════════════════════════════════════════════════════════════════════════
+// date-tooltips-and-folder-contrast task 6.7 -- Criteria 2.1, 2.3, 3.8.
+//
+// Date_Render_Positions 9 and 10 are the last-sync and template-last-updated
+// values, and they are TWO of the FOUR non-table positions: `<p>` elements
+// inside cards rather than cells inside an `overflow-x-auto` wrapper.
+// (requirements.md Criterion 3.4 counts eight table cells and names only
+// these two as non-table; measured, it is six and four, the other two being
+// Requests' "Submitted" values -- design.md correction 1.)
+//
+// These assertions are SOURCE-LEVEL, following this file's own documented
+// convention rather than diverging from it: Admin.jsx is a ~1100-line page
+// whose two date branches sit behind `syncStatus?.last_sync && !syncing` and
+// `templateLoaded && !templateLoadError && templateUpdatedAt`, so reaching
+// them means standing up the whole page's API surface for a claim that is
+// about which component renders the value. Criterion 3.8's real content --
+// that a `<p>`-hosted position carries the SAME placement classes a table
+// cell does -- is measured where it can be measured, mounted, in
+// `src/pages/Requests.test.jsx`, against the other two non-table positions.
+// What is checked here is that these two reach the same shared component the
+// same way, which is what makes the placement identical by construction.
+// ══════════════════════════════════════════════════════════════════════════
+describe('Admin.jsx non-table Date_Render_Positions (task 6.7)', () => {
+  const occurrences = (needle) => normalized.split(needle).length - 1
+
+  it('renders both values through the ONE shared Formatted_Date (Criterion 2.1)', () => {
+    expect(adminSource).toMatch(
+      /import\s+FormattedDate[^\n]*from\s+'\.\.\/components\/FormattedDate'/
+    )
+    expect(occurrences('<FormattedDate')).toBe(2)
+    // The two positions this page owns, named by the value each renders.
+    expect(normalized).toContain('<FormattedDate value={syncStatus.last_sync}')
+    expect(normalized).toContain('<FormattedDate value={templateUpdatedAt}')
+  })
+
+  it('leaves no direct Date_Format_Helper call behind (Criteria 2.1, 2.12)', () => {
+    // The drift guard in `src/utils/dateFormatConsumers.test.js` makes this
+    // mechanical across the whole client; asserted here too because this page
+    // is where the two calls used to be.
+    expect(adminSource).not.toMatch(/from\s+'\.\.\/utils\/dateFormat'/)
+    expect(adminSource).not.toMatch(/[^`]formatDateTime\(/)
+    expect(adminSource).not.toMatch(/[^`]formatDate\(/)
+  })
+
+  it('gives both the same Sideways_Tooltip_Placement as the table positions (Criterion 3.8)', () => {
+    // Both are leading-half positions, so both open rightward. One tooltip
+    // behaviour for the application, not one per surrounding element type.
+    expect(occurrences('side={TOOLTIP_SIDES.RIGHT}')).toBe(2)
+    expect(normalized).not.toContain('TOOLTIP_SIDES.LEFT')
+    // Both render a timestamp, so both anchor their phrase on the value's own
+    // instant rather than on a Midnight_Anchor (Criterion 4.5).
+    expect(occurrences('precision={DATE_PRECISION.DATE_TIME}')).toBe(2)
+    // Matched WITH the closing brace: `DATE_PRECISION.DATE` is a prefix of
+    // `DATE_PRECISION.DATE_TIME`, so the bare token matches both.
+    expect(normalized).not.toContain('precision={DATE_PRECISION.DATE}')
+  })
+
+  it('keeps the "Last updated:" label outside the component (Criterion 2.3)', () => {
+    // Only the VALUE acquires the disclosure, so the rendered string -- the
+    // separating space included -- is unchanged character for character.
+    expect(normalized).toContain("Last updated:{' '} <FormattedDate")
+  })
+})

@@ -44,7 +44,7 @@ describe('Property 4: Agency attributes map exactly to the Team fields', () => {
     description: fc.option(fc.string(), { nil: null }),
     // extra fields that must be ignored by agencyAttributes
     parent_team_id: fc.option(fc.integer(), { nil: null }),
-    created_at: fc.date().map((d) => d.toISOString())
+    created_at: fc.date({ noInvalidDate: true }).map((d) => d.toISOString())
   });
 
   // Feature: cloudtak-agency-groups, Property 4: Agency attributes map

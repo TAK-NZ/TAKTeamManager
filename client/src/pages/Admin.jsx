@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { UserGroupIcon, UsersIcon, CogIcon, PencilIcon, CheckIcon, XMarkIcon, ArrowUpTrayIcon, ArrowDownTrayIcon } from '@heroicons/react/24/outline'
 import { configAPI, usersAPI, teamsAPI, syncAPI, bulkImportAPI, communicationsAPI, settingsAPI } from '../services/api'
-import { formatDateTime } from '../utils/dateFormat'
+import FormattedDate, { DATE_PRECISION, TOOLTIP_SIDES } from '../components/FormattedDate'
 import { getVariableHints } from '../utils/templateVariableHints'
 import { buildTemplateUpdatePayload, validateTemplateDraft } from '../utils/templateUpdatePayload'
 import { unzipExportedArchive, isImportPayloadShape } from '../utils/settingsImportTransform'
@@ -607,7 +607,24 @@ export default function Admin({ user }) {
                   </p>
                   {syncStatus?.last_sync && !syncing && (
                     <p className="text-xs text-gray-500 dark:text-gray-400">
-                      {formatDateTime(syncStatus.last_sync)}
+                      {/* Date_Render_Position 9: the last sync timestamp, rendered
+                          through the one shared Formatted_Date so it carries the
+                          same Date_Tooltip as every other date (Criteria 2.1, 2.2)
+                          while the visible string stays what `formatDateTime`
+                          renders today, character for character (Criterion 2.3).
+                          This is a NON-TABLE position -- a `<p>` inside a card --
+                          and it deliberately takes the same
+                          Sideways_Tooltip_Placement as the table cells, so the
+                          application has ONE tooltip behaviour rather than one per
+                          surrounding element type (Criterion 3.8). `fallback=''` is
+                          the Date_Format_Helpers' own default, which is what this
+                          site renders today for an unparseable value. */}
+                      <FormattedDate
+                        value={syncStatus.last_sync}
+                        fallback=""
+                        precision={DATE_PRECISION.DATE_TIME}
+                        side={TOOLTIP_SIDES.RIGHT}
+                      />
                     </p>
                   )}
                 </div>
@@ -987,7 +1004,20 @@ export default function Admin({ user }) {
                     {templateDescription && <p>{templateDescription}</p>}
                     {templateUpdatedAt && (
                       <p className="text-xs text-gray-500 dark:text-gray-400">
-                        Last updated: {formatDateTime(templateUpdatedAt)}
+                        {/* Date_Render_Position 10: the template's last-updated
+                            timestamp, on the same terms as the last-sync value
+                            above. The literal `Last updated: ` label stays OUTSIDE
+                            the component -- only the VALUE acquires the disclosure
+                            -- so the rendered string is unchanged character for
+                            character, the separating space included (Criterion
+                            2.3). */}
+                        Last updated:{' '}
+                        <FormattedDate
+                          value={templateUpdatedAt}
+                          fallback=""
+                          precision={DATE_PRECISION.DATE_TIME}
+                          side={TOOLTIP_SIDES.RIGHT}
+                        />
                       </p>
                     )}
                   </div>

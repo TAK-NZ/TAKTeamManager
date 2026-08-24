@@ -16,7 +16,8 @@
  *
  *   {
  *     requiredFields: { <fieldName>: <expectedType>, ... },
- *     optionalFields: { <fieldName>: <expectedType>, ... }   // omitted entirely if none
+ *     optionalFields: { <fieldName>: <expectedType>, ... },  // omitted entirely if none
+ *     exactlyOneOf:   { <fieldName>: <expectedType>, ... }   // omitted entirely if none
  *   }
  *
  * `<expectedType>` is one of the strings `typeof` would return for a valid
@@ -32,6 +33,17 @@
  *   does not fail when they are absent, so they are intentionally excluded
  *   from `requiredFields` per Requirement 9.3's focus on validating
  *   required fields.
+ * - `exactlyOneOf` (feature device-management, Requirement 12.2/12.3):
+ *   declares a set of MUTUALLY EXCLUSIVE discriminator fields, of which a
+ *   valid payload MUST carry exactly one -- carrying none, or carrying two
+ *   or more, is a validation failure. The one that IS present must match
+ *   its declared type; the absent ones are not type-checked. This exists
+ *   for operation types that accept more than one payload shape (today only
+ *   `revoke_tak_certificates`, which accepts a device-scoped `client_uid`
+ *   or a user-scoped `tak_usernames`) and lets the handler branch on which
+ *   discriminator it received. An entry declaring `exactlyOneOf` MAY omit
+ *   `requiredFields` entirely when no field is required across every shape.
+ *   Entries WITHOUT an `exactlyOneOf` key are validated exactly as before.
  *
  * Every `operation_type` handled by `executeOperation`'s `switch`
  * statement MUST have a corresponding top-level entry here (enforced by
@@ -246,8 +258,32 @@ module.exports = {
   // `target_user_id` is optional: present for the single-user call
   // sites (1)/(2) for logging/traceability, omitted for the team-level
   // bulk call site (3), which has no single target user.
+  //
+  // Feature device-management, Requirement 12.2/12.3 (task 19.2): this
+  // operation now accepts TWO payload shapes, and the device-scoped shape
+  // is purely ADDITIVE -- the user-scoped shape above is unchanged and
+  // still valid, so all three pre-existing call sites keep working without
+  // modification and main-spec Requirement 26.6/26.7 is not broken:
+  //
+  //   device-scoped (this feature's per-Device Revoke action) -- revokes
+  //   only the Live_Certificates carrying that one Client_Uid:
+  //     { client_uid: 'ANDROID-842f08e120efdbe3', target_user_id: 42 }
+  //
+  //   user-scoped (the three pre-existing call sites) -- unchanged, still
+  //   revokes every certificate the named users hold:
+  //     { tak_usernames: ['alice'], target_user_id: 42 }
+  //
+  // The two discriminators are declared under `exactlyOneOf` rather than
+  // `requiredFields`/`optionalFields`, because neither is required on its
+  // own yet a payload carrying both (or neither) is ambiguous about what
+  // to revoke and must be rejected up front rather than silently resolved
+  // by the handler's branch order. `target_user_id` stays optional in both
+  // shapes -- the device-scoped routes (task 19.4) always send it, the
+  // team-level bulk enqueue still cannot. The handler branch that reads
+  // `client_uid` is task 19.3; this entry only widens what validates.
   revoke_tak_certificates: {
-    requiredFields: {
+    exactlyOneOf: {
+      client_uid: 'string',
       tak_usernames: 'object'
     },
     optionalFields: {

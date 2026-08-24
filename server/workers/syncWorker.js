@@ -10,6 +10,11 @@ const { validateConfig } = require('../config/configValidator');
 
 const { Pool } = require('pg');
 const http = require('http');
+// Feature device-management, Requirement 12.14 (task 24.3): `createHash` backs
+// the Revoke_Audit_Record's `targetCertIdsDigest` -- a stable digest of the
+// sorted target certificate id list, so two runs can be compared (and a
+// truncated log line detected) without the full list.
+const crypto = require('crypto');
 const pLimit = require('p-limit');
 const authentikService = require('../services/authentik');
 const TeamMembershipService = require('../services/TeamMembershipService');
@@ -57,8 +62,38 @@ const RetentionCleanupJob = require('../services/RetentionCleanupJob');
 // can fetch `listCertificates()` exactly once per operation and filter
 // that single result against every `tak_usernames` entry, per task 48.4's
 // "single bulk batch fetching the certificate catalog once" design intent.
+// Feature device-management, Requirement 12.1 (task 19.3): `matchesCreatorDn`
+// is for the USER-scoped payload shape only. The device-scoped shape resolves by
+// `clientUid` against `listLiveCertificates()` instead, because distinct Devices
+// share a `creatorDn` and matching on it revoked every certificate the user held
+// across all their Devices.
 const TakServerService = require('../services/TakServerService');
 const { matchesCreatorDn } = TakServerService;
+// Feature device-management (task 8.1): the Admin_Credential_Loader and the
+// three scheduled device-management jobs, all constructed in the `SyncWorker`
+// constructor below around the SINGLE shared `this.takServerService` instance
+// so the `revoke_tak_certificates` handler and the device-management jobs use
+// one credential mechanism and both pick up a rotated Admin_Credential without
+// a process restart (Requirement 2.8). Constructed unconditionally (like
+// `this.expiryScheduler`/`this.retentionCleanupJob`) -- constructing them opens
+// no timer, reads no secret, and makes no network call; the
+// `isDeviceMgmtEnabled()` gate lives on the `start()` calls (task 8.2).
+// Feature device-management, Requirements 12.11/12.13 (task 24.3):
+// `isDeviceMgmtRevokeEnabled` is the INDEPENDENT arming flag consulted by
+// `revokeTakCertificates` before any `DELETE` (a disarmed revoke completes as a
+// Revoke_Dry_Run), and `getRevokeMaxCerts` is the Revoke_Blast_Radius_Cap
+// checked against the resolved target count. Both are read per call, so the
+// production predicates stay in the loop rather than being snapshotted at
+// require time.
+const {
+  isDeviceMgmtEnabled,
+  isDeviceMgmtRevokeEnabled,
+  getRevokeMaxCerts
+} = require('../config/deviceMgmt');
+const AdminCredentialLoader = require('../services/AdminCredentialLoader');
+const AdminCredentialRefreshJob = require('../services/AdminCredentialRefreshJob');
+const SubscriptionPoller = require('../services/SubscriptionPoller');
+const DeviceSync = require('../services/DeviceSync');
 // Feature cloudtak-agency-groups (tasks 4.1/4.2): the pure CloudTAK
 // helpers -- `groupName(teamId)` (`CloudTAKAgency<id>`),
 // `agencyAttributes(team)` (the three Agency_Attributes), and
@@ -136,6 +171,99 @@ class TakServerApiError extends Error {
     this.name = 'TakServerApiError';
     this.classification = classification;
   }
+}
+
+/**
+ * Feature device-management, Requirements 12.12/12.13 (task 24.3): thrown by
+ * `revokeTakCertificates` when one of the revocation rails refuses the
+ * operation BEFORE any `DELETE` is issued -- a resolved target set spanning
+ * more than one `client_uid`, or a resolved count over the
+ * Revoke_Blast_Radius_Cap.
+ *
+ * Both are defects of the RESOLUTION rather than transient upstream failures,
+ * so neither can be fixed by re-running the identical operation: the rail is a
+ * refusal, and a retried refusal is just the same refusal 48 more times against
+ * a shared TAK Server. This therefore reuses the existing `alreadyHandled`
+ * contract rather than inventing a second signalling mechanism -- exactly like
+ * `PayloadValidationError` above, `revokeTakCertificates` calls
+ * `markPermanentlyFailed` itself (writing the terminal
+ * `failed`/`failure_category='permanent'` row) and then throws this, whose
+ * `alreadyHandled` tells `executeOperationSafely` to skip
+ * `handleOperationError` so `retry_count`/`next_retry_at` are never touched on
+ * top of that terminal state.
+ *
+ * `alreadyHandled` is false in the one case where no terminal state COULD be
+ * written: a direct `worker.revokeTakCertificates(payload)` call with no
+ * `operation` row behind it (unit tests, and any future non-queued caller).
+ * Then this is just a rejected promise the caller sees, and the refusal is
+ * still visible in the `revoke_abort` log line either way.
+ */
+class RevokeRailAbortError extends Error {
+  constructor(message, { alreadyHandled = true } = {}) {
+    super(message);
+    this.name = 'RevokeRailAbortError';
+    this.alreadyHandled = alreadyHandled;
+  }
+}
+
+/**
+ * Feature device-management, Requirement 12.14 (task 24.3): the canonical order
+ * of a resolved target certificate id set -- ascending numeric, with a string
+ * tiebreak so a non-numeric id can never make the order (and therefore the
+ * digest) depend on iteration order.
+ *
+ * The same array is what gets logged in `targetCertIds`, what the digest is
+ * computed over, and what is handed to `revokeCertificates`, so all three agree
+ * and a shortened id list is detectable by comparing them.
+ *
+ * @param {Set<number>|Array<number>} certIds
+ * @returns {Array<number>} a new, sorted array.
+ */
+function sortCertIds(certIds) {
+  return Array.from(certIds).sort(
+    (a, b) => (Number(a) - Number(b)) || String(a).localeCompare(String(b))
+  );
+}
+
+/**
+ * Feature device-management, Requirement 12.14 (task 24.3): a stable digest of
+ * the sorted target certificate id list, logged alongside the count so two runs
+ * can be compared -- and a truncated or reordered list spotted -- without the
+ * full list in hand.
+ *
+ * Stable means: the same SET of ids always digests to the same value regardless
+ * of the order they were resolved in (hence `sortCertIds` first), and the value
+ * is reproducible by anyone hashing the sorted, comma-joined ids. SHA-256 is
+ * used as a content fingerprint only -- there is no secret here and nothing
+ * about this is a security boundary.
+ *
+ * @param {Array<number>} sortedCertIds ids already in `sortCertIds` order.
+ * @returns {string} a hex SHA-256 digest.
+ */
+function revokeTargetDigest(sortedCertIds) {
+  return crypto.createHash('sha256').update(sortedCertIds.join(',')).digest('hex');
+}
+
+/**
+ * Feature device-management, Requirements 12.2/12.3 (task 19.3): reads the
+ * `revoke_tak_certificates` payload discriminator, in ONE place.
+ *
+ * Two collaborators need the shape and MUST agree on it: the fetch
+ * (`fetchRevokeResolutionInputs`, which reads a DIFFERENT certificate view per
+ * shape) and the resolution (`resolveRevokeTargets`, which matches a different
+ * field per shape). Deciding it twice is how they would come to disagree, and a
+ * disagreement here means resolving a device-scoped target set out of the
+ * user-scoped catalog -- i.e. re-targeting already-revoked ids.
+ *
+ * `validatePayloadSchema`'s `exactlyOneOf` has already rejected a payload
+ * carrying both discriminators or neither (task 19.2), so the presence of
+ * `client_uid` is unambiguous by the time either caller runs.
+ *
+ * @param {object} payload the parsed `revoke_tak_certificates` payload.
+ * @returns {'client_uid'|'tak_usernames'} the payload shape.
+ */
+function revokePayloadShape(payload) {
+  return payload.client_uid !== undefined ? 'client_uid' : 'tak_usernames';
 }
 
 // Requirement 14.6: the heartbeat is considered stale (and the health
@@ -271,6 +399,39 @@ class SyncWorker {
     // made until a `revoke_tak_certificates` operation is actually
     // dispatched to `revokeTakCertificates` below.
     this.takServerService = new TakServerService();
+
+    // Feature device-management, Requirement 2.8 (task 8.1): ONE
+    // Admin_Credential_Loader, built around the same `this.takServerService`
+    // instance the `revoke_tak_certificates` handler uses, so revocation and
+    // device-management share one credential mechanism.
+    this.adminCredentialLoader = new AdminCredentialLoader({
+      takServerService: this.takServerService
+    });
+
+    // Requirement 2.7/2.8: register the Loader on the shared service so
+    // `refreshAgent()` pulls the current Admin_Credential from it (rather than
+    // re-deriving file/environment values). This is done after construction --
+    // not via `new TakServerService(env, { credentialLoader })` -- because the
+    // Loader itself takes the service as a constructor argument, so passing it
+    // to the constructor would be a construction-order cycle; see
+    // `TakServerService.setCredentialLoader`'s own note.
+    this.takServerService.setCredentialLoader(this.adminCredentialLoader);
+
+    // Requirement 2.6/3.1/4.8 (task 8.1): the three device-management jobs,
+    // each following the same `ExpiryScheduler`/`RetentionCleanupJob` shape as
+    // the schedulers above. The refresh job drives the shared Loader; the
+    // poller and the sync take the shared `TakServerService`, so a refreshed
+    // credential applies to their Marti calls too. They are started (guarded by
+    // `isDeviceMgmtEnabled()`) and stopped in `start()`/`stop()`.
+    this.adminCredentialRefreshJob = new AdminCredentialRefreshJob({
+      loader: this.adminCredentialLoader
+    });
+    this.subscriptionPoller = new SubscriptionPoller({
+      takServerService: this.takServerService
+    });
+    this.deviceSync = new DeviceSync({
+      takServerService: this.takServerService
+    });
   }
 
   async start() {
@@ -296,6 +457,24 @@ class SyncWorker {
     // sync_operations/audit_logs retention cleanup runs on its own
     // (default 24h) cadence independent of the poll loop.
     this.retentionCleanupJob.start();
+
+    // Feature device-management, Requirements 1.5/1.6/1.7/9.5 (task 8.2):
+    // the three device-management jobs are started ONLY when
+    // Device_Mgmt_Enabled is true. This single gate is what makes the whole
+    // background half of the feature inert when the flag is off: no
+    // Admin_Credential is loaded or refreshed (1.5), the Subscriptions_API is
+    // never called (1.6), and Active_Certificates are never fetched nor the
+    // Device_Table written (1.7) -- all four background concerns disabled
+    // together, never some-on/some-off (9.5).
+    //
+    // Order matters: `AdminCredentialRefreshJob.start()` runs its first
+    // refresh immediately, so the Admin_Credential is loaded before the
+    // poller's and the sync's first tick.
+    if (isDeviceMgmtEnabled()) {
+      this.adminCredentialRefreshJob.start();
+      this.subscriptionPoller.start();
+      this.deviceSync.start();
+    }
 
     while (this.isRunning) {
       try {
@@ -336,7 +515,16 @@ class SyncWorker {
     // Requirement 25 (task 47.1): stop the retention cleanup job
     // alongside the expiry scheduler and health server.
     this.retentionCleanupJob.stop();
-    
+
+    // Feature device-management (task 8.2): stopped UNCONDITIONALLY -- i.e.
+    // without re-checking `isDeviceMgmtEnabled()`. Each job's `stop()` is
+    // idempotent (a no-op when no timer is running), so stopping jobs that
+    // were never started is safe, and this also guarantees a clean shutdown if
+    // the flag were somehow read differently at stop time than at start time.
+    this.adminCredentialRefreshJob.stop();
+    this.subscriptionPoller.stop();
+    this.deviceSync.stop();
+
     try {
       await this.pool.end();
       logger.info('Database pool closed');
@@ -764,7 +952,14 @@ class SyncWorker {
         break;
 
       case 'revoke_tak_certificates':
-        await this.revokeTakCertificates(payload);
+        // Feature device-management, Requirements 12.12/12.14 (task 24.3): the
+        // ONLY handler handed the whole `operation` row rather than just the
+        // parsed payload. It needs two things the payload cannot carry: the
+        // queue row's `id` and `created_by` for the Revoke_Audit_Record's
+        // `operationId`/`actingUserId`, and the row itself so a rail abort can
+        // write its own terminal permanently-failed state via
+        // `markPermanentlyFailed`.
+        await this.revokeTakCertificates(payload, operation);
         break;
 
       case 'create_cloudtak_group':
@@ -798,9 +993,23 @@ class SyncWorker {
    * - Every key in `requiredFields` must be present on `payload` (i.e.
    *   not `undefined`) and `typeof payload[key]` must equal the
    *   declared type.
+   * - Every key in `exactlyOneOf` (if the schema entry declares any --
+   *   feature device-management, Requirement 12.2/12.3, task 19.2):
+   *   EXACTLY ONE of those mutually exclusive discriminator fields must be
+   *   present on `payload`, and the present one's `typeof` must match its
+   *   declared type. Zero present (nothing to act on) and two-or-more
+   *   present (ambiguous about what to act on) are both validation
+   *   failures, caught here rather than silently resolved by a handler's
+   *   branch order. An entry may declare `exactlyOneOf` with no
+   *   `requiredFields` at all, when no single field is required across
+   *   every accepted shape.
    * - Every key in `optionalFields` (if the schema entry declares any)
    *   that IS present on `payload` must also match its declared type;
    *   an absent optional field is not an error.
+   *
+   * Schema entries that do not declare `exactlyOneOf` -- i.e. every
+   * operation type other than `revoke_tak_certificates` -- are validated
+   * exactly as they were before that block was added.
    *
    * @param {string} operationType
    * @param {object} payload
@@ -821,6 +1030,36 @@ class SyncWorker {
           reason: `missing required field "${field}" (expected type: ${expectedType})`
         };
       }
+      if (typeof payload[field] !== expectedType) {
+        return {
+          valid: false,
+          reason: `field "${field}" has type "${typeof payload[field]}", expected "${expectedType}"`
+        };
+      }
+    }
+
+    // Requirement 12.2/12.3: mutually exclusive discriminator fields, of
+    // which a valid payload carries exactly one. Skipped entirely (and so
+    // behaviourally inert) for schema entries that declare none.
+    if (schema.exactlyOneOf) {
+      const discriminators = Object.keys(schema.exactlyOneOf);
+      const present = discriminators.filter((field) => payload[field] !== undefined);
+
+      if (present.length === 0) {
+        return {
+          valid: false,
+          reason: `payload must carry exactly one of the fields ${discriminators.join(', ')}, but carries none`
+        };
+      }
+      if (present.length > 1) {
+        return {
+          valid: false,
+          reason: `payload must carry exactly one of the fields ${discriminators.join(', ')}, but carries ${present.join(', ')}`
+        };
+      }
+
+      const [field] = present;
+      const expectedType = schema.exactlyOneOf[field];
       if (typeof payload[field] !== expectedType) {
         return {
           valid: false,
@@ -2118,20 +2357,32 @@ class SyncWorker {
   }
 
   /**
-   * Requirement 26.8 (task 48.5): revokes every TAK Server certificate
-   * belonging to each username in `payload.tak_usernames`.
+   * Requirement 26.8 (task 48.5): revokes TAK Server certificates. The payload
+   * carries one of two mutually exclusive shapes (feature device-management,
+   * Requirements 12.2/12.3, tasks 19.2/19.3), and the shape decides both the
+   * certificate view fetched and the field matched:
+   *
+   * - `tak_usernames` (user-scoped, the three pre-existing call sites): every
+   *   certificate in `listCertificates()` whose `creatorDn` matches any of the
+   *   given usernames -- unchanged behaviour, deliberately spanning every Device
+   *   that user holds.
+   * - `client_uid` (device-scoped, this feature's per-Device Revoke): exactly the
+   *   Live_Certificates (`listLiveCertificates()`: in `/active`, NOT in
+   *   `/revoked`) carrying that one `clientUid`, and no certificate carrying
+   *   another -- including certificates issued to the same local user for a
+   *   different Device (Requirements 7.4, 8.4, 12.1).
    *
    * Per task 48.4's payload design ("single bulk batch fetching the
-   * certificate catalog once"), this calls
-   * `this.takServerService.listCertificates()` exactly ONCE regardless of
-   * how many usernames the payload carries, then filters that single
-   * result against every username using the same `matchesCreatorDn`
-   * predicate `TakServerService.findCertificatesForUser` uses internally
-   * -- rather than calling `findCertificatesForUser` once per username,
-   * which would re-fetch the full certificate list from TAK Server on
-   * every iteration.
+   * certificate catalog once"), the chosen view is fetched exactly ONCE per
+   * operation regardless of how many targets the payload resolves to (see
+   * `fetchRevokeResolutionInputs`), and the single result is then filtered in
+   * memory -- the user-scoped shape using the same `matchesCreatorDn` predicate
+   * `TakServerService.findCertificatesForUser` uses internally, rather than
+   * calling `findCertificatesForUser` once per username, which would re-fetch
+   * the full certificate list from TAK Server on every iteration.
    *
-   * - No certificates matching any of the given usernames is treated as
+   * - No certificate matching the payload -- no username match, or a
+   *   `client_uid` with no live certificate left -- is treated as
    *   a successful no-op (Requirement 26.8's "nothing to revoke" case --
    *   e.g. the user never had a TAK certificate).
    * - `TakServerService.revokeCertificates`'s verified-failed-revocation
@@ -2143,44 +2394,181 @@ class SyncWorker {
    *   26.8's "not confirmed revoked" being treated as a failure requiring
    *   retry.
    * - Any error thrown BY the axios calls inside `listCertificates`/
-   *   `revokeCertificates` themselves (TAK Server unreachable, timed out,
+   *   `listLiveCertificates`/`revokeCertificates` themselves (TAK Server
+   *   unreachable, timed out,
    *   or returned a non-2xx status) IS the "TAK Server unreachable/error
    *   responses" case Requirement 26.8 explicitly calls out: it is
    *   classified via the existing `classifyFailure` mechanism (5xx/
    *   network/timeout -> retryable, 4xx -> permanent) and re-thrown as a
    *   `TakServerApiError` carrying that classification, mirroring every
    *   other Authentik-calling handler's `AuthentikApiError` pattern.
+   * - Feature device-management, Requirement 7.6/8.7 (task 9.1): once (and
+   *   only once) the revocation is confirmed, the matched certificates'
+   *   Device_Table rows are marked revoked via `markDevicesRevoked`, guarded
+   *   by `isDeviceMgmtEnabled()`.
+   *
+   * ## The revocation rails (Requirements 12.10-12.16, task 24.3)
+   *
+   * This handler is RESOLVE-THEN-GATE: it first resolves the target
+   * certificate ids into a `{ payloadShape, clientUid, targetCertIds,
+   * clientUids }` shape (`resolveRevokeTargets`), and only then runs four rails,
+   * in this order and ALL before any `DELETE` -- the resolved set is the only
+   * point at which the true blast radius is known:
+   *
+   *   1. **Audit record** -- one `revoke_audit` line carrying the full,
+   *      never-truncated target id list plus its count and a stable digest
+   *      (Requirements 12.14, 12.16). Emitted BEFORE the decision point in
+   *      every case, including every abort and the dry-run, because the whole
+   *      point of the record is that "did we target these?" stays answerable
+   *      for an operation that did NOT proceed as much as for one that did.
+   *   2. **Single-`client_uid`** (device-scoped shape only) -- a resolved set
+   *      spanning more than one `clientUid` is a resolution defect, so the
+   *      operation aborts permanently (Requirement 12.12). NOT applied to the
+   *      user-scoped shape, which legitimately spans a user's Devices
+   *      (Requirements 12.3, 12.15).
+   *   3. **Blast-radius cap** -- `targetCertCount > getRevokeMaxCerts()` aborts.
+   *      The set is NEVER truncated to the cap and never proceeds partially: a
+   *      partial revoke reports a Device disabled while leaving it usable, which
+   *      is worse than a refused one (Requirement 12.13).
+   *   4. **Dry-run** -- WHILE Revoke_Enabled is false, no `DELETE` is issued, no
+   *      `revoked` flag is flipped, and the operation completes SUCCESSFULLY as
+   *      a dry-run (`dryRun: true` on the audit record) rather than failing, so
+   *      it is neither retried forever nor left queued to fire the moment the
+   *      flag flips (Requirement 12.11).
+   *
+   * Rails 1 and 3 apply to BOTH payload shapes including the pre-existing
+   * user-scoped one, which has the LARGER blast radius -- exempting it would
+   * leave the widest revoke the least observable and the least bounded one
+   * (Requirement 12.15). That means the three pre-existing user-scoped call
+   * sites now also need `DEVICE_MGMT_REVOKE_ENABLED=true` before they revoke
+   * anything; that is exactly Requirement 12.11's intent, and disarmed they
+   * complete as dry-runs rather than failing.
+   *
+   * Everything else is unchanged: no-match is still a successful no-op, success
+   * is still gated on `revokeCertificates`' verification, and thrown Marti
+   * errors still flow through `classifyTakServerError`'s retryable/permanent
+   * split.
+   *
+   * @param {object} payload the parsed operation payload.
+   * @param {object|null} [operation] the `sync_operations` row, when this was
+   *   dispatched from the queue. Supplies `operationId`/`actingUserId` for the
+   *   audit record and is what a rail abort writes its terminal
+   *   permanently-failed state onto. A direct call without it still runs every
+   *   rail; only the terminal-state write is unavailable (see
+   *   `RevokeRailAbortError`).
    */
-  async revokeTakCertificates(payload) {
-    const { tak_usernames: takUsernames } = payload;
+  async revokeTakCertificates(payload, operation = null) {
+    const operationId = operation ? operation.id : null;
+    // `sync_operations.created_by` is the acting user -- the admin or user who
+    // requested the revoke, or null for a system call site (`Team.delete`'s
+    // bulk enqueue). NOT `payload.target_user_id`, which is the SUBJECT of the
+    // revoke, not its author.
+    const actingUserId = operation && operation.created_by !== undefined ? operation.created_by : null;
+    const capLimit = getRevokeMaxCerts();
+    const dryRun = !isDeviceMgmtRevokeEnabled();
 
-    let certificates;
-    try {
-      certificates = await this.takServerService.listCertificates();
-    } catch (error) {
-      throw this.classifyTakServerError(error, 'Failed to list TAK Server certificates');
+    // --- Resolution (before any gate; no DELETE anywhere below this line
+    // --- until rail 4 has passed) ---------------------------------------
+    const { certificates, revokedViewCountBefore } = await this.fetchRevokeResolutionInputs(payload);
+    const resolved = this.resolveRevokeTargets(payload, certificates);
+    const { payloadShape, clientUid, targetCertIds, clientUids, unresolvedReason } = resolved;
+    const targetCertCount = targetCertIds.length;
+
+    // --- Rail 1: the Revoke_Audit_Record (Requirements 12.14, 12.15, 12.16) --
+    // Identifiers only. No credential material and no passphrase reaches this
+    // record, or any other line in this handler (Requirements 2.11, 9.2).
+    const auditRecord = {
+      operationId,
+      actingUserId,
+      payloadShape,
+      clientUid,
+      // The FULL list, never truncated (Requirement 12.14). Sorted so the
+      // logged list, the digest, and the id list handed to the `DELETE` are all
+      // the same sequence and a shortened one is detectable by comparison.
+      targetCertIds,
+      targetCertCount,
+      targetCertIdsDigest: revokeTargetDigest(targetCertIds),
+      // Not part of the specified shape, but the resolved uids are what makes
+      // the user-scoped shape's blast radius (and a multi-uid abort) legible.
+      resolvedClientUids: Array.from(clientUids),
+      capLimit,
+      dryRun,
+      revokedViewCountBefore
+    };
+    logger.info(auditRecord, 'revoke_audit');
+
+    // A payload this handler cannot resolve to a target set must never fall
+    // through to a `DELETE` with an empty or wrongly-derived one, and must not be
+    // retried 48 times against a payload no retry will teach it to resolve. Both
+    // SHAPES resolve as of task 19.3; what reaches this gate now is a
+    // device-scoped payload whose `client_uid` is present but blank -- schema-
+    // valid, and identifying no Device (see `resolveRevokeTargets`).
+    if (unresolvedReason) {
+      throw await this.abortRevoke(operation, auditRecord, {
+        reason: 'revoke_unsupported_payload_shape',
+        details: unresolvedReason
+      });
     }
 
-    const matchedCertIds = new Set();
-    for (const takUsername of takUsernames) {
-      for (const cert of certificates) {
-        if (matchesCreatorDn(cert.creatorDn, takUsername)) {
-          matchedCertIds.add(cert.id);
-        }
-      }
+    // --- Rail 2: exactly one `client_uid`, device-scoped shape only (12.12) --
+    if (payloadShape === 'client_uid' && clientUids.size > 1) {
+      throw await this.abortRevoke(operation, auditRecord, {
+        reason: 'revoke_multiple_client_uids',
+        details:
+          `a device-scoped revoke of "${clientUid}" resolved ${targetCertCount} certificate(s) ` +
+          `spanning ${clientUids.size} distinct client_uid(s): ${Array.from(clientUids).join(', ')}`
+      });
     }
 
-    if (matchedCertIds.size === 0) {
+    // --- Rail 3: the Revoke_Blast_Radius_Cap (12.13, 12.15) -----------------
+    // Fails closed on the WHOLE operation. Deliberately no truncation: see
+    // this method's doc comment and Requirement 12.13.
+    if (targetCertCount > capLimit) {
+      throw await this.abortRevoke(operation, auditRecord, {
+        reason: 'revoke_cap_exceeded',
+        details:
+          `resolved ${targetCertCount} target certificate(s), over the ` +
+          `DEVICE_MGMT_REVOKE_MAX_CERTS cap of ${capLimit}; refusing the whole operation ` +
+          'rather than truncating it to the cap'
+      });
+    }
+
+    // The pre-existing no-match no-op, unchanged in outcome (a successful
+    // operation, no `DELETE`, no `tak_devices` write) -- it just now sits after
+    // the audit record, so a revoke that targeted nothing is as answerable as
+    // one that targeted everything.
+    if (targetCertCount === 0) {
       logger.debug(
-        { takUsernames },
-        'No TAK Server certificates matched any of the given usernames; nothing to revoke'
+        { operationId, payloadShape, clientUid, takUsernames: payload.tak_usernames },
+        'No TAK Server certificates matched this revoke payload; nothing to revoke'
+      );
+      return;
+    }
+
+    // --- Rail 4: the dry-run (12.11) ---------------------------------------
+    // Last gate before the DELETE, and a SUCCESS rather than a failure: a
+    // disarmed revoke that failed would be retried until its retries were
+    // exhausted, and one left pending would fire the instant the flag flipped.
+    if (dryRun) {
+      logger.warn(
+        {
+          operationId,
+          payloadShape,
+          clientUid,
+          targetCertCount,
+          targetCertIdsDigest: auditRecord.targetCertIdsDigest,
+          dryRun: true,
+          revokedFlagFlipped: false,
+          capability: 'DEVICE_MGMT_REVOKE_ENABLED'
+        },
+        'revoke_dry_run: revocation is disarmed; no DELETE issued and no revoked flag flipped'
       );
       return;
     }
 
     let result;
     try {
-      result = await this.takServerService.revokeCertificates(Array.from(matchedCertIds));
+      result = await this.takServerService.revokeCertificates(targetCertIds);
     } catch (error) {
       throw this.classifyTakServerError(error, 'Failed to revoke TAK Server certificates');
     }
@@ -2192,9 +2580,401 @@ class SyncWorker {
       // -- it's a plain Error, so it flows through the default
       // (retryable) handleOperationError path rather than being
       // classified via TakServerApiError.
+      //
+      // Requirement 12.14: the outcome record is emitted for the UNVERIFIED
+      // case too, before the throw -- "we issued the DELETE and it did not
+      // verify" is precisely the outcome that has to be on the record.
+      const revokedViewCountAfterUnverified = await this.countRevokedCertificates();
+      logger.warn(
+        {
+          operationId,
+          clientUid,
+          targetCertCount,
+          verified: false,
+          unverified: result.unverified,
+          revokedViewCountAfter: revokedViewCountAfterUnverified,
+          revokedFlagFlipped: false
+        },
+        'revoke_audit_result'
+      );
       throw new Error(
         `TAK Server certificate revocation not confirmed for id(s): ${result.unverified.join(', ')}`
       );
+    }
+
+    // Feature device-management, Requirement 7.6/8.7 (task 9.1): the
+    // revocation is now CONFIRMED (`revokeCertificates` re-queried TAK Server
+    // and verified every targeted id), so the Device_Table rows for those
+    // certificates are marked revoked. Reached only past the verify-before-
+    // success check above, and never on the no-match no-op path (which returns
+    // earlier), so `revoked` is only ever flipped for devices whose
+    // certificate revocation TAK Server actually confirmed.
+    //
+    // Requirement 12.8 (task 19.3): for the device-scoped shape these resolved
+    // uids are exactly the ONE target `client_uid` -- every id revoked above was
+    // selected by its `clientUid` equalling it -- so no other Device of the same
+    // user has its flag flipped. The user-scoped shape still spans that user's
+    // Devices, which is its documented, legitimate scope (Requirement 12.3).
+    const revokedViewCountAfter = await this.countRevokedCertificates();
+    const flippedRows = await this.markDevicesRevoked(clientUids);
+
+    logger.info(
+      {
+        operationId,
+        clientUid,
+        targetCertCount,
+        verified: true,
+        unverified: [],
+        revokedViewCountAfter,
+        revokedFlagFlipped: flippedRows > 0
+      },
+      'revoke_audit_result'
+    );
+  }
+
+  /**
+   * Feature device-management, Requirements 12.14/12.16 (task 24.3): fetches
+   * everything the resolution and the audit record need from TAK Server, in one
+   * concurrent round.
+   *
+   * The certificate view fetched depends on the payload shape
+   * (`revokePayloadShape`), because the two shapes resolve against different
+   * sets -- but EITHER way the catalog is fetched exactly ONCE per operation,
+   * never once per target (task 48.4's "single bulk batch fetching the
+   * certificate catalog once"):
+   *
+   * - `tak_usernames` (user-scoped): `listCertificates()`, keeping its
+   *   pre-existing contract exactly -- called once regardless of how many
+   *   usernames the payload carries, with any failure propagating as a
+   *   classified `TakServerApiError` under the same message as before, so the
+   *   retryable/permanent semantics of a TAK Server outage are untouched.
+   * - `client_uid` (device-scoped, task 19.3): `listLiveCertificates()`, the
+   *   Live_Certificates -- in `/active` AND NOT in `/revoked`. `/active` is NOT
+   *   the live set and must never be used as one here (Requirement 11.2): 90 of
+   *   its 95 certificates also appeared in `/revoked` live, so resolving a
+   *   device-scoped revoke out of it would re-target certificates TAK Server
+   *   already lists as revoked. The set difference is `listLiveCertificates()`'s
+   *   own job (Requirements 4.3/11.2) rather than something recomputed here, so
+   *   the Device_Sync and the Revoke_Operation agree on what "live" means.
+   *   Failures of EITHER underlying view propagate through it and are classified
+   *   here identically -- a `/revoked` outage fails this shape's resolution
+   *   rather than silently promoting revoked certificates back to live
+   *   (Requirements 14.1, 14.2).
+   *
+   * The Revoked_Certificate_View size is fetched ALONGSIDE it (not after), so
+   * `revokedViewCountBefore` costs no added latency, and via a
+   * never-throwing read: today this count feeds the audit record only, and a
+   * `/revoked` outage must not newly break a revoke path that did not depend on
+   * that view before this task. It records `null` -- explicitly "we could not
+   * ask" -- rather than `0`, which would read as "nothing was revoked" and is
+   * the confusion Requirements 14.1/14.2 exist to prevent. The device-scoped
+   * shape's CORRECTNESS dependency on `/revoked` is a separate matter and
+   * propagates through `listLiveCertificates()` above; this count stays advisory
+   * for both shapes, which is why it is read independently even where that reads
+   * the same view twice in one round -- a failing advisory count must not fail an
+   * operation, and a failing resolution must not be masked by a count that
+   * happened to succeed.
+   *
+   * @param {object} payload the parsed operation payload; its shape selects
+   *   which certificate view the resolution runs against.
+   * @returns {Promise<{certificates: Array<object>, revokedViewCountBefore: number|null}>}
+   */
+  async fetchRevokeResolutionInputs(payload) {
+    const deviceScoped = revokePayloadShape(payload) === 'client_uid';
+    const certificatesPromise = deviceScoped
+      ? this.takServerService.listLiveCertificates()
+      : this.takServerService.listCertificates();
+
+    const [certificatesResult, revokedViewCountBefore] = await Promise.all([
+      certificatesPromise.then(
+        (value) => ({ ok: true, value }),
+        (error) => ({ ok: false, error })
+      ),
+      this.countRevokedCertificates()
+    ]);
+
+    if (!certificatesResult.ok) {
+      throw this.classifyTakServerError(
+        certificatesResult.error,
+        deviceScoped
+          ? 'Failed to list TAK Server live certificates'
+          : 'Failed to list TAK Server certificates'
+      );
+    }
+
+    return { certificates: certificatesResult.value, revokedViewCountBefore };
+  }
+
+  /**
+   * Feature device-management, Requirement 12.16 (task 24.3): the size of the
+   * Revoked_Certificate_View, for the audit record's `revokedViewCountBefore`/
+   * `revokedViewCountAfter` -- the two numbers whose difference is what a revoke
+   * actually changed on TAK Server.
+   *
+   * NEVER throws. This is an observability read on both sides of a destructive
+   * action: on the pre-flight side it must not fail an operation that did not
+   * previously depend on `/revoked`, and on the post-flight side the
+   * certificates are already revoked and verified, so failing the operation
+   * there would mark a completed revocation as failed and send the retry back
+   * at a catalog that no longer lists them. A failure records `null`, never
+   * `0`.
+   *
+   * @returns {Promise<number|null>} the view size, or null when it could not be read.
+   */
+  async countRevokedCertificates() {
+    try {
+      const revoked = await this.takServerService.listRevokedCertificates();
+      return Array.isArray(revoked) ? revoked.length : null;
+    } catch (error) {
+      logger.warn(
+        { err: error },
+        'revoke_audit: could not read the Revoked_Certificate_View size; recording null'
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Feature device-management, Requirements 12.1/12.15 (tasks 24.3, 19.3):
+   * resolves a
+   * `revoke_tak_certificates` payload to the shape every rail operates on --
+   * `{ payloadShape, clientUid, targetCertIds, clientUids }` -- so the gates are
+   * written against the RESOLVED set and are shape-agnostic apart from the one
+   * rail (single-`client_uid`) that is deliberately shape-specific.
+   *
+   * Pure and synchronous: it takes the already-fetched catalog, so it makes no
+   * TAK Server call of its own and adding a payload branch here cannot add a
+   * round trip.
+   *
+   * - `tak_usernames` (user-scoped, the three pre-existing call sites): matches
+   *   every certificate whose `creatorDn` matches any payload username via the
+   *   same `matchesCreatorDn` predicate `TakServerService.findCertificatesForUser`
+   *   uses internally -- unchanged behaviour, including that this legitimately
+   *   spans a user's Devices.
+   * - `client_uid` (device-scoped, this feature's per-Device Revoke, task 19.3):
+   *   matches every certificate whose `clientUid` EQUALS the payload's, and
+   *   nothing else. For this shape `certificates` is the Live_Certificate view
+   *   (in `/active`, NOT in `/revoked`), which `fetchRevokeResolutionInputs`
+   *   fetched via `TakServerService.listLiveCertificates()` -- so the target set
+   *   is that Device's live certificates and an already-revoked id is never
+   *   re-targeted (Requirement 12.1).
+   *
+   *   `creatorDn` is deliberately NOT consulted for this shape: distinct Devices
+   *   SHARE a `creatorDn` (one per enrolling user), so `matchesCreatorDn`
+   *   resolved every certificate the user held across all their Devices -- the
+   *   over-revocation Requirements 7.4/8.4/12.1 exist to correct. `clientUid`
+   *   reuse across certificates is the normal case (95 certificates carried 10
+   *   distinct `clientUid`s live, one of them holding 60), so a Device's target
+   *   set is routinely many ids; that breadth is what the blast-radius cap
+   *   bounds, not something to de-duplicate here. `revocationDate` is likewise
+   *   never read (Requirement 12.5): all 95 of those live certificates carried a
+   *   non-null one, so any such check is vacuous.
+   *
+   * `clientUids` collects the resolved certificates' `clientUid`s in the SAME
+   * pass as their ids, since the Device_Table is keyed on `client_uid` while the
+   * Marti revoke API takes cert ids -- so the device rows flipped after a
+   * confirmed revoke correspond exactly to the ids that were revoked, and the
+   * single-`client_uid` rail sees exactly the uids the `DELETE` would touch.
+   * Certificates carrying no usable `clientUid` (an older enrollment, or a
+   * catalog shape without the field) are still revoked; they simply have no
+   * Device_Table row to flip.
+   *
+   * @param {object} payload
+   * @param {Array<object>} certificates the once-fetched TAK Server catalog --
+   *   `listCertificates()` for the user-scoped shape, the Live_Certificates for
+   *   the device-scoped one, per `fetchRevokeResolutionInputs`.
+   * @returns {{payloadShape: string, clientUid: string|null, targetCertIds: Array<number>,
+   *   clientUids: Set<string>, unresolvedReason: string|null}} `unresolvedReason`
+   *   is non-null only for a payload this cannot resolve to a target set at all
+   *   (today: a blank device-scoped `client_uid`), which the caller records and
+   *   refuses permanently rather than resolving into an arbitrary set.
+   */
+  resolveRevokeTargets(payload, certificates) {
+    const clientUids = new Set();
+    const certIds = new Set();
+
+    // The two shapes are mutually exclusive and `validatePayloadSchema`'s
+    // `exactlyOneOf` has already rejected a payload carrying both or neither,
+    // so the discriminator is unambiguous by the time it gets here.
+    if (revokePayloadShape(payload) === 'client_uid') {
+      const targetClientUid = payload.client_uid;
+
+      // A blank `client_uid` is schema-valid (`typeof '' === 'string'`) but
+      // identifies no Device, and matching it against the catalog would select
+      // exactly the certificates carrying NO usable `clientUid` -- certificates
+      // that belong to no Device row at all. Refused as unresolvable rather
+      // than resolved into a target set nobody asked for.
+      if (typeof targetClientUid !== 'string' || targetClientUid.length === 0) {
+        return {
+          payloadShape: 'client_uid',
+          clientUid: targetClientUid,
+          targetCertIds: [],
+          clientUids,
+          unresolvedReason:
+            'the device-scoped payload carries an empty client_uid, which identifies no Device; ' +
+            'refusing rather than issuing a DELETE against an unresolved target set'
+        };
+      }
+
+      for (const cert of certificates) {
+        if (cert.clientUid === targetClientUid) {
+          certIds.add(cert.id);
+          clientUids.add(cert.clientUid);
+        }
+      }
+
+      return {
+        payloadShape: 'client_uid',
+        clientUid: targetClientUid,
+        targetCertIds: sortCertIds(certIds),
+        // Exactly `{ targetClientUid }` when anything matched, empty otherwise:
+        // every id above was selected BY its `clientUid` equalling this one, so
+        // the Device_Table flip after a confirmed revoke can only ever touch the
+        // target Device and no other Device of the same user (Requirement 12.8).
+        clientUids,
+        unresolvedReason: null
+      };
+    }
+
+    for (const takUsername of payload.tak_usernames) {
+      for (const cert of certificates) {
+        if (matchesCreatorDn(cert.creatorDn, takUsername)) {
+          certIds.add(cert.id);
+          if (typeof cert.clientUid === 'string' && cert.clientUid.length > 0) {
+            clientUids.add(cert.clientUid);
+          }
+        }
+      }
+    }
+
+    return {
+      payloadShape: 'tak_usernames',
+      clientUid: null,
+      targetCertIds: sortCertIds(certIds),
+      clientUids,
+      unresolvedReason: null
+    };
+  }
+
+  /**
+   * Feature device-management, Requirements 12.12/12.13 (task 24.3): the shared
+   * tail of every rail abort. Records the refusal against the same audit record
+   * the rails were evaluated on, writes the operation's terminal
+   * permanently-failed state, and RETURNS the error for the caller to throw (so
+   * the abort reads as `throw await this.abortRevoke(...)` at the rail, keeping
+   * the control flow visible at the gate rather than buried in a helper).
+   *
+   * Permanently failed, not retryable, for both rails: a target set spanning
+   * two Devices and a target set over the cap are properties of the resolution,
+   * so the identical operation re-run resolves the identical refused set. The
+   * fix is a corrected resolution or a deliberately raised cap plus a fresh
+   * enqueue -- not 48 retries, each of which would re-fetch the whole TAK
+   * Server catalog to arrive at the same refusal.
+   *
+   * @param {object|null} operation
+   * @param {object} auditRecord the record already logged by rail 1.
+   * @param {{reason: string, details: string}} refusal
+   * @returns {Promise<RevokeRailAbortError>} the error to throw.
+   */
+  async abortRevoke(operation, auditRecord, { reason, details }) {
+    logger.error(
+      {
+        operationId: auditRecord.operationId,
+        payloadShape: auditRecord.payloadShape,
+        clientUid: auditRecord.clientUid,
+        resolvedClientUids: auditRecord.resolvedClientUids,
+        targetCertCount: auditRecord.targetCertCount,
+        targetCertIdsDigest: auditRecord.targetCertIdsDigest,
+        capLimit: auditRecord.capLimit,
+        reason,
+        details,
+        revokedFlagFlipped: false
+      },
+      'revoke_abort: refused before issuing any DELETE'
+    );
+
+    if (!operation) {
+      return new RevokeRailAbortError(`${reason}: ${details}`, { alreadyHandled: false });
+    }
+
+    await this.markPermanentlyFailed(operation, {
+      reason,
+      details,
+      failureCategory: 'permanent'
+    });
+
+    return new RevokeRailAbortError(`${reason}: ${details}`);
+  }
+
+  /**
+   * Feature device-management, Requirement 7.6/8.7 (task 9.1): flips the
+   * Device_Table `revoked` flag for the given `client_uid`s after a confirmed
+   * certificate revocation.
+   *
+   * Gated on `isDeviceMgmtEnabled()` (Requirement 9.5): WHILE the feature is
+   * off there is no Device_Table data to maintain, so no write is issued and
+   * the revoke handler behaves exactly as it did before this feature.
+   *
+   * A failure of this update NEVER fails the operation. The success semantics
+   * of `revoke_tak_certificates` stay driven entirely by
+   * `revokeCertificates`' verification: the certificates ARE revoked on TAK
+   * Server at this point, and throwing here would both mark a successful
+   * revocation as failed and cause the retry to re-run the whole handler
+   * against certificates that no longer appear in the (already-revoked)
+   * catalog. The stale `revoked = false` flag is a display-only inaccuracy
+   * that the Device_Sync self-heals, and it is genuinely transient: the next
+   * completed sync finds no Live_Certificate for that `clientUid` -- every
+   * certificate carrying it is now in the Revoked_Certificate_View -- so the
+   * uid is absent from that run's Live_Device_Set and the row is DELETED
+   * (Requirements 17.1, 17.7). So the error is logged and swallowed.
+   *
+   * That swallow used to be justified by a different, WRONG claim, corrected
+   * here in place: "a revoked certificate drops out of the Active_Certificate
+   * view, so the row stops being refreshed". Both halves were false. A revoked
+   * certificate does NOT drop out of `/active` -- verified live, 90 of the 95
+   * certificates that view returned also appeared in `/revoked`, which is why
+   * the live set must be computed as the difference between the two views
+   * (Requirement 11.2) -- and nothing ever consumed the resulting staleness:
+   * `last_polled_at` is sync bookkeeping, not a visibility input, and
+   * `DeviceManagementService.listOwnDevices` has no freshness or `revoked`
+   * predicate (Requirement 17.8). Deletion by the sync, not a row going stale,
+   * is what makes the flag's inaccuracy short-lived.
+   *
+   * @param {Set<string>|Array<string>} clientUids the `clientUid`s of the
+   *   confirmed-revoked certificates.
+   * @returns {Promise<number>} the number of Device_Table rows updated (0 when
+   *   the feature is disabled, when no matched certificate carried a
+   *   `clientUid`, when no matching row exists, or when the update failed).
+   */
+  async markDevicesRevoked(clientUids) {
+    if (!isDeviceMgmtEnabled()) return 0;
+
+    const uids = Array.from(clientUids);
+    if (uids.length === 0) return 0;
+
+    try {
+      const result = await this.pool.query(
+        `UPDATE tak_devices
+            SET revoked = true
+          WHERE client_uid = ANY($1::text[])`,
+        [uids]
+      );
+
+      const updated = result.rowCount || 0;
+      logger.debug(
+        { clientUids: uids, updated },
+        'Marked device(s) revoked after confirmed certificate revocation'
+      );
+
+      return updated;
+    } catch (error) {
+      // Deliberately non-fatal: see this method's doc comment.
+      logger.error(
+        { err: error, clientUids: uids },
+        'Failed to mark device(s) revoked after confirmed certificate revocation; ' +
+          'the certificate revocation itself succeeded'
+      );
+      return 0;
     }
   }
 

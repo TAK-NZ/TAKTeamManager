@@ -2,6 +2,8 @@ import { Routes, Route, Navigate } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import { authAPI, configAPI } from './services/api'
 import { isPublicOnlyPath } from './utils/publicPaths'
+import { setDisplayTimezone } from './utils/dateFormat'
+import { setExpiryWarningDays } from './utils/expiryWarning'
 import { ThemeProvider } from './contexts/ThemeContext'
 import Layout from './components/Layout'
 import Dashboard from './pages/Dashboard'
@@ -29,6 +31,56 @@ function App() {
   }
 
   useEffect(() => {
+    // Install the operator-configured presentation values -- the display
+    // timezone (Requirements 18.7, 18.11) and the certificate-expiry
+    // warning threshold (Requirement 21.7). Both are Presentation_Config
+    // keys on the same public-config response, both are installed as module
+    // state that no React render depends on, and both have to be in force
+    // before the first row of any surface renders, so they are installed
+    // together here rather than each from whichever page happened to read
+    // the config first. (The threshold previously rode along with
+    // `Dashboard.jsx`'s own public-config read, which meant a client
+    // landing directly on `/users` -- never mounting the Dashboard --
+    // classified expiry at the 30-day default.)
+    //
+    // This fetch is issued FIRST and unconditionally -- ahead of the
+    // public-only early return and ahead of the session check -- for two
+    // reasons:
+    //
+    //  * It has to run regardless of session state. The OTHER
+    //    `configAPI.getPublic()` call in this effect sits inside the
+    //    `authAPI.getProfile()` REJECTION branch (the unauthenticated
+    //    auto-login path, where it reads `authentik_origin`), so a user
+    //    with a valid session never reaches it. It cannot serve as an
+    //    app-wide install point. The promise is shared with that branch
+    //    below so the unauthenticated path still issues just one request.
+    //  * `setDisplayTimezone` and `setExpiryWarningDays` mutate module
+    //    variables in `utils/dateFormat.js` and `utils/expiryWarning.js`.
+    //    React does not re-render anything because of that, so both values
+    //    have to be in place BEFORE the first date or device row renders
+    //    rather than corrected afterwards. Firing here puts the request in
+    //    flight in the same tick as the `GET /auth/me` the startup gate
+    //    below already waits on, so it resolves inside that gate -- while
+    //    the only thing on screen is the spinner -- and the first date the
+    //    interface renders is already in the configured zone.
+    //
+    // The gate is deliberately NOT chained onto this promise: a slow or
+    // unreachable public config must not hold the interface back. A
+    // failure is swallowed, and each installer's own handling of an
+    // unusable value leaves the documented default in force
+    // (`Pacific/Auckland`, 30 days), so a client that never received the
+    // config behaves exactly like one that received the defaults
+    // (Requirements 18.7, 21.7).
+    const publicConfig = configAPI.getPublic()
+    publicConfig
+      .then((response) => {
+        setDisplayTimezone(response.data?.display_timezone)
+        setExpiryWarningDays(response.data?.device_expiry_warning_days)
+      })
+      .catch(() => {
+        // Unreachable config: the Pacific/Auckland and 30-day defaults stand.
+      })
+
     // /request-access must be fully usable by a completely anonymous
     // visitor with no session cookie. Skip the authenticated GET /auth/me
     // check entirely on this path -- calling it here would 401 for every
@@ -66,7 +118,10 @@ function App() {
           return
         }
 
-        configAPI.getPublic()
+        // The same in-flight request the timezone install above started --
+        // reused rather than re-issued so the mount makes one
+        // `GET /config/public` call, not two.
+        publicConfig
           .then((response) => {
             const authentikOrigin = response.data?.authentik_origin
             if (referrer && authentikOrigin && referrer.startsWith(authentikOrigin)) {

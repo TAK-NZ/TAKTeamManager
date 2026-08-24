@@ -203,18 +203,18 @@ export default function GlobalChannels({ user }) {
       items.push(
         <div key={folderPath}>
           <div 
-            className="flex items-center p-3 bg-gray-100 dark:bg-gray-600 rounded-lg cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-500"
+            className="flex items-center p-3 bg-gray-100 dark:bg-gray-800 rounded-lg cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-700"
             onClick={() => toggleFolder(folderPath)}
           >
             <div className="flex items-center flex-1">
               {isExpanded ? (
-                <FolderOpenIcon className="h-5 w-5 text-blue-600 mr-2" />
+                <FolderOpenIcon className="h-5 w-5 text-blue-600 dark:text-blue-400 mr-2" />
               ) : (
-                <FolderIcon className="h-5 w-5 text-blue-600 mr-2" />
+                <FolderIcon className="h-5 w-5 text-blue-600 dark:text-blue-400 mr-2" />
               )}
               <span className="font-medium text-gray-900 dark:text-gray-100">{folderName}</span>
             </div>
-            <ChevronRightIcon className={`h-4 w-4 text-gray-500 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+            <ChevronRightIcon className={`h-4 w-4 text-gray-500 dark:text-gray-300 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
           </div>
         </div>
       );

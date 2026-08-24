@@ -3,7 +3,7 @@ import { CheckIcon, XMarkIcon, ClockIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import { requestsAPI } from '../services/api'
 import OrgInterestRequests from '../components/OrgInterestRequests'
-import { formatDate } from '../utils/dateFormat'
+import FormattedDate, { DATE_PRECISION, TOOLTIP_SIDES } from '../components/FormattedDate'
 
 // Requirement 11.11/11.12: pure helper computing the initial per-request
 // "Callsign Suffix" input value map from a `GET /api/requests/pending`
@@ -227,7 +227,25 @@ export default function Requests({ user }) {
                           <span className="font-medium">Requested By:</span>{' '}
                           {formatPersonName(request.initiated_by_first_name, request.initiated_by_last_name)}
                         </p>
-                        <p><span className="font-medium">Submitted:</span> {formatDate(request.created_at)}</p>
+                        {/* Criteria 2.1/2.3/3.8: the value renders through the one
+                            shared Formatted_Date so it carries the Date_Tooltip,
+                            with the string itself unchanged character for
+                            character. This is a non-table Date_Render_Position --
+                            a `<p>` inside a card -- and it deliberately takes the
+                            same Sideways_Tooltip_Placement as the table cells, so
+                            the application has ONE tooltip behaviour rather than
+                            one per surrounding element type. `fallback=''` is the
+                            Date_Format_Helpers' own default, which is what this
+                            site renders today for an absent or unparseable value. */}
+                        <p>
+                          <span className="font-medium">Submitted:</span>{' '}
+                          <FormattedDate
+                            value={request.created_at}
+                            fallback=""
+                            precision={DATE_PRECISION.DATE}
+                            side={TOOLTIP_SIDES.RIGHT}
+                          />
+                        </p>
                       </div>
 
                       <div className="mt-4">
@@ -246,7 +264,18 @@ export default function Requests({ user }) {
                       <div className="space-y-2 text-sm text-gray-600 dark:text-gray-400">
                         <p><span className="font-medium">Email:</span> {request.requester_email}</p>
                         <p><span className="font-medium">Requested Team:</span> {request.team_path || request.team_name}</p>
-                        <p><span className="font-medium">Submitted:</span> {formatDate(request.created_at)}</p>
+                        {/* The new_account card's own "Submitted" value, the second
+                            of this page's two Date_Render_Position call sites, on
+                            the same terms as the team_change one above. */}
+                        <p>
+                          <span className="font-medium">Submitted:</span>{' '}
+                          <FormattedDate
+                            value={request.created_at}
+                            fallback=""
+                            precision={DATE_PRECISION.DATE}
+                            side={TOOLTIP_SIDES.RIGHT}
+                          />
+                        </p>
                       </div>
 
                       <div className="mt-4">

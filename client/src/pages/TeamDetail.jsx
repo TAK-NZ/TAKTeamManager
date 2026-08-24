@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import React from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { PlusIcon, UsersIcon, UserPlusIcon, ShieldCheckIcon, BuildingOfficeIcon, FolderPlusIcon, HashtagIcon, XMarkIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, TrashIcon, PencilIcon, CheckIcon, ArrowLeftOnRectangleIcon, EnvelopeIcon, ArrowRightCircleIcon, ArrowPathIcon } from '@heroicons/react/24/outline'
+import { PlusIcon, UsersIcon, UserPlusIcon, ShieldCheckIcon, BuildingOfficeIcon, FolderPlusIcon, HashtagIcon, XMarkIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, TrashIcon, PencilIcon, CheckIcon, ArrowLeftOnRectangleIcon, EnvelopeIcon, ArrowRightCircleIcon, ArrowPathIcon, DevicePhoneMobileIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import { teamsAPI, channelsAPI, usersAPI, configAPI } from '../services/api'
 import api from '../services/api'
@@ -11,6 +11,7 @@ import TeamFormDialog from '../components/TeamFormDialog'
 import SignupCodeManager from '../components/SignupCodeManager'
 import OrgDomainManager from '../components/OrgDomainManager'
 import TransferMemberDialog from '../components/TransferMemberDialog'
+import UserDevicesModal, { useDeviceManagementEnabled } from '../components/UserDevicesModal'
 import {
   newUserFormReducer,
   initialNewUserFormState,
@@ -352,6 +353,17 @@ export default function TeamDetail({ user, refreshUser }) {
   // when the dialog is closed. Shared between the Members and Team Admins
   // tabs, since at most one transfer dialog is ever open.
   const [transferringMember, setTransferringMember] = useState(null)
+  // Requirement 6.3 (device-management task 15.4): the Member_List row whose
+  // devices action was activated, i.e. the member `UserDevicesModal` is open
+  // for. Null when the modal is closed. Shared between the Members and Team
+  // Admins tabs, since at most one device modal is ever open. This is the
+  // SAME component `Users.jsx` attaches (Requirement 6.4), so the device list
+  // is defined once and reused by both surfaces.
+  const [devicesForMember, setDevicesForMember] = useState(null)
+  // The device surfaces exist only WHILE the server-side DEVICE_MGMT_ENABLED
+  // flag is on, and that flag is never exposed through /api/config/public
+  // (Requirement 1.4), so the affordance is gated on the reachability probe.
+  const devicesEnabled = useDeviceManagementEnabled()
 
   const handleCreateSubTeam = async (e) => {
     e.preventDefault()
@@ -1312,6 +1324,24 @@ export default function TeamDetail({ user, refreshUser }) {
                             >
                               <ArrowRightCircleIcon className="h-4 w-4" aria-hidden="true" />
                             </button>
+                            {/* Requirement 6.3: opens the shared
+                                UserDevicesModal for this member. `member.id`
+                                is the LOCAL `users.id`, which is what the
+                                device route is keyed on. Whether the caller
+                                may see this member's devices is the server's
+                                call (403 when the member is not a
+                                Managed_User of the caller), shown inside the
+                                modal. */}
+                            {devicesEnabled && (
+                              <button
+                                onClick={() => setDevicesForMember(member)}
+                                className="text-gray-600 hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300"
+                                title="View member devices"
+                                aria-label="View member devices"
+                              >
+                                <DevicePhoneMobileIcon className="h-4 w-4" aria-hidden="true" />
+                              </button>
+                            )}
                             {member.inherited_from_team_name ? (
                               <button
                                 onClick={() => handleRemoveUser(member.id, 'member')}
@@ -1438,6 +1468,19 @@ export default function TeamDetail({ user, refreshUser }) {
                             >
                               <ArrowRightCircleIcon className="h-4 w-4" aria-hidden="true" />
                             </button>
+                            {/* Requirement 6.3: same shared UserDevicesModal
+                                as the Members tab above -- one modal, one
+                                state, both tabs. */}
+                            {devicesEnabled && (
+                              <button
+                                onClick={() => setDevicesForMember(admin)}
+                                className="text-gray-600 hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300"
+                                title="View member devices"
+                                aria-label="View member devices"
+                              >
+                                <DevicePhoneMobileIcon className="h-4 w-4" aria-hidden="true" />
+                              </button>
+                            )}
                             {admin.inherited_from_team_name ? (
                               <button
                                 onClick={() => handleRemoveUser(admin.id, 'admin')}
@@ -2305,6 +2348,17 @@ export default function TeamDetail({ user, refreshUser }) {
           user={user}
           onClose={() => setTransferringMember(null)}
           onCompleted={handleTransferCompleted}
+        />
+      )}
+
+      {/* Requirements 6.3, 6.5: the shared device modal (also attached in
+          Users.jsx -- ONE component, two surfaces). Serves both the Members
+          and Team Admins tabs. */}
+      {devicesForMember && (
+        <UserDevicesModal
+          userId={devicesForMember.id}
+          userName={`${devicesForMember.first_name || ''} ${devicesForMember.last_name || ''}`.trim() || devicesForMember.email}
+          onClose={() => setDevicesForMember(null)}
         />
       )}
 

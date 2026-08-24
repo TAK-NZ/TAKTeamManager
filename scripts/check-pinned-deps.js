@@ -1,11 +1,17 @@
 'use strict';
 
 /**
- * Requirement 20.5 / 20.6: jsonwebtoken, bcryptjs, helmet, and
- * express-rate-limit must be declared in package.json with an exact
- * version (no `^`/`~` range operator), to avoid unreviewed automatic
- * upgrades of these security-sensitive packages. This script fails CI
- * (non-zero exit) if any of them is declared with a `^` or `~` range.
+ * Requirement 20.5 / 20.6: jsonwebtoken, bcryptjs, helmet,
+ * express-rate-limit, and node-forge must be declared in package.json
+ * with an exact version (no `^`/`~` range operator), to avoid
+ * unreviewed automatic upgrades of these security-sensitive packages.
+ * This script fails CI (non-zero exit) if any of them is declared with
+ * a `^` or `~` range.
+ *
+ * node-forge is included per the device-management feature
+ * (Requirements 2.5/2.12): it performs the admin-credential P12->PEM
+ * conversion, so it handles certificate/key material and must not be
+ * upgraded without review.
  *
  * bcryptjs is intentionally allowed to be absent (Requirement 20.7
  * resolved by removing it as an unused dependency); absence is treated
@@ -20,11 +26,11 @@ const path = require('path');
 const PACKAGE_JSON_PATH = path.join(__dirname, '..', 'package.json');
 
 // Packages that must use an exact version when present.
-const PINNED_PACKAGES = ['jsonwebtoken', 'bcryptjs', 'helmet', 'express-rate-limit'];
+const PINNED_PACKAGES = ['jsonwebtoken', 'bcryptjs', 'helmet', 'express-rate-limit', 'node-forge'];
 
 // Packages that are required to be present in dependencies (all except
 // bcryptjs, which was intentionally removed as unused per Requirement 20.7).
-const REQUIRED_PACKAGES = ['jsonwebtoken', 'helmet', 'express-rate-limit'];
+const REQUIRED_PACKAGES = ['jsonwebtoken', 'helmet', 'express-rate-limit', 'node-forge'];
 
 function hasRangeOperator(versionString) {
   return versionString.startsWith('^') || versionString.startsWith('~');
@@ -66,7 +72,7 @@ function main() {
     return;
   }
 
-  process.stdout.write('Version-pin lint passed: jsonwebtoken, helmet, and express-rate-limit are exactly pinned; bcryptjs is absent.\n');
+  process.stdout.write(`Version-pin lint passed: ${REQUIRED_PACKAGES.join(', ')} are exactly pinned.\n`);
 }
 
 if (require.main === module) {

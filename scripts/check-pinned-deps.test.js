@@ -14,14 +14,16 @@ const { checkPinnedDeps, hasRangeOperator, PINNED_PACKAGES, REQUIRED_PACKAGES } 
 
 /**
  * A package.json `dependencies` shape where jsonwebtoken/helmet/
- * express-rate-limit are all exactly pinned and bcryptjs is absent --
- * the fully-passing baseline every other test in this file mutates.
+ * express-rate-limit/node-forge are all exactly pinned and bcryptjs is
+ * absent -- the fully-passing baseline every other test in this file
+ * mutates.
  */
 function buildValidDependencies(overrides = {}) {
   return {
     jsonwebtoken: '9.0.3',
     helmet: '7.2.0',
     'express-rate-limit': '7.5.1',
+    'node-forge': '1.4.0',
     ...overrides
   };
 }
@@ -32,7 +34,7 @@ describe('checkPinnedDeps', () => {
     expect(checkPinnedDeps(pkg)).toEqual([]);
   });
 
-  describe.each(['jsonwebtoken', 'helmet', 'express-rate-limit'])('%s', (packageName) => {
+  describe.each(['jsonwebtoken', 'helmet', 'express-rate-limit', 'node-forge'])('%s', (packageName) => {
     it('is reported as a violation when declared with a "^" range', () => {
       const pkg = {
         dependencies: buildValidDependencies({ [packageName]: '^1.0.0' })
@@ -160,9 +162,16 @@ describe('PINNED_PACKAGES / REQUIRED_PACKAGES', () => {
     expect(REQUIRED_PACKAGES).not.toContain('bcryptjs');
   });
 
-  it('REQUIRED_PACKAGES contains exactly jsonwebtoken, helmet, and express-rate-limit', () => {
+  it('REQUIRED_PACKAGES contains exactly jsonwebtoken, helmet, express-rate-limit, and node-forge', () => {
     expect(new Set(REQUIRED_PACKAGES)).toEqual(
-      new Set(['jsonwebtoken', 'helmet', 'express-rate-limit'])
+      new Set(['jsonwebtoken', 'helmet', 'express-rate-limit', 'node-forge'])
     );
+  });
+
+  // node-forge is security-sensitive (it converts the admin credential
+  // P12 to PEM), so it must be both range-checked and required present.
+  it('PINNED_PACKAGES and REQUIRED_PACKAGES both include node-forge', () => {
+    expect(PINNED_PACKAGES).toContain('node-forge');
+    expect(REQUIRED_PACKAGES).toContain('node-forge');
   });
 });

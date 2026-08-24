@@ -1,8 +1,56 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { UserGroupIcon, UsersIcon, ClipboardDocumentListIcon, ArrowUpRightIcon, ArrowDownLeftIcon, ArrowsRightLeftIcon, MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon, InformationCircleIcon, FolderIcon, FolderOpenIcon, ChevronRightIcon as ChevronRightSmall, ChevronDownIcon, ChevronUpIcon, SignalIcon } from '@heroicons/react/24/outline'
-import { teamsAPI, requestsAPI, configAPI, usersAPI, channelsAPI } from '../services/api'
+import { teamsAPI, requestsAPI, configAPI, usersAPI, channelsAPI, deviceManagementAPI } from '../services/api'
 import { buildFolderTree } from '../utils/channelTree'
+import RevokeDeviceDialog from '../components/RevokeDeviceDialog'
+import DeviceListRow, { DeviceListHeader } from '../components/DeviceListRow'
+
+// --- The Visibility_Pause_Pattern (device-management Requirements 19.1-19.3) ---
+//
+// Both auto-refreshing cards on this page ("My Channels" and "My Devices")
+// share this one mechanism rather than each hand-rolling its own timer, so a
+// reader sees one pattern used twice. `startVisibilityPausedRefresh` owns the
+// whole lifecycle: it starts the interval, clears it WHILE the tab is hidden,
+// re-fetches immediately and restarts it WHEN the tab becomes visible again,
+// and returns a teardown that removes BOTH the interval and the listener --
+// so an effect can `return startVisibilityPausedRefresh(fn)` and be sure no
+// timer survives the component (Requirement 19.3).
+//
+// On the interval length: 60000 ms is a UI-CONSISTENCY choice, not a
+// data-freshness one. The server re-polls TAK Server on
+// `DEVICE_MGMT_POLL_INTERVAL_MS` (default 5 minutes) and re-syncs the
+// certificate list on `DEVICE_MGMT_SYNC_INTERVAL_MS` (default 15 minutes), so
+// most device refreshes re-read rows the server has not changed. The device
+// card ticks at 60000 ms because the channel card in the same view already
+// does, NOT because the underlying data moves that fast -- and neither server
+// cadence is tightened to match it (Requirement 19.7).
+const REFRESH_INTERVAL_MS = 60000
+
+function startVisibilityPausedRefresh(refresh) {
+  let intervalId = setInterval(refresh, REFRESH_INTERVAL_MS)
+
+  const handleVisibilityChange = () => {
+    // Always clear before (re)starting: a `visibilitychange` that reports
+    // visible twice in a row would otherwise leave the previous interval
+    // running and double the fetch rate.
+    if (intervalId) {
+      clearInterval(intervalId)
+      intervalId = null
+    }
+    if (!document.hidden) {
+      // Tab became visible again -- refresh immediately, then restart timer.
+      refresh()
+      intervalId = setInterval(refresh, REFRESH_INTERVAL_MS)
+    }
+  }
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+
+  return () => {
+    document.removeEventListener('visibilitychange', handleVisibilityChange)
+    if (intervalId) clearInterval(intervalId)
+  }
+}
 
 export default function Dashboard({ user }) {
   const [stats, setStats] = useState({ requests: 0 })
@@ -15,6 +63,76 @@ export default function Dashboard({ user }) {
   const channelsPerPage = 10
   const [expandedFolders, setExpandedFolders] = useState(new Set())
   const [folderSeparator, setFolderSeparator] = useState(' - ')
+
+  // --- My Devices (device-management spec, Requirement 5) ---
+  //
+  // `DEVICE_MGMT_ENABLED` is deliberately never exposed through
+  // /api/config/public (Requirement 1.4), so the card can't ask "is this
+  // feature on?" up front. `probeEnabled()` uses the self-view itself as the
+  // probe: a 200 means the feature is live AND hands back the device list, so
+  // this needs no second request. A 404 means the flag is off and the card
+  // stays hidden. Anything else is a real failure, which the probe rethrows.
+  const [devicesEnabled, setDevicesEnabled] = useState(false)
+  const [devices, setDevices] = useState([])
+  const [devicesLoading, setDevicesLoading] = useState(true)
+  const [devicesError, setDevicesError] = useState(null)
+  const [deviceToRevoke, setDeviceToRevoke] = useState(null)
+
+  // Serves both the first load and every background refresh (Requirement
+  // 19.1), which is why it never RAISES `devicesLoading` -- it only ever
+  // lowers it in `finally`. A refresh that flipped the spinner back on would
+  // make the card flicker once a minute (Requirement 19.5).
+  //
+  // The 404-vs-failure distinction this relies on is already drawn by
+  // `probeEnabled()`: it RESOLVES `{ enabled: false, devices: [] }` for a 404
+  // (the flag is off server-side) and RETHROWS everything else (network, 5xx,
+  // 401/403). So the two branches below are exactly those two cases, and
+  // nothing here has to inspect a status code.
+  const fetchDevices = useCallback(async () => {
+    try {
+      const { enabled, devices: probedDevices } = await deviceManagementAPI.probeEnabled()
+      setDevicesEnabled(enabled)
+      setDevices(enabled ? probedDevices : [])
+      setDevicesError(null)
+    } catch (error) {
+      // A real failure (5xx, network, 401/403) -- NOT "feature off". The card
+      // stays hidden until the probe has succeeded at least once; once it has,
+      // a later failure shows inline rather than making the card disappear.
+      //
+      // Requirements 19.5, 19.6: this branch deliberately touches NEITHER
+      // `devices` NOR `devicesEnabled`. No `setDevices([])`, so the last
+      // successful list stays rendered and the empty-list message does not
+      // appear; no `setDevicesEnabled(false)`, so a transient failure cannot
+      // make a card that was showing a list disappear. Only the resolved
+      // `enabled: false` above -- i.e. an explicit 404 -- hides it.
+      //
+      // Requirement 19.4: `deviceToRevoke` is likewise untouched, by this
+      // branch and by the success branch. An open RevokeDeviceDialog holds the
+      // Device object it was handed and its own input state, so a refresh that
+      // replaces `devices` with freshly fetched objects leaves the open dialog
+      // and the text typed into it intact. The open Device is deliberately NOT
+      // re-resolved against the new list.
+      console.error('Failed to fetch devices:', error)
+      setDevicesError('Failed to load your devices.')
+    } finally {
+      setDevicesLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchDevices()
+  }, [fetchDevices])
+
+  // Requirements 19.1, 19.2, 19.3: keep the card current on the shared
+  // Visibility_Pause_Pattern. Separate from the first-load effect above so
+  // mounting still performs exactly one fetch -- `startVisibilityPausedRefresh`
+  // only schedules, it does not fetch up front.
+  //
+  // Requirement 19.8 note: the user-details device modal gets NO equivalent
+  // interval. It is a short-lived dialog that already fetches on open and
+  // after a revoke, and a background re-render underneath a stacked
+  // confirmation dialog is disruption rather than freshness.
+  useEffect(() => startVisibilityPausedRefresh(fetchDevices), [fetchDevices])
 
   // Map color names to CSS colors
   const getColorValue = (colorName) => {
@@ -65,6 +183,13 @@ export default function Dashboard({ user }) {
         setColorMappings(colorResponse.data.colorMappings)
         setRoleDescriptions(colorResponse.data.roleDescriptions)
         setFolderSeparator(publicResponse.data.channel_folder_separator || ' - ')
+        // NOTE: the Expiry_Warning_Days threshold (Requirement 21.7) is NOT
+        // installed here. It is installed once in `App.jsx`, beside the
+        // sibling `display_timezone`, so that it is in force before the
+        // first device row of ANY surface renders -- including for a client
+        // that lands directly on /users and never mounts this page.
+        // `folderSeparator` stays page state because the PAGE is its
+        // consumer: it calls `buildFolderTree` itself.
       } catch (error) {
         console.error('Failed to fetch config:', error)
       }
@@ -134,17 +259,17 @@ export default function Dashboard({ user }) {
       if (parentChannel) {
         // Render as expandable channel
         items.push(
-          <div key={folderPath} className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-lg ml-6">
+          <div key={folderPath} className="flex items-center justify-between p-3 bg-gray-100 dark:bg-gray-800 rounded-lg ml-6">
             <div className="flex items-center flex-1">
               <button
                 onClick={() => toggleFolder(folderPath)}
                 className="mr-2 p-1 hover:bg-gray-200 dark:hover:bg-gray-600 rounded"
               >
-                <ChevronRightSmall className={`h-4 w-4 text-gray-500 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+                <ChevronRightSmall className={`h-4 w-4 text-gray-500 dark:text-gray-300 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
               </button>
               <div className="flex-1">
                 <h3 className="font-medium text-gray-900 dark:text-gray-100">{parentChannel.display_name}</h3>
-                <p className="text-sm text-gray-500 dark:text-gray-400">
+                <p className="text-sm text-gray-600 dark:text-gray-400">
                   {parentChannel.description}
                 </p>
               </div>
@@ -194,18 +319,18 @@ export default function Dashboard({ user }) {
         items.push(
           <div key={folderPath}>
             <div 
-              className="flex items-center p-3 bg-gray-100 dark:bg-gray-600 rounded-lg cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-500"
+              className="flex items-center p-3 bg-gray-100 dark:bg-gray-800 rounded-lg cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-700"
               onClick={() => toggleFolder(folderPath)}
             >
               <div className="flex items-center flex-1">
                 {isExpanded ? (
-                  <FolderOpenIcon className="h-5 w-5 text-blue-600 mr-2" />
+                  <FolderOpenIcon className="h-5 w-5 text-blue-600 dark:text-blue-400 mr-2" />
                 ) : (
-                  <FolderIcon className="h-5 w-5 text-blue-600 mr-2" />
+                  <FolderIcon className="h-5 w-5 text-blue-600 dark:text-blue-400 mr-2" />
                 )}
                 <span className="font-medium text-gray-900 dark:text-gray-100">{folderName}</span>
               </div>
-              <ChevronRightSmall className={`h-4 w-4 text-gray-500 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+              <ChevronRightSmall className={`h-4 w-4 text-gray-500 dark:text-gray-300 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
             </div>
           </div>
         )
@@ -373,26 +498,14 @@ export default function Dashboard({ user }) {
     
     window.addEventListener('userAssignmentChanged', handleUserAssignmentChanged)
 
-    // Auto-refresh every 60 seconds, paused when tab is hidden
-    const REFRESH_INTERVAL_MS = 60000
-    let intervalId = setInterval(fetchChannelData, REFRESH_INTERVAL_MS)
-
-    const handleVisibilityChange = () => {
-      if (document.hidden) {
-        clearInterval(intervalId)
-        intervalId = null
-      } else {
-        // Tab became visible again — refresh immediately, then restart timer
-        fetchChannelData()
-        intervalId = setInterval(fetchChannelData, REFRESH_INTERVAL_MS)
-      }
-    }
-    document.addEventListener('visibilitychange', handleVisibilityChange)
+    // Auto-refresh every 60 seconds, paused when the tab is hidden. This is
+    // the same shared mechanism the device card uses -- see
+    // `startVisibilityPausedRefresh` at the top of this file.
+    const stopRefresh = startVisibilityPausedRefresh(fetchChannelData)
 
     return () => {
       window.removeEventListener('userAssignmentChanged', handleUserAssignmentChanged)
-      document.removeEventListener('visibilitychange', handleVisibilityChange)
-      if (intervalId) clearInterval(intervalId)
+      stopRefresh()
     }
   }, [user])
 
@@ -617,6 +730,68 @@ export default function Dashboard({ user }) {
           </>
         )}
       </div>
+
+      {/* My Devices (Requirements 5.1, 5.2, 5.3) -- rendered only when the
+          reachability probe succeeded, i.e. the feature is enabled server-side. */}
+      {devicesEnabled && (
+        <div className="card">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-lg font-medium text-gray-900 dark:text-gray-100">My Devices</h2>
+            <span className="text-sm text-gray-500 dark:text-gray-400">
+              {devices.length} device{devices.length !== 1 ? 's' : ''}
+            </span>
+          </div>
+
+          {devicesError && (
+            <p role="alert" className="text-sm text-red-600 dark:text-red-400 mb-4">
+              {devicesError}
+            </p>
+          )}
+
+          {devicesLoading ? (
+            <div className="text-center py-8">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary-600 mx-auto"></div>
+              <p className="text-gray-500 dark:text-gray-400 mt-2">Loading devices...</p>
+            </div>
+          ) : devices.length === 0 ? (
+            <p className="text-gray-500 dark:text-gray-400 text-center py-8">
+              No devices are enrolled under your name.
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                {/* Requirements 15.6, 16.1-16.6: header and rows both come from
+                    `components/DeviceListRow.jsx`, the single definition this
+                    card shares with the user-details modal -- including the
+                    Device_Type_Icon, the icon-only Revoke action, the "Revoked"
+                    badge, and the "never seen" Last_Seen fallback (Req 5.3). */}
+                <thead className="bg-gray-50 dark:bg-gray-700">
+                  <DeviceListHeader />
+                </thead>
+                <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                  {devices.map((device) => (
+                    <DeviceListRow
+                      key={device.clientUid}
+                      device={device}
+                      onRevoke={setDeviceToRevoke}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Requirements 7.2, 7.3: the shared REVOKE type-in confirmation dialog.
+          No `userId` prop -- that selects the self-service flow. */}
+      {deviceToRevoke && (
+        <RevokeDeviceDialog
+          device={deviceToRevoke}
+          onClose={() => setDeviceToRevoke(null)}
+          onRevoked={fetchDevices}
+        />
+      )}
 
       {/* Quick Actions */}
       {stats.requests > 0 && (

@@ -9,6 +9,11 @@ import Requests, {
 } from './Requests.jsx';
 import Layout from '../components/Layout.jsx';
 import { ThemeProvider } from '../contexts/ThemeContext.jsx';
+import FormattedDate, {
+  DATE_PRECISION,
+  TOOLTIP_SEPARATOR,
+  TOOLTIP_SIDES
+} from '../components/FormattedDate.jsx';
 import { requestsAPI } from '../services/api';
 import { formatDate } from '../utils/dateFormat';
 import toast from 'react-hot-toast';
@@ -496,5 +501,117 @@ describe('Requests page team_change card (mounted)', () => {
     // existing error toast"), so it is asserted as it stands.
     expect(toast.error).toHaveBeenCalledWith('Failed to deny request')
     expect(toast.success).not.toHaveBeenCalled()
+  })
+
+  // ════════════════════════════════════════════════════════════════════════
+  // date-tooltips-and-folder-contrast task 6.7 -- Criteria 2.3, 3.1, 3.5,
+  // 3.7, 3.8, 3.11.
+  //
+  // Both "Submitted" values are NON-TABLE Date_Render_Positions: `<p>`
+  // elements inside cards, not cells inside an `overflow-x-auto` wrapper.
+  // (requirements.md Criterion 3.4 counts eight table cells and names only
+  // Admin's two as non-table; measured, it is six and four, and these are
+  // two of the four -- design.md correction 1.) Criterion 3.8 is what this
+  // block exists for: the surrounding element type must make NO difference
+  // to the placement, so the application has one tooltip behaviour rather
+  // than one per host.
+  //
+  // The text side of Criterion 2.3 is already asserted above, by the
+  // `formatDate(TEAM_CHANGE_REQUEST.created_at)` assertion in the Req 16.1
+  // test -- written before the adoption and reused unchanged.
+  // ════════════════════════════════════════════════════════════════════════
+  describe('both "Submitted" values disclose a Date_Tooltip (task 6.7)', () => {
+    const hostIn = (card) => card.querySelector('span[tabindex="0"]')
+
+    const tooltipFor = (host) => {
+      const id = host && host.getAttribute('aria-describedby')
+      return id ? document.getElementById(id) : null
+    }
+
+    const pointerOver = async (node) => {
+      await act(async () => {
+        node.dispatchEvent(new PointerEvent('pointerover', { bubbles: true }))
+      })
+    }
+
+    it.each([
+      ['team_change', () => teamChangeCard(), TEAM_CHANGE_REQUEST],
+      ['new_account', () => newAccountCard(), NEW_ACCOUNT_REQUEST]
+    ])('opens rightward from left-full/ml-2 on the %s card (Criteria 3.5, 3.8, 3.11)', async (
+      _name,
+      cardOf,
+      request
+    ) => {
+      await mountPage()
+
+      const card = cardOf()
+      const host = hostIn(card)
+      expect(host).not.toBeNull()
+      // The label stays outside the component -- only the VALUE acquires the
+      // disclosure, so the rendered string is unchanged.
+      expect(host.textContent).toBe(formatDate(request.created_at))
+      expect(host.hasAttribute('aria-describedby')).toBe(false)
+
+      await pointerOver(host)
+      const tooltip = tooltipFor(host)
+
+      expect(tooltip).not.toBeNull()
+      expect(tooltip.className).toContain('left-full')
+      expect(tooltip.className).toContain('ml-2')
+      expect(tooltip.className).toContain('top-1/2')
+      expect(tooltip.className).toContain('-translate-y-1/2')
+      expect(tooltip.className).not.toContain('right-full')
+      expect(tooltip.className).not.toContain('mr-2')
+      // Sideways, on a `<p>` host just as on a `<td>` one (Criterion 3.4).
+      expect(card.innerHTML).not.toContain('top-full')
+      expect(card.innerHTML).not.toContain('bottom-full')
+      expect(tooltip.textContent).toContain(TOOLTIP_SEPARATOR)
+    })
+
+    it('carries the SAME placement classes as a table-cell position (Criterion 3.8)', async () => {
+      await mountPage()
+      const cardHost = hostIn(teamChangeCard())
+      await pointerOver(cardHost)
+      const cardTooltipClasses = tooltipFor(cardHost).className
+
+      // The same shared component, the same `side`, hosted the way the six
+      // TABLE positions are hosted: a `<td>` inside the `overflow-x-auto`
+      // wrapper that produced the Tooltip_Clipping_Defect in the first
+      // place. Compared byte for byte rather than by restating a class list,
+      // because a restated list agrees with itself after someone changes the
+      // component.
+      const tableContainer = document.createElement('div')
+      document.body.appendChild(tableContainer)
+      const tableRoot = createRoot(tableContainer)
+      await act(async () => {
+        tableRoot.render(
+          <div className="overflow-x-auto">
+            <table>
+              <tbody>
+                <tr>
+                  <td>
+                    <FormattedDate
+                      value={TEAM_CHANGE_REQUEST.created_at}
+                      fallback=""
+                      precision={DATE_PRECISION.DATE}
+                      side={TOOLTIP_SIDES.RIGHT}
+                    />
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        )
+      })
+      const tableHost = tableContainer.querySelector('span[tabindex="0"]')
+      await pointerOver(tableHost)
+
+      expect(tooltipFor(tableHost).className).toBe(cardTooltipClasses)
+
+      await act(async () => {
+        tableRoot.unmount()
+      })
+      tableContainer.remove()
+    })
   })
 })

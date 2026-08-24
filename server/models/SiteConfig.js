@@ -4,6 +4,14 @@ const { SANITIZE_HTML_OPTIONS } = require('../config/htmlSafeSubset');
 const { MAX_TEAM_DEPTH } = require('../config/constants');
 const { isRecaptchaDisabledForTesting } = require('../middleware/captcha');
 
+/**
+ * Default Expiry_Warning_Days: how far ahead of a certificate's `expires_at`
+ * the Client draws an Imminent_Expiry. Used when
+ * `DEVICE_MGMT_EXPIRY_WARNING_DAYS` is unset, empty, non-numeric, zero or
+ * negative (Requirement 21.1).
+ */
+const DEFAULT_EXPIRY_WARNING_DAYS = 30;
+
 class SiteConfig {
   static async getAll() {
     const result = await pool.query('SELECT * FROM site_config ORDER BY config_key');
@@ -107,6 +115,62 @@ class SiteConfig {
     // circular require between the two modules.
     const { TAK_ROLE_VALUES } = require('../routes/settings');
     config.takRoleValues = TAK_ROLE_VALUES;
+
+    // ---- Presentation_Config keys (Requirements 18.5, 18.6, 21.7) ----
+    //
+    // The two keys below exist ONLY so the Client can draw something the way
+    // an operator configured it. They are deliberately here, and one of them
+    // is deliberately named after a device-management environment variable.
+    //
+    // If you arrived at `device_expiry_warning_days` looking for a leak:
+    // `DEVICE_MGMT_ENABLED` and `DEVICE_MGMT_REVOKE_ENABLED` are NOT here and
+    // must never be added (Requirements 1.4, 12.9, 18.6). The distinction is
+    // the whole reason these two are safe and those two are not negotiable:
+    //
+    //   - A display timezone and an expiry-highlight threshold are
+    //     presentation. They carry no security meaning, arm no capability,
+    //     and are useless on the server -- nothing server-side branches on
+    //     either. The client that renders the dates is the only consumer, so
+    //     the value has to reach it somehow, and this endpoint is that
+    //     "somehow".
+    //   - `DEVICE_MGMT_ENABLED` / `DEVICE_MGMT_REVOKE_ENABLED` describe the
+    //     ARMING STATE OF A DESTRUCTIVE CAPABILITY. An unauthenticated caller
+    //     has no business reading whether certificate revocation is live, and
+    //     a client that could read the flag would branch on it instead of on
+    //     the server's own 403/404. Feature discovery keeps using the
+    //     self-view reachability probe, not a config key.
+    //
+    // So: presentation values may be exposed; capability-arming flags may
+    // not. Adding a Presentation_Config key is not a precedent for exposing
+    // the flags, and `server/models/SiteConfig.test.js` asserts their
+    // continued absence.
+
+    // Display_Timezone (Requirements 18.1, 18.5): the zone the Client's
+    // shared Date_Format_Helpers (`client/src/utils/dateFormat.js`) compute
+    // every user-visible date's wall-clock components in -- app-wide, not
+    // just on device-management surfaces. Presentation only: stored, logged
+    // and API-transported timestamps stay ISO-8601/UTC and are not converted
+    // (Requirement 18.12). A client that never receives this key falls back
+    // to the same `Pacific/Auckland` literal (Requirement 18.7).
+    config.display_timezone = process.env.DISPLAY_TIMEZONE || 'Pacific/Auckland';
+
+    // Expiry_Warning_Days (Requirements 21.1, 21.7): how many days ahead of a
+    // certificate's `expires_at` the Client starts drawing it as an imminent
+    // expiry. Resolved with the `parseInt(...) || <default>` discipline
+    // `getRevokeMaxCerts()` follows in `server/config/deviceMgmt.js`, plus an
+    // explicit positive-integer guard: unset, empty, non-numeric and zero all
+    // fall through the `||`, and a NEGATIVE value is caught by the `> 0`
+    // check, so all four cases yield 30 as Requirement 21.1 requires.
+    // (`getRevokeMaxCerts` clamps with `Math.max(1, ...)` instead, which
+    // would turn a negative into 1 -- correct for a blast-radius cap that
+    // must stay usable, wrong for a threshold whose documented default is
+    // 30.) Presentation only: nothing server-side reads this, and the read
+    // path gained no expiry predicate (Requirement 21.9).
+    const parsedExpiryWarningDays =
+      parseInt(process.env.DEVICE_MGMT_EXPIRY_WARNING_DAYS, 10) || DEFAULT_EXPIRY_WARNING_DAYS;
+    config.device_expiry_warning_days = parsedExpiryWarningDays > 0
+      ? parsedExpiryWarningDays
+      : DEFAULT_EXPIRY_WARNING_DAYS;
 
     return config;
   }

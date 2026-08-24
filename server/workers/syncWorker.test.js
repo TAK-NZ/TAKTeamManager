@@ -557,11 +557,38 @@ describe('Property 3: Payload validation failures never schedule a retry', () =>
     }
   }
 
+  // Feature device-management (task 19.2): a schema entry may declare
+  // `exactlyOneOf` -- mutually exclusive discriminators of which a valid
+  // payload carries exactly one. The FIRST declared discriminator is the
+  // one a valid baseline payload carries here (adding all of them, or none,
+  // would make the baseline itself invalid), and it is corruptible in the
+  // same missing/wrongType sense as a required field: deleting it leaves
+  // zero discriminators present, and mistyping it fails the type check.
+  function discriminatorFieldFor(operationType) {
+    const schema = operationSchemas[operationType];
+    if (!schema.exactlyOneOf) {
+      return null;
+    }
+    return Object.keys(schema.exactlyOneOf)[0];
+  }
+
+  function expectedTypeForCorruptibleField(operationType, field) {
+    const schema = operationSchemas[operationType];
+    if (schema.requiredFields && schema.requiredFields[field] !== undefined) {
+      return schema.requiredFields[field];
+    }
+    return schema.exactlyOneOf[field];
+  }
+
   function buildValidPayload(operationType) {
     const schema = operationSchemas[operationType];
     const payload = {};
     for (const [field, type] of Object.entries(schema.requiredFields || {})) {
       payload[field] = validValueForType(type);
+    }
+    const discriminatorField = discriminatorFieldFor(operationType);
+    if (discriminatorField !== null) {
+      payload[discriminatorField] = validValueForType(schema.exactlyOneOf[discriminatorField]);
     }
     for (const [field, type] of Object.entries(schema.optionalFields || {})) {
       payload[field] = validValueForType(type);
@@ -576,9 +603,13 @@ describe('Property 3: Payload validation failures never schedule a retry', () =>
     .tuple(fc.constantFrom(...operationTypes), fc.nat(), fc.constantFrom('missing', 'wrongType'))
     .map(([operationType, fieldIndexSeed, corruption]) => {
       const schema = operationSchemas[operationType];
-      const requiredFieldNames = Object.keys(schema.requiredFields);
-      const targetField = requiredFieldNames[fieldIndexSeed % requiredFieldNames.length];
-      const expectedType = schema.requiredFields[targetField];
+      const discriminatorField = discriminatorFieldFor(operationType);
+      const corruptibleFieldNames = [
+        ...Object.keys(schema.requiredFields || {}),
+        ...(discriminatorField !== null ? [discriminatorField] : [])
+      ];
+      const targetField = corruptibleFieldNames[fieldIndexSeed % corruptibleFieldNames.length];
+      const expectedType = expectedTypeForCorruptibleField(operationType, targetField);
 
       const payload = buildValidPayload(operationType);
       if (corruption === 'missing') {
@@ -1693,7 +1724,10 @@ describe('SyncWorker Authentik failure classification wiring', () => {
 
     it('treats a 404 on an individual remove_user call as a no-op and continues to the next member', async () => {
       let callCount = 0;
-      global.fetch = jest.fn().mockImplementation((url, options) => {
+      // Sequenced on call ORDER alone, so neither `url` nor `options` is read
+      // here -- declared params would both be unused, and this file's other
+      // order-only fetch doubles take none either.
+      global.fetch = jest.fn().mockImplementation(() => {
         callCount += 1;
         if (callCount === 1) {
           return Promise.resolve({
@@ -2315,9 +2349,18 @@ describe('SyncWorker RetentionCleanupJob wiring', () => {
  */
 describe('SyncWorker.revokeTakCertificates', () => {
   let worker;
+  // Feature device-management, Requirement 12.11 (task 24.3): a `DELETE` is now
+  // issued ONLY while Revoke_Enabled is armed -- disarmed, every one of these
+  // operations would complete as a successful Revoke_Dry_Run with no `DELETE`
+  // at all. That gate applies to the user-scoped shape these Requirement 26.8
+  // tests use as much as to the device-scoped one (Requirement 12.15), so the
+  // flag is armed for the whole block; the rails' own behaviour is covered by
+  // task 24.4's dedicated block.
+  const originalRevokeFlag = process.env.DEVICE_MGMT_REVOKE_ENABLED;
 
   beforeEach(() => {
     jest.clearAllMocks();
+    process.env.DEVICE_MGMT_REVOKE_ENABLED = 'true';
     worker = new SyncWorker();
     worker.pool.query = jest.fn().mockResolvedValue({ rows: [] });
     // Requirement 26.3/26.4/26.5: replace the real TakServerService
@@ -2327,8 +2370,21 @@ describe('SyncWorker.revokeTakCertificates', () => {
     // calls.
     worker.takServerService = {
       listCertificates: jest.fn(),
+      // Requirement 12.16 (task 24.3): the audit record's pre/post
+      // Revoked_Certificate_View counts. A never-throwing advisory read, so a
+      // mock that omitted it would record `null` rather than fail -- it is
+      // stubbed here so the counts in the audit record are real values.
+      listRevokedCertificates: jest.fn().mockResolvedValue([]),
       revokeCertificates: jest.fn()
     };
+  });
+
+  afterEach(() => {
+    if (originalRevokeFlag === undefined) {
+      delete process.env.DEVICE_MGMT_REVOKE_ENABLED;
+    } else {
+      process.env.DEVICE_MGMT_REVOKE_ENABLED = originalRevokeFlag;
+    }
   });
 
   const baseOperation = {
@@ -2959,4 +3015,1290 @@ describe('Property 7: Create/update attribute idempotence', () => {
       });
     }
   );
+});
+
+/**
+ * Feature device-management (task 8.3): `SyncWorker`'s wiring of the
+ * Admin_Credential_Loader and the three scheduled device-management jobs.
+ *
+ * Two things are asserted here:
+ *
+ * 1. Requirements 1.5/1.6/1.7/9.5: `start()` starts
+ *    `adminCredentialRefreshJob`/`subscriptionPoller`/`deviceSync` ONLY when
+ *    `isDeviceMgmtEnabled()` is true, and `stop()` stops all three
+ *    unconditionally. The flag is driven through the real
+ *    `DEVICE_MGMT_ENABLED` env var (rather than by mocking
+ *    `../config/deviceMgmt`) because `isDeviceMgmtEnabled(env = process.env)`
+ *    reads the environment on every call, so the production predicate itself
+ *    stays in the loop. Requirement 9.5's all-or-nothing rule is asserted as a
+ *    property of each case: either all three jobs started, or none did --
+ *    never a partial mix.
+ * 2. Requirement 2.8: the `revoke_tak_certificates` handler and the three jobs
+ *    share ONE `TakServerService` instance, with ONE
+ *    `AdminCredentialLoader` attached to it, so a rotated Admin_Credential
+ *    applies to revocation and device management alike without a restart.
+ *
+ * The `start()`-driving stubs mirror the existing `ExpiryScheduler`/
+ * `RetentionCleanupJob` wiring tests above: the poll loop is a `while
+ * (this.isRunning)` loop, so `sleep` is stubbed to clear `isRunning` and let
+ * `start()` resolve after exactly one cycle.
+ */
+describe('SyncWorker device-management job wiring', () => {
+  let worker;
+  const originalFlag = process.env.DEVICE_MGMT_ENABLED;
+  const originalRevokeFlag = process.env.DEVICE_MGMT_REVOKE_ENABLED;
+
+  // Stubs every non-device-management collaborator `start()` touches, and
+  // makes the poll loop run exactly one cycle.
+  function stubStartLoop(w) {
+    w.processNextOperation = jest.fn().mockResolvedValue();
+    w.updateHeartbeat = jest.fn().mockResolvedValue();
+    w.startHealthServer = jest.fn();
+    w.stopHealthServer = jest.fn().mockResolvedValue();
+    w.expiryScheduler = { start: jest.fn(), stop: jest.fn() };
+    w.retentionCleanupJob = { start: jest.fn(), stop: jest.fn() };
+    w.sleep = jest.fn().mockImplementation(() => {
+      w.isRunning = false;
+      return Promise.resolve();
+    });
+  }
+
+  // Replaces the three real jobs with start/stop spies, so no real timer,
+  // secret read, or Marti call can occur in these tests.
+  function stubDeviceJobs(w) {
+    w.adminCredentialRefreshJob = { start: jest.fn(), stop: jest.fn() };
+    w.subscriptionPoller = { start: jest.fn(), stop: jest.fn() };
+    w.deviceSync = { start: jest.fn(), stop: jest.fn() };
+  }
+
+  function deviceJobStartCounts(w) {
+    return [
+      w.adminCredentialRefreshJob.start.mock.calls.length,
+      w.subscriptionPoller.start.mock.calls.length,
+      w.deviceSync.start.mock.calls.length
+    ];
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    worker = new SyncWorker();
+    worker.pool.query = jest.fn().mockResolvedValue({ rows: [] });
+  });
+
+  afterEach(() => {
+    if (originalFlag === undefined) {
+      delete process.env.DEVICE_MGMT_ENABLED;
+    } else {
+      process.env.DEVICE_MGMT_ENABLED = originalFlag;
+    }
+    if (originalRevokeFlag === undefined) {
+      delete process.env.DEVICE_MGMT_REVOKE_ENABLED;
+    } else {
+      process.env.DEVICE_MGMT_REVOKE_ENABLED = originalRevokeFlag;
+    }
+  });
+
+  it('constructs the Admin_Credential_Loader and the three jobs with start/stop (2.8)', () => {
+    expect(worker.adminCredentialLoader).toBeDefined();
+    for (const job of [worker.adminCredentialRefreshJob, worker.subscriptionPoller, worker.deviceSync]) {
+      expect(job).toBeDefined();
+      expect(typeof job.start).toBe('function');
+      expect(typeof job.stop).toBe('function');
+    }
+  });
+
+  it('gives the loader and all three jobs the SAME shared TakServerService/loader instance (2.8)', () => {
+    // One service, shared by the Loader, the poller, and the sync.
+    expect(worker.adminCredentialLoader.takServerService).toBe(worker.takServerService);
+    expect(worker.subscriptionPoller.takServerService).toBe(worker.takServerService);
+    expect(worker.deviceSync.takServerService).toBe(worker.takServerService);
+
+    // One Loader, registered on that service (so `refreshAgent()` pulls the
+    // rotated credential from it) and driven by the refresh job.
+    expect(worker.takServerService.credentialLoader).toBe(worker.adminCredentialLoader);
+    expect(worker.adminCredentialRefreshJob.loader).toBe(worker.adminCredentialLoader);
+  });
+
+  it('routes the revoke_tak_certificates handler through that same shared TakServerService instance (2.8)', async () => {
+    // Stub the Marti calls via the POLLER's reference to the service. If the
+    // revoke handler used its own separate instance, these spies would never
+    // be called.
+    const sharedService = worker.subscriptionPoller.takServerService;
+    sharedService.listCertificates = jest.fn().mockResolvedValue([
+      { id: 1, creatorDn: 'CN=alice,OU=TAK-NZ', clientUid: 'uid-1' }
+    ]);
+    sharedService.listRevokedCertificates = jest.fn().mockResolvedValue([]);
+    sharedService.revokeCertificates = jest.fn().mockResolvedValue({ success: true });
+
+    // Feature device-management, Requirement 12.11 (task 24.3): armed, or the
+    // handler would complete as a dry-run and never reach `revokeCertificates`
+    // on any service instance, shared or not.
+    process.env.DEVICE_MGMT_REVOKE_ENABLED = 'true';
+
+    await worker.revokeTakCertificates({ tak_usernames: ['alice'] });
+
+    expect(sharedService.listCertificates).toHaveBeenCalledTimes(1);
+    expect(sharedService.revokeCertificates).toHaveBeenCalledWith([1]);
+  });
+
+  it('start() starts all three device-management jobs when DEVICE_MGMT_ENABLED is true (1.5, 1.6, 1.7)', async () => {
+    process.env.DEVICE_MGMT_ENABLED = 'true';
+    stubStartLoop(worker);
+    stubDeviceJobs(worker);
+
+    await worker.start();
+
+    expect(deviceJobStartCounts(worker)).toEqual([1, 1, 1]);
+  });
+
+  it('start() starts the credential refresh job BEFORE the poller and the sync, so the credential is loaded before their first tick', async () => {
+    process.env.DEVICE_MGMT_ENABLED = 'true';
+    stubStartLoop(worker);
+    stubDeviceJobs(worker);
+
+    await worker.start();
+
+    const [refreshOrder] = worker.adminCredentialRefreshJob.start.mock.invocationCallOrder;
+    const [pollerOrder] = worker.subscriptionPoller.start.mock.invocationCallOrder;
+    const [syncOrder] = worker.deviceSync.start.mock.invocationCallOrder;
+
+    expect(refreshOrder).toBeLessThan(pollerOrder);
+    expect(refreshOrder).toBeLessThan(syncOrder);
+  });
+
+  it.each([
+    ['false', 'false'],
+    ['unset', undefined],
+    ['a non-exact truthy-looking value (TRUE)', 'TRUE'],
+    ['1', '1']
+  ])(
+    'start() starts NONE of the three device-management jobs when DEVICE_MGMT_ENABLED is %s (1.5, 1.6, 1.7, 9.5)',
+    async (_label, flagValue) => {
+      if (flagValue === undefined) {
+        delete process.env.DEVICE_MGMT_ENABLED;
+      } else {
+        process.env.DEVICE_MGMT_ENABLED = flagValue;
+      }
+      stubStartLoop(worker);
+      stubDeviceJobs(worker);
+
+      await worker.start();
+
+      // All-or-nothing (9.5): none started, never a partial mix.
+      expect(deviceJobStartCounts(worker)).toEqual([0, 0, 0]);
+      // The non-device schedulers are unaffected by the flag.
+      expect(worker.expiryScheduler.start).toHaveBeenCalledTimes(1);
+      expect(worker.retentionCleanupJob.start).toHaveBeenCalledTimes(1);
+    }
+  );
+
+  it('stop() stops all three device-management jobs when the flag is true', async () => {
+    process.env.DEVICE_MGMT_ENABLED = 'true';
+    stubStartLoop(worker);
+    stubDeviceJobs(worker);
+
+    await worker.stop();
+
+    expect(worker.adminCredentialRefreshJob.stop).toHaveBeenCalledTimes(1);
+    expect(worker.subscriptionPoller.stop).toHaveBeenCalledTimes(1);
+    expect(worker.deviceSync.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('stop() stops all three device-management jobs UNCONDITIONALLY, even when the flag is off and they were never started', async () => {
+    process.env.DEVICE_MGMT_ENABLED = 'false';
+    stubStartLoop(worker);
+    stubDeviceJobs(worker);
+
+    await worker.stop();
+
+    expect(worker.adminCredentialRefreshJob.stop).toHaveBeenCalledTimes(1);
+    expect(worker.subscriptionPoller.stop).toHaveBeenCalledTimes(1);
+    expect(worker.deviceSync.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves no live device-management timer behind after a flag-on start()/stop() cycle, using the REAL jobs', async () => {
+    process.env.DEVICE_MGMT_ENABLED = 'true';
+    stubStartLoop(worker);
+    // Deliberately NOT stubbing the jobs here: this exercises the real
+    // start()/stop() timer lifecycle. Their immediate-first-run work is
+    // neutralised so no secret read or Marti call is attempted.
+    worker.adminCredentialLoader.refresh = jest.fn().mockResolvedValue(undefined);
+    worker.subscriptionPoller.run = jest.fn().mockResolvedValue(undefined);
+    worker.deviceSync.run = jest.fn().mockResolvedValue(undefined);
+
+    await worker.start();
+
+    expect(worker.adminCredentialRefreshJob.timer).not.toBeNull();
+    expect(worker.subscriptionPoller.timer).not.toBeNull();
+    expect(worker.deviceSync.timer).not.toBeNull();
+
+    await worker.stop();
+
+    expect(worker.adminCredentialRefreshJob.timer).toBeNull();
+    expect(worker.subscriptionPoller.timer).toBeNull();
+    expect(worker.deviceSync.timer).toBeNull();
+  });
+});
+
+/**
+ * Feature device-management (task 9.2): the Device_Table `revoked` flag flip
+ * that `revokeTakCertificates` performs via `markDevicesRevoked`.
+ *
+ * Requirements 7.6/8.7: the flag is flipped for the matched certificates'
+ * `client_uid`s ONLY once TAK Server has CONFIRMED the revocation -- i.e. only
+ * past `revokeCertificates`' verify-before-success check. Every path that does
+ * not reach a confirmed success (no matching certificate, an unverified
+ * `{success: false}` result, a thrown Marti error) must leave the Device_Table
+ * untouched.
+ *
+ * Requirement 9.5: WHILE `isDeviceMgmtEnabled()` is false nothing is flipped at
+ * all -- the handler behaves exactly as it did before this feature, issuing no
+ * `tak_devices` write even on a confirmed-success revoke.
+ *
+ * As in the wiring block above, the flag is driven through the real
+ * `DEVICE_MGMT_ENABLED` env var (restored in `afterEach`) so the production
+ * `isDeviceMgmtEnabled()` predicate stays in the loop, and `worker.pool.query`
+ * is a spy that these tests scan for the `UPDATE tak_devices` statement.
+ */
+describe('SyncWorker.revokeTakCertificates Device_Table revoked flag (7.6, 8.7, 9.5)', () => {
+  let worker;
+  const originalFlag = process.env.DEVICE_MGMT_ENABLED;
+  const originalRevokeFlag = process.env.DEVICE_MGMT_REVOKE_ENABLED;
+
+  // The `UPDATE tak_devices SET revoked = true` call, if it was issued at all.
+  function findRevokeUpdateCall(w) {
+    return w.pool.query.mock.calls.find(
+      ([sql]) =>
+        typeof sql === 'string' && sql.includes('tak_devices') && sql.includes('revoked = true')
+    );
+  }
+
+  function makeCert(overrides = {}) {
+    return {
+      id: 1,
+      creatorDn: 'CN=alice,OU=TAK-NZ',
+      clientUid: 'uid-alice-1',
+      revocationDate: null,
+      ...overrides
+    };
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // Feature device-management, Requirements 12.9/12.11 (task 24.3): armed for
+    // the whole block, INDEPENDENTLY of `DEVICE_MGMT_ENABLED` -- which is what
+    // lets the `it.each` below still assert that a confirmed revoke happens
+    // while `DEVICE_MGMT_ENABLED` is off and only the `tak_devices` flip is
+    // suppressed. Disarmed, no `DELETE` would be issued at all.
+    process.env.DEVICE_MGMT_REVOKE_ENABLED = 'true';
+    worker = new SyncWorker();
+    worker.pool.query = jest.fn().mockResolvedValue({ rows: [], rowCount: 1 });
+    worker.takServerService = {
+      listCertificates: jest.fn(),
+      listRevokedCertificates: jest.fn().mockResolvedValue([]),
+      revokeCertificates: jest.fn()
+    };
+  });
+
+  afterEach(() => {
+    if (originalFlag === undefined) {
+      delete process.env.DEVICE_MGMT_ENABLED;
+    } else {
+      process.env.DEVICE_MGMT_ENABLED = originalFlag;
+    }
+    if (originalRevokeFlag === undefined) {
+      delete process.env.DEVICE_MGMT_REVOKE_ENABLED;
+    } else {
+      process.env.DEVICE_MGMT_REVOKE_ENABLED = originalRevokeFlag;
+    }
+  });
+
+  it('sets revoked = true for exactly the matched devices after a confirmed-success revoke (7.6, 8.7)', async () => {
+    process.env.DEVICE_MGMT_ENABLED = 'true';
+    worker.takServerService.listCertificates.mockResolvedValue([
+      makeCert({ id: 1, creatorDn: 'CN=alice,OU=TAK-NZ', clientUid: 'uid-alice-1' }),
+      makeCert({ id: 2, creatorDn: 'CN=alice,OU=TAK-NZ', clientUid: 'uid-alice-2' }),
+      // Not in the payload: neither revoked nor flipped.
+      makeCert({ id: 3, creatorDn: 'CN=bob,OU=TAK-NZ', clientUid: 'uid-bob-1' })
+    ]);
+    worker.takServerService.revokeCertificates.mockResolvedValue({ success: true });
+
+    await worker.revokeTakCertificates({ tak_usernames: ['alice'] });
+
+    const updateCall = findRevokeUpdateCall(worker);
+    expect(updateCall).toBeDefined();
+    const [, params] = updateCall;
+    // Matched uids only -- bob's device is untouched.
+    expect(new Set(params[0])).toEqual(new Set(['uid-alice-1', 'uid-alice-2']));
+    expect(params[0]).not.toContain('uid-bob-1');
+  });
+
+  it('flips only the devices of the usernames in the payload across multiple usernames (7.6, 8.7)', async () => {
+    process.env.DEVICE_MGMT_ENABLED = 'true';
+    worker.takServerService.listCertificates.mockResolvedValue([
+      makeCert({ id: 1, creatorDn: 'CN=alice,OU=TAK-NZ', clientUid: 'uid-alice-1' }),
+      makeCert({ id: 2, creatorDn: 'CN=bob,OU=TAK-NZ', clientUid: 'uid-bob-1' }),
+      makeCert({ id: 3, creatorDn: 'CN=carol,OU=TAK-NZ', clientUid: 'uid-carol-1' })
+    ]);
+    worker.takServerService.revokeCertificates.mockResolvedValue({ success: true });
+
+    await worker.revokeTakCertificates({ tak_usernames: ['alice', 'carol'] });
+
+    const [, params] = findRevokeUpdateCall(worker);
+    expect(new Set(params[0])).toEqual(new Set(['uid-alice-1', 'uid-carol-1']));
+  });
+
+  it('issues NO tak_devices write when the revocation is not confirmed (success: false) (7.6, 8.7)', async () => {
+    process.env.DEVICE_MGMT_ENABLED = 'true';
+    worker.takServerService.listCertificates.mockResolvedValue([makeCert({ id: 1 })]);
+    worker.takServerService.revokeCertificates.mockResolvedValue({ success: false, unverified: [1] });
+
+    await expect(worker.revokeTakCertificates({ tak_usernames: ['alice'] })).rejects.toThrow(
+      /not confirmed/i
+    );
+
+    expect(findRevokeUpdateCall(worker)).toBeUndefined();
+  });
+
+  it('issues NO tak_devices write when revokeCertificates itself throws (7.6, 8.7)', async () => {
+    process.env.DEVICE_MGMT_ENABLED = 'true';
+    worker.takServerService.listCertificates.mockResolvedValue([makeCert({ id: 1 })]);
+    worker.takServerService.revokeCertificates.mockRejectedValue(new Error('ECONNREFUSED'));
+
+    await expect(worker.revokeTakCertificates({ tak_usernames: ['alice'] })).rejects.toThrow();
+
+    expect(findRevokeUpdateCall(worker)).toBeUndefined();
+  });
+
+  it('issues NO tak_devices write on the no-match no-op path (7.6, 8.7)', async () => {
+    process.env.DEVICE_MGMT_ENABLED = 'true';
+    worker.takServerService.listCertificates.mockResolvedValue([
+      makeCert({ id: 1, creatorDn: 'CN=dave,OU=TAK-NZ', clientUid: 'uid-dave-1' })
+    ]);
+
+    await worker.revokeTakCertificates({ tak_usernames: ['alice'] });
+
+    expect(worker.takServerService.revokeCertificates).not.toHaveBeenCalled();
+    expect(findRevokeUpdateCall(worker)).toBeUndefined();
+  });
+
+  it('still revokes but issues NO tak_devices write when no matched certificate carries a clientUid (7.6, 8.7)', async () => {
+    process.env.DEVICE_MGMT_ENABLED = 'true';
+    worker.takServerService.listCertificates.mockResolvedValue([
+      makeCert({ id: 1, clientUid: undefined }),
+      makeCert({ id: 2, clientUid: '' })
+    ]);
+    worker.takServerService.revokeCertificates.mockResolvedValue({ success: true });
+
+    await worker.revokeTakCertificates({ tak_usernames: ['alice'] });
+
+    // The certificates are still revoked on TAK Server -- they simply have no
+    // Device_Table row to flip.
+    expect(new Set(worker.takServerService.revokeCertificates.mock.calls[0][0])).toEqual(
+      new Set([1, 2])
+    );
+    expect(findRevokeUpdateCall(worker)).toBeUndefined();
+  });
+
+  it.each([
+    ['false', 'false'],
+    ['unset', undefined],
+    ['a non-exact truthy-looking value (TRUE)', 'TRUE'],
+    ['1', '1']
+  ])(
+    'flips nothing when DEVICE_MGMT_ENABLED is %s, even on a confirmed-success revoke (9.5)',
+    async (_label, flagValue) => {
+      if (flagValue === undefined) {
+        delete process.env.DEVICE_MGMT_ENABLED;
+      } else {
+        process.env.DEVICE_MGMT_ENABLED = flagValue;
+      }
+      worker.takServerService.listCertificates.mockResolvedValue([
+        makeCert({ id: 1, clientUid: 'uid-alice-1' })
+      ]);
+      worker.takServerService.revokeCertificates.mockResolvedValue({ success: true });
+
+      await worker.revokeTakCertificates({ tak_usernames: ['alice'] });
+
+      // The certificate revocation itself is unaffected by the flag...
+      expect(worker.takServerService.revokeCertificates).toHaveBeenCalledWith([1]);
+      // ...but no Device_Table write is issued at all.
+      expect(findRevokeUpdateCall(worker)).toBeUndefined();
+    }
+  );
+
+  it('returns 0 from markDevicesRevoked without querying when the feature is off (9.5)', async () => {
+    process.env.DEVICE_MGMT_ENABLED = 'false';
+
+    await expect(worker.markDevicesRevoked(['uid-alice-1'])).resolves.toBe(0);
+    expect(worker.pool.query).not.toHaveBeenCalled();
+  });
+
+  it('returns 0 from markDevicesRevoked without querying for an empty uid set', async () => {
+    process.env.DEVICE_MGMT_ENABLED = 'true';
+
+    await expect(worker.markDevicesRevoked(new Set())).resolves.toBe(0);
+    expect(worker.pool.query).not.toHaveBeenCalled();
+  });
+
+  it('logs and swallows an update failure so a confirmed revocation is never reported as failed', async () => {
+    process.env.DEVICE_MGMT_ENABLED = 'true';
+    worker.takServerService.listCertificates.mockResolvedValue([
+      makeCert({ id: 1, clientUid: 'uid-alice-1' })
+    ]);
+    worker.takServerService.revokeCertificates.mockResolvedValue({ success: true });
+    worker.pool.query = jest.fn().mockRejectedValue(new Error('relation "tak_devices" does not exist'));
+
+    await expect(worker.revokeTakCertificates({ tak_usernames: ['alice'] })).resolves.toBeUndefined();
+
+    expect(mockLoggerInstance.error).toHaveBeenCalled();
+  });
+
+  it('returns the number of rows updated on a successful flip', async () => {
+    process.env.DEVICE_MGMT_ENABLED = 'true';
+    worker.pool.query = jest.fn().mockResolvedValue({ rows: [], rowCount: 2 });
+
+    await expect(worker.markDevicesRevoked(['uid-alice-1', 'uid-alice-2'])).resolves.toBe(2);
+  });
+});
+
+/**
+ * Feature device-management, Requirements 12.11-12.16 (task 24.4): the four
+ * revocation rails `revokeTakCertificates` runs, in order, ALL before any
+ * `DELETE /Marti/api/certadmin/cert/revoke/{ids}` -- the audit record, the
+ * single-`client_uid` abort, the blast-radius cap, and the dry-run.
+ *
+ * The handler is RESOLVE-THEN-GATE, so every assertion below is about what
+ * happens to an ALREADY-RESOLVED target set: that is the only point at which
+ * the true blast radius is known, and it is the number these rails exist to
+ * bound. This matters because this path previously over-revoked 20 real
+ * certificates on a shared live TAK Server.
+ *
+ * Two conventions carry through the block:
+ *
+ *  - **The cap is set small** (`DEVICE_MGMT_REVOKE_MAX_CERTS = 3`) rather than
+ *    building 250-element fixtures, and the boundary is exercised at cap-1,
+ *    cap and cap+1. The production `getRevokeMaxCerts()` predicate stays in the
+ *    loop because the value is driven through the real env var.
+ *  - **"No `DELETE`" is asserted as "`revokeCertificates` received no call at
+ *    all"**, never merely as "the operation failed". A rail that truncated the
+ *    target set to the cap and proceeded would still fail some weaker
+ *    assertion while having revoked a partial set -- which reports a Device as
+ *    disabled while leaving it usable (Requirement 12.13).
+ */
+const crypto = require('crypto');
+
+describe('SyncWorker.revokeTakCertificates revocation rails (12.11-12.16)', () => {
+  let worker;
+  const originalFlag = process.env.DEVICE_MGMT_ENABLED;
+  const originalRevokeFlag = process.env.DEVICE_MGMT_REVOKE_ENABLED;
+  const originalCap = process.env.DEVICE_MGMT_REVOKE_MAX_CERTS;
+
+  /** The small cap every test in this block is measured against. */
+  const CAP = 3;
+
+  const TARGET_UID = 'uid-target-1';
+
+  const operationRow = (overrides = {}) => ({
+    id: 'op-rails-1',
+    operation_type: 'revoke_tak_certificates',
+    retry_count: 0,
+    max_retries: 48,
+    correlation_id: 'corr-rails-1',
+    created_by: 42,
+    payload: { client_uid: TARGET_UID, target_user_id: 7 },
+    ...overrides
+  });
+
+  function makeCert(overrides = {}) {
+    return {
+      id: 1,
+      creatorDn: 'CN=alice,OU=TAK-NZ',
+      clientUid: TARGET_UID,
+      revocationDate: null,
+      ...overrides
+    };
+  }
+
+  /** `count` live certificates for `clientUid`, ids 1..count. */
+  function liveCertsFor(clientUid, count) {
+    return Array.from({ length: count }, (_unused, index) =>
+      makeCert({ id: index + 1, clientUid })
+    );
+  }
+
+  /** `count` certificates all matching `CN=alice`, ids 1..count. */
+  function userCertsFor(count) {
+    return Array.from({ length: count }, (_unused, index) =>
+      makeCert({ id: index + 1, creatorDn: 'CN=alice,OU=TAK-NZ', clientUid: `uid-alice-${index + 1}` })
+    );
+  }
+
+  /** The single `revoke_audit` record rail 1 logged, if any. */
+  function auditRecord() {
+    const call = mockLoggerInstance.info.mock.calls.find(([, msg]) => msg === 'revoke_audit');
+    return call ? call[0] : undefined;
+  }
+
+  /** The post-action `revoke_audit_result` record, from either level. */
+  function auditResult() {
+    const call = [...mockLoggerInstance.info.mock.calls, ...mockLoggerInstance.warn.mock.calls].find(
+      ([, msg]) => msg === 'revoke_audit_result'
+    );
+    return call ? call[0] : undefined;
+  }
+
+  /** The `revoke_abort` record, if a rail refused the operation. */
+  function abortRecord() {
+    const call = mockLoggerInstance.error.mock.calls.find(
+      ([, msg]) => typeof msg === 'string' && msg.startsWith('revoke_abort')
+    );
+    return call ? call[0] : undefined;
+  }
+
+  /** The `revoke_dry_run` record, if rail 4 refused the `DELETE`. */
+  function dryRunRecord() {
+    const call = mockLoggerInstance.warn.mock.calls.find(
+      ([, msg]) => typeof msg === 'string' && msg.startsWith('revoke_dry_run')
+    );
+    return call ? call[0] : undefined;
+  }
+
+  /** The terminal `sync_operations` UPDATE, whichever path wrote it. */
+  function terminalCall() {
+    return worker.pool.query.mock.calls.find(
+      ([sql]) =>
+        typeof sql === 'string' &&
+        sql.includes('sync_operations') &&
+        (sql.includes('failure_category') || sql.includes('completed') || sql.includes('next_retry_at'))
+    );
+  }
+
+  function revokeUpdateCall() {
+    return worker.pool.query.mock.calls.find(
+      ([sql]) =>
+        typeof sql === 'string' && sql.includes('tak_devices') && sql.includes('revoked = true')
+    );
+  }
+
+  /**
+   * The digest the audit record must carry: sha256 of the sorted id list,
+   * joined by commas. Recomputed here from the ids the test itself expects, so
+   * a handler that logged a digest of a TRUNCATED list (while logging the full
+   * one) would not match.
+   */
+  function expectedDigest(sortedIds) {
+    return crypto.createHash('sha256').update(sortedIds.join(',')).digest('hex');
+  }
+
+  /** Invocation order of the `revoke_audit` log line. */
+  function auditCallOrder() {
+    const index = mockLoggerInstance.info.mock.calls.findIndex(([, msg]) => msg === 'revoke_audit');
+    return mockLoggerInstance.info.mock.invocationCallOrder[index];
+  }
+
+  function arm() {
+    process.env.DEVICE_MGMT_REVOKE_ENABLED = 'true';
+  }
+
+  function disarm() {
+    delete process.env.DEVICE_MGMT_REVOKE_ENABLED;
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // Device management itself is on for the whole block, so the Device_Table
+    // flip is reachable and "no flag was flipped" is a real observation rather
+    // than a consequence of `markDevicesRevoked`'s own feature gate.
+    process.env.DEVICE_MGMT_ENABLED = 'true';
+    process.env.DEVICE_MGMT_REVOKE_MAX_CERTS = String(CAP);
+    // Each test arms or disarms explicitly; nothing here should be able to make
+    // a `DELETE` reachable by default.
+    disarm();
+
+    worker = new SyncWorker();
+    worker.pool.query = jest.fn().mockResolvedValue({ rows: [], rowCount: 1 });
+    worker.takServerService = {
+      listCertificates: jest.fn().mockResolvedValue([]),
+      listLiveCertificates: jest.fn().mockResolvedValue([]),
+      listRevokedCertificates: jest.fn().mockResolvedValue([]),
+      revokeCertificates: jest.fn().mockResolvedValue({ success: true })
+    };
+  });
+
+  afterEach(() => {
+    if (originalFlag === undefined) {
+      delete process.env.DEVICE_MGMT_ENABLED;
+    } else {
+      process.env.DEVICE_MGMT_ENABLED = originalFlag;
+    }
+    if (originalRevokeFlag === undefined) {
+      delete process.env.DEVICE_MGMT_REVOKE_ENABLED;
+    } else {
+      process.env.DEVICE_MGMT_REVOKE_ENABLED = originalRevokeFlag;
+    }
+    if (originalCap === undefined) {
+      delete process.env.DEVICE_MGMT_REVOKE_MAX_CERTS;
+    } else {
+      process.env.DEVICE_MGMT_REVOKE_MAX_CERTS = originalCap;
+    }
+  });
+
+  // --- Rail 4: the dry-run (Requirement 12.11) ------------------------------
+  describe('rail 4: the dry-run while Revoke_Enabled is false (12.11)', () => {
+    it('logs the full audit record, issues no DELETE, flips no revoked flag, and resolves successfully', async () => {
+      disarm();
+      worker.takServerService.listLiveCertificates.mockResolvedValue([
+        ...liveCertsFor(TARGET_UID, 2),
+        makeCert({ id: 99, clientUid: 'uid-someone-else' })
+      ]);
+
+      // A dry-run is a SUCCESS, not a failure: a disarmed revoke that failed
+      // would be retried until its retries ran out, and one left pending would
+      // fire the instant the flag flipped.
+      await expect(worker.revokeTakCertificates(operationRow().payload, operationRow()))
+        .resolves.toBeUndefined();
+
+      const record = auditRecord();
+      expect(record).toBeDefined();
+      expect(record.dryRun).toBe(true);
+      expect(record.payloadShape).toBe('client_uid');
+      expect(record.clientUid).toBe(TARGET_UID);
+      // The FULL list, never truncated, and only this Device's certificates.
+      expect(record.targetCertIds).toEqual([1, 2]);
+      expect(record.targetCertCount).toBe(2);
+      expect(record.operationId).toBe('op-rails-1');
+      expect(record.actingUserId).toBe(42);
+
+      // No DELETE at all -- not a shortened one, not an empty one.
+      expect(worker.takServerService.revokeCertificates).not.toHaveBeenCalled();
+      // No Device_Table `revoked` flip.
+      expect(revokeUpdateCall()).toBeUndefined();
+
+      const dryRun = dryRunRecord();
+      expect(dryRun).toBeDefined();
+      expect(dryRun.dryRun).toBe(true);
+      expect(dryRun.revokedFlagFlipped).toBe(false);
+      expect(dryRun.capability).toBe('DEVICE_MGMT_REVOKE_ENABLED');
+      // Not an abort: the rails refused nothing, the capability is simply off.
+      expect(abortRecord()).toBeUndefined();
+    });
+
+    it('completes the queued operation as completed, not failed or pending, while disarmed', async () => {
+      disarm();
+      worker.takServerService.listLiveCertificates.mockResolvedValue(liveCertsFor(TARGET_UID, 2));
+
+      await worker.executeOperationSafely(operationRow());
+
+      const terminal = terminalCall();
+      expect(terminal).toBeDefined();
+      expect(terminal[1][0]).toBe('completed');
+      expect(terminal[0]).not.toContain('failure_category');
+      expect(terminal[0]).not.toContain('next_retry_at');
+      expect(worker.takServerService.revokeCertificates).not.toHaveBeenCalled();
+    });
+
+    it.each([['false'], ['TRUE'], ['1'], ['']])(
+      'is still a dry-run for the non-exact flag value %p',
+      async (value) => {
+        process.env.DEVICE_MGMT_REVOKE_ENABLED = value;
+        worker.takServerService.listLiveCertificates.mockResolvedValue(liveCertsFor(TARGET_UID, 1));
+
+        await expect(worker.revokeTakCertificates(operationRow().payload, operationRow()))
+          .resolves.toBeUndefined();
+
+        expect(auditRecord().dryRun).toBe(true);
+        expect(worker.takServerService.revokeCertificates).not.toHaveBeenCalled();
+        expect(revokeUpdateCall()).toBeUndefined();
+      }
+    );
+
+    // Requirement 12.15: the dry-run is shape-agnostic. The user-scoped shape
+    // is the one with the LARGER blast radius, so it must not be the shape that
+    // slips past the arming flag.
+    it('is a dry-run for the user-scoped shape too', async () => {
+      disarm();
+      worker.takServerService.listCertificates.mockResolvedValue(userCertsFor(2));
+
+      await expect(worker.revokeTakCertificates({ tak_usernames: ['alice'] })).resolves.toBeUndefined();
+
+      expect(auditRecord().payloadShape).toBe('tak_usernames');
+      expect(auditRecord().dryRun).toBe(true);
+      expect(worker.takServerService.revokeCertificates).not.toHaveBeenCalled();
+      expect(revokeUpdateCall()).toBeUndefined();
+    });
+  });
+
+  // --- Rail 2: exactly one `client_uid` (Requirement 12.12) -----------------
+  //
+  // This rail is a DEFENSIVE INVARIANT, not a reachable resolution: as of task
+  // 19.3 the device-scoped resolution selects certificates by `clientUid`
+  // EQUALITY, so `resolveRevokeTargets` cannot itself produce a multi-uid set
+  // for a device-scoped payload. The tests below therefore drive the gate
+  // directly, by stubbing the resolution on the instance, and assert that IF the
+  // resolution ever regressed into spanning Devices (the exact defect
+  // Requirements 7.4/8.4/12.1 exist to correct) the gate would refuse before
+  // any `DELETE`. Asserting the invariant is the point; a test that could only
+  // reach it through a reachable resolution would have nothing to assert.
+  describe('rail 2: a resolved set spanning two client_uids (12.12)', () => {
+    function stubMultiUidResolution() {
+      jest.spyOn(worker, 'resolveRevokeTargets').mockReturnValue({
+        payloadShape: 'client_uid',
+        clientUid: TARGET_UID,
+        targetCertIds: [1, 2],
+        clientUids: new Set([TARGET_UID, 'uid-a-different-device']),
+        unresolvedReason: null
+      });
+    }
+
+    it('aborts with no DELETE and is marked permanently failed', async () => {
+      arm();
+      stubMultiUidResolution();
+
+      await expect(
+        worker.revokeTakCertificates(operationRow().payload, operationRow())
+      ).rejects.toThrow(/revoke_multiple_client_uids/);
+
+      // Refused BEFORE the DELETE: no call whatsoever, so no subset of the
+      // two Devices' certificates was revoked either.
+      expect(worker.takServerService.revokeCertificates).not.toHaveBeenCalled();
+      expect(revokeUpdateCall()).toBeUndefined();
+
+      // Permanently failed, not retried: the identical operation re-run
+      // resolves the identical spanning set, so retrying cannot fix it.
+      const terminal = terminalCall();
+      expect(terminal).toBeDefined();
+      expect(terminal[0]).toContain('failure_category');
+      expect(terminal[0]).not.toContain('next_retry_at');
+      expect(terminal[1][0]).toBe('failed');
+      expect(terminal[1][1]).toBe('permanent');
+      expect(terminal[1][2]).toMatch(/revoke_multiple_client_uids/);
+
+      // The audit record is still on the record for the refused operation.
+      expect(auditRecord()).toBeDefined();
+      expect(auditRecord().targetCertIds).toEqual([1, 2]);
+      const abort = abortRecord();
+      expect(abort).toBeDefined();
+      expect(abort.reason).toBe('revoke_multiple_client_uids');
+      expect(abort.resolvedClientUids).toEqual(
+        expect.arrayContaining([TARGET_UID, 'uid-a-different-device'])
+      );
+    });
+
+    it('marks the operation permanently failed rather than letting the retry path see it', async () => {
+      arm();
+      stubMultiUidResolution();
+
+      // Through the dispatcher: `RevokeRailAbortError.alreadyHandled` must keep
+      // `handleOperationError` from writing a retry row on top of the terminal
+      // permanently-failed one.
+      await worker.executeOperationSafely(operationRow());
+
+      const retryCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('next_retry_at')
+      );
+      expect(retryCall).toBeUndefined();
+      expect(worker.takServerService.revokeCertificates).not.toHaveBeenCalled();
+    });
+
+    // Requirement 12.15: the single-`client_uid` constraint is device-scoped
+    // ONLY. The user-scoped shape legitimately spans a user's Devices
+    // (Requirement 12.3), so the same multi-uid set must NOT abort there.
+    it('does not apply to the user-scoped shape, which legitimately spans Devices', async () => {
+      arm();
+      worker.takServerService.listCertificates.mockResolvedValue([
+        makeCert({ id: 1, creatorDn: 'CN=alice,OU=TAK-NZ', clientUid: 'uid-alice-1' }),
+        makeCert({ id: 2, creatorDn: 'CN=alice,OU=TAK-NZ', clientUid: 'uid-alice-2' })
+      ]);
+
+      await expect(worker.revokeTakCertificates({ tak_usernames: ['alice'] })).resolves.toBeUndefined();
+
+      expect(worker.takServerService.revokeCertificates).toHaveBeenCalledWith([1, 2]);
+      expect(abortRecord()).toBeUndefined();
+    });
+  });
+
+  // --- Rail 3: the blast-radius cap (Requirements 12.13, 12.15) -------------
+  describe('rail 3: the blast-radius cap (12.13)', () => {
+    it.each([
+      ['one under the cap', CAP - 1],
+      ['exactly at the cap', CAP]
+    ])('proceeds with the FULL sorted id list when the resolved set is %s', async (_label, count) => {
+      arm();
+      worker.takServerService.listLiveCertificates.mockResolvedValue(
+        liveCertsFor(TARGET_UID, count)
+      );
+
+      await worker.revokeTakCertificates(operationRow().payload, operationRow());
+
+      const expectedIds = Array.from({ length: count }, (_unused, i) => i + 1);
+      expect(worker.takServerService.revokeCertificates).toHaveBeenCalledTimes(1);
+      // The full set, in the same sorted order the audit record recorded.
+      expect(worker.takServerService.revokeCertificates).toHaveBeenCalledWith(expectedIds);
+      expect(auditRecord().targetCertIds).toEqual(expectedIds);
+      expect(auditRecord().capLimit).toBe(CAP);
+      expect(abortRecord()).toBeUndefined();
+    });
+
+    it('aborts with NO DELETE at all when the resolved set is one over the cap, and does not truncate it', async () => {
+      arm();
+      worker.takServerService.listLiveCertificates.mockResolvedValue(
+        liveCertsFor(TARGET_UID, CAP + 1)
+      );
+
+      await expect(
+        worker.revokeTakCertificates(operationRow().payload, operationRow())
+      ).rejects.toThrow(/revoke_cap_exceeded/);
+
+      // The load-bearing assertion of this whole task: `revokeCertificates`
+      // received NO call, so it cannot have received a shortened id list. A
+      // truncate-and-proceed implementation would show a call here carrying
+      // CAP of the CAP+1 ids -- reporting the Device as disabled while leaving
+      // it usable, which Requirement 12.13 rules out explicitly.
+      expect(worker.takServerService.revokeCertificates).toHaveBeenCalledTimes(0);
+      expect(worker.takServerService.revokeCertificates.mock.calls).toEqual([]);
+      expect(revokeUpdateCall()).toBeUndefined();
+
+      const terminal = terminalCall();
+      expect(terminal[1][0]).toBe('failed');
+      expect(terminal[1][1]).toBe('permanent');
+
+      // The refused set is fully on the record, un-truncated, so an operator can
+      // see exactly what was refused and decide whether to raise the cap.
+      const record = auditRecord();
+      expect(record.targetCertCount).toBe(CAP + 1);
+      expect(record.targetCertIds).toHaveLength(CAP + 1);
+      expect(record.capLimit).toBe(CAP);
+      expect(abortRecord().reason).toBe('revoke_cap_exceeded');
+    });
+
+    // Requirement 12.15: the cap applies to the user-scoped shape as well --
+    // the shape with the larger blast radius, and the one the pre-existing call
+    // sites use.
+    it('applies to a user-scoped payload as well, aborting with no DELETE over the cap', async () => {
+      arm();
+      worker.takServerService.listCertificates.mockResolvedValue(userCertsFor(CAP + 1));
+
+      await expect(worker.revokeTakCertificates({ tak_usernames: ['alice'] })).rejects.toThrow(
+        /revoke_cap_exceeded/
+      );
+
+      expect(worker.takServerService.revokeCertificates).toHaveBeenCalledTimes(0);
+      expect(revokeUpdateCall()).toBeUndefined();
+      expect(auditRecord().payloadShape).toBe('tak_usernames');
+      expect(auditRecord().targetCertCount).toBe(CAP + 1);
+      expect(auditRecord().capLimit).toBe(CAP);
+    });
+
+    it('honours a raised DEVICE_MGMT_REVOKE_MAX_CERTS, revoking the whole set the smaller cap refused', async () => {
+      arm();
+      process.env.DEVICE_MGMT_REVOKE_MAX_CERTS = String(CAP + 1);
+      worker.takServerService.listLiveCertificates.mockResolvedValue(
+        liveCertsFor(TARGET_UID, CAP + 1)
+      );
+
+      await worker.revokeTakCertificates(operationRow().payload, operationRow());
+
+      expect(worker.takServerService.revokeCertificates).toHaveBeenCalledWith([1, 2, 3, 4]);
+      expect(auditRecord().capLimit).toBe(CAP + 1);
+    });
+  });
+
+  // --- Rail 1: the audit record (Requirements 12.14, 12.15, 12.16) ----------
+  describe('rail 1: the audit record and its post-action counterpart (12.14, 12.16)', () => {
+    it('carries every targeted id plus the count and digest, and is emitted BEFORE the DELETE', async () => {
+      arm();
+      worker.takServerService.listLiveCertificates.mockResolvedValue([
+        // Deliberately out of id order: the recorded list, the digest and the
+        // list handed to the DELETE must all be the same sorted sequence.
+        makeCert({ id: 3, clientUid: TARGET_UID }),
+        makeCert({ id: 1, clientUid: TARGET_UID }),
+        makeCert({ id: 2, clientUid: TARGET_UID })
+      ]);
+
+      await worker.revokeTakCertificates(operationRow().payload, operationRow());
+
+      const record = auditRecord();
+      expect(record.targetCertIds).toEqual([1, 2, 3]);
+      expect(record.targetCertCount).toBe(3);
+      expect(record.targetCertIdsDigest).toBe(expectedDigest([1, 2, 3]));
+      expect(record.operationId).toBe('op-rails-1');
+      expect(record.actingUserId).toBe(42);
+      expect(record.clientUid).toBe(TARGET_UID);
+
+      // A real ordering assertion, via jest's global invocation counter: the
+      // audit line was emitted before `revokeCertificates` was entered, not
+      // merely at some point during the operation.
+      expect(worker.takServerService.revokeCertificates).toHaveBeenCalledWith([1, 2, 3]);
+      expect(auditCallOrder()).toBeLessThan(
+        worker.takServerService.revokeCertificates.mock.invocationCallOrder[0]
+      );
+    });
+
+    // Requirement 12.16: what a revoke changed on TAK Server must be answerable
+    // by differencing two RECORDED counts rather than inferred from an absence
+    // of evidence.
+    it('records the pre-flight and post-flight Revoked_Certificate_View counts and the verification outcome', async () => {
+      arm();
+      worker.takServerService.listLiveCertificates.mockResolvedValue(liveCertsFor(TARGET_UID, 2));
+      worker.takServerService.listRevokedCertificates
+        .mockResolvedValueOnce(new Array(5).fill({}))  // pre-flight
+        .mockResolvedValueOnce(new Array(7).fill({})); // post-flight
+
+      await worker.revokeTakCertificates(operationRow().payload, operationRow());
+
+      expect(auditRecord().revokedViewCountBefore).toBe(5);
+
+      const result = auditResult();
+      expect(result).toBeDefined();
+      expect(result.verified).toBe(true);
+      expect(result.unverified).toEqual([]);
+      expect(result.revokedViewCountAfter).toBe(7);
+      expect(result.targetCertCount).toBe(2);
+      expect(result.revokedFlagFlipped).toBe(true);
+    });
+
+    it('records the verification outcome for an UNVERIFIED revocation too, with no revoked flag flipped', async () => {
+      arm();
+      worker.takServerService.listLiveCertificates.mockResolvedValue(liveCertsFor(TARGET_UID, 2));
+      worker.takServerService.listRevokedCertificates
+        .mockResolvedValueOnce(new Array(5).fill({}))
+        .mockResolvedValueOnce(new Array(5).fill({}));
+      worker.takServerService.revokeCertificates.mockResolvedValue({
+        success: false,
+        unverified: [2]
+      });
+
+      await expect(
+        worker.revokeTakCertificates(operationRow().payload, operationRow())
+      ).rejects.toThrow(/not confirmed/i);
+
+      // "We issued the DELETE and it did not verify" is precisely the outcome
+      // that has to be on the record.
+      const result = auditResult();
+      expect(result.verified).toBe(false);
+      expect(result.unverified).toEqual([2]);
+      expect(result.revokedViewCountAfter).toBe(5);
+      expect(result.revokedFlagFlipped).toBe(false);
+      expect(revokeUpdateCall()).toBeUndefined();
+    });
+
+    // Requirement 12.15: the audit record applies to BOTH payload shapes.
+    it('logs the same record shape for a user-scoped payload, before its DELETE', async () => {
+      arm();
+      worker.takServerService.listCertificates.mockResolvedValue(userCertsFor(2));
+
+      await worker.revokeTakCertificates({ tak_usernames: ['alice'] }, operationRow({
+        payload: { tak_usernames: ['alice'] }
+      }));
+
+      const record = auditRecord();
+      expect(record.payloadShape).toBe('tak_usernames');
+      expect(record.clientUid).toBeNull();
+      expect(record.targetCertIds).toEqual([1, 2]);
+      expect(record.targetCertCount).toBe(2);
+      expect(record.targetCertIdsDigest).toBe(expectedDigest([1, 2]));
+      expect(record.capLimit).toBe(CAP);
+      expect(record.actingUserId).toBe(42);
+      expect(auditCallOrder()).toBeLessThan(
+        worker.takServerService.revokeCertificates.mock.invocationCallOrder[0]
+      );
+    });
+
+    // Requirement 12.16: a `/revoked` outage records `null` -- explicitly "we
+    // could not ask" -- never `0`, which would read as "nothing was revoked".
+    it('records null, not 0, when the Revoked_Certificate_View size cannot be read', async () => {
+      arm();
+      worker.takServerService.listLiveCertificates.mockResolvedValue(liveCertsFor(TARGET_UID, 1));
+      worker.takServerService.listRevokedCertificates.mockRejectedValue(new Error('ECONNREFUSED'));
+
+      await worker.revokeTakCertificates(operationRow().payload, operationRow());
+
+      expect(auditRecord().revokedViewCountBefore).toBeNull();
+      expect(auditResult().revokedViewCountAfter).toBeNull();
+      // The advisory read must not fail an operation that did not previously
+      // depend on that view.
+      expect(worker.takServerService.revokeCertificates).toHaveBeenCalledWith([1]);
+    });
+  });
+
+  // --- Requirements 2.11, 9.2: nothing credential-bearing is ever logged ----
+  //
+  // The certificate fixtures below deliberately carry the credential-shaped
+  // fields a real TAK Server enrollment response can hold. The audit record is
+  // built from IDENTIFIERS only, so scanning every captured log payload (keys
+  // AND values, recursively) for those field names and for the fixture secret
+  // strings is what makes "identifiers only" an enforced property rather than a
+  // comment.
+  describe('log hygiene: no credential material or passphrase in any record (2.11, 9.2)', () => {
+    const FIXTURE_SECRETS = [
+      'fixture-p12-bytes-should-never-be-logged',
+      'fixture-passphrase-should-never-be-logged',
+      'fixture-private-key-should-never-be-logged',
+      'fixture-pem-body-should-never-be-logged'
+    ];
+
+    const CREDENTIAL_KEYS = ['pfx', 'p12', 'passphrase', 'password', 'cert', 'key', 'privatekey', 'secret', 'token'];
+
+    function credentialBearingCerts(count, clientUid) {
+      return Array.from({ length: count }, (_unused, index) => ({
+        ...makeCert({ id: index + 1, clientUid }),
+        pfx: FIXTURE_SECRETS[0],
+        passphrase: FIXTURE_SECRETS[1],
+        key: FIXTURE_SECRETS[2],
+        cert: FIXTURE_SECRETS[3]
+      }));
+    }
+
+    /** Every payload and message this suite's logger captured, flattened. */
+    function capturedLogCalls() {
+      return [
+        ...mockLoggerInstance.info.mock.calls,
+        ...mockLoggerInstance.warn.mock.calls,
+        ...mockLoggerInstance.error.mock.calls,
+        ...mockLoggerInstance.debug.mock.calls
+      ];
+    }
+
+    /** All object keys appearing anywhere in a captured payload. */
+    function collectKeys(value, seen = new Set(), keys = []) {
+      if (!value || typeof value !== 'object' || seen.has(value)) return keys;
+      seen.add(value);
+      for (const [key, nested] of Object.entries(value)) {
+        keys.push(key);
+        collectKeys(nested, seen, keys);
+      }
+      return keys;
+    }
+
+    function assertNoCredentialMaterialLogged() {
+      const calls = capturedLogCalls();
+      expect(calls.length).toBeGreaterThan(0);
+
+      for (const [payload, message] of calls) {
+        const serialized = JSON.stringify(payload ?? null) + String(message ?? '');
+        for (const secret of FIXTURE_SECRETS) {
+          expect(serialized).not.toContain(secret);
+        }
+        for (const key of collectKeys(payload)) {
+          expect(CREDENTIAL_KEYS).not.toContain(key.toLowerCase());
+        }
+      }
+    }
+
+    it('logs no credential material on the armed, successful device-scoped path', async () => {
+      arm();
+      worker.takServerService.listLiveCertificates.mockResolvedValue(
+        credentialBearingCerts(2, TARGET_UID)
+      );
+
+      await worker.revokeTakCertificates(operationRow().payload, operationRow());
+
+      expect(worker.takServerService.revokeCertificates).toHaveBeenCalledWith([1, 2]);
+      assertNoCredentialMaterialLogged();
+    });
+
+    it('logs no credential material on the dry-run path', async () => {
+      disarm();
+      worker.takServerService.listLiveCertificates.mockResolvedValue(
+        credentialBearingCerts(2, TARGET_UID)
+      );
+
+      await worker.revokeTakCertificates(operationRow().payload, operationRow());
+
+      expect(dryRunRecord()).toBeDefined();
+      assertNoCredentialMaterialLogged();
+    });
+
+    it('logs no credential material on a cap abort, whose record carries the whole refused set', async () => {
+      arm();
+      worker.takServerService.listLiveCertificates.mockResolvedValue(
+        credentialBearingCerts(CAP + 1, TARGET_UID)
+      );
+
+      await expect(
+        worker.revokeTakCertificates(operationRow().payload, operationRow())
+      ).rejects.toThrow(/revoke_cap_exceeded/);
+
+      expect(auditRecord().targetCertCount).toBe(CAP + 1);
+      assertNoCredentialMaterialLogged();
+    });
+
+    it('logs no credential material on the user-scoped path', async () => {
+      arm();
+      worker.takServerService.listCertificates.mockResolvedValue(
+        credentialBearingCerts(2, 'uid-alice-1')
+      );
+
+      await worker.revokeTakCertificates({ tak_usernames: ['alice'] });
+
+      assertNoCredentialMaterialLogged();
+    });
+  });
+
+  /**
+   * Feature device-management, Requirements 12.1/12.8 (task 19.7): WHICH
+   * certificates the two payload shapes resolve, and which Device rows the
+   * confirmed revoke flips.
+   *
+   * Nested inside the rails block to reuse its armed worker, its mocked
+   * `TakServerService` and its `makeCert`/`revokeUpdateCall` helpers -- but it
+   * asserts a different thing: the rails bound an already-resolved set, these
+   * cases pin the SET ITSELF, which is the part the defect lived in.
+   *
+   * **The fixture is the whole point.** Two Devices (`uid-alice-phone`,
+   * `uid-alice-tablet`) SHARE one `creatorDn`, because a `creatorDn` identifies
+   * the enrolling USER, not the device. The old handler matched `creatorDn` for
+   * every payload shape, so a per-Device revoke resolved every certificate that
+   * user held across all their Devices -- how 20 certificates were over-revoked
+   * on a shared live TAK Server. A fixture giving each Device its own
+   * `creatorDn` would pass against that broken handler and would prove nothing;
+   * this one is the only shape where the old and new behaviour differ.
+   *
+   * The cap is raised for this block (the rails' deliberately tiny `CAP = 3`
+   * would refuse the 4-certificate user-scoped resolution before it could be
+   * observed) and revocation is armed throughout, so every "revokes exactly
+   * these" assertion below is a POSITIVE observation of a real
+   * `revokeCertificates` call rather than a vacuous pass on the dry-run rail.
+   */
+  describe('device-scoped target selection across Devices sharing a creatorDn (12.1, 12.8)', () => {
+    /** One enrolling user, therefore ONE `creatorDn`, across two Devices. */
+    const SHARED_CREATOR_DN = 'CN=alice,OU=TAK-NZ';
+    const PHONE = 'uid-alice-phone';
+    const TABLET = 'uid-alice-tablet';
+
+    /**
+     * Four Live_Certificates: two per Device, interleaved by id so a handler
+     * that sliced by position rather than matching by `clientUid` could not
+     * accidentally agree with the expected sets.
+     */
+    function sharedCreatorDnCerts() {
+      return [
+        makeCert({ id: 1, creatorDn: SHARED_CREATOR_DN, clientUid: PHONE }),
+        makeCert({ id: 2, creatorDn: SHARED_CREATOR_DN, clientUid: TABLET }),
+        makeCert({ id: 3, creatorDn: SHARED_CREATOR_DN, clientUid: PHONE }),
+        makeCert({ id: 4, creatorDn: SHARED_CREATOR_DN, clientUid: TABLET })
+      ];
+    }
+
+    beforeEach(() => {
+      arm();
+      // Above every resolved set below, so the cap rail never pre-empts the
+      // selection these cases are about.
+      process.env.DEVICE_MGMT_REVOKE_MAX_CERTS = '50';
+      worker.takServerService.listLiveCertificates.mockResolvedValue(sharedCreatorDnCerts());
+      worker.takServerService.listCertificates.mockResolvedValue(sharedCreatorDnCerts());
+    });
+
+    it.each([
+      ['the phone', PHONE, [1, 3], [2, 4]],
+      ['the tablet', TABLET, [2, 4], [1, 3]]
+    ])(
+      'revokes only %s\'s live certificates, never the other Device\'s, though both share a creatorDn',
+      async (_label, targetUid, ownIds, otherDeviceIds) => {
+        await worker.revokeTakCertificates(
+          { client_uid: targetUid, target_user_id: 7 },
+          operationRow({ payload: { client_uid: targetUid, target_user_id: 7 } })
+        );
+
+        // Positive: the DELETE happened, with exactly this Device's ids.
+        expect(worker.takServerService.revokeCertificates).toHaveBeenCalledTimes(1);
+        expect(worker.takServerService.revokeCertificates).toHaveBeenCalledWith(ownIds);
+
+        // Negative: not one certificate of the sibling Device. The old
+        // `creatorDn` match would have handed all four ids to this call.
+        const [revokedIds] = worker.takServerService.revokeCertificates.mock.calls[0];
+        for (const otherId of otherDeviceIds) {
+          expect(revokedIds).not.toContain(otherId);
+        }
+        expect(auditRecord().targetCertIds).toEqual(ownIds);
+        expect(auditRecord().resolvedClientUids).toEqual([targetUid]);
+      }
+    );
+
+    // Requirement 12.8: the Device_Table flip is scoped to the ONE target
+    // `client_uid`. `markDevicesRevoked` keeps its real implementation here, so
+    // both the argument it received and the SQL parameter it built are observed.
+    it('calls markDevicesRevoked with exactly one client_uid and flips only that Device row (12.8)', async () => {
+      const markSpy = jest.spyOn(worker, 'markDevicesRevoked');
+
+      await worker.revokeTakCertificates(
+        { client_uid: PHONE, target_user_id: 7 },
+        operationRow({ payload: { client_uid: PHONE, target_user_id: 7 } })
+      );
+
+      expect(markSpy).toHaveBeenCalledTimes(1);
+      const [uids] = markSpy.mock.calls[0];
+      // Exactly one, not "at least the right one": the sibling Device of the
+      // same user must not have its flag flipped (12.8).
+      expect(Array.from(uids)).toEqual([PHONE]);
+
+      const [, params] = revokeUpdateCall();
+      expect(params[0]).toEqual([PHONE]);
+      expect(params[0]).not.toContain(TABLET);
+      expect(auditResult().revokedFlagFlipped).toBe(true);
+    });
+
+    // Requirement 12.1: the device-scoped resolution runs against the
+    // Live_Certificates (`/active` MINUS `/revoked`), never the raw
+    // Active_Certificate view -- 90 of that view's 95 live entries also appeared
+    // in `/revoked`, so resolving from it would re-target already-revoked ids.
+    it('resolves from listLiveCertificates and never from listCertificates', async () => {
+      await worker.revokeTakCertificates(
+        { client_uid: PHONE, target_user_id: 7 },
+        operationRow({ payload: { client_uid: PHONE, target_user_id: 7 } })
+      );
+
+      expect(worker.takServerService.listLiveCertificates).toHaveBeenCalledTimes(1);
+      expect(worker.takServerService.listCertificates).not.toHaveBeenCalled();
+    });
+
+    // The corrective detail of task 19.3, stated as a test: for the
+    // device-scoped shape `creatorDn` is not consulted AT ALL. Selection is
+    // `clientUid` equality, so a certificate carrying the target Client_Uid
+    // under some other `creatorDn` is still that Device's certificate, and one
+    // carrying the shared `creatorDn` under another Client_Uid is not.
+    it('selects purely on clientUid equality, ignoring creatorDn entirely', async () => {
+      worker.takServerService.listLiveCertificates.mockResolvedValue([
+        makeCert({ id: 1, creatorDn: SHARED_CREATOR_DN, clientUid: PHONE }),
+        makeCert({ id: 2, creatorDn: 'CN=some-other-dn,OU=TAK-NZ', clientUid: PHONE }),
+        makeCert({ id: 3, creatorDn: SHARED_CREATOR_DN, clientUid: TABLET })
+      ]);
+
+      await worker.revokeTakCertificates(
+        { client_uid: PHONE, target_user_id: 7 },
+        operationRow({ payload: { client_uid: PHONE, target_user_id: 7 } })
+      );
+
+      expect(worker.takServerService.revokeCertificates).toHaveBeenCalledWith([1, 2]);
+      expect(auditRecord().resolvedClientUids).toEqual([PHONE]);
+    });
+
+    // Requirement 12.3: the user-scoped shape is UNCHANGED by all of the above.
+    // Against the very same fixture it still spans both of the user's Devices --
+    // that breadth is its documented, legitimate scope, and the three
+    // pre-existing call sites depend on it.
+    it('leaves the user-scoped shape unchanged: it still spans every Device of that user (12.3)', async () => {
+      const markSpy = jest.spyOn(worker, 'markDevicesRevoked');
+
+      await worker.revokeTakCertificates(
+        { tak_usernames: ['alice'] },
+        operationRow({ payload: { tak_usernames: ['alice'] } })
+      );
+
+      expect(worker.takServerService.listCertificates).toHaveBeenCalledTimes(1);
+      expect(worker.takServerService.listLiveCertificates).not.toHaveBeenCalled();
+      expect(worker.takServerService.revokeCertificates).toHaveBeenCalledWith([1, 2, 3, 4]);
+
+      const record = auditRecord();
+      expect(record.payloadShape).toBe('tak_usernames');
+      expect(record.clientUid).toBeNull();
+      expect(new Set(record.resolvedClientUids)).toEqual(new Set([PHONE, TABLET]));
+
+      // Both Devices' rows are flipped here -- the one case where more than one
+      // `client_uid` reaches `markDevicesRevoked` legitimately.
+      const [uids] = markSpy.mock.calls[0];
+      expect(new Set(Array.from(uids))).toEqual(new Set([PHONE, TABLET]));
+    });
+  });
 });

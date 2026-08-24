@@ -42,6 +42,22 @@ jest.mock('../services/TeamVisibilityService', () => ({
   isVisibleBranch: (...args) => mockIsVisibleBranch(...args)
 }));
 
+// device-management task 12.2: the two `device_mgmt:*:managed` resolvers
+// delegate every DB-backed decision to `DeviceManagementService`, so the
+// two collaborator calls (`isManagedUser`, `findDeviceRow`) are the mocked
+// seams here. `sameUserId` is deliberately NOT mocked -- it is a pure
+// comparator whose whole job is normalising a route-param STRING
+// `:userId` against an integer `tak_devices.user_id`, and stubbing it
+// would hide exactly the `5 === '5'` mismatch it exists to prevent. The
+// real implementation is pulled in with `requireActual`.
+const mockIsManagedUser = jest.fn();
+const mockFindDeviceRow = jest.fn();
+jest.mock('../services/DeviceManagementService', () => ({
+  isManagedUser: (...args) => mockIsManagedUser(...args),
+  findDeviceRow: (...args) => mockFindDeviceRow(...args),
+  sameUserId: jest.requireActual('../services/DeviceManagementService').sameUserId
+}));
+
 jest.mock('../config/permissions.registry', () => {
   // Minimal, self-contained stand-in for the real `resolveAccess`, matching
   // its deny-by-default / wildcard-satisfies-everything behavior so this
@@ -90,7 +106,19 @@ jest.mock('../config/permissions.registry', () => {
       // could satisfy them.
       'POST /api/users/create-and-add': ['user:create'],
       'POST /api/users/callsign-suffix-preview': ['user:create'],
-      'POST /api/users/add-to-team': ['user:team:add']
+      'POST /api/users/add-to-team': ['user:team:add'],
+      // device-management Requirements 6.2, 8.5 (task 12.1): the two
+      // `:managed` device-management entries, mirrored from the production
+      // registry so their row-scoped resolvers can be exercised through
+      // the middleware. The two `:own` entries are intentionally absent
+      // here -- they hold no resolver at all (they are static grants in
+      // the real `roleDefaults.authenticated_user`), so there is nothing
+      // for this file to exercise; `server/config/permissions.registry
+      // .test.js` asserts their static-grant side.
+      'GET /api/device-management/users/:userId/devices': ['device_mgmt:read:managed'],
+      'POST /api/device-management/users/:userId/devices/:clientUid/revoke': [
+        'device_mgmt:revoke:managed'
+      ]
     },
     roleDefaults: {
       global_manager: ['*'],
@@ -166,6 +194,18 @@ function buildApp(user) {
   app.post(
     '/api/users/add-to-team',
     express.json(),
+    authorize,
+    (req, res) => res.status(200).json({ ok: true })
+  );
+  // device-management task 12.2. Both resolvers read only route params, so
+  // no body parser is needed on either route.
+  app.get(
+    '/api/device-management/users/:userId/devices',
+    authorize,
+    (req, res) => res.status(200).json({ ok: true })
+  );
+  app.post(
+    '/api/device-management/users/:userId/devices/:clientUid/revoke',
     authorize,
     (req, res) => res.status(200).json({ ok: true })
   );
@@ -1235,6 +1275,257 @@ describe('authorize (shared body-teamId resolver for user:create and user:team:a
       expect(mockWarn).toHaveBeenCalledTimes(1);
       const [payload] = mockWarn.mock.calls[0];
       expect(payload).toEqual({ ip: TEST_IP, route: path, reason: 'permission_denied' });
+    });
+  });
+});
+
+/**
+ * The two `device_mgmt:*:managed` row-scoped resolvers (device-management
+ * task 12.1, Requirements 6.6, 6.7, 8.5, 8.6, 9.4).
+ *
+ * Both back an ADMIN-facing route naming another user, so the resolver IS
+ * the access control: neither identifier sits in
+ * `roleDefaults.authenticated_user` (asserted on the registry side in
+ * `server/config/permissions.registry.test.js`), which is what guarantees
+ * `authorize()` consults these resolvers on every request rather than
+ * satisfying the route statically.
+ *
+ * The revoke resolver carries a second leg the read resolver does not:
+ * Requirement 8.5 wants an unauthorized revocation blocked "upfront before
+ * any Revoke_Operation is enqueued", so device ownership is checked HERE,
+ * before the handler runs at all -- hence the device-lookup assertions
+ * below and the check that a denial never reaches the handler (a 403 with
+ * no `{ok: true}` body).
+ *
+ * All four decision paths are covered for each resolver: Global_Manager,
+ * managed target, non-managed target, and collaborator failure (fail
+ * closed, Requirement 9.4).
+ */
+describe('authorize (task 12.1: device_mgmt:*:managed row-scoped resolvers)', () => {
+  // A deliberately different Authentik id from the local `users.id`, so a
+  // resolver passing the wrong one to `isManagedUser` is observable.
+  const ADMIN_USER_ID = 11;
+  const ADMIN_AUTHENTIK_ID = 9011;
+  // Route params arrive as STRINGS; `tak_devices.user_id` is an integer.
+  const TARGET_USER_ID = 7;
+  const CLIENT_UID = 'ANDROID-abc123';
+
+  const READ_PATH = `/api/device-management/users/${TARGET_USER_ID}/devices`;
+  const REVOKE_PATH = `/api/device-management/users/${TARGET_USER_ID}/devices/${CLIENT_UID}/revoke`;
+
+  const admin = { id: ADMIN_AUTHENTIK_ID, userId: ADMIN_USER_ID, is_global_manager: false };
+  const globalManager = { id: ADMIN_AUTHENTIK_ID, userId: ADMIN_USER_ID, is_global_manager: true };
+
+  function getDevices(user) {
+    return request(buildApp(user)).get(READ_PATH).set('X-Forwarded-For', TEST_IP);
+  }
+
+  function postRevoke(user) {
+    return request(buildApp(user)).post(REVOKE_PATH).set('X-Forwarded-For', TEST_IP);
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  afterEach(() => {
+    mockIsManagedUser.mockReset();
+    mockFindDeviceRow.mockReset();
+  });
+
+  describe('device_mgmt:read:managed (GET .../users/:userId/devices)', () => {
+    it('permits an admin for whom the target is a Managed_User', async () => {
+      mockIsManagedUser.mockResolvedValueOnce(true);
+
+      const res = await getDevices(admin);
+
+      expect(res.status).toBe(200);
+      expect(mockWarn).not.toHaveBeenCalled();
+    });
+
+    it('passes req.user and the :userId route param to isManagedUser, never the Authentik id', async () => {
+      mockIsManagedUser.mockResolvedValueOnce(true);
+
+      await getDevices(admin);
+
+      expect(mockIsManagedUser).toHaveBeenCalledTimes(1);
+      const [actingUser, targetUserId] = mockIsManagedUser.mock.calls[0];
+      expect(actingUser).toMatchObject({ userId: ADMIN_USER_ID });
+      expect(String(targetUserId)).toBe(String(TARGET_USER_ID));
+    });
+
+    it('denies an admin for whom the target is NOT a Managed_User with 403 permission_denied', async () => {
+      mockIsManagedUser.mockResolvedValueOnce(false);
+
+      const res = await getDevices(admin);
+
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: 'Forbidden' });
+      expect(mockWarn).toHaveBeenCalledTimes(1);
+      const [payload] = mockWarn.mock.calls[0];
+      expect(payload).toEqual({ ip: TEST_IP, route: READ_PATH, reason: 'permission_denied' });
+    });
+
+    it('fails closed with 403 resolver_exception when isManagedUser throws (Req 9.4)', async () => {
+      mockIsManagedUser.mockRejectedValueOnce(new Error('db connection lost'));
+
+      const res = await getDevices(admin);
+
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: 'Forbidden' });
+      const [payload] = mockWarn.mock.calls[0];
+      expect(payload).toEqual({ ip: TEST_IP, route: READ_PATH, reason: 'resolver_exception' });
+      expect(mockError.mock.calls[0][0]).toMatchObject({
+        errorCategory: 'authorization_check_exception',
+        permission: 'device_mgmt:read:managed'
+      });
+    });
+
+    it('permits a Global_Manager without consulting DeviceManagementService at all', async () => {
+      // A standing implementation that would DENY if it were reached, so a
+      // passing assertion can only mean a short-circuit fired.
+      mockIsManagedUser.mockResolvedValue(false);
+
+      const res = await getDevices(globalManager);
+
+      expect(res.status).toBe(200);
+      expect(mockIsManagedUser).not.toHaveBeenCalled();
+      expect(mockWarn).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('device_mgmt:revoke:managed (POST .../users/:userId/devices/:clientUid/revoke)', () => {
+    it('permits an admin when the target is managed AND the Device belongs to that target', async () => {
+      mockIsManagedUser.mockResolvedValueOnce(true);
+      // Integer `user_id` vs. the STRING `:userId` route param: the real
+      // `sameUserId` comparator has to normalise both sides.
+      mockFindDeviceRow.mockResolvedValueOnce({ client_uid: CLIENT_UID, user_id: TARGET_USER_ID });
+
+      const res = await postRevoke(admin);
+
+      expect(res.status).toBe(200);
+      expect(mockFindDeviceRow).toHaveBeenCalledWith(CLIENT_UID);
+      expect(mockWarn).not.toHaveBeenCalled();
+    });
+
+    it('denies when the target is managed but the Device belongs to a DIFFERENT user (Req 8.5)', async () => {
+      mockIsManagedUser.mockResolvedValueOnce(true);
+      mockFindDeviceRow.mockResolvedValueOnce({
+        client_uid: CLIENT_UID,
+        user_id: TARGET_USER_ID + 1
+      });
+
+      const res = await postRevoke(admin);
+
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: 'Forbidden' });
+      const [payload] = mockWarn.mock.calls[0];
+      expect(payload).toEqual({ ip: TEST_IP, route: REVOKE_PATH, reason: 'permission_denied' });
+    });
+
+    it('denies an unmatched Device (user_id NULL) and a :clientUid naming no row, identically', async () => {
+      mockIsManagedUser.mockResolvedValue(true);
+
+      mockFindDeviceRow.mockResolvedValueOnce({ client_uid: CLIENT_UID, user_id: null });
+      const unmatched = await postRevoke(admin);
+
+      mockFindDeviceRow.mockResolvedValueOnce(undefined);
+      const missing = await postRevoke(admin);
+
+      expect(unmatched.status).toBe(403);
+      expect(missing.status).toBe(403);
+      expect(unmatched.body).toEqual({ error: 'Forbidden' });
+      expect(missing.body).toEqual({ error: 'Forbidden' });
+    });
+
+    it('denies a non-managed target without looking the Device up at all (Req 8.6)', async () => {
+      mockIsManagedUser.mockResolvedValueOnce(false);
+
+      const res = await postRevoke(admin);
+
+      expect(res.status).toBe(403);
+      expect(mockFindDeviceRow).not.toHaveBeenCalled();
+      const [payload] = mockWarn.mock.calls[0];
+      expect(payload).toEqual({ ip: TEST_IP, route: REVOKE_PATH, reason: 'permission_denied' });
+    });
+
+    it('fails closed with 403 resolver_exception when findDeviceRow throws (Req 9.4)', async () => {
+      mockIsManagedUser.mockResolvedValueOnce(true);
+      mockFindDeviceRow.mockRejectedValueOnce(new Error('db connection lost'));
+
+      const res = await postRevoke(admin);
+
+      expect(res.status).toBe(403);
+      const [payload] = mockWarn.mock.calls[0];
+      expect(payload).toEqual({ ip: TEST_IP, route: REVOKE_PATH, reason: 'resolver_exception' });
+      expect(mockError.mock.calls[0][0]).toMatchObject({
+        errorCategory: 'authorization_check_exception',
+        permission: 'device_mgmt:revoke:managed'
+      });
+    });
+
+    it('permits a Global_Manager without consulting DeviceManagementService at all', async () => {
+      mockIsManagedUser.mockResolvedValue(false);
+      mockFindDeviceRow.mockResolvedValue(undefined);
+
+      const res = await postRevoke(globalManager);
+
+      expect(res.status).toBe(200);
+      expect(mockIsManagedUser).not.toHaveBeenCalled();
+      expect(mockFindDeviceRow).not.toHaveBeenCalled();
+      expect(mockWarn).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * Both resolvers open with their own explicit `req.user.is_global_manager`
+   * short-circuit, which the two "without consulting
+   * DeviceManagementService" cases above CANNOT reach: `authorize()` sees
+   * the wildcard in `roleDefaults.global_manager` and returns before any
+   * resolver runs. That makes the in-resolver check defense in depth, and
+   * defense in depth is worth testing -- it is what keeps a Global_Manager
+   * permitted if the wildcard grant is ever narrowed.
+   *
+   * So this suite temporarily empties the mocked
+   * `roleDefaults.global_manager`, which is the ONLY way to drive a
+   * Global_Manager request down the resolver path. `authorize.js`
+   * destructures the same `roleDefaults` object this file's mock factory
+   * returns and reads `.global_manager` per request, so the swap takes
+   * effect immediately and is restored afterwards.
+   */
+  describe('the resolvers\u2019 own Global_Manager short-circuit (defense in depth)', () => {
+    const mockedRegistry = require('../config/permissions.registry');
+    const originalGlobalManagerDefaults = mockedRegistry.roleDefaults.global_manager;
+
+    beforeEach(() => {
+      mockedRegistry.roleDefaults.global_manager = [];
+    });
+
+    afterEach(() => {
+      mockedRegistry.roleDefaults.global_manager = originalGlobalManagerDefaults;
+    });
+
+    it('sanity-checks the swap: a non-Global_Manager identifier is now unsatisfiable', async () => {
+      const res = await request(buildApp(globalManager))
+        .get('/api/widgets')
+        .set('X-Forwarded-For', TEST_IP);
+
+      expect(res.status).toBe(403);
+    });
+
+    it.each([
+      ['device_mgmt:read:managed', () => getDevices(globalManager)],
+      ['device_mgmt:revoke:managed', () => postRevoke(globalManager)]
+    ])('permits a Global_Manager inside the %s resolver itself', async (_identifier, send) => {
+      // Would deny if either collaborator were consulted.
+      mockIsManagedUser.mockResolvedValue(false);
+      mockFindDeviceRow.mockResolvedValue(undefined);
+
+      const res = await send();
+
+      expect(res.status).toBe(200);
+      expect(mockIsManagedUser).not.toHaveBeenCalled();
+      expect(mockFindDeviceRow).not.toHaveBeenCalled();
     });
   });
 });

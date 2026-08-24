@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { adminAPI } from '../services/api'
-import { formatDateTime } from '../utils/dateFormat'
+import FormattedDate, { DATE_PRECISION, TOOLTIP_SIDES } from './FormattedDate'
 import toast from 'react-hot-toast'
 
 /**
@@ -115,7 +115,40 @@ export default function OrgInterestRequests() {
                     </span>
                   </td>
                   <td className="px-3 py-2 text-sm text-gray-500 dark:text-gray-400">
-                    {req.created_at ? formatDateTime(req.created_at) : '-'}
+                    {/* Date_Render_Position 11 (Criteria 2.1, 2.2, 2.3): the
+                        created-at value renders through the ONE shared
+                        FormattedDate, so it acquires the Date_Tooltip with the
+                        same behaviour as every other date in the app. `side`
+                        is LEFT because this is the second-to-last cell of a
+                        horizontally scrolling table (Criterion 3.5) -- a
+                        tooltip pushed past the container's left edge is
+                        clipped AND unreachable, so trailing columns open
+                        leftward from `right-full`.
+
+                        THE TERNARY STAYS, and `fallback` is the helper's own
+                        `''` rather than `'-'` (design.md Decision 13, the same
+                        reasoning `Users.jsx` records for its `'Never'`).
+                        Folding the string into the prop reads better and
+                        CHANGES what this table renders: a `created_at` that is
+                        present but unparseable takes the truthy branch today
+                        and renders the EMPTY STRING, because `formatDateTime`'s
+                        default fallback is `''`. Passing `fallback="-"` would
+                        render `-` for that value instead. That is arguably the
+                        better product decision, which is exactly why it does
+                        not belong in a change whose Criterion 2.3 promises the
+                        same string character for character and whose Criterion
+                        2.4 preserves each caller's fallback rather than
+                        relocating it. */}
+                    {req.created_at ? (
+                      <FormattedDate
+                        value={req.created_at}
+                        fallback=""
+                        precision={DATE_PRECISION.DATE_TIME}
+                        side={TOOLTIP_SIDES.LEFT}
+                      />
+                    ) : (
+                      '-'
+                    )}
                   </td>
                   <td className="px-3 py-2 text-right">
                     {req.status === 'pending' && (

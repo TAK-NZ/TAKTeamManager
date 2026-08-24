@@ -530,3 +530,149 @@ describe('registry completeness: every required identifier is satisfiable', () =
     }
   });
 });
+
+/**
+ * device-management registry entries (device-management Requirements 6.2,
+ * 6.6, 6.7, 8.5, 8.6, 9.3, 9.4 -- task 12.2).
+ *
+ * The four `/api/device-management` routes split deliberately into two
+ * pairs, and the split IS the security property under test here:
+ *
+ *   - The `:own` pair sits in `roleDefaults.authenticated_user`. Their only
+ *     subject is the caller's own `req.user.userId`, which no request input
+ *     can widen, so a static grant is safe -- and necessary, since every
+ *     signed-in user must be able to see and revoke their own Devices
+ *     (Requirements 5.1, 7.1).
+ *   - The `:managed` pair must stay OUT of `roleDefaults.authenticated_user`,
+ *     exactly as `user:team:transfer` does. A statically-held identifier
+ *     satisfies `resolveAccess` outright, so `authorize.js` would never
+ *     consult the row-scoped resolver -- handing every authenticated user
+ *     the ability to read, and revoke, ANY user's Devices. The negative
+ *     assertions therefore carry the weight in this suite.
+ *
+ * The resolvers' own behavior (Global_Manager, managed target, non-managed
+ * target, non-owned Device, fail-closed) is covered in
+ * `server/middleware/authorize.test.js`, which can drive them through the
+ * middleware with mocked collaborators. This file covers the registry side:
+ * the mapping and the role defaults that decide WHETHER those resolvers get
+ * consulted at all.
+ */
+describe('device-management registry entries (Requirements 6.2, 8.5, 9.3, 9.4)', () => {
+  const registry = { routes, roleDefaults };
+
+  const OWN_ROUTE_IDENTIFIERS = {
+    'GET /api/device-management/me/devices': 'device_mgmt:read:own',
+    'POST /api/device-management/me/devices/:clientUid/revoke': 'device_mgmt:revoke:own'
+  };
+
+  const MANAGED_ROUTE_IDENTIFIERS = {
+    'GET /api/device-management/users/:userId/devices': 'device_mgmt:read:managed',
+    'POST /api/device-management/users/:userId/devices/:clientUid/revoke':
+      'device_mgmt:revoke:managed'
+  };
+
+  it('maps each of the four device-management routes to exactly its own identifier', () => {
+    for (const [routeKey, identifier] of Object.entries({
+      ...OWN_ROUTE_IDENTIFIERS,
+      ...MANAGED_ROUTE_IDENTIFIERS
+    })) {
+      expect(routes[routeKey]).toEqual([identifier]);
+    }
+  });
+
+  it('keeps the device_mgmt identifiers distinct from the /api/devices enrollment feature', () => {
+    // `/api/devices` (Requirement 27, team-owned device ENROLLMENT) is a
+    // different feature that happens to share the word "device". Reusing
+    // its `device:manage` identifier here would hand every authenticated
+    // user -- who holds `device:manage` statically -- the managed-user
+    // device-management routes outright.
+    const deviceMgmtIdentifiers = Object.values({
+      ...OWN_ROUTE_IDENTIFIERS,
+      ...MANAGED_ROUTE_IDENTIFIERS
+    });
+    expect(deviceMgmtIdentifiers).not.toContain('device:manage');
+    expect(routes['POST /api/devices']).toEqual(['device:manage']);
+  });
+
+  it('keeps device_mgmt:read:own and device_mgmt:revoke:own IN roleDefaults.authenticated_user', () => {
+    for (const [routeKey, identifier] of Object.entries(OWN_ROUTE_IDENTIFIERS)) {
+      expect(roleDefaults.authenticated_user).toContain(identifier);
+      // The point of the static grant: a plain signed-in user reaches the
+      // self routes with no resolver involved at all.
+      expect(resolveAccess(routeKey, roleDefaults.authenticated_user, registry)).toBe(true);
+      expect(resolveAccess(routeKey, roleDefaults.global_manager, registry)).toBe(true);
+    }
+  });
+
+  it('keeps device_mgmt:read:managed and device_mgmt:revoke:managed OUT of roleDefaults.authenticated_user', () => {
+    for (const [routeKey, identifier] of Object.entries(MANAGED_ROUTE_IDENTIFIERS)) {
+      expect(roleDefaults.authenticated_user).not.toContain(identifier);
+      // `false` here is the POINT: the row-scoped resolver in
+      // `authorize.js` is what grants these per request, and it is only
+      // ever consulted because `resolveAccess` does NOT permit the route
+      // outright.
+      expect(resolveAccess(routeKey, roleDefaults.authenticated_user, registry)).toBe(false);
+      expect(resolveAccess(routeKey, [], registry)).toBe(false);
+      // Still satisfiable by the identifier itself (what the resolver
+      // effectively grants) and by a Global_Manager's wildcard.
+      expect(resolveAccess(routeKey, [identifier], registry)).toBe(true);
+      expect(resolveAccess(routeKey, roleDefaults.global_manager, registry)).toBe(true);
+    }
+  });
+
+  it('does not let a :own grant satisfy a :managed route, or vice versa', () => {
+    // The two pairs must not be interchangeable: holding the self grant
+    // (every authenticated user does) must never open the admin route.
+    for (const managedRouteKey of Object.keys(MANAGED_ROUTE_IDENTIFIERS)) {
+      expect(resolveAccess(managedRouteKey, Object.values(OWN_ROUTE_IDENTIFIERS), registry)).toBe(
+        false
+      );
+    }
+    for (const ownRouteKey of Object.keys(OWN_ROUTE_IDENTIFIERS)) {
+      expect(
+        resolveAccess(ownRouteKey, Object.values(MANAGED_ROUTE_IDENTIFIERS), registry)
+      ).toBe(false);
+    }
+  });
+
+  it('backs both :managed identifiers with a row-scoped resolver in authorize.js', () => {
+    // Without a resolver these two would be satisfiable ONLY by a
+    // Global_Manager's wildcard -- the exact `user:create`/`user:team:add`
+    // shape the completeness suite below was written for -- and every
+    // legitimate team admin would get a 403.
+    const authorizeSource = fs.readFileSync(
+      path.join(__dirname, '..', 'middleware', 'authorize.js'),
+      'utf8'
+    );
+    const declaration = authorizeSource.match(/const rowScopedResolvers = \{([\s\S]*?)\n\};/);
+    expect(declaration).not.toBeNull();
+
+    const resolverKeys = Array.from(declaration[1].matchAll(/^ {2}'([^']+)':/gm), (m) => m[1]);
+    for (const identifier of Object.values(MANAGED_ROUTE_IDENTIFIERS)) {
+      expect(resolverKeys).toContain(identifier);
+    }
+    // The `:own` pair is a static grant and deliberately has no resolver.
+    for (const identifier of Object.values(OWN_ROUTE_IDENTIFIERS)) {
+      expect(resolverKeys).not.toContain(identifier);
+    }
+  });
+
+  it('leaves device-management denials on the generic 403 path, not the team:read 404 path', () => {
+    const authorizeSource = fs.readFileSync(
+      path.join(__dirname, '..', 'middleware', 'authorize.js'),
+      'utf8'
+    );
+    const declaration = authorizeSource.match(
+      /const PERMISSION_DENIALS_MAPPED_TO_404 = new Set\(\[([\s\S]*?)\]\);/
+    );
+    expect(declaration).not.toBeNull();
+
+    const mappedTo404 = Array.from(declaration[1].matchAll(/'([^']+)'/g), (m) => m[1]);
+    for (const identifier of Object.values({
+      ...OWN_ROUTE_IDENTIFIERS,
+      ...MANAGED_ROUTE_IDENTIFIERS
+    })) {
+      expect(mappedTo404).not.toContain(identifier);
+    }
+  });
+});

@@ -358,6 +358,43 @@ const routes = {
   'POST /api/devices': ['device:manage'],
   'POST /api/devices/:deviceUserId/qr-code': ['device:manage'],
 
+  // --- /api/device-management (server/routes/deviceManagement.js) ---
+  // device-management Requirements 6.2, 6.6, 6.7, 8.5, 8.6, 9.3, 9.4. A
+  // DIFFERENT feature from `/api/devices` above (which enrolls
+  // team-owned devices via `DeviceEnrollmentService`): these four routes
+  // surface a user's TAK Server client certificates ("Devices") and
+  // revoke them. Hence the distinct path prefix and the distinct
+  // `device_mgmt:*` identifiers -- `device:manage` above is left
+  // untouched.
+  //
+  // The `:own` pair sits in `roleDefaults.authenticated_user` below: any
+  // signed-in user may act on their OWN Devices, and the row that scopes
+  // the action is the caller's own `req.user.userId`, which no request
+  // input can widen -- `DeviceManagementService.listOwnDevices` takes the
+  // caller's id as the sole query parameter, and the self-revoke route
+  // calls `assertCanRevokeOwn(req.user.userId, :clientUid)` before it
+  // enqueues anything. `device_mgmt:revoke:own` is therefore a static
+  // grant even though the design describes it as row-scoped: the row
+  // check (does THIS Device belong to the caller) is an assertion the
+  // route/service performs and reports as a denial, not a question the
+  // authorize layer can answer without duplicating the same lookup.
+  //
+  // The `:managed` pair is deliberately NOT in
+  // `roleDefaults.authenticated_user` -- exactly as
+  // `user:team:transfer` above is not. A statically-held identifier
+  // satisfies `resolveAccess` outright, so `authorize.js` would never
+  // consult the row-scoped resolver and every authenticated user could
+  // read (and revoke) any user's Devices. Both are granted per-request by
+  // the `device_mgmt:read:managed` / `device_mgmt:revoke:managed`
+  // resolvers in server/middleware/authorize.js, which permit a
+  // Global_Manager, or an admin for whom the target `:userId` is a
+  // Managed_User (and, for revoke, whose `:clientUid` Device belongs to
+  // that target).
+  'GET /api/device-management/me/devices': ['device_mgmt:read:own'],
+  'GET /api/device-management/users/:userId/devices': ['device_mgmt:read:managed'],
+  'POST /api/device-management/me/devices/:clientUid/revoke': ['device_mgmt:revoke:own'],
+  'POST /api/device-management/users/:userId/devices/:clientUid/revoke': ['device_mgmt:revoke:managed'],
+
   // --- /api/bulk-import (server/routes/bulkImport.js) ---
   // Requirement 29 (CSV Bulk Import for Users and Teams, task 51.4).
   // `POST /users`: `BulkImportService.importUsers` (task 51.1) already
@@ -438,7 +475,15 @@ const roleDefaults = {
     'communication:broadcast:send',
     'device:manage',
     'bulk_import:users',
-    'config:read:mappings'
+    'config:read:mappings',
+    // device-management Requirements 5.1, 7.1: the two SELF-scoped
+    // device-management identifiers. Their only subject is the caller's
+    // own `req.user.userId`, so a static grant here cannot widen what a
+    // caller reaches (see the `/api/device-management` route comments
+    // above). The `:managed` counterparts are intentionally absent so
+    // their row-scoped resolvers are always consulted.
+    'device_mgmt:read:own',
+    'device_mgmt:revoke:own'
   ]
 };
 

@@ -357,4 +357,70 @@ export const settingsAPI = {
   importSettings: (payload) => api.post('/settings/import', payload),
 };
 
+// --- Device management (device-management spec) ---
+//
+// The server mounts /api/device-management only WHILE DEVICE_MGMT_ENABLED is
+// true, and each handler re-checks the flag and answers 404 when it's off. The
+// flag is deliberately never exposed through /api/config/public (Requirement
+// 1.4), so the client can't ask "is this feature on?" up front -- and there is
+// no dedicated /enabled endpoint either. `probeEnabled()` below therefore uses
+// the self-view itself as the reachability probe: a 200 means the feature is
+// live (and hands back the device list, so a caller that renders immediately
+// needs no second request), while a 404 means the feature is off.
+//
+// Anything else (network failure, 5xx, 401/403) is a REAL error and is
+// rethrown rather than folded into `enabled: false`, so a caller can tell
+// "feature intentionally off" (hide the surface silently) apart from
+// "something broke" (surface an error) -- collapsing both into a falsy result
+// would silently hide the device UI whenever the backend hiccups.
+export const deviceManagementAPI = {
+  // Resolves 200 with { devices: [...] }; each device carries
+  // { clientUid, issuedAt, expiresAt, lastSeenAt } where a null `lastSeenAt`
+  // means "never seen" (Requirements 5.1, 5.2, 5.3).
+  getMyDevices: () => api.get('/device-management/me/devices'),
+
+  // Admin view of a Managed_User's devices (Requirements 6.3, 6.4, 6.5).
+  // Rejects with 403 when `userId` is not a Managed_User of the caller.
+  getUserDevices: (userId) =>
+    api.get(`/device-management/users/${encodeURIComponent(userId)}/devices`),
+
+  // Self-service revocation (Requirement 7.4). `confirmation` must be the
+  // exact string 'REVOKE'; the server re-validates it and rejects with 400
+  // without enqueueing anything otherwise (Requirement 7.3). Resolves 202
+  // with { enqueued: true } once the Revoke_Operation is queued.
+  //
+  // `clientUid` is TAK-supplied free-form text, so it's percent-encoded
+  // rather than interpolated raw into the path.
+  revokeMyDevice: (clientUid, confirmation) =>
+    api.post(
+      `/device-management/me/devices/${encodeURIComponent(clientUid)}/revoke`,
+      { confirmation }
+    ),
+
+  // Admin revocation of a Managed_User's device (Requirement 8.4). Same
+  // confirmation contract as revokeMyDevice; rejects with 403 when the target
+  // isn't a Managed_User of the caller or the device isn't theirs.
+  revokeUserDevice: (userId, clientUid, confirmation) =>
+    api.post(
+      `/device-management/users/${encodeURIComponent(userId)}/devices/${encodeURIComponent(clientUid)}/revoke`,
+      { confirmation }
+    ),
+
+  // Reachability probe used to decide whether to render the device surfaces.
+  // Resolves { enabled: true, devices } when the feature is live, or
+  // { enabled: false, devices: [] } when the server reports 404 (flag off).
+  // Rethrows every other failure.
+  probeEnabled: async () => {
+    try {
+      const response = await deviceManagementAPI.getMyDevices();
+      return { enabled: true, devices: response.data?.devices ?? [] };
+    } catch (error) {
+      if (error.response?.status === 404) {
+        return { enabled: false, devices: [] };
+      }
+      throw error;
+    }
+  },
+};
+
 export default api;

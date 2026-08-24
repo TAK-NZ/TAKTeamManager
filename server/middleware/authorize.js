@@ -46,6 +46,10 @@ const User = require('../models/User');
 const pool = require('../config/database');
 const { getLogger } = require('./requestContext');
 const TeamVisibilityService = require('../services/TeamVisibilityService');
+// device-management task 12.1: the `device_mgmt:*:managed` resolvers below
+// delegate their Managed_User and Device-ownership checks here so those
+// rules have ONE definition shared with the routes (task 13.1).
+const DeviceManagementService = require('../services/DeviceManagementService');
 
 /**
  * Requirement 13.7: "IF a request to the App fails authorization (403) or
@@ -692,6 +696,101 @@ const rowScopedResolvers = {
     const orgId = req.params && req.params.orgId;
     if (!orgId) return false;
     return Team.isAdmin(orgId, req.user && req.user.userId);
+  },
+
+  /**
+   * `device_mgmt:read:managed` — device-management Requirements 6.2, 6.6,
+   * 6.7, 9.4: satisfied if the requesting user is a Global_Manager OR the
+   * `:userId` route param names a Managed_User of the requesting admin.
+   * Backs `GET /api/device-management/users/:userId/devices`.
+   *
+   * Managed_User membership is answered by
+   * `DeviceManagementService.isManagedUser` rather than re-implemented
+   * here, so this resolver and the service's own
+   * `listManagedUserDevices`/`assertCanRevokeManaged` assertions cannot
+   * disagree about who an admin manages. Note that is deliberately NOT
+   * `Team.isAdmin` (which walks the Ancestor_Chain and counts inherited
+   * admin rows): the Managed_User relationship requires a DIRECT admin row
+   * (`role = 'admin' AND inherited_from_team_id IS NULL`), the same
+   * condition `user:read:team_admin` above and `DirectoryScopeService`
+   * use.
+   *
+   * The Global_Manager short-circuit is kept explicit (rather than left to
+   * `isManagedUser`'s own `DirectoryScopeService.resolveScope` unscoped
+   * check) to match every resolver above and to skip the lookup entirely.
+   *
+   * Per this module's contract a throw propagates to
+   * `isSatisfiedWithRowScopedChecks`, which logs it and fails closed — so
+   * there is deliberately no local try/catch, and a database failure
+   * denies rather than permits (Requirement 9.4).
+   *
+   * @param {import('express').Request} req
+   * @returns {Promise<boolean>}
+   */
+  'device_mgmt:read:managed': async (req) => {
+    if (req.user && req.user.is_global_manager) {
+      return true;
+    }
+    const targetUserId = req.params && req.params.userId;
+    if (!targetUserId) {
+      return false;
+    }
+    return DeviceManagementService.isManagedUser(req.user, targetUserId);
+  },
+
+  /**
+   * `device_mgmt:revoke:managed` — device-management Requirements 8.5,
+   * 8.6, 9.4: satisfied if the requesting user is a Global_Manager OR BOTH
+   * (a) the `:userId` route param names a Managed_User of the requesting
+   * admin AND (b) the `:clientUid` route param names a Device whose
+   * `user_id` is that same `:userId`. Backs
+   * `POST /api/device-management/users/:userId/devices/:clientUid/revoke`.
+   *
+   * Both legs are required here, at the authorization layer, because
+   * Requirement 8.5 calls for an unauthorized revocation to be blocked
+   * "upfront before any Revoke_Operation is enqueued" — this resolver runs
+   * before the route handler exists as far as the request is concerned, so
+   * neither the `REVOKE` confirmation check nor `EventPublisher` is ever
+   * reached on a denial. The route handler repeats the same assertion via
+   * `DeviceManagementService.assertCanRevokeManaged` (defense in depth,
+   * mirroring `MouService.recordCountersignature`'s double-gating), which
+   * is also what turns the two cases into the distinct client-facing
+   * errors; this layer only answers permitted/denied.
+   *
+   * The managed-user leg is evaluated first so a caller with no
+   * relationship to the target triggers no Device lookup at all. A
+   * `:clientUid` naming no `tak_devices` row is denied identically to one
+   * naming another user's Device — see `DeviceNotOwnedError`'s reasoning
+   * for why those two cases are never distinguished.
+   *
+   * Per this module's contract a throw propagates to
+   * `isSatisfiedWithRowScopedChecks`, which logs it and fails closed.
+   *
+   * @param {import('express').Request} req
+   * @returns {Promise<boolean>}
+   */
+  'device_mgmt:revoke:managed': async (req) => {
+    if (req.user && req.user.is_global_manager) {
+      return true;
+    }
+
+    const targetUserId = req.params && req.params.userId;
+    const clientUid = req.params && req.params.clientUid;
+    if (!targetUserId || !clientUid) {
+      return false;
+    }
+
+    const managed = await DeviceManagementService.isManagedUser(req.user, targetUserId);
+    if (!managed) {
+      return false;
+    }
+
+    const device = await DeviceManagementService.findDeviceRow(clientUid);
+    if (!device) {
+      return false;
+    }
+
+    return DeviceManagementService.sameUserId(device.user_id, targetUserId);
   },
 
   /**

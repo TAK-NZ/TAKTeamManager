@@ -106,6 +106,17 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
     // SAME batched query below, used to exclude Team_Owned_Device rows
     // from the response after the map is built.
     const isTeamDeviceByAuthentikUserId = new Map();
+    // device-management task 15.4: authentik_user_id -> LOCAL `users.id`,
+    // built from the SAME batched query below. The user list is sourced from
+    // Authentik, so every row's `pk` is an AUTHENTIK id -- but local
+    // per-user resources (here: `GET /api/device-management/users/:userId/
+    // devices`, whose `:userId` is validated as an integer and matched
+    // against `tak_devices.user_id`, a FK to `users(id)`) are keyed on the
+    // LOCAL id. Projecting it here lets the Users view address those
+    // resources without a second round trip per row, and its absence (a
+    // user with no local `users` row yet) is exactly the signal that no
+    // local per-user resource can exist for that row.
+    const localUserIdByAuthentikUserId = new Map();
     // Requirement 11.2/11.3: authentik_user_id -> the local scoping facts,
     // built from the SAME batched query below. Each entry carries the
     // candidate's Direct_Membership Organisation id (the root of its
@@ -128,6 +139,7 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
           WHERE tr.parent_team_id IS NOT NULL
         )
         SELECT u.authentik_user_id AS authentik_user_id,
+               u.id AS local_user_id,
                u.is_team_device AS is_team_device,
                u.origin_org_id AS origin_org_id,
                root.root_id AS direct_membership_org_id,
@@ -146,6 +158,7 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
       for (const row of teamNameResult.rows) {
         teamNameByAuthentikUserId.set(row.authentik_user_id, row.team_name);
         isTeamDeviceByAuthentikUserId.set(row.authentik_user_id, row.is_team_device === true);
+        localUserIdByAuthentikUserId.set(row.authentik_user_id, row.local_user_id ?? null);
         // The `users` row exists locally, so its email/first_name are known,
         // but scoping only needs the org facts here; the email a candidate is
         // matched on comes from the Authentik payload in `toFacts` below,
@@ -169,7 +182,11 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
       .filter((user) => !isTeamDeviceByAuthentikUserId.get(user.pk))
       .map((user) => ({
         ...user,
-        team_name: teamNameByAuthentikUserId.get(user.pk) ?? null
+        team_name: teamNameByAuthentikUserId.get(user.pk) ?? null,
+        // device-management task 15.4: additive, and null for a user with no
+        // local `users` row. `pk` (Authentik) is left untouched, so every
+        // existing consumer of this response is unaffected.
+        local_user_id: localUserIdByAuthentikUserId.get(user.pk) ?? null
       }));
 
     // Requirement 10: a Global_Manager's response is not scoped at all.

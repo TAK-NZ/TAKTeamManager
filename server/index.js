@@ -13,6 +13,7 @@ const logger = require('./config/logger');
 const pool = require('./config/database');
 const { createGracefulShutdown } = require('./utils/gracefulShutdown');
 const { validateConfig, assertAuthRouteMounted } = require('./config/configValidator');
+const { isDeviceMgmtEnabled } = require('./config/deviceMgmt');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -170,6 +171,21 @@ const PORT = process.env.PORT || 3000;
   app.use('/api/communications', require('./routes/communications'));
   app.use('/api/devices', require('./routes/devices'));
   app.use('/api/bulk-import', require('./routes/bulkImport'));
+
+  // Device_Management (device-management Requirements 1.8, 1.9, task
+  // 13.1): mounted ONLY while Device_Mgmt_Enabled is true, so while the
+  // feature is off none of its four routes exist at all and the app's
+  // catch-all answers them with its standard 404 -- no
+  // `authenticateToken`, no `authorize`, no handler, and therefore no
+  // Revoke_Operation enqueue. Each handler in `routes/deviceManagement.js`
+  // ALSO re-checks `isDeviceMgmtEnabled()` and returns the same 404 shape;
+  // that duplication is deliberate defense in depth (this mount decision
+  // is made once at boot, the in-handler check reads `process.env` at call
+  // time). NOT added to `publicRoutes`: every route requires
+  // authentication.
+  if (isDeviceMgmtEnabled()) {
+    app.use('/api/device-management', require('./routes/deviceManagement'));
+  }
 
   // Health check (Requirement 14.1/14.2): GET /health verifies Database
   // connectivity with a 2s-timeout SELECT 1, returning 200 {status:

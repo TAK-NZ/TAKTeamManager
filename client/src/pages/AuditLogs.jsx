@@ -1,7 +1,10 @@
 import { useState, useEffect } from 'react'
 import { ClipboardDocumentListIcon } from '@heroicons/react/24/outline'
 import { teamsAPI, auditLogsAPI } from '../services/api'
-import { formatDateTime } from '../utils/dateFormat'
+import FormattedDate, {
+  DATE_PRECISION,
+  TOOLTIP_SIDES,
+} from '../components/FormattedDate'
 
 /**
  * Global_Manager-only page rendering the filter bar, results table,
@@ -351,7 +354,32 @@ export default function AuditLogs({ user }) {
                       )}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                      {formatDateTime(row.created_at, row.created_at)}
+                      {/* Created At, the last cell of a table inside an
+                          `overflow-x-auto` wrapper, so the tooltip opens
+                          LEFTWARD (Criterion 3.5): a tooltip pushed past a
+                          scroll container's right edge is clipped but
+                          reachable by scrolling, while one pushed past the
+                          left edge is clipped AND unreachable.
+
+                          `fallback` is `row.created_at` itself -- the RAW
+                          value, exactly as this cell passed it to
+                          `formatDateTime` before. Rendered exactly as
+                          passed: if the API ever sends a non-renderable
+                          child here it fails exactly as it fails today,
+                          and this spec neither introduces nor repairs that.
+
+                          This page paginates at 50 rows, so it gains 50 tab
+                          stops. That price is argued and accepted in
+                          design.md Decision 5 -- do NOT try to avoid it
+                          with a `title` (Criterion 3.3 forbids it and it is
+                          never disclosed on focus) or by exposing only some
+                          rows. */}
+                      <FormattedDate
+                        value={row.created_at}
+                        fallback={row.created_at}
+                        precision={DATE_PRECISION.DATE_TIME}
+                        side={TOOLTIP_SIDES.LEFT}
+                      />
                     </td>
                   </tr>
                 ))}
