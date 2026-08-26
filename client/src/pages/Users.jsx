@@ -3,6 +3,7 @@ import { PlusIcon, MagnifyingGlassIcon } from '@heroicons/react/24/outline'
 import { usersAPI } from '../services/api'
 import FormattedDate, { DATE_PRECISION, TOOLTIP_SIDES } from '../components/FormattedDate'
 import UserDevicesModal, { useDeviceManagementEnabled } from '../components/UserDevicesModal'
+import MultipleCertificateWarning from '../components/MultipleCertificateWarning'
 
 export default function Users() {
   const [searchQuery, setSearchQuery] = useState('')
@@ -117,6 +118,18 @@ export default function Users() {
                         <div className="ml-4">
                           <div className="text-sm font-medium text-gray-900 dark:text-gray-100">{user.name}</div>
                           <div className="text-sm text-gray-500 dark:text-gray-400">{user.email}</div>
+                          {/* takserver-enrollment Criterion 13.6: GET /api/users
+                              already projects `live_certificate_count` from the
+                              SAME batched query this page's fetch already runs,
+                              so this renders with no second request. Renders
+                              nothing at all for a count of 0 or 1 -- see
+                              MultipleCertificateWarning.jsx's own doc comment
+                              for why this is deliberately NOT gated on
+                              devicesEnabled (design decision 17: the count is
+                              zero whenever DEVICE_MGMT_ENABLED is off, so the
+                              warning is already inert without a second flag
+                              check). */}
+                          <MultipleCertificateWarning count={user.live_certificate_count} />
                         </div>
                       </div>
                     </td>

@@ -3,8 +3,12 @@ const QRCode = require('qrcode');
 const PDFDocument = require('pdfkit');
 const path = require('path');
 const pool = require('../config/database');
+const { AMBIGUITY_FREE_ALPHABET } = require('../utils/identifierAlphabet');
 
-const CHARSET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+// Local alias: this is the same 31-character Identifier_Alphabet the
+// Managed_Identifier generator (server/utils/managedIdentifier.js) draws
+// from -- see server/utils/identifierAlphabet.js for the single definition.
+const CHARSET = AMBIGUITY_FREE_ALPHABET;
 const CODE_LENGTH = 8;
 const MAX_RETRY_ATTEMPTS = 3;
 
@@ -21,11 +25,23 @@ class SignupCodeService {
   /**
    * Generate a random 8-character code from the valid character set.
    * Uses crypto.randomBytes for randomness. Each byte is mapped to a
-   * character via modulo over the charset length (30 chars).
+   * character via modulo over the charset length (31 chars).
    *
    * @returns {string} An 8-character code string (no dash).
    */
   static generateRandomCode() {
+    // NOTE: `bytes[i] % CHARSET.length` over a uniform byte is biased: 256 =
+    // 8*31+8, so the first eight alphabet characters (A-H) are drawn 9/256 of
+    // the time and the remaining 23 are drawn 8/256 -- about 12.5%
+    // over-representation on eight of thirty-one characters. This is
+    // deliberately LEFT UNFIXED here: fixing it would change the
+    // distribution of every future sign-up code, a behaviour change in a
+    // different feature with its own requirements and tests, and a 31^8
+    // space biased by an eighth is still not guessable. Rejection sampling
+    // (e.g. via crypto.randomInt) is a named follow-up, not part of this
+    // change. The Managed_Identifier generator (server/utils/managedIdentifier.js)
+    // deliberately does NOT use this construction -- it draws via
+    // crypto.randomInt(31), which is bias-free.
     const bytes = crypto.randomBytes(CODE_LENGTH);
     let code = '';
     for (let i = 0; i < CODE_LENGTH; i++) {

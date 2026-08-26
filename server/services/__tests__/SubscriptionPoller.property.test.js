@@ -176,9 +176,17 @@ function createModelPool(store) {
   };
 }
 
-/** @returns {{getClientEndpoints: jest.Mock}} */
+/**
+ * @returns {{getClientEndpoints: jest.Mock, getAllSubscriptions: jest.Mock}}
+ *   `getAllSubscriptions` resolves to `[]` -- this property is about the
+ *   PRIMARY source's Monotonic_Guard (`lastEventTime`), so the
+ *   Requirement-13-freshening merge is kept a no-op throughout rather than
+ *   introducing a second timestamp generator into this model. Freshening's
+ *   own guarantees are covered by `SubscriptionPoller.test.js`'s
+ *   `mergeSubscriptionFreshness` unit tests instead.
+ */
 function createTakServerService() {
-  return { getClientEndpoints: jest.fn() };
+  return { getClientEndpoints: jest.fn(), getAllSubscriptions: jest.fn().mockResolvedValue([]) };
 }
 
 /**

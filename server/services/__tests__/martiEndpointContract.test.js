@@ -88,7 +88,11 @@ const KNOWN_REQUESTED_PATHS = [
   '/Marti/api/certadmin/cert/active',
   '/Marti/api/certadmin/cert/revoked',
   `/Marti/api/certadmin/cert/revoke/${PLACEHOLDER_SEGMENT}`,
-  '/Marti/api/clientEndPoints'
+  '/Marti/api/clientEndPoints',
+  // Requirement 13 freshening follow-up: SubscriptionPoller's supplementary
+  // Last_Seen freshness signal for currently-live connections. Documented as
+  // OpenAPI `getAllSubscriptions` -> `ApiResponseSetSubscriptionInfo`.
+  '/Marti/api/subscriptions/all'
 ];
 
 /**

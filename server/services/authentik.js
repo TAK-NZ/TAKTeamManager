@@ -1,4 +1,5 @@
 const axios = require('axios');
+const logger = require('../config/logger').createLogger('AuthentikService');
 
 class AuthentikService {
   constructor() {
@@ -54,6 +55,23 @@ class AuthentikService {
   // token key and log access") returns it. So this method makes two
   // calls: create the token row, then immediately fetch its key.
   //
+  // takserver-enrollment Requirement 3/15.1 Error Handling: if the FIRST
+  // call (creating the token row) throws, nothing was created and
+  // nothing needs compensating -- that rejection simply propagates.
+  // If the SECOND call (fetching the key) throws AFTER the first
+  // succeeded, a live `app_password` token now exists in Authentik that
+  // this method will never return the key for and that no device will
+  // ever receive. This module is the one that knows about both calls and
+  // their shared `identifier`, so the compensation lives here: attempt a
+  // `DELETE /core/tokens/{identifier}/` for that token, then rethrow the
+  // ORIGINAL key-fetch error regardless of whether the delete succeeded.
+  // This delete is licensed -- unlike the product's "never delete a
+  // federated identity" rule, a token is a credential this application
+  // minted seconds earlier, not an identity. On a FAILED delete, log the
+  // token IDENTIFIER (never a key, since none was ever obtained) at
+  // `error` and leave it to expire naturally within its
+  // `expiresInMinutes` cap -- no further compensation attempt.
+  //
   // @param {number} userId - the Authentik user's `pk` the token is
   //   scoped to (Requirement 27.5: "scoped to that device's Authentik
   //   user").
@@ -70,9 +88,23 @@ class AuthentikService {
       expires
     });
 
-    const keyResponse = await this.client.get(
-      `/core/tokens/${encodeURIComponent(identifier)}/view_key/`
-    );
+    let keyResponse;
+    try {
+      keyResponse = await this.client.get(
+        `/core/tokens/${encodeURIComponent(identifier)}/view_key/`
+      );
+    } catch (keyFetchError) {
+      try {
+        await this.client.delete(`/core/tokens/${encodeURIComponent(identifier)}/`);
+      } catch (deleteError) {
+        logger.error(
+          { err: deleteError, identifier },
+          'Enrollment token created but its key fetch failed, and the compensating delete also failed; ' +
+          'it will expire naturally within its configured lifetime'
+        );
+      }
+      throw keyFetchError;
+    }
 
     return {
       identifier: createResponse.data.identifier,

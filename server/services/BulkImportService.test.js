@@ -27,10 +27,37 @@ jest.mock('../models/Team', () => ({
 jest.mock('./authentik', () => ({
   createUser: jest.fn()
 }));
-jest.mock('./UserProvisioningService', () => ({
-  createAndAddUser: jest.fn(),
-  resolveCallsignSuffixForNewUser: jest.fn()
-}));
+jest.mock('./UserProvisioningService', () => {
+  class CallsignSuffixRequiredError extends Error {
+    constructor(message = "A callsign suffix is required for this Organisation's user_defined callsign format") {
+      super(message);
+      this.name = 'CallsignSuffixRequiredError';
+    }
+  }
+  return {
+    createAndAddUser: jest.fn(),
+    // takserver-enrollment Requirements 6.3, 6.6, 6.8 (task 5.3):
+    // replaces the removed `resolveCallsignSuffixForNewUser`.
+    resolveNewUserIdentity: jest.fn(),
+    CallsignSuffixRequiredError
+  };
+});
+jest.mock('./ManagedIdentifierService', () => {
+  class OrganisationPrefixMissingError extends Error {
+    constructor(organisationId) {
+      super(`Organisation ${organisationId} has no Organisation_Prefix. A Managed_Identifier cannot be minted for it, and none was.`);
+      this.name = 'OrganisationPrefixMissingError';
+      this.organisationId = organisationId;
+    }
+  }
+  class ManagedIdentifierExhaustionError extends Error {
+    constructor(organisationId, typeMarker, attempts) {
+      super(`Exhausted ${attempts} Managed_Identifier mint attempt(s) for organisation ${organisationId} (type marker ${typeMarker}). No identifier could be claimed.`);
+      this.name = 'ManagedIdentifierExhaustionError';
+    }
+  }
+  return { OrganisationPrefixMissingError, ManagedIdentifierExhaustionError };
+});
 
 const mockLoggerInstance = { info: jest.fn(), error: jest.fn(), warn: jest.fn() };
 jest.mock('../config/logger', () => ({
@@ -63,7 +90,16 @@ describe('BulkImportService.importUsers', () => {
     pool.connect.mockImplementation(() => Promise.resolve(buildMockClient()));
     authentikService.createUser.mockResolvedValue({ pk: 1000 });
     UserProvisioningService.createAndAddUser.mockResolvedValue({ localUserId: 42, queuedGroups: 1 });
-    UserProvisioningService.resolveCallsignSuffixForNewUser.mockResolvedValue(null);
+    UserProvisioningService.resolveNewUserIdentity.mockImplementation((client, { requestedUsername }) =>
+      Promise.resolve({
+        username: requestedUsername,
+        callsignSuffix: null,
+        pseudonymous: false,
+        organisationId: 1,
+        organisationPrefix: 'ORG',
+        claimId: null
+      })
+    );
     Team.isAdmin.mockResolvedValue(true);
   });
 
@@ -663,7 +699,16 @@ describe('Property 14: CSV batch row processing is isolated', () => {
     UserProvisioningService.createAndAddUser.mockImplementation((client, params) =>
       Promise.resolve({ localUserId: params.teamId, queuedGroups: 1 })
     );
-    UserProvisioningService.resolveCallsignSuffixForNewUser.mockResolvedValue(null);
+    UserProvisioningService.resolveNewUserIdentity.mockImplementation((client, { requestedUsername }) =>
+      Promise.resolve({
+        username: requestedUsername,
+        callsignSuffix: null,
+        pseudonymous: false,
+        organisationId: 1,
+        organisationPrefix: 'ORG',
+        claimId: null
+      })
+    );
     pool.connect.mockImplementation(() => Promise.resolve(buildMockClient()));
   }
 
@@ -1523,18 +1568,23 @@ describe('Property 13: Duplicate rowId values reject the entire import before an
 });
 
 /**
- * Unit tests for `BulkImportService.importUserRow`'s callsign_suffix
- * resolution wiring (Requirements 11.6, 11.7, 11.14, 11.15; task 22.2).
+ * Unit tests for `BulkImportService.importUserRow`'s identity resolution
+ * wiring (takserver-enrollment Requirements 6.3, 6.6, 6.8; task 5.3 --
+ * replacing the removed `resolveCallsignSuffixForNewUser` with
+ * `resolveNewUserIdentity`).
  *
  * Covers: a successful import passing an optional `callsignSuffix` CSV
- * column through to `resolveCallsignSuffixForNewUser` and on to
- * `createAndAddUser`; a `CallsignSuffixRequiredError`/
- * `CallsignSuffixConflictError` thrown for one row being recorded as
- * THAT row's own failure via `importUsers`'s existing per-row catch,
- * with the rest of the batch continuing; and confirming
- * `authentikService.createUser` is never called for the failing row.
+ * column and the `row.username || email.split('@')[0]` derivation through
+ * to `resolveNewUserIdentity` and on to `createAndAddUser`; a
+ * `CallsignSuffixRequiredError`/`CallsignSuffixConflictError`/
+ * `OrganisationPrefixMissingError`/`ManagedIdentifierExhaustionError`
+ * thrown for one row being recorded as THAT row's own failure via
+ * `importUsers`'s existing per-row catch, with the rest of the batch
+ * continuing; that the RESOLVED username (not the raw CSV-derived one)
+ * reaches `authentikService.createUser`; and confirming
+ * `authentikService.createUser` is never called for a failing row.
  */
-describe('BulkImportService.importUserRow callsign_suffix resolution (task 22.2)', () => {
+describe('BulkImportService.importUserRow identity resolution (takserver-enrollment task 5.3)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     pool.connect.mockImplementation(() => Promise.resolve(buildMockClient()));
@@ -1552,29 +1602,47 @@ describe('BulkImportService.importUserRow callsign_suffix resolution (task 22.2)
   }
 
   it('reads the optional callsignSuffix column and passes it through resolution to createAndAddUser', async () => {
-    UserProvisioningService.resolveCallsignSuffixForNewUser.mockResolvedValue('J.Doe');
+    UserProvisioningService.resolveNewUserIdentity.mockResolvedValue({
+      username: 'jdoe',
+      callsignSuffix: 'J.Doe',
+      pseudonymous: false,
+      organisationId: 1,
+      organisationPrefix: 'ORG',
+      claimId: null
+    });
     const csv = csvFromUserRowsWithSuffix([
-      { email: 'jdoe@example.com', firstName: 'John', lastName: 'Doe', teamId: '5', callsignSuffix: 'J.Doe' }
+      { email: 'jdoe@example.com', firstName: 'John', lastName: 'Doe', teamId: '5', username: 'jdoe', callsignSuffix: 'J.Doe' }
     ]);
 
     const importingUser = { userId: 1, is_global_manager: true };
     const summary = await BulkImportService.importUsers(csv, importingUser);
 
     expect(summary.successCount).toBe(1);
-    expect(UserProvisioningService.resolveCallsignSuffixForNewUser).toHaveBeenCalledWith(null, {
+    expect(UserProvisioningService.resolveNewUserIdentity).toHaveBeenCalledWith(null, {
       firstName: 'John',
       lastName: 'Doe',
+      email: 'jdoe@example.com',
       teamId: 5,
+      requestedUsername: 'jdoe',
       requestedCallsignSuffix: 'J.Doe'
     });
+    // The RESOLVED username reaches the Authentik call.
+    expect(authentikService.createUser).toHaveBeenCalledWith(
+      expect.objectContaining({ username: 'jdoe' })
+    );
     expect(UserProvisioningService.createAndAddUser).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ callsign_suffix: 'J.Doe' })
+      expect.objectContaining({ username: 'jdoe', callsign_suffix: 'J.Doe' })
     );
   });
 
-  it('passes undefined requestedCallsignSuffix when the CSV column is omitted/empty', async () => {
-    UserProvisioningService.resolveCallsignSuffixForNewUser.mockResolvedValue('J-Doe');
+  it('passes undefined requestedCallsignSuffix when the CSV column is omitted/empty, and derives requestedUsername from the email local part when the username column is empty', async () => {
+    UserProvisioningService.resolveNewUserIdentity.mockResolvedValue({
+      username: 'jdoe',
+      callsignSuffix: 'J-Doe',
+      pseudonymous: false,
+      claimId: null
+    });
     const csv = csvFromRows([
       { email: 'jdoe@example.com', firstName: 'John', lastName: 'Doe', teamId: '5' }
     ]);
@@ -1582,12 +1650,42 @@ describe('BulkImportService.importUserRow callsign_suffix resolution (task 22.2)
     const importingUser = { userId: 1, is_global_manager: true };
     await BulkImportService.importUsers(csv, importingUser);
 
-    expect(UserProvisioningService.resolveCallsignSuffixForNewUser).toHaveBeenCalledWith(null, {
+    expect(UserProvisioningService.resolveNewUserIdentity).toHaveBeenCalledWith(null, {
       firstName: 'John',
       lastName: 'Doe',
+      email: 'jdoe@example.com',
       teamId: 5,
+      requestedUsername: 'jdoe',
       requestedCallsignSuffix: undefined
     });
+  });
+
+  it("uses the resolved (minted) username for the Authentik call, and passes claimId through to createAndAddUser, for a pseudonymous Organisation", async () => {
+    UserProvisioningService.resolveNewUserIdentity.mockResolvedValue({
+      username: 'ORG-U7K3QMX',
+      callsignSuffix: 'Ghost1',
+      pseudonymous: true,
+      organisationId: 1,
+      organisationPrefix: 'ORG',
+      claimId: 999
+    });
+    const csv = csvFromRows([
+      { email: 'jdoe@example.com', firstName: 'John', lastName: 'Doe', teamId: '5', username: 'jdoe' }
+    ]);
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importUsers(csv, importingUser);
+
+    expect(summary.successCount).toBe(1);
+    // The Authentik create-user call uses the RESOLVED (minted)
+    // username, never the raw CSV-supplied `jdoe`.
+    expect(authentikService.createUser).toHaveBeenCalledWith(
+      expect.objectContaining({ username: 'ORG-U7K3QMX' })
+    );
+    expect(UserProvisioningService.createAndAddUser).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ username: 'ORG-U7K3QMX', claimId: 999 })
+    );
   });
 
   it('records a CallsignSuffixRequiredError as that row\'s own failure, continuing the rest of the batch, without calling Authentik for that row', async () => {
@@ -1598,10 +1696,10 @@ describe('BulkImportService.importUserRow callsign_suffix resolution (task 22.2)
       { email: 'carol@example.com', firstName: 'Carol', lastName: 'Lee', teamId: '5' }
     ]);
 
-    UserProvisioningService.resolveCallsignSuffixForNewUser
-      .mockResolvedValueOnce('A.Smith')
+    UserProvisioningService.resolveNewUserIdentity
+      .mockResolvedValueOnce({ username: 'alice', callsignSuffix: 'A.Smith', pseudonymous: false, claimId: null })
       .mockRejectedValueOnce(new CallsignSuffixRequiredError())
-      .mockResolvedValueOnce('C.Lee');
+      .mockResolvedValueOnce({ username: 'carol', callsignSuffix: 'C.Lee', pseudonymous: false, claimId: null });
 
     const importingUser = { userId: 1, is_global_manager: true };
     const summary = await BulkImportService.importUsers(csv, importingUser);
@@ -1618,6 +1716,54 @@ describe('BulkImportService.importUserRow callsign_suffix resolution (task 22.2)
     );
   });
 
+  it('records an OrganisationPrefixMissingError as that row\'s own failure, continuing the rest of the batch, without calling Authentik for that row', async () => {
+    const { OrganisationPrefixMissingError } = jest.requireActual('./ManagedIdentifierService');
+    const csv = csvFromRows([
+      { email: 'alice@example.com', firstName: 'Alice', lastName: 'Smith', teamId: '5' },
+      { email: 'bob@example.com', firstName: 'Bob', lastName: 'Jones', teamId: '5' }
+    ]);
+
+    UserProvisioningService.resolveNewUserIdentity
+      .mockResolvedValueOnce({ username: 'alice', callsignSuffix: 'A.Smith', pseudonymous: false, claimId: null })
+      .mockRejectedValueOnce(new OrganisationPrefixMissingError(1));
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importUsers(csv, importingUser);
+
+    expect(summary.successCount).toBe(1);
+    expect(summary.failureCount).toBe(1);
+    expect(summary.results[1].success).toBe(false);
+    expect(summary.results[1].error).toMatch(/Organisation_Prefix/);
+    expect(authentikService.createUser).toHaveBeenCalledTimes(1);
+    expect(authentikService.createUser).not.toHaveBeenCalledWith(
+      expect.objectContaining({ email: 'bob@example.com' })
+    );
+  });
+
+  it('records a ManagedIdentifierExhaustionError as that row\'s own failure, continuing the rest of the batch, without calling Authentik for that row', async () => {
+    const { ManagedIdentifierExhaustionError } = jest.requireActual('./ManagedIdentifierService');
+    const csv = csvFromRows([
+      { email: 'alice@example.com', firstName: 'Alice', lastName: 'Smith', teamId: '5' },
+      { email: 'bob@example.com', firstName: 'Bob', lastName: 'Jones', teamId: '5' }
+    ]);
+
+    UserProvisioningService.resolveNewUserIdentity
+      .mockResolvedValueOnce({ username: 'alice', callsignSuffix: 'A.Smith', pseudonymous: false, claimId: null })
+      .mockRejectedValueOnce(new ManagedIdentifierExhaustionError(1, 'U', 5));
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importUsers(csv, importingUser);
+
+    expect(summary.successCount).toBe(1);
+    expect(summary.failureCount).toBe(1);
+    expect(summary.results[1].success).toBe(false);
+    expect(summary.results[1].error).toMatch(/Exhausted/);
+    expect(authentikService.createUser).toHaveBeenCalledTimes(1);
+    expect(authentikService.createUser).not.toHaveBeenCalledWith(
+      expect.objectContaining({ email: 'bob@example.com' })
+    );
+  });
+
   it('records a CallsignSuffixConflictError as that row\'s own failure, continuing the rest of the batch, without calling Authentik for that row', async () => {
     const { CallsignSuffixConflictError } = jest.requireActual('./CallsignSuffixUniquenessService');
     const csv = csvFromRows([
@@ -1625,8 +1771,8 @@ describe('BulkImportService.importUserRow callsign_suffix resolution (task 22.2)
       { email: 'bob@example.com', firstName: 'Bob', lastName: 'Jones', teamId: '5' }
     ]);
 
-    UserProvisioningService.resolveCallsignSuffixForNewUser
-      .mockResolvedValueOnce('A.Smith')
+    UserProvisioningService.resolveNewUserIdentity
+      .mockResolvedValueOnce({ username: 'alice', callsignSuffix: 'A.Smith', pseudonymous: false, claimId: null })
       .mockRejectedValueOnce(new CallsignSuffixConflictError('A.Smith'));
 
     const importingUser = { userId: 1, is_global_manager: true };

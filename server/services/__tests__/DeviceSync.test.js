@@ -259,49 +259,49 @@ const UID_2_ONLY = {
 const REUSED_UID_LIVE_SET = [UID_1_MIDDLE, UID_1_NEWEST, UID_1_OLDEST, UID_2_ONLY];
 
 /**
- * Requirement 4.8 / design.md: "`DEVICE_MGMT_SYNC_INTERVAL_MS`, clamped,
+ * Requirement 4.8 / design.md: "`DEVICE_MGMT_SYNC_INTERVAL_SECONDS`, clamped,
  * default e.g. 15 minutes" -- the existing Sync_Worker scheduled-job
  * pattern, no new framework. Bounds are sanity guards: a 1-minute floor
  * against a busy-loop, a 24-hour ceiling against a mistyped value parking
  * the sync for weeks.
  */
 describe('DeviceSync interval configuration', () => {
-  const originalEnv = process.env.DEVICE_MGMT_SYNC_INTERVAL_MS;
+  const originalEnv = process.env.DEVICE_MGMT_SYNC_INTERVAL_SECONDS;
 
   afterEach(() => {
     if (originalEnv === undefined) {
-      delete process.env.DEVICE_MGMT_SYNC_INTERVAL_MS;
+      delete process.env.DEVICE_MGMT_SYNC_INTERVAL_SECONDS;
     } else {
-      process.env.DEVICE_MGMT_SYNC_INTERVAL_MS = originalEnv;
+      process.env.DEVICE_MGMT_SYNC_INTERVAL_SECONDS = originalEnv;
     }
   });
 
   it('defaults to 900000ms (15 minutes) when unset', () => {
-    delete process.env.DEVICE_MGMT_SYNC_INTERVAL_MS;
+    delete process.env.DEVICE_MGMT_SYNC_INTERVAL_SECONDS;
     const job = new DeviceSync({ takServerService: createTakServerService(), pool });
     expect(job.intervalMs).toBe(900000);
   });
 
   it('respects a valid configured value within the allowed range', () => {
-    process.env.DEVICE_MGMT_SYNC_INTERVAL_MS = '300000';
+    process.env.DEVICE_MGMT_SYNC_INTERVAL_SECONDS = '300';
     const job = new DeviceSync({ takServerService: createTakServerService(), pool });
     expect(job.intervalMs).toBe(300000);
   });
 
-  it('clamps a value below 60000ms up to 60000ms', () => {
-    process.env.DEVICE_MGMT_SYNC_INTERVAL_MS = '250';
+  it('clamps a value below 60 seconds up to 60000ms', () => {
+    process.env.DEVICE_MGMT_SYNC_INTERVAL_SECONDS = '1';
     const job = new DeviceSync({ takServerService: createTakServerService(), pool });
     expect(job.intervalMs).toBe(60000);
   });
 
   it('clamps a value above 24 hours down to 24 hours', () => {
-    process.env.DEVICE_MGMT_SYNC_INTERVAL_MS = '9000000000';
+    process.env.DEVICE_MGMT_SYNC_INTERVAL_SECONDS = '9000000';
     const job = new DeviceSync({ takServerService: createTakServerService(), pool });
     expect(job.intervalMs).toBe(24 * 60 * 60 * 1000);
   });
 
   it('falls back to the default for a non-numeric value', () => {
-    process.env.DEVICE_MGMT_SYNC_INTERVAL_MS = 'quarter-hourly';
+    process.env.DEVICE_MGMT_SYNC_INTERVAL_SECONDS = 'quarter-hourly';
     const job = new DeviceSync({ takServerService: createTakServerService(), pool });
     expect(job.intervalMs).toBe(900000);
   });

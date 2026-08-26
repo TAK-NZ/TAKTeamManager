@@ -17,14 +17,23 @@
  * body and compares the preview's reported value against the
  * `callsign_suffix` argument the create-and-add path actually passes to
  * `UserProvisioningService.createAndAddUser` -- captured via a spy on that
- * method. Computing the expectation by calling
- * `resolveCallsignSuffixForNewUser` twice would assert nothing, since both
- * handlers already call it; the whole point is to prove that neither call
- * site transforms, defaults, or re-derives the resolved value differently
- * on its way into the report versus into the write.
+ * method. Computing the expectation by calling the resolver twice would
+ * assert nothing, since both handlers already call it; the whole point is
+ * to prove that neither call site transforms, defaults, or re-derives the
+ * resolved value differently on its way into the report versus into the
+ * write.
+ *
+ * takserver-enrollment Requirements 6.3, 6.6, 6.8 (task 5.3): both
+ * handlers now delegate to `UserProvisioningService.resolveNewUserIdentity`,
+ * which REPLACED `resolveCallsignSuffixForNewUser` (removed in task 5.1).
+ * None of this file's generated Ancestor_Chain rows set
+ * `pseudonymous_usernames`, so `resolveNewUserIdentity`'s policy-disabled
+ * branch runs throughout -- the exact same resolve/default/
+ * uniqueness-check behaviour `resolveCallsignSuffixForNewUser` used to
+ * provide, unchanged per Criterion 6.8.
  *
  * Both handlers therefore run the REAL
- * `UserProvisioningService.resolveCallsignSuffixForNewUser` (and the real
+ * `UserProvisioningService.resolveNewUserIdentity` (and the real
  * `CallsignService.computeDefaultCallsignSuffix` /
  * `checkCallsignSuffixUniqueness` it delegates to); only the model reads
  * `Team.getAncestorChain` / `Team.getFullMemberList` are mocked (to
@@ -72,10 +81,10 @@ jest.mock('../services/EventPublisher', () => ({
   publishOperation: jest.fn().mockResolvedValue(1)
 }));
 
-// The two `Team` model reads that `resolveCallsignSuffixForNewUser`
-// depends on are mocked so each generated case controls both the
-// Organisation's Callsign_Name_Format (via `getAncestorChain`) and the
-// roster the uniqueness check runs against (via `getFullMemberList`).
+// The two `Team` model reads that `resolveNewUserIdentity` depends on
+// are mocked so each generated case controls both the Organisation's
+// Callsign_Name_Format (via `getAncestorChain`) and the roster the
+// uniqueness check runs against (via `getFullMemberList`).
 // Everything else about the resolver -- the precedence rule, the default
 // computation, the case-insensitive collision check -- runs for real.
 jest.mock('../models/Team', () => ({
@@ -85,9 +94,9 @@ jest.mock('../models/Team', () => ({
 
 // `createAndAddUser` is the value-capture point: it is spied so no real
 // local write happens, while every OTHER static method on the service
-// (crucially `resolveCallsignSuffixForNewUser` and the typed error
-// classes) stays real. Assigning the spy directly onto the required class
-// (rather than spreading it) preserves the non-enumerable static methods.
+// (crucially `resolveNewUserIdentity` and the typed error classes) stays
+// real. Assigning the spy directly onto the required class (rather than
+// spreading it) preserves the non-enumerable static methods.
 jest.mock('../services/UserProvisioningService', () => {
   const actual = jest.requireActual('../services/UserProvisioningService');
   actual.createAndAddUser = jest.fn();
@@ -217,12 +226,24 @@ async function deriveEffectiveValue(gen) {
   ]);
   Team.getFullMemberList.mockResolvedValue([]);
   try {
-    return await UserProvisioningService.resolveCallsignSuffixForNewUser(null, {
+    // takserver-enrollment Requirements 6.3, 6.6, 6.8 (task 5.3):
+    // `resolveCallsignSuffixForNewUser` was REMOVED (task 5.1);
+    // `resolveNewUserIdentity` is the single choke point both this
+    // route and the create-and-add path now delegate to. None of this
+    // property's generated Ancestor_Chain rows set
+    // `pseudonymous_usernames`, so `resolveNewUserIdentity`'s
+    // policy-disabled branch runs -- the exact same
+    // resolve/default/uniqueness-check behaviour
+    // `resolveCallsignSuffixForNewUser` used to provide.
+    const identity = await UserProvisioningService.resolveNewUserIdentity(null, {
       firstName: gen.firstName,
       lastName: gen.lastName,
+      email: 'newuser@example.com',
       teamId: gen.teamId,
+      requestedUsername: 'newuser@example.com',
       requestedCallsignSuffix: gen.callsignSuffix
     });
+    return identity.callsignSuffix;
   } catch {
     return null;
   }
@@ -337,9 +358,10 @@ describe('Feature: member-visibility-and-callsign-recompute, Property 5: The che
  * Callsign_Name_Format (via `getAncestorChain`) and the roster the uniqueness
  * check runs against (via `getFullMemberList`).
  *
- * No production code changes accompany this task. `resolveCallsignSuffixForNewUser`'s
- * `trimmedRequested || computeDefault(...)` precedence is correct and explicitly
- * out of scope -- a Team_Admin who types a suffix must receive it.
+ * No production code changes accompany this task. `resolveNewUserIdentity`'s
+ * `trimmedRequested || computeDefault(...)` precedence (in its policy-disabled
+ * branch) is correct and explicitly out of scope -- a Team_Admin who types a
+ * suffix must receive it.
  */
 describe('Feature: member-visibility-and-callsign-recompute, Task 4.2: read-only and user_defined preview examples', () => {
   let app;

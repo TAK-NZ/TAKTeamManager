@@ -357,6 +357,41 @@ const routes = {
   // Global_Manager from creating/enrolling devices for their own team.
   'POST /api/devices': ['device:manage'],
   'POST /api/devices/:deviceUserId/qr-code': ['device:manage'],
+  // takserver-enrollment Criteria 3.5, 3.7, 3.11 (task 8.4): team-device
+  // LISTING route (`DeviceEnrollmentService.listTeamDevices`), a
+  // DIFFERENT surface from the two routes above (which create/enroll a
+  // device). Subject comes from the `:teamId` URL parameter, not from
+  // `req.user` alone -- exactly the shape `user:team:transfer` and the
+  // `device_mgmt:*:managed` pair above already document: a
+  // statically-held identifier would satisfy `resolveAccess` outright,
+  // so `authorize.js` would never consult a row-scoped resolver, and
+  // every authenticated user could enumerate every team's devices.
+  // `device:read:team_admin` is therefore deliberately NOT in
+  // `roleDefaults.authenticated_user` below (see that list's comment).
+  // Its resolver ("Global_Manager OR `Team.isAdmin(:teamId, ...)`") is
+  // added in a later task; until then this identifier is satisfiable
+  // only via `roleDefaults.global_manager`'s wildcard, which is expected
+  // for this task's scope.
+  'GET /api/devices/team/:teamId': ['device:read:team_admin'],
+
+  // --- /api/enrollment (server/routes/enrollment.js) ---
+  // takserver-enrollment Criteria 3.4, 3.5 (task 8.4): self-service
+  // enrollment of the CALLER'S OWN account. The route carries no route
+  // parameters, no body schema and no query schema --
+  // `DeviceEnrollmentService.generateSelfEnrollment` takes only
+  // `req.user` as its argument -- so the subject is `req.user.userId`
+  // alone and no request input can widen it. `enrollment:self` is a NEW
+  // identifier rather than a reuse of `device:manage`: `device:manage`
+  // means "may create and enroll team-owned devices", and reusing it
+  // would make the two capabilities inseparable, so an operator could
+  // not grant a member the ability to enroll their own phone without
+  // also granting them the ability to create device accounts on their
+  // team (Criterion 3.5). It is placed in `roleDefaults.authenticated_user`
+  // below as a static grant for the same reason `device_mgmt:read:own`
+  // already is (see that identifier's comment above): with a
+  // caller-fixed subject there is no row for a resolver to scope and
+  // nothing a static grant could give away.
+  'POST /api/enrollment/me': ['enrollment:self'],
 
   // --- /api/device-management (server/routes/deviceManagement.js) ---
   // device-management Requirements 6.2, 6.6, 6.7, 8.5, 8.6, 9.3, 9.4. A
@@ -483,7 +518,20 @@ const roleDefaults = {
     // above). The `:managed` counterparts are intentionally absent so
     // their row-scoped resolvers are always consulted.
     'device_mgmt:read:own',
-    'device_mgmt:revoke:own'
+    'device_mgmt:revoke:own',
+    // takserver-enrollment Criterion 3.5 (task 8.4): self-service
+    // enrollment of the caller's OWN account, per
+    // `POST /api/enrollment/me` above. Its subject is `req.user.userId`
+    // alone -- `DeviceEnrollmentService.generateSelfEnrollment` takes no
+    // other parameter -- so there is no row for a resolver to scope and
+    // nothing a static grant could give away, the SAME reasoning already
+    // recorded above for `device_mgmt:read:own`. A NEW identifier rather
+    // than a reuse of `device:manage`: that identifier means "may create
+    // and enroll team-owned devices", and reusing it would make the two
+    // capabilities inseparable, so an operator could not grant a member
+    // the ability to enroll their own phone without also granting them
+    // the ability to create device accounts on their team.
+    'enrollment:self'
   ]
 };
 

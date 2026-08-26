@@ -5,8 +5,6 @@ const { TeamTransferService } = require('./TeamTransferService');
 const EventPublisher = require('./EventPublisher');
 const UserAttributesService = require('./userAttributes');
 const Team = require('../models/Team');
-const CallsignService = require('./CallsignService');
-const { checkCallsignSuffixUniqueness, CallsignSuffixConflictError } = require('./CallsignSuffixUniquenessService');
 const { getLogger } = require('../middleware/requestContext');
 const crypto = require('crypto');
 
@@ -209,13 +207,18 @@ class RequestApprovalService {
     const preFetchedRequest = preFetchResult.rows[0];
     let newAccountAuthentikUser = null;
     let resolvedCallsignSuffix = null;
+    let resolvedUsername = null;
+    let resolvedClaimId = null;
 
     if (preFetchedRequest.request_type === 'new_account') {
-      resolvedCallsignSuffix = await this.resolveAndCheckCallsignSuffixForApproval(
+      const resolvedIdentity = await this.resolveAndCheckCallsignSuffixForApproval(
         preFetchedRequest,
         callsignSuffixOverride
       );
-      newAccountAuthentikUser = await this.createAuthentikUserForNewAccount(preFetchedRequest);
+      resolvedCallsignSuffix = resolvedIdentity.callsignSuffix;
+      resolvedUsername = resolvedIdentity.username;
+      resolvedClaimId = resolvedIdentity.claimId;
+      newAccountAuthentikUser = await this.createAuthentikUserForNewAccount(preFetchedRequest, resolvedUsername);
     }
 
     if (preFetchedRequest.request_type === 'name_change') {
@@ -295,6 +298,8 @@ class RequestApprovalService {
         newAccountAuthentikUser,
         adminId,
         resolvedCallsignSuffix,
+        resolvedUsername,
+        resolvedClaimId,
         callsignSuffixOverride,
         approverIsGlobalManager
       });
@@ -366,7 +371,13 @@ class RequestApprovalService {
           const email = request.requester_email;
           const firstName = request.requested_first_name || request.requester_first_name;
           const lastName = request.requested_last_name || request.requester_last_name;
-          const username = email;
+          // takserver-enrollment Requirement 6.6 (task 5.2): the resolved
+          // username (which may be a minted Pseudonymous_Username, not
+          // `email`) already used to create the Authentik user and the
+          // local `users` row above -- carried into this best-effort
+          // `user_cache` upsert too, so the cache never disagrees with
+          // what was actually created.
+          const username = resolvedUsername;
 
           const attributes = await UserAttributesService.generateCallsign(processResult.localUserId, request.target_team_id);
           if (attributes) {
@@ -484,58 +495,98 @@ class RequestApprovalService {
   }
 
   /**
-   * Requirement 11.12, 11.13, 11.15, 11.16 (task 24.3): resolves the
-   * effective `callsign_suffix` value for a `new_account` request's
-   * approval, and checks it for a per-Team uniqueness collision BEFORE
-   * anything else in `approveRequest` runs (Requirement 11.16 -- reject
-   * before committing ANYTHING).
+   * takserver-enrollment Requirements 6.6, 9.1, 9.2, 9.3 (task 5.2): a
+   * THIN ADAPTER over `UserProvisioningService.resolveNewUserIdentity`,
+   * replacing this method's own `computeDefaultCallsignSuffix` call and
+   * its own `Team.getAncestorChain` read (both REMOVED) -- both are now
+   * `resolveNewUserIdentity`'s job, from the SAME single ancestor-chain
+   * read the resolver already performs. This is the consolidation
+   * Criterion 9.3 requires before Callsign_Default_Suppression can be
+   * relied on anywhere: `CallsignService.computeDefaultCallsignSuffix`
+   * had three callers before this task, and this was one of them --
+   * left alone, a member self-signing-up into a Pseudonymous_Organisation
+   * (this exact path) would have received a name-derived callsign on
+   * the commonest creation path, while every other path looked correct.
    *
-   * Resolution order (Requirement 11.13):
-   *   1. `callsignSuffixOverride`, the reviewer's override supplied on
-   *      THIS approve request, when non-empty.
-   *   2. Else the request's own originally-submitted
-   *      `callsign_suffix` (Requirement 11.9's submission), when
-   *      non-empty.
-   *   3. Else the computed default via
-   *      `CallsignService.computeDefaultCallsignSuffix`, using the
-   *      target Organisation's `callsign_name_format` (resolved via
-   *      `Team.getAncestorChain(request.target_team_id)`'s root row) --
-   *      the exact same computation task 24.2 already performs for
-   *      display purposes.
+   * This method's job is now narrower: adapt the pre-fetched
+   * `access_requests` row into `resolveNewUserIdentity`'s parameter
+   * shape, and figure out the single `requestedCallsignSuffix` value to
+   * pass through -- the resolver itself decides what to do with it
+   * (compute a default when the policy is disabled, or demand an
+   * explicit value with no default when enabled).
    *
-   * The effective value is then checked via
-   * `checkCallsignSuffixUniqueness(request.target_team_id, effectiveValue)`
-   * (Requirement 11.15) -- no `excludeUserId`, since this is a brand-new
-   * user with no existing membership. Throws `CallsignSuffixConflictError`
-   * on a collision (Requirement 11.16), which propagates naturally out of
+   * Field mapping onto `resolveNewUserIdentity`'s params:
+   *   - `firstName`/`lastName`: `request.requested_first_name ||
+   *     request.requester_first_name` / the `_last_name` equivalent --
+   *     the EXACT derivation this method already used.
+   *   - `email`: `request.requester_email`.
+   *   - `teamId`: `request.target_team_id`.
+   *   - `requestedUsername`: `request.requester_email` -- the existing
+   *     `new_account` branch's `const username = email` derivation,
+   *     unchanged when the policy is disabled (the resolver returns it
+   *     verbatim in that case; Criterion 6.8).
+   *   - `requestedCallsignSuffix`: this method's OWN resolution of
+   *     (1) `callsignSuffixOverride` when non-empty, else (2)
+   *     `request.callsign_suffix` -- the same first two links of the
+   *     old three-link precedence chain. The THIRD link (the computed
+   *     default) is deliberately NOT resolved here anymore:
+   *     `resolveNewUserIdentity` computes it internally when the policy
+   *     is disabled, and suppresses it (demanding an explicit value)
+   *     when the policy is enabled -- this adapter has no way to know
+   *     which of those applies without duplicating the resolver's own
+   *     ancestor-chain read, which is exactly the duplication this
+   *     consolidation removes.
+   *
+   * `resolveNewUserIdentity` itself runs
+   * `checkCallsignSuffixUniqueness` (Requirement 9.4, unchanged) and,
+   * when the target Organisation's Pseudonymous_Username_Policy is
+   * enabled, mints a Pseudonymous_Username and inserts a Claim_Row via
+   * `ManagedIdentifierService.mintUniqueIdentifier` -- see that
+   * function's own doc comment for the full resolution order. Both
+   * still run, and a `CallsignSuffixConflictError` /
+   * `CallsignSuffixRequiredError` /
+   * `ManagedIdentifierService.OrganisationPrefixMissingError` /
+   * `ManagedIdentifierExhaustionError` still propagates naturally out of
    * `approveRequest` at this point -- before Phase 1/Phase 2 have done
    * anything at all, so nothing needs rolling back.
    *
    * @param {object} request - the pre-fetched `access_requests` row.
    * @param {string|null} callsignSuffixOverride - the reviewer's
    *   optional override supplied on this approve request.
-   * @returns {Promise<string|null>} the resolved, uniqueness-checked
-   *   effective `callsign_suffix` value.
+   * @returns {Promise<{
+   *   username: string,
+   *   callsignSuffix: string,
+   *   pseudonymous: boolean,
+   *   claimId: number|null
+   * }>} `username`/`callsignSuffix` are the exact shape callers already
+   *   expect from this method's return value. `pseudonymous`/`claimId`
+   *   are ADDED alongside them -- `approveRequest`/`processApprovedRequest`
+   *   need `claimId` later in this same task to adopt the Claim_Row
+   *   `resolveNewUserIdentity` inserted (when pseudonymous) rather than
+   *   re-inserting and colliding on the username it just claimed.
    */
   async resolveAndCheckCallsignSuffixForApproval(request, callsignSuffixOverride) {
     const trimmedOverride = callsignSuffixOverride ? callsignSuffixOverride.trim() : '';
+    const requestedCallsignSuffix = trimmedOverride || request.callsign_suffix || undefined;
 
-    let effectiveValue;
-    if (trimmedOverride) {
-      effectiveValue = trimmedOverride;
-    } else if (request.callsign_suffix) {
-      effectiveValue = request.callsign_suffix;
-    } else {
-      const firstName = request.requested_first_name || request.requester_first_name;
-      const lastName = request.requested_last_name || request.requester_last_name;
-      const ancestorChain = await Team.getAncestorChain(request.target_team_id);
-      const organisation = ancestorChain[0];
-      effectiveValue = CallsignService.computeDefaultCallsignSuffix(firstName, lastName, organisation?.callsign_name_format);
-    }
+    const firstName = request.requested_first_name || request.requester_first_name;
+    const lastName = request.requested_last_name || request.requester_last_name;
 
-    await checkCallsignSuffixUniqueness(request.target_team_id, effectiveValue);
+    const identity = await UserProvisioningService.resolveNewUserIdentity(null, {
+      firstName,
+      lastName,
+      email: request.requester_email,
+      teamId: request.target_team_id,
+      requestedUsername: request.requester_email,
+      requestedCallsignSuffix
+    });
 
-    return effectiveValue;
+    return {
+      username: identity.username,
+      callsignSuffix: identity.callsignSuffix,
+      pseudonymous: identity.pseudonymous,
+      claimId: identity.claimId
+    };
   }
 
   /**
@@ -544,14 +595,30 @@ class RequestApprovalService {
    * existing-email check + create-user call (`server/routes/users.js`).
    * Runs strictly before any transactional client is acquired.
    *
+   * takserver-enrollment Requirement 6.6 (task 5.2): `resolvedUsername`
+   * is now REQUIRED and is what gets sent to Authentik as `username` --
+   * this can no longer always be `request.requester_email`, because
+   * `resolveAndCheckCallsignSuffixForApproval` may have already resolved
+   * a DIFFERENT username (a minted Pseudonymous_Username) and even
+   * already inserted a Claim_Row under it via
+   * `UserProvisioningService.resolveNewUserIdentity`. Using
+   * `request.requester_email` unconditionally here, as this method did
+   * before this task, would create the Authentik user under the WRONG
+   * name whenever the target Organisation is pseudonymous.
+   *
    * @param {object} request - the pre-fetched `access_requests` row.
+   * @param {string} resolvedUsername - the username already resolved by
+   *   `resolveAndCheckCallsignSuffixForApproval` (the caller-supplied
+   *   email verbatim when the target Organisation's
+   *   Pseudonymous_Username_Policy is disabled; a freshly minted
+   *   Pseudonymous_Username when enabled).
    * @returns {Promise<{pk: number|string}>} the created Authentik user.
    */
-  async createAuthentikUserForNewAccount(request) {
+  async createAuthentikUserForNewAccount(request, resolvedUsername) {
     const email = request.requester_email;
     const firstName = request.requested_first_name || request.requester_first_name;
     const lastName = request.requested_last_name || request.requester_last_name;
-    const username = email;
+    const username = resolvedUsername;
 
     const existingUserResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/?email=${encodeURIComponent(email)}`, {
       headers: { Authorization: `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }
@@ -721,7 +788,7 @@ class RequestApprovalService {
     }
   }
 
-  async processApprovedRequest(client, request, { newAccountAuthentikUser, adminId, resolvedCallsignSuffix = null, callsignSuffixOverride = null, approverIsGlobalManager = false } = {}) {
+  async processApprovedRequest(client, request, { newAccountAuthentikUser, adminId, resolvedCallsignSuffix = null, resolvedUsername = null, resolvedClaimId = null, callsignSuffixOverride = null, approverIsGlobalManager = false } = {}) {
     switch (request.request_type) {
       case 'new_account': {
         // Requirement 18.1 (task 38.1): the Authentik user was already
@@ -734,7 +801,16 @@ class RequestApprovalService {
         const email = request.requester_email;
         const firstName = request.requested_first_name || request.requester_first_name;
         const lastName = request.requested_last_name || request.requester_last_name;
-        const username = email;
+
+        // takserver-enrollment Requirement 6.6 (task 5.2): `username` is
+        // now `resolvedUsername`, taken from the Phase-1 adapter's
+        // result -- NOT `const username = email` as before this task.
+        // Under a policy-disabled Organisation this is still exactly
+        // `email` (the resolver returns `requestedUsername` verbatim in
+        // that case); under a pseudonymous one it is the minted
+        // Pseudonymous_Username already used to create the Authentik
+        // user above.
+        const username = resolvedUsername;
 
         // Requirement 11.13 (task 24.3): `resolvedCallsignSuffix` was
         // already resolved and uniqueness-checked in Phase 1 (see
@@ -753,7 +829,16 @@ class RequestApprovalService {
           lastName,
           teamId: request.target_team_id,
           callsign_suffix: resolvedCallsignSuffix,
-          createdBy: adminId ?? null
+          createdBy: adminId ?? null,
+          // takserver-enrollment Requirement 6.6 (task 5.2): when the
+          // target Organisation is pseudonymous, `resolvedClaimId` names
+          // the Claim_Row `resolveNewUserIdentity` already inserted under
+          // `username` above -- `createAndAddUser` adopts that exact row
+          // (`UPDATE ... WHERE id = $claimId`) instead of its generic
+          // upsert, which cannot match a Claim_Row's NULL
+          // `authentik_user_id` under `ON CONFLICT`. `null` (the default)
+          // for a policy-disabled Organisation, where no Claim_Row exists.
+          claimId: resolvedClaimId
         });
       }
       case 'team_change': {

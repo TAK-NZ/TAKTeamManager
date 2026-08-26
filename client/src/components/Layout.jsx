@@ -11,7 +11,9 @@ import {
   XMarkIcon,
   CogIcon,
   SunIcon,
-  MoonIcon
+  MoonIcon,
+  QrCodeIcon,
+  ArrowDownTrayIcon
 } from '@heroicons/react/24/outline'
 import { authAPI, requestsAPI } from '../services/api'
 import { useTheme } from '../contexts/ThemeContext'
@@ -20,6 +22,17 @@ const getNavigation = (user) => {
   const baseNavigation = [
     { name: 'Dashboard', href: '/dashboard', icon: HomeIcon },
     { name: 'Orgs & Teams', href: '/teams', icon: UserGroupIcon },
+    // Enrollment carries no permission identifier and no role gate: every
+    // signed-in user must see it regardless of team membership, because a
+    // user with no team membership at all is exactly the user who needs to
+    // self-enroll a device (takserver-enrollment Criterion 15.2). The
+    // authorization decision happens on the API call, not on nav visibility.
+    { name: 'Enrollment', href: '/enrollment', icon: QrCodeIcon },
+    // Downloads carries no permission identifier and no role gate either,
+    // for the same reason as Enrollment above: a user who has not yet been
+    // placed in a Team is exactly the user installing a client for the
+    // first time (takserver-enrollment Criterion 12.9).
+    { name: 'Downloads', href: '/downloads', icon: ArrowDownTrayIcon },
   ]
   
   if (user?.isAdmin || user?.is_global_manager) {

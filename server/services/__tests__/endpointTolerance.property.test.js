@@ -373,7 +373,14 @@ describe('Property 12: A documented-endpoint failure is never an empty result', 
           jest.clearAllMocks();
           pool.query.mockResolvedValue({ rowCount: 1 });
 
-          const takServerService = { getClientEndpoints: jest.fn() };
+          const takServerService = {
+            getClientEndpoints: jest.fn(),
+            // Requirement 13 freshening follow-up: stubbed to a no-op so this
+            // property stays about the PRIMARY fetch's failure modes; the
+            // freshening fetch's own best-effort tolerance has its own
+            // coverage in SubscriptionPoller.test.js.
+            getAllSubscriptions: jest.fn().mockResolvedValue([])
+          };
           if (failure.mode === 'malformed') {
             takServerService.getClientEndpoints.mockResolvedValue(failure.payload);
           } else {
@@ -417,6 +424,7 @@ describe('Property 12: A documented-endpoint failure is never an empty result', 
             entries: 0,
             observed: 0,
             skipped: 0,
+            freshened: 0,
             updated: 0,
             failed: 0,
             connected: 0,

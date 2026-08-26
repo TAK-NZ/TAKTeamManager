@@ -52,6 +52,7 @@ jest.mock('../services/DeviceEnrollmentService', () => {
   const MockDeviceEnrollmentService = {
     createDevice: jest.fn(),
     generateEnrollmentQrCode: jest.fn(),
+    listTeamDevices: jest.fn(),
     DeviceEnrollmentAuthorizationError,
     NotATeamOwnedDeviceError,
     TakServerNotConfiguredError
@@ -164,23 +165,72 @@ describe('POST /api/devices/:deviceUserId/qr-code', () => {
     pool.query.mockResolvedValue({ rows: [] });
   });
 
-  it('generates a QR code and writes an audit_logs row on success', async () => {
+  // takserver-enrollment Criteria 4.1, 4.3 (Correction 3, task 8.3): the
+  // corrected `#buildEnrollment` shape a mocked service call now
+  // resolves with, used across the tests below in place of the retired
+  // `itakEnrollmentPayload: { host, username, token }` shape.
+  const correctedQrCode = {
+    principalId: 10,
+    principalKind: 'device',
+    teamId: 3,
+    username: 'device-abc',
+    host: 'tak.example.com',
+    expiresAt: '2024-01-01T00:30:00.000Z',
+    reEnrollmentDate: '2025-01-01T00:00:00.000Z',
+    atakEnrollmentUri: 'tak://com.atakmap.app/enroll?host=tak.example.com&username=device-abc&token=xyz',
+    itakRegistrationPayload: {
+      passphrase: 'false',
+      type: 'registration',
+      serverCredentials: { connectionString: 'tak.example.com:8089:ssl' },
+      userCredentials: { username: 'device-abc', password: 'xyz', registrationId: 'a1b2c3d4-0000-0000-0000-000000000000' }
+    },
+    atakQrDataUrl: 'data:image/png;base64,AAA=',
+    itakQrDataUrl: 'data:image/png;base64,BBB=',
+    takAttributes: { callsign: 'Callsign1', color: 'Blue', role: 'Team Member' },
+    liveCertificateCount: 1
+  };
+
+  it('generates the corrected enrollment payload and writes an audit_logs row on success', async () => {
     asGlobalManager();
-    DeviceEnrollmentService.generateEnrollmentQrCode.mockResolvedValue({
-      deviceUserId: 10,
-      teamId: 3,
-      username: 'device-abc',
-      host: 'tak.example.com',
-      expiresAt: '2024-01-01T00:30:00.000Z',
-      atakEnrollmentUri: 'tak://com.atakmap.app/enroll?host=tak.example.com&username=device-abc&token=xyz',
-      itakEnrollmentPayload: { host: 'tak.example.com', username: 'device-abc', token: 'xyz' }
-    });
+    DeviceEnrollmentService.generateEnrollmentQrCode.mockResolvedValue(correctedQrCode);
 
     const res = await request(app).post('/api/devices/10/qr-code');
 
     expect(res.status).toBe(200);
+    // takserver-enrollment Criterion 4.1: assert the EXACT key set of
+    // the corrected shape, not a loose/partial shape check -- no
+    // `token` key anywhere.
+    expect(Object.keys(res.body.qrCode).sort()).toEqual([
+      'atakEnrollmentUri',
+      'atakQrDataUrl',
+      'expiresAt',
+      'host',
+      'itakQrDataUrl',
+      'itakRegistrationPayload',
+      'liveCertificateCount',
+      'principalId',
+      'principalKind',
+      'reEnrollmentDate',
+      'takAttributes',
+      'teamId',
+      'username'
+    ].sort());
+    expect(res.body.qrCode).not.toHaveProperty('deviceUserId');
+    expect(res.body.qrCode).not.toHaveProperty('itakEnrollmentPayload');
+    expect(res.body.qrCode.itakRegistrationPayload).toEqual({
+      passphrase: 'false',
+      type: 'registration',
+      serverCredentials: { connectionString: 'tak.example.com:8089:ssl' },
+      userCredentials: { username: 'device-abc', password: 'xyz', registrationId: 'a1b2c3d4-0000-0000-0000-000000000000' }
+    });
+    expect(JSON.stringify(res.body.qrCode)).not.toContain('"token"');
     expect(res.body.qrCode.atakEnrollmentUri).toContain('tak://com.atakmap.app/enroll');
     expect(DeviceEnrollmentService.generateEnrollmentQrCode).toHaveBeenCalledWith('10', mockUser);
+
+    // takserver-enrollment Criterion 11.5: `no-store` present on the
+    // success response.
+    expect(res.headers['cache-control']).toBe('no-store, no-cache, must-revalidate');
+    expect(res.headers['pragma']).toBe('no-cache');
 
     expect(pool.query).toHaveBeenCalledTimes(1);
     const [sql, params] = pool.query.mock.calls[0];
@@ -188,6 +238,9 @@ describe('POST /api/devices/:deviceUserId/qr-code', () => {
     expect(params[0]).toBe(mockUser.userId);
     expect(params[1]).toBe('device_enrollment_qr_generated');
     expect(params[2]).toBe('user');
+    // takserver-enrollment task 8.3: `#buildEnrollment` returns
+    // `principalId`, not `deviceUserId` -- the audit log's `resource_id`
+    // and `details.deviceUserId` now read the corrected field.
     expect(params[3]).toBe(10);
     const details = JSON.parse(params[4]);
     expect(details.deviceUserId).toBe(10);
@@ -198,19 +251,29 @@ describe('POST /api/devices/:deviceUserId/qr-code', () => {
   it('allows a standard authenticated user to reach the handler', async () => {
     asStandardUser(5);
     DeviceEnrollmentService.generateEnrollmentQrCode.mockResolvedValue({
-      deviceUserId: 12,
+      ...correctedQrCode,
+      principalId: 12,
       teamId: 4,
-      username: 'device-ghi',
-      host: 'tak.example.com',
-      expiresAt: '2024-01-01T00:30:00.000Z',
-      atakEnrollmentUri: 'tak://com.atakmap.app/enroll?host=tak.example.com&username=device-ghi&token=abc',
-      itakEnrollmentPayload: { host: 'tak.example.com', username: 'device-ghi', token: 'abc' }
+      username: 'device-ghi'
     });
 
     const res = await request(app).post('/api/devices/12/qr-code');
 
     expect(res.status).toBe(200);
     expect(DeviceEnrollmentService.generateEnrollmentQrCode).toHaveBeenCalledWith('12', mockUser);
+  });
+
+  it('sets the no-store Cache-Control and Pragma headers even on an error response', async () => {
+    asStandardUser(5);
+    DeviceEnrollmentService.generateEnrollmentQrCode.mockRejectedValue(
+      new DeviceEnrollmentService.DeviceEnrollmentAuthorizationError()
+    );
+
+    const res = await request(app).post('/api/devices/10/qr-code');
+
+    expect(res.status).toBe(403);
+    expect(res.headers['cache-control']).toBe('no-store, no-cache, must-revalidate');
+    expect(res.headers['pragma']).toBe('no-cache');
   });
 
   it('returns 400 for a non-integer deviceUserId without calling the service', async () => {
@@ -256,5 +319,86 @@ describe('POST /api/devices/:deviceUserId/qr-code', () => {
 
     expect(res.status).toBe(400);
     expect(pool.query).not.toHaveBeenCalled();
+  });
+});
+
+// takserver-enrollment Criteria 3.11, 5.9, 5.10, 13.6, 14.6, 14.7 (task
+// 8.3): the new team device listing route.
+describe('GET /api/devices/team/:teamId', () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    app = buildApp();
+  });
+
+  it('returns the team\'s devices for an authorized caller (Global_Manager)', async () => {
+    asGlobalManager();
+    DeviceEnrollmentService.listTeamDevices.mockResolvedValue({
+      devices: [
+        {
+          deviceUserId: 10,
+          username: 'AUK-D7K3QMX',
+          deviceLabel: 'Engine 4 Tablet',
+          teamId: 3,
+          createdAt: '2024-01-01T00:00:00.000Z',
+          liveCertificateCount: 1
+        }
+      ]
+    });
+
+    const res = await request(app).get('/api/devices/team/3');
+
+    expect(res.status).toBe(200);
+    expect(res.body.devices).toHaveLength(1);
+    expect(res.body.devices[0]).toEqual({
+      deviceUserId: 10,
+      username: 'AUK-D7K3QMX',
+      deviceLabel: 'Engine 4 Tablet',
+      teamId: 3,
+      createdAt: '2024-01-01T00:00:00.000Z',
+      liveCertificateCount: 1
+    });
+    // takserver-enrollment Criterion 5.10: no email field for any device.
+    expect(res.body.devices[0]).not.toHaveProperty('email');
+    expect(DeviceEnrollmentService.listTeamDevices).toHaveBeenCalledWith('3', mockUser);
+  });
+
+  it('returns the team\'s devices for an authorized caller (team admin, non-global-manager)', async () => {
+    asStandardUser(5);
+    // The real `authorize.js` middleware and `device:read:team_admin`
+    // resolver run for this route (not mocked, per this file's header
+    // comment) -- its resolver calls `Team.isAdmin(teamId, userId)`,
+    // which issues a real `pool.query`. `pool.query` is mocked at the
+    // module boundary here, so a non-empty row set is what makes the
+    // resolver's admin check resolve `true` for a standard user.
+    pool.query.mockResolvedValue({ rows: [{ exists: 1 }] });
+    DeviceEnrollmentService.listTeamDevices.mockResolvedValue({ devices: [] });
+
+    const res = await request(app).get('/api/devices/team/4');
+
+    expect(res.status).toBe(200);
+    expect(res.body.devices).toEqual([]);
+    expect(DeviceEnrollmentService.listTeamDevices).toHaveBeenCalledWith('4', mockUser);
+  });
+
+  it('maps DeviceEnrollmentAuthorizationError from the service to 403 for an unauthorized caller', async () => {
+    asStandardUser(5);
+    DeviceEnrollmentService.listTeamDevices.mockRejectedValue(
+      new DeviceEnrollmentService.DeviceEnrollmentAuthorizationError()
+    );
+
+    const res = await request(app).get('/api/devices/team/4');
+
+    expect(res.status).toBe(403);
+  });
+
+  it('returns 400 for a non-integer teamId without calling the service', async () => {
+    asGlobalManager();
+
+    const res = await request(app).get('/api/devices/team/not-a-number');
+
+    expect(res.status).toBe(400);
+    expect(DeviceEnrollmentService.listTeamDevices).not.toHaveBeenCalled();
   });
 });

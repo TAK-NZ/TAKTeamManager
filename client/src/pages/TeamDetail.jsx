@@ -3,7 +3,7 @@ import React from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { PlusIcon, UsersIcon, UserPlusIcon, ShieldCheckIcon, BuildingOfficeIcon, FolderPlusIcon, HashtagIcon, XMarkIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, TrashIcon, PencilIcon, CheckIcon, ArrowLeftOnRectangleIcon, EnvelopeIcon, ArrowRightCircleIcon, ArrowPathIcon, DevicePhoneMobileIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
-import { teamsAPI, channelsAPI, usersAPI, configAPI } from '../services/api'
+import { teamsAPI, channelsAPI, usersAPI, configAPI, devicesAPI } from '../services/api'
 import api from '../services/api'
 import { labelFor } from '../utils/teamLabels'
 import { computeTeamDepth } from '../utils/teamDepth'
@@ -12,6 +12,8 @@ import SignupCodeManager from '../components/SignupCodeManager'
 import OrgDomainManager from '../components/OrgDomainManager'
 import TransferMemberDialog from '../components/TransferMemberDialog'
 import UserDevicesModal, { useDeviceManagementEnabled } from '../components/UserDevicesModal'
+import TeamDeviceList, { deviceDisplayName } from '../components/TeamDeviceList'
+import EnrollmentView from './EnrollmentView'
 import {
   newUserFormReducer,
   initialNewUserFormState,
@@ -115,6 +117,55 @@ export function isValidMemberCallsignSuffix(value) {
     return true
   }
   return CALLSIGN_SUFFIX_REGEX.test(value)
+}
+
+// takserver-enrollment Requirement 6.7/9.7 (task 5.5): resolves whether
+// the CURRENT team's own Ancestor_Chain root (its Organisation) has the
+// Pseudonymous_Username_Policy enabled, for the Create New User form.
+//
+// Mirrors the server's own rule -- `Team.getAncestorChain(teamId)[0]`,
+// the chain is root-first, NEVER a positional read from the tail -- but
+// resolves it client-side from the already-fetched `allTeams` list
+// (the same list `computeTeamDepth` already walks for the "Add
+// Sub-team" disable state) rather than adding a new network call: this
+// page already fetches every Team in the caller's own Organisation via
+// `teamsAPI.getMyTeams()` (`Team.getOrganisationTeams` server-side for a
+// non-Global_Manager team admin), and every returned row carries
+// `pseudonymous_usernames` (Requirement 6.2's `SELECT t.*`/`SELECT
+// oh.*`), so no new fetch is needed to answer this question.
+//
+// An Organisation's own row carries its authoritative value directly.
+// A Sub_Team's own `pseudonymous_usernames` is always NULL (Requirement
+// 6.2) -- reading it directly would be the exact positional-tail-read
+// mistake the server-side rule forbids -- so this walks `parent_team_id`
+// up through `allTeams` to the root and reads ITS value instead.
+// Terminates defensively if an ancestor is missing from `allTeams` (e.g.
+// a private ancestor not returned to this admin, or a Global_Manager's
+// paginated all-teams list not reaching back far enough), returning
+// `false` rather than looping forever or guessing -- the same
+// termination rule `computeTeamDepth` already uses for the identical
+// "walk parent_team_id through an already-fetched list" shape.
+export function isPseudonymousOrganisation(team, allTeams) {
+  if (!team) {
+    return false
+  }
+  if (!team.parent_team_id) {
+    return Boolean(team.pseudonymous_usernames)
+  }
+  const teamsById = new Map((allTeams || []).map((t) => [t.id, t]))
+  const seen = new Set([team.id])
+  let current = teamsById.get(team.parent_team_id)
+  while (current) {
+    if (!current.parent_team_id) {
+      return Boolean(current.pseudonymous_usernames)
+    }
+    if (seen.has(current.id)) {
+      break
+    }
+    seen.add(current.id)
+    current = teamsById.get(current.parent_team_id)
+  }
+  return false
 }
 
 // Pure email-format validator for the Create New User form's Email
@@ -364,6 +415,15 @@ export default function TeamDetail({ user, refreshUser }) {
   // flag is on, and that flag is never exposed through /api/config/public
   // (Requirement 1.4), so the affordance is gated on the reachability probe.
   const devicesEnabled = useDeviceManagementEnabled()
+  // takserver-enrollment Criteria 14.6, 14.7 (task 11.3): the Team_Owned_Device
+  // whose Enrollment_View modal is open, or null when closed. `TeamDeviceList`
+  // (task 11.2) only lists devices and calls `onEnroll(device)` -- it renders
+  // no Enrollment_View itself -- so this page is the caller that decides how
+  // to open one: a modal wrapping `<EnrollmentView fetchEnrollment={...}>`
+  // with a `fetchEnrollment` bound to THIS device's own
+  // `POST /api/devices/:deviceUserId/qr-code`, rather than the self-service
+  // `POST /api/enrollment/me` route `EnrollmentView`'s default fetches.
+  const [enrollingDevice, setEnrollingDevice] = useState(null)
 
   const handleCreateSubTeam = async (e) => {
     e.preventDefault()
@@ -1016,6 +1076,13 @@ export default function TeamDetail({ user, refreshUser }) {
   // maxTeamDepth to disable "Add Sub-team" at the deepest permitted level.
   const teamDepth = computeTeamDepth(team, allTeams)
   const atMaxTeamDepth = maxTeamDepth != null && teamDepth >= maxTeamDepth
+  // takserver-enrollment Requirement 6.7/9.7 (task 5.5): whether this
+  // team's own Organisation (via its Ancestor_Chain root) has the
+  // Pseudonymous_Username_Policy enabled -- drives the Create New User
+  // tab's Callsign Suffix "required" state/explanation and hides the
+  // Username field entirely (there is none to hide today; see the note
+  // at the Callsign Suffix field below).
+  const pseudonymousTarget = isPseudonymousOrganisation(team, allTeams)
 
   return (
     <div className="space-y-6">
@@ -1708,6 +1775,21 @@ export default function TeamDetail({ user, refreshUser }) {
         </div>
       </div>
 
+      {/* takserver-enrollment Criteria 14.6, 14.7 (task 11.3): the Devices
+          section is its OWN card, BENEATH the tabbed Members/Team
+          Admins/Channels/Sub-teams interface above -- not a fifth tab inside
+          it, and not folded into the Members tab's table. `TeamDeviceList`
+          fetches from `GET /api/devices/team/:teamId`, a route entirely
+          separate from the human member list and the human member-count
+          query this page already renders above, so this section cannot
+          reintroduce a Team_Owned_Device into either (`production-hardening`
+          Criterion 27.9, preserved here). It is gated on `devicesEnabled`
+          exactly like the per-member "View member devices" affordance above,
+          since both surfaces exist only while DEVICE_MGMT_ENABLED is on. */}
+      {devicesEnabled && (
+        <TeamDeviceList teamId={team.id} onEnroll={setEnrollingDevice} />
+      )}
+
       {/* Create Sub-Team Dialog */}
       {showSubTeamDialog && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
@@ -2085,10 +2167,22 @@ export default function TeamDetail({ user, refreshUser }) {
                       the name inputs, required when the Organisation's
                       `callsign_name_format` is `user_defined`, and re-checked on
                       its own blur so a manually typed value is collision-checked
-                      before submit. */}
+                      before submit.
+
+                      takserver-enrollment Requirement 9.7 (task 5.5): ALSO
+                      required, unconditionally, when the target
+                      Organisation is pseudonymous (`pseudonymousTarget`) --
+                      Callsign_Default_Suppression means the server never
+                      computes a name-derived default there
+                      (`resolveNewUserIdentity`'s policy-enabled branch), so
+                      this field is required regardless of what the
+                      `callsign_name_format`-driven preview reports. Stated
+                      here as visible TEXT and a `required` attribute BEFORE
+                      submit, per Criterion 9.7 -- not left for the admin to
+                      discover only from the server's rejection. */}
                   <div>
                     <label htmlFor="new-user-callsign-suffix" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                      Callsign Suffix {newUserFormState.required ? '*' : ''}
+                      Callsign Suffix {(newUserFormState.required || pseudonymousTarget) ? '*' : ''}
                     </label>
                     <div className="flex items-center gap-2">
                       <input
@@ -2101,9 +2195,9 @@ export default function TeamDetail({ user, refreshUser }) {
                         pattern={CALLSIGN_SUFFIX_PATTERN}
                         title="Only letters, digits, - and . are allowed"
                         placeholder="Filled in automatically"
-                        required={newUserFormState.required}
+                        required={newUserFormState.required || pseudonymousTarget}
                         aria-invalid={newUserFormState.error ? 'true' : undefined}
-                        aria-describedby={newUserFormState.error ? 'new-user-callsign-suffix-error' : (newUserFormState.required ? 'new-user-callsign-suffix-help' : undefined)}
+                        aria-describedby={newUserFormState.error ? 'new-user-callsign-suffix-error' : ((newUserFormState.required || pseudonymousTarget) ? 'new-user-callsign-suffix-help' : undefined)}
                       />
                       {/* Recompute_Control: forces a Suffix_Preview that omits
                           `callsignSuffix`, discarding any Admin_Typed_Suffix and
@@ -2127,10 +2221,18 @@ export default function TeamDetail({ user, refreshUser }) {
                         Checking callsign suffix…
                       </span>
                     )}
-                    {newUserFormState.required && !newUserFormState.error && (
-                      <p id="new-user-callsign-suffix-help" className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-                        This Organisation requires a manually chosen callsign suffix.
-                      </p>
+                    {pseudonymousTarget ? (
+                      !newUserFormState.error && (
+                        <p id="new-user-callsign-suffix-help" className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                          Required because this Organisation uses pseudonymous usernames: the username is generated automatically and carries no personal information, so it cannot stand in for a callsign the way a name-derived one would.
+                        </p>
+                      )
+                    ) : (
+                      newUserFormState.required && !newUserFormState.error && (
+                        <p id="new-user-callsign-suffix-help" className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                          This Organisation requires a manually chosen callsign suffix.
+                        </p>
+                      )
                     )}
                     {newUserFormState.error && (
                       <p id="new-user-callsign-suffix-error" role="alert" className="text-red-600 text-sm mt-1">
@@ -2138,7 +2240,24 @@ export default function TeamDetail({ user, refreshUser }) {
                       </p>
                     )}
                   </div>
-                  
+
+                  {/* takserver-enrollment Requirement 6.3/6.4/9.7 (task
+                      5.5): this tab has no Username input to begin with --
+                      `create-and-add` always derives it server-side (from
+                      the email when the policy is disabled, per
+                      Criterion 6.8) -- so there is no field to hide. What
+                      Criterion 9.7 requires here is the same fact stated as
+                      visible text: under a pseudonymous policy the
+                      username is generated, not derived from anything
+                      submitted on this form, so no admin-supplied value is
+                      ever silently discarded server-side because none is
+                      ever offered. */}
+                  {pseudonymousTarget && (
+                    <p className="text-xs text-gray-500 dark:text-gray-400">
+                      This Organisation uses pseudonymous usernames: the new member's TAK username will be generated automatically and will not be derived from their email address or name.
+                    </p>
+                  )}
+
                   <div className="bg-blue-50 dark:bg-blue-900 p-4 rounded-lg">
                     <p className="text-sm text-blue-800 dark:text-blue-200">
                       <strong>Note:</strong> The user will be created in the Account Management System and automatically added to this team. 
@@ -2360,6 +2479,44 @@ export default function TeamDetail({ user, refreshUser }) {
           userName={`${devicesForMember.first_name || ''} ${devicesForMember.last_name || ''}`.trim() || devicesForMember.email}
           onClose={() => setDevicesForMember(null)}
         />
+      )}
+
+      {/* takserver-enrollment Criteria 3.1, 3.6, 10.10 (task 11.3): the
+          Team_Owned_Device's Enrollment_View, opened from the Devices
+          section's "Enroll" action above. `fetchEnrollment` calls THIS
+          device's own `POST /api/devices/:deviceUserId/qr-code` --
+          `generateEnrollmentQrCode` server-side -- rather than
+          `EnrollmentView`'s default self-service route, which is what lets
+          the SAME component (Criterion 10.10) serve a Team_Owned_Device
+          here and a Human_Principal at `/enrollment` without knowing which
+          one it is showing. A short-lived dialog: closing it does not need
+          to cancel anything in flight, since `EnrollmentView` itself never
+          auto-refreshes (see its own doc comment). */}
+      {enrollingDevice && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-3xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
+              <h3 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
+                Enroll {deviceDisplayName(enrollingDevice)}
+              </h3>
+              <button
+                onClick={() => setEnrollingDevice(null)}
+                className="text-gray-400 hover:text-gray-500 dark:hover:text-gray-300"
+                aria-label="Close"
+              >
+                <XMarkIcon className="h-6 w-6" />
+              </button>
+            </div>
+            <div className="p-6">
+              <EnrollmentView
+                fetchEnrollment={async () => {
+                  const response = await devicesAPI.generateQrCode(enrollingDevice.deviceUserId)
+                  return response.data.qrCode
+                }}
+              />
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Edit Team Dialog (shared with Teams.jsx) */}

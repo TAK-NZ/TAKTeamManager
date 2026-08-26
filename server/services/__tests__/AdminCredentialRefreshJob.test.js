@@ -35,36 +35,36 @@ describe('AdminCredentialRefreshJob constructor', () => {
  * no upper bound is imposed because none is stated.
  */
 describe('AdminCredentialRefreshJob interval configuration', () => {
-  const originalEnv = process.env.TAK_ADMIN_CERT_REFRESH_INTERVAL_MS;
+  const originalEnv = process.env.TAK_ADMIN_CERT_REFRESH_INTERVAL_SECONDS;
 
   afterEach(() => {
     if (originalEnv === undefined) {
-      delete process.env.TAK_ADMIN_CERT_REFRESH_INTERVAL_MS;
+      delete process.env.TAK_ADMIN_CERT_REFRESH_INTERVAL_SECONDS;
     } else {
-      process.env.TAK_ADMIN_CERT_REFRESH_INTERVAL_MS = originalEnv;
+      process.env.TAK_ADMIN_CERT_REFRESH_INTERVAL_SECONDS = originalEnv;
     }
   });
 
   it('defaults to 86400000ms (24 hours) when unset', () => {
-    delete process.env.TAK_ADMIN_CERT_REFRESH_INTERVAL_MS;
+    delete process.env.TAK_ADMIN_CERT_REFRESH_INTERVAL_SECONDS;
     const job = new AdminCredentialRefreshJob({ loader: createLoader() });
     expect(job.intervalMs).toBe(24 * 60 * 60 * 1000);
   });
 
   it('respects a valid configured value above the minimum', () => {
-    process.env.TAK_ADMIN_CERT_REFRESH_INTERVAL_MS = '3600000';
+    process.env.TAK_ADMIN_CERT_REFRESH_INTERVAL_SECONDS = '3600';
     const job = new AdminCredentialRefreshJob({ loader: createLoader() });
     expect(job.intervalMs).toBe(3600000);
   });
 
-  it('clamps a value below 60000ms up to 60000ms', () => {
-    process.env.TAK_ADMIN_CERT_REFRESH_INTERVAL_MS = '1000';
+  it('clamps a value below 60 seconds up to 60000ms', () => {
+    process.env.TAK_ADMIN_CERT_REFRESH_INTERVAL_SECONDS = '1';
     const job = new AdminCredentialRefreshJob({ loader: createLoader() });
     expect(job.intervalMs).toBe(60000);
   });
 
   it('falls back to the default for a non-numeric value', () => {
-    process.env.TAK_ADMIN_CERT_REFRESH_INTERVAL_MS = 'not-a-number';
+    process.env.TAK_ADMIN_CERT_REFRESH_INTERVAL_SECONDS = 'not-a-number';
     const job = new AdminCredentialRefreshJob({ loader: createLoader() });
     expect(job.intervalMs).toBe(24 * 60 * 60 * 1000);
   });

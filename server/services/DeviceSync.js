@@ -106,28 +106,31 @@ class DeviceSync {
     this.takServerService = takServerService;
     this.pool = dbPool;
 
-    // design.md: "`DEVICE_MGMT_SYNC_INTERVAL_MS`, clamped, default e.g. 15
-    // minutes". Unlike `ExpiryScheduler`'s 15-minute cap (which encodes a
+    // design.md: "`DEVICE_MGMT_SYNC_INTERVAL_SECONDS`, clamped, default e.g.
+    // 15 minutes". Unlike `ExpiryScheduler`'s 15-minute cap (which encodes a
     // hard vendor-grant SLA), nothing in requirements.md pins this cadence,
     // so the bounds here exist purely as sanity guards: a 1-minute floor
     // stops a misconfigured near-zero value turning this into a tight
     // busy-loop against TAK Server and the database (the same reasoning
-    // behind `ExpiryScheduler`/`RetentionCleanupJob`'s MIN_INTERVAL_MS), and
-    // a 24-hour ceiling stops a mistyped value (e.g. an extra digit) from
+    // behind `ExpiryScheduler`/`RetentionCleanupJob`'s MIN_INTERVAL_SECONDS),
+    // and a 24-hour ceiling stops a mistyped value (e.g. an extra digit) from
     // silently parking the sync for weeks. Same
     // `parseInt(...) || <default>` + `Math.min`/`Math.max` shape used for
-    // the other scheduled jobs.
-    const MIN_INTERVAL_MS = 60000; // 1 minute
-    const MAX_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
-    const DEFAULT_INTERVAL_MS = 900000; // 15 minutes
+    // the other scheduled jobs, clamped in seconds and converted to
+    // milliseconds once at the end -- the field stays `intervalMs` because
+    // `setInterval` takes milliseconds.
+    const MIN_INTERVAL_SECONDS = 60; // 1 minute
+    const MAX_INTERVAL_SECONDS = 24 * 60 * 60; // 24 hours
+    const DEFAULT_INTERVAL_SECONDS = 900; // 15 minutes
 
-    this.intervalMs = Math.min(
-      MAX_INTERVAL_MS,
+    const intervalSeconds = Math.min(
+      MAX_INTERVAL_SECONDS,
       Math.max(
-        MIN_INTERVAL_MS,
-        parseInt(process.env.DEVICE_MGMT_SYNC_INTERVAL_MS, 10) || DEFAULT_INTERVAL_MS
+        MIN_INTERVAL_SECONDS,
+        parseInt(process.env.DEVICE_MGMT_SYNC_INTERVAL_SECONDS, 10) || DEFAULT_INTERVAL_SECONDS
       )
     );
+    this.intervalMs = intervalSeconds * 1000;
 
     this.timer = null;
   }

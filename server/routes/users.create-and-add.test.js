@@ -57,20 +57,47 @@ jest.mock('../services/EventPublisher', () => ({
   publishOperation: jest.fn()
 }));
 
-// Requirement 11.6, 11.7, 11.14, 11.15 (task 22.2): `createAndAddUser`
-// is left as the REAL implementation (the pre-existing tests above rely
-// on it issuing specific `client.query` calls), but
-// `resolveCallsignSuffixForNewUser` is mocked so the pre-existing tests
-// (which don't care about callsign_suffix resolution) resolve to a
-// benign default, while the dedicated tests below override this mock
-// per-case. Note: `actual` is a CLASS, whose static methods are
-// non-enumerable, so `{...actual}` would silently drop
-// `createAndAddUser` -- assigning the mocked method directly onto
-// `actual` instead preserves every other static method unchanged.
+// takserver-enrollment Requirements 6.3, 6.6, 6.8 (task 5.3):
+// `createAndAddUser` is left as the REAL implementation (the
+// pre-existing tests above rely on it issuing specific `client.query`
+// calls), but `resolveNewUserIdentity` (which REPLACES the removed
+// `resolveCallsignSuffixForNewUser`) is mocked so the pre-existing tests
+// (which don't care about identity resolution) resolve to a benign
+// default matching the existing `const username = email` derivation
+// this route uses under a policy-disabled Organisation, while the
+// dedicated tests below override this mock per-case. Note: `actual` is
+// a CLASS, whose static methods are non-enumerable, so `{...actual}`
+// would silently drop `createAndAddUser` -- assigning the mocked method
+// directly onto `actual` instead preserves every other static method
+// unchanged.
 jest.mock('../services/UserProvisioningService', () => {
   const actual = jest.requireActual('../services/UserProvisioningService');
-  actual.resolveCallsignSuffixForNewUser = jest.fn().mockResolvedValue(null);
+  actual.resolveNewUserIdentity = jest.fn().mockResolvedValue({
+    username: 'newuser@example.com',
+    callsignSuffix: null,
+    pseudonymous: false,
+    organisationId: 1,
+    organisationPrefix: 'ORG',
+    claimId: null
+  });
   return actual;
+});
+
+jest.mock('../services/ManagedIdentifierService', () => {
+  class OrganisationPrefixMissingError extends Error {
+    constructor(organisationId) {
+      super(`Organisation ${organisationId} has no Organisation_Prefix. A Managed_Identifier cannot be minted for it, and none was.`);
+      this.name = 'OrganisationPrefixMissingError';
+      this.organisationId = organisationId;
+    }
+  }
+  class ManagedIdentifierExhaustionError extends Error {
+    constructor(organisationId, typeMarker, attempts) {
+      super(`Exhausted ${attempts} Managed_Identifier mint attempt(s) for organisation ${organisationId} (type marker ${typeMarker}). No identifier could be claimed.`);
+      this.name = 'ManagedIdentifierExhaustionError';
+    }
+  }
+  return { OrganisationPrefixMissingError, ManagedIdentifierExhaustionError };
 });
 
 const express = require('express');
@@ -78,6 +105,7 @@ const request = require('supertest');
 const pool = require('../config/database');
 const EventPublisher = require('../services/EventPublisher');
 const UserProvisioningService = require('../services/UserProvisioningService');
+const ManagedIdentifierService = require('../services/ManagedIdentifierService');
 const usersRouter = require('./users');
 
 function buildApp() {
@@ -358,8 +386,15 @@ describe('POST /api/users/create-and-add callsign_suffix resolution (task 22.2)'
     global.fetch = originalFetch;
   });
 
-  it('resolves callsign_suffix and passes it through to createAndAddUser on a successful creation', async () => {
-    UserProvisioningService.resolveCallsignSuffixForNewUser.mockResolvedValue('J.Doe');
+  it('resolves callsign_suffix and the verbatim (email-derived) username under a policy-disabled Organisation, passing both through to createAndAddUser', async () => {
+    UserProvisioningService.resolveNewUserIdentity.mockResolvedValue({
+      username: 'newuser@example.com',
+      callsignSuffix: 'J.Doe',
+      pseudonymous: false,
+      organisationId: 1,
+      organisationPrefix: 'ORG',
+      claimId: null
+    });
     mockAuthentikSuccess();
 
     const mockClient = {
@@ -377,12 +412,21 @@ describe('POST /api/users/create-and-add callsign_suffix resolution (task 22.2)'
     const res = await request(app).post('/api/users/create-and-add').send(VALID_BODY);
 
     expect(res.status).toBe(201);
-    expect(UserProvisioningService.resolveCallsignSuffixForNewUser).toHaveBeenCalledWith(null, {
+    // `requestedUsername: email` is passed IN -- matching the existing
+    // `const username = email` derivation, which becomes the value
+    // passed to the resolver rather than the value used directly.
+    expect(UserProvisioningService.resolveNewUserIdentity).toHaveBeenCalledWith(null, {
       firstName: 'New',
       lastName: 'User',
+      email: 'newuser@example.com',
       teamId: 7,
+      requestedUsername: 'newuser@example.com',
       requestedCallsignSuffix: undefined
     });
+    // The Authentik create-user call uses the RESOLVED username.
+    const createBodyCall = global.fetch.mock.calls[1];
+    const createBody = JSON.parse(createBodyCall[1].body);
+    expect(createBody.username).toBe('newuser@example.com');
     // callsign_suffix INSERT param made it into the users upsert call.
     expect(mockClient.query).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO users'),
@@ -395,8 +439,52 @@ describe('POST /api/users/create-and-add callsign_suffix resolution (task 22.2)'
     );
   });
 
+  it("uses the resolved (minted) username for the Authentik create-user call, and passes claimId through to createAndAddUser, for a pseudonymous Organisation", async () => {
+    UserProvisioningService.resolveNewUserIdentity.mockResolvedValue({
+      username: 'ORG-U7K3QMX',
+      callsignSuffix: 'Ghost1',
+      pseudonymous: true,
+      organisationId: 1,
+      organisationPrefix: 'ORG',
+      claimId: 999
+    });
+    mockAuthentikSuccess();
+
+    const mockClient = {
+      query: jest.fn().mockImplementation((sql) => {
+        if (sql.includes('UPDATE users SET')) {
+          return Promise.resolve({ rows: [{ id: 999 }] });
+        }
+        return Promise.resolve({ rows: [] });
+      }),
+      release: jest.fn()
+    };
+    pool.connect.mockResolvedValue(mockClient);
+    pool.query.mockResolvedValue({ rows: [] });
+
+    const createAndAddUserSpy = jest.spyOn(UserProvisioningService, 'createAndAddUser');
+
+    const res = await request(app).post('/api/users/create-and-add').send(VALID_BODY);
+
+    expect(res.status).toBe(201);
+    // The Authentik create-user call uses the RESOLVED (minted)
+    // username, never `email` directly.
+    const createBodyCall = global.fetch.mock.calls[1];
+    const createBody = JSON.parse(createBodyCall[1].body);
+    expect(createBody.username).toBe('ORG-U7K3QMX');
+    // `claimId` reaches `createAndAddUser`, which already supports
+    // Claim_Row adoption (task 5.2) via `UPDATE ... WHERE id = $claimId`
+    // instead of the generic upsert.
+    expect(createAndAddUserSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ username: 'ORG-U7K3QMX', claimId: 999 })
+    );
+    expect(res.body.user.username).toBe('ORG-U7K3QMX');
+    createAndAddUserSpy.mockRestore();
+  });
+
   it('returns 400 naming the missing value for a user_defined Organisation with no callsignSuffix supplied, never calling Authentik', async () => {
-    UserProvisioningService.resolveCallsignSuffixForNewUser.mockRejectedValue(
+    UserProvisioningService.resolveNewUserIdentity.mockRejectedValue(
       new UserProvisioningService.CallsignSuffixRequiredError()
     );
     global.fetch = jest.fn();
@@ -411,7 +499,7 @@ describe('POST /api/users/create-and-add callsign_suffix resolution (task 22.2)'
 
   it('returns 400 naming the conflicting value on a uniqueness collision, never calling Authentik', async () => {
     const { CallsignSuffixConflictError } = jest.requireActual('../services/CallsignSuffixUniquenessService');
-    UserProvisioningService.resolveCallsignSuffixForNewUser.mockRejectedValue(
+    UserProvisioningService.resolveNewUserIdentity.mockRejectedValue(
       new CallsignSuffixConflictError('J.Doe')
     );
     global.fetch = jest.fn();
@@ -423,6 +511,34 @@ describe('POST /api/users/create-and-add callsign_suffix resolution (task 22.2)'
     expect(global.fetch).not.toHaveBeenCalled();
     expect(pool.connect).not.toHaveBeenCalled();
   });
+
+  it('returns 400 naming the Organisation when it has no Organisation_Prefix, never calling Authentik', async () => {
+    UserProvisioningService.resolveNewUserIdentity.mockRejectedValue(
+      new ManagedIdentifierService.OrganisationPrefixMissingError(1)
+    );
+    global.fetch = jest.fn();
+
+    const res = await request(app).post('/api/users/create-and-add').send(VALID_BODY);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Organisation_Prefix/);
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(pool.connect).not.toHaveBeenCalled();
+  });
+
+  it('returns 500 (a system defect) when the Managed_Identifier mint is exhausted, never calling Authentik', async () => {
+    UserProvisioningService.resolveNewUserIdentity.mockRejectedValue(
+      new ManagedIdentifierService.ManagedIdentifierExhaustionError(1, 'U', 5)
+    );
+    global.fetch = jest.fn();
+
+    const res = await request(app).post('/api/users/create-and-add').send(VALID_BODY);
+
+    expect(res.status).toBe(500);
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(pool.connect).not.toHaveBeenCalled();
+    expect(mockLoggerError).toHaveBeenCalled();
+  });
 });
 
 /**
@@ -430,12 +546,17 @@ describe('POST /api/users/create-and-add callsign_suffix resolution (task 22.2)'
  * `POST /api/users/create-and-add`, reporting what the submit path WOULD
  * assign (or why it would reject) before the Client submits.
  *
- * The preview is required to delegate to the exact same
- * `UserProvisioningService.resolveCallsignSuffixForNewUser` the submit
- * path uses, so these tests drive the route entirely through that
- * (already-mocked) service call and assert on the translation of its
- * result / typed errors into the response report -- plus that the route
- * performs no write and never touches Authentik.
+ * Under a policy-disabled Organisation (the `Team.getAncestorChain`
+ * result the route reads directly resolves via the mocked, real `Team`
+ * module against `pool.query`, which is stubbed here to return an empty
+ * `ancestorChain` -- i.e. no Organisation row, `pseudonymous_usernames`
+ * therefore not `true`) the route delegates to the exact same
+ * `UserProvisioningService.resolveNewUserIdentity` the submit path
+ * uses (Requirements 6.6, 9.1, 9.2; task 5.3, replacing the removed
+ * `resolveCallsignSuffixForNewUser`), so these tests drive the route
+ * through that (already-mocked) service call and assert on the
+ * translation of its result / typed errors into the response report --
+ * plus that the route performs no write and never touches Authentik.
  */
 describe('POST /api/users/callsign-suffix-preview', () => {
   let app;
@@ -448,6 +569,9 @@ describe('POST /api/users/callsign-suffix-preview', () => {
     app = buildApp();
     originalFetch = global.fetch;
     global.fetch = jest.fn();
+    // Empty ancestorChain -> organisation undefined -> pseudonymous_usernames
+    // not `true` -> the route's own Pseudonymous_Username_Policy branch is
+    // never taken, and it falls through to `resolveNewUserIdentity`.
     pool.query.mockResolvedValue({ rows: [] });
   });
 
@@ -456,22 +580,36 @@ describe('POST /api/users/callsign-suffix-preview', () => {
   });
 
   it('reports the computed default suffix for a team whose Organisation derives it', async () => {
-    UserProvisioningService.resolveCallsignSuffixForNewUser.mockResolvedValue('N.User');
+    UserProvisioningService.resolveNewUserIdentity.mockResolvedValue({
+      username: undefined,
+      callsignSuffix: 'N.User',
+      pseudonymous: false,
+      organisationId: undefined,
+      organisationPrefix: undefined,
+      claimId: null
+    });
 
     const res = await request(app).post('/api/users/callsign-suffix-preview').send(PREVIEW_BODY);
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ suffix: 'N.User', required: false, conflict: null });
-    expect(UserProvisioningService.resolveCallsignSuffixForNewUser).toHaveBeenCalledWith(null, {
+    expect(UserProvisioningService.resolveNewUserIdentity).toHaveBeenCalledWith(null, {
       firstName: 'New',
       lastName: 'User',
+      email: undefined,
       teamId: 7,
+      requestedUsername: undefined,
       requestedCallsignSuffix: undefined
     });
   });
 
   it('passes a supplied callsignSuffix through to the resolver and reports it back', async () => {
-    UserProvisioningService.resolveCallsignSuffixForNewUser.mockResolvedValue('Bravo1');
+    UserProvisioningService.resolveNewUserIdentity.mockResolvedValue({
+      username: undefined,
+      callsignSuffix: 'Bravo1',
+      pseudonymous: false,
+      claimId: null
+    });
 
     const res = await request(app)
       .post('/api/users/callsign-suffix-preview')
@@ -479,16 +617,18 @@ describe('POST /api/users/callsign-suffix-preview', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ suffix: 'Bravo1', required: false, conflict: null });
-    expect(UserProvisioningService.resolveCallsignSuffixForNewUser).toHaveBeenCalledWith(null, {
+    expect(UserProvisioningService.resolveNewUserIdentity).toHaveBeenCalledWith(null, {
       firstName: 'New',
       lastName: 'User',
+      email: undefined,
       teamId: 7,
+      requestedUsername: undefined,
       requestedCallsignSuffix: 'Bravo1'
     });
   });
 
   it('reports required: true (and no suffix) for a user_defined Organisation with no suffix supplied', async () => {
-    UserProvisioningService.resolveCallsignSuffixForNewUser.mockRejectedValue(
+    UserProvisioningService.resolveNewUserIdentity.mockRejectedValue(
       new UserProvisioningService.CallsignSuffixRequiredError()
     );
 
@@ -501,7 +641,7 @@ describe('POST /api/users/callsign-suffix-preview', () => {
   it('reports the conflicting value and message on a per-Team uniqueness collision', async () => {
     const { CallsignSuffixConflictError } = jest.requireActual('../services/CallsignSuffixUniquenessService');
     const conflictError = new CallsignSuffixConflictError('J.Doe');
-    UserProvisioningService.resolveCallsignSuffixForNewUser.mockRejectedValue(conflictError);
+    UserProvisioningService.resolveNewUserIdentity.mockRejectedValue(conflictError);
 
     const res = await request(app)
       .post('/api/users/callsign-suffix-preview')
@@ -532,11 +672,16 @@ describe('POST /api/users/callsign-suffix-preview', () => {
     expect(Array.isArray(nonInteger.body.errors)).toBe(true);
 
     // Validation failure short-circuits before any resolution work.
-    expect(UserProvisioningService.resolveCallsignSuffixForNewUser).not.toHaveBeenCalled();
+    expect(UserProvisioningService.resolveNewUserIdentity).not.toHaveBeenCalled();
   });
 
   it('issues no write and no Authentik call -- the preview is strictly read-only', async () => {
-    UserProvisioningService.resolveCallsignSuffixForNewUser.mockResolvedValue('N.User');
+    UserProvisioningService.resolveNewUserIdentity.mockResolvedValue({
+      username: undefined,
+      callsignSuffix: 'N.User',
+      pseudonymous: false,
+      claimId: null
+    });
 
     const res = await request(app).post('/api/users/callsign-suffix-preview').send(PREVIEW_BODY);
 
@@ -546,14 +691,15 @@ describe('POST /api/users/callsign-suffix-preview', () => {
     expect(pool.connect).not.toHaveBeenCalled();
     // ...no Authentik HTTP call was made...
     expect(global.fetch).not.toHaveBeenCalled();
-    // ...and no mutating statement reached the pool.
+    // ...and no mutating statement reached the pool (the one read
+    // that DID reach the pool is Team.getAncestorChain's own SELECT).
     for (const [sql] of pool.query.mock.calls) {
       expect(String(sql)).not.toMatch(/\b(INSERT|UPDATE|DELETE)\b/i);
     }
   });
 
   it('responds 500 and logs when the resolver fails for an unexpected reason', async () => {
-    UserProvisioningService.resolveCallsignSuffixForNewUser.mockRejectedValue(
+    UserProvisioningService.resolveNewUserIdentity.mockRejectedValue(
       new Error('database unreachable')
     );
 
@@ -562,6 +708,39 @@ describe('POST /api/users/callsign-suffix-preview', () => {
     expect(res.status).toBe(500);
     expect(res.body.error).toBeDefined();
     expect(mockLoggerError).toHaveBeenCalled();
+  });
+
+  describe('Pseudonymous_Username_Policy branch (task 5.3)', () => {
+    beforeEach(() => {
+      // A single Organisation row with the policy enabled, matching what
+      // `Team.getAncestorChain` would return at index 0.
+      pool.query.mockResolvedValue({
+        rows: [{ id: 3, parent_team_id: null, pseudonymous_usernames: true }]
+      });
+    });
+
+    it('reports required: true and never mints/writes anything for a blank callsignSuffix', async () => {
+      const res = await request(app).post('/api/users/callsign-suffix-preview').send(PREVIEW_BODY);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ suffix: null, required: true, conflict: null });
+      // No mint, no write: resolveNewUserIdentity (which is what would
+      // mint a Pseudonymous_Username and insert a Claim_Row) was never
+      // called, and no Authentik call was made.
+      expect(UserProvisioningService.resolveNewUserIdentity).not.toHaveBeenCalled();
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it('reports the trimmed supplied suffix as clean with no mint attempt when it is unique', async () => {
+      const res = await request(app)
+        .post('/api/users/callsign-suffix-preview')
+        .send({ ...PREVIEW_BODY, callsignSuffix: '  Ghost1  ' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ suffix: 'Ghost1', required: false, conflict: null });
+      expect(UserProvisioningService.resolveNewUserIdentity).not.toHaveBeenCalled();
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
   });
 });
 
@@ -606,8 +785,15 @@ describe('POST /api/users/create-and-add CloudTAK admin-promotion enqueue (Requi
     pool.query.mockResolvedValue({ rows: [] });
     // `jest.clearAllMocks()` clears recorded calls but NOT implementations,
     // so restore the benign Phase-0 default here in case an earlier test in
-    // this file left `resolveCallsignSuffixForNewUser` rejecting.
-    UserProvisioningService.resolveCallsignSuffixForNewUser.mockResolvedValue(null);
+    // this file left `resolveNewUserIdentity` rejecting.
+    UserProvisioningService.resolveNewUserIdentity.mockResolvedValue({
+      username: 'newuser@example.com',
+      callsignSuffix: null,
+      pseudonymous: false,
+      organisationId: 1,
+      organisationPrefix: 'ORG',
+      claimId: null
+    });
   });
 
   afterEach(() => {

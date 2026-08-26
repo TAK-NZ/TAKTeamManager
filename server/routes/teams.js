@@ -144,7 +144,13 @@ router.post('/', authenticateToken, authorize, [
   // messages in this route's catch block below, not duplicated here.
   body('callsignLevelSelection').optional().isArray()
     .custom(value => value === undefined || (Array.isArray(value) && value.every(v => Number.isInteger(v))))
-    .withMessage('callsignLevelSelection must be an array of integers')
+    .withMessage('callsignLevelSelection must be an array of integers'),
+  // takserver-enrollment Requirement 6.1/6.2 (task 5.4): basic
+  // request-shape validation only -- the Organisation-only/typed
+  // Sub_Team-rejection rule is enforced by `Team.create` itself (task
+  // 5.4) and mapped to its specific 400 message in this route's catch
+  // block below, mirroring callsignLevelSelection's own pattern exactly.
+  body('pseudonymousUsernames').optional().isBoolean()
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -152,12 +158,30 @@ router.post('/', authenticateToken, authorize, [
   }
 
   try {
-    let { name, description, callsignPrefix, color, visibility, canJoin, parentTeamId, callsignNameFormat, callsignLevelSelection } = req.body;
+    let { name, description, callsignPrefix, color, visibility, canJoin, parentTeamId, callsignNameFormat, callsignLevelSelection, pseudonymousUsernames } = req.body;
 
     // Authorization (root team requires Global_Manager, sub-team requires
     // Global_Manager or parent-team admin) is enforced centrally by
     // authorize.js via the 'POST /api/teams': ['team:create:root_or_sub']
     // Permission_Registry entry.
+
+    // takserver-enrollment Requirement 2.1/2.4: an Organisation (no
+    // parentTeamId) requires a non-empty callsign_prefix -- a Managed_
+    // Identifier can never be minted for one without it. Rejected here,
+    // in the handler, rather than added as a plain express-validator
+    // .notEmpty() rule, because "required" is conditional on
+    // parentTeamId being absent, which isValidCallsignPrefix's existing
+    // .optional() chain has no visibility into. A Sub_Team's prefix
+    // stays optional exactly as it is today (Criterion 2.3). A
+    // whitespace-only value is treated as empty -- [A-Za-z0-9]* matches
+    // the empty string, so the character-class check alone would accept
+    // '   '.
+    if (!parentTeamId) {
+      const trimmedCallsignPrefix = typeof callsignPrefix === 'string' ? callsignPrefix.trim() : callsignPrefix;
+      if (!trimmedCallsignPrefix) {
+        return res.status(400).json({ error: 'callsignPrefix is required for an Organisation' });
+      }
+    }
 
     // Requirement 3.2 (task 6.1): the actual inherited color/
     // callsign_name_format VALUES are now resolved by `Team.create` itself
@@ -194,7 +218,8 @@ router.post('/', authenticateToken, authorize, [
       parent_team_id: parentTeamId,
       created_by: null, // Skip created_by for now since user ID is string
       callsign_name_format: !parentTeamId ? callsignNameFormat : null,
-      callsign_level_selection: callsignLevelSelection
+      callsign_level_selection: callsignLevelSelection,
+      pseudonymous_usernames: pseudonymousUsernames
     });
 
     // Skip adding creator as admin for now since user ID is string
@@ -228,6 +253,12 @@ router.post('/', authenticateToken, authorize, [
     if (error instanceof Team.CallsignLevelSelectionSubTeamError) {
       return res.status(400).json({ error: error.message });
     }
+    // takserver-enrollment Requirement 6.2 (task 5.4): Team.create
+    // throws this BEFORE any INSERT is attempted when
+    // pseudonymousUsernames is supplied on a Sub_Team creation request.
+    if (error instanceof Team.PseudonymousUsernamePolicySubTeamError) {
+      return res.status(400).json({ error: error.message });
+    }
     getLogger().error({ err: error }, 'Team creation error');
     res.status(500).json({ error: 'Failed to create team', details: error.message });
   }
@@ -251,7 +282,13 @@ router.put('/:teamId', authenticateToken, authorize, [
   // messages in this route's catch block below, not duplicated here.
   body('callsignLevelSelection').optional().isArray()
     .custom(value => value === undefined || (Array.isArray(value) && value.every(v => Number.isInteger(v))))
-    .withMessage('callsignLevelSelection must be an array of integers')
+    .withMessage('callsignLevelSelection must be an array of integers'),
+  // takserver-enrollment Requirement 7.2/7.4 (task 5.4): basic
+  // request-shape validation only -- whether a changed value is
+  // actually accepted (never, on an existing Organisation) is enforced
+  // by `Team.update` itself and mapped to its specific 400 message in
+  // this route's catch block below.
+  body('pseudonymousUsernames').optional().isBoolean()
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -268,13 +305,38 @@ router.put('/:teamId', authenticateToken, authorize, [
       return res.status(404).json({ error: 'Team not found' });
     }
 
-    const { name, description, callsignPrefix, color, visibility, canJoin, parentTeamId, callsignNameFormat, callsignLevelSelection } = req.body;
+    const { name, description, callsignPrefix, color, visibility, canJoin, parentTeamId, callsignNameFormat, callsignLevelSelection, pseudonymousUsernames } = req.body;
+
+    // takserver-enrollment Requirement 2.2/2.4: an Organisation's
+    // callsign_prefix must remain non-empty across an edit -- checked
+    // against `team.parent_team_id` (the CURRENT, pre-update row, same
+    // lookup `Team.update` itself relies on for its own Sub_Team-only
+    // rules), so this only applies when `:teamId` is an Organisation
+    // today. `callsignPrefix === undefined` means "not supplied on this
+    // request" and is accepted (Team.update's COALESCE preserves the
+    // existing value); an explicit empty or whitespace-only value is
+    // what Criterion 2.2 rejects, since it would clear a still-mandatory
+    // field. A Sub_Team's prefix stays optional exactly as it is today
+    // (Criterion 2.3) -- no check runs for one.
+    if (team.parent_team_id === null && callsignPrefix !== undefined) {
+      const trimmedCallsignPrefix = typeof callsignPrefix === 'string' ? callsignPrefix.trim() : callsignPrefix;
+      if (!trimmedCallsignPrefix) {
+        return res.status(400).json({ error: 'callsignPrefix is required for an Organisation and cannot be cleared' });
+      }
+    }
 
     // Requirement 3.3 (task 6.1): `color`/`callsignNameFormat` are passed
     // straight through to `Team.update`, which silently ignores them
     // (preserving the team's existing stored values, never rejecting the
     // request) when `teamId` is a Sub_Team. An Organisation's own
     // `color`/`callsignNameFormat` remain freely updatable here.
+    // Note: `callsign_prefix` is deliberately NOT passed to Team.update
+    // below -- Team.update's UPDATE statement has never had a column
+    // placeholder for it (the field has always been immutable post
+    // creation, matching TeamFormDialog.jsx's `disabled={!!editingTeam}`
+    // prefix input). The guard above runs BEFORE Team.update either way,
+    // so Criterion 2.2 is enforced regardless of whether the field is
+    // ever wired up to persist a change.
     const updatedTeam = await Team.update(req.params.teamId, {
       name,
       description,
@@ -283,7 +345,8 @@ router.put('/:teamId', authenticateToken, authorize, [
       can_join: canJoin,
       parent_team_id: parentTeamId,
       callsign_name_format: callsignNameFormat,
-      callsign_level_selection: callsignLevelSelection
+      callsign_level_selection: callsignLevelSelection,
+      pseudonymous_usernames: pseudonymousUsernames
     });
 
     // When canJoin is explicitly set to false, revoke any existing
@@ -325,6 +388,20 @@ router.put('/:teamId', authenticateToken, authorize, [
     // UPDATE is attempted when callsignLevelSelection is supplied on a
     // Sub_Team update request.
     if (error instanceof Team.CallsignLevelSelectionSubTeamError) {
+      return res.status(400).json({ error: error.message });
+    }
+    // takserver-enrollment Requirement 6.2 (task 5.4): Team.update
+    // throws this BEFORE any UPDATE is attempted when
+    // pseudonymousUsernames is supplied on a Sub_Team update request.
+    if (error instanceof Team.PseudonymousUsernamePolicySubTeamError) {
+      return res.status(400).json({ error: error.message });
+    }
+    // takserver-enrollment Requirement 7.2/7.3 (task 5.4): Team.update
+    // throws this BEFORE any UPDATE is attempted when a request
+    // attempts to CHANGE (not resubmit) an existing Organisation's
+    // pseudonymousUsernames value. The error's own message states the
+    // concrete consequence being prevented.
+    if (error instanceof Team.PseudonymousUsernamePolicyImmutableError) {
       return res.status(400).json({ error: error.message });
     }
     getLogger().error({ err: error }, 'Failed to update team');

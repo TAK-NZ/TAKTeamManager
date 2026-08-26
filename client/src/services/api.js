@@ -423,4 +423,34 @@ export const deviceManagementAPI = {
   },
 };
 
+// --- TAK Server enrollment (takserver-enrollment spec) ---
+//
+// Two capabilities, two routes, one shared response shape (`#buildEnrollment`
+// on the server): a signed-in user's own enrollment, and a Team_Owned_Device's.
+// The response is secret material -- it carries a live Authentik app_password
+// token in the ATAK URI, the iTAK payload and both QR data URLs. Callers MUST
+// keep it in component state for the life of the view only: never localStorage,
+// never sessionStorage, and never a URL, so a token cannot outlive the tab or
+// land in browser history (Criterion 11.5).
+
+export const enrollmentAPI = {
+  // Self-service enrollment for the caller's own account. No route params and
+  // no body: the subject is always resolved server-side from the session
+  // (Requirement 3.4), so there is nothing here for a caller to tamper with.
+  generateSelf: () => api.post('/enrollment/me'),
+};
+
+export const devicesAPI = {
+  // A Team's Team_Owned_Devices, for that Team's admin (Criterion 14.7). Each
+  // device carries no email field at all -- a device has none (Criterion 5.10).
+  getTeamDevices: (teamId) => api.get(`/devices/team/${teamId}`),
+
+  // Mints a fresh Enrollment_Token and QR codes for an existing
+  // Team_Owned_Device. Response carries the same secret-material shape as
+  // `enrollmentAPI.generateSelf()`, under the `qrCode` key (Criteria 4.1,
+  // 4.3, 11.5) -- callers must keep it in component state only, per the note
+  // above `enrollmentAPI`.
+  generateQrCode: (deviceUserId) => api.post(`/devices/${deviceUserId}/qr-code`),
+};
+
 export default api;

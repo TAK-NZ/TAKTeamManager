@@ -11,18 +11,20 @@ const logger = require('../config/logger').createLogger('ExpiryScheduler');
  * (satisfying both the vendor grant's 15-minute SLA and, run at the same
  * cadence, comfortably inside the deployment channel's 24-hour SLA)."
  *
- * Default interval: exactly 15 minutes (900000ms) -- the tightest SLA
+ * Default interval: exactly 15 minutes (900 seconds) -- the tightest SLA
  * this scheduler serves (Requirement 21.6's 15-minute vendor-grant expiry
- * bound). Configurable via `EXPIRY_SCHEDULER_INTERVAL_MS`, clamped to
- * 60000ms (1 minute) - 900000ms (15 minutes) inclusive, following the
+ * bound). Configurable via `EXPIRY_SCHEDULER_INTERVAL_SECONDS`, clamped to
+ * 60 seconds (1 minute) - 900 seconds (15 minutes) inclusive, following the
  * same `parseInt(...) || <default>` + `Math.min(<max>, Math.max(<min>,
  * ...))` clamp pattern already used for `SYNC_WORKER_BATCH_SIZE`/
  * `SYNC_WORKER_CONCURRENCY` in `server/workers/syncWorker.js`. The upper
- * bound is fixed at 900000ms (rather than left uncapped) because
+ * bound is fixed at 900 seconds (rather than left uncapped) because
  * design.md's "no longer than 15 minutes" is a hard requirement on this
- * scheduler's cadence, not merely a default; a lower bound of 60000ms
+ * scheduler's cadence, not merely a default; a lower bound of 60 seconds
  * guards against a misconfigured near-zero interval turning this into a
- * tight busy-loop against the database.
+ * tight busy-loop against the database. The clamp runs in seconds and is
+ * multiplied by 1000 once, at the end, into `this.intervalMs` -- the field
+ * name stays `intervalMs` because `setInterval` takes milliseconds.
  *
  * Lifecycle mirrors `SyncWorker`'s own `start()`/`stop()` shape (a plain
  * `setInterval`/`clearInterval` wrapper, idempotent against a double
@@ -43,14 +45,18 @@ class ExpiryScheduler {
     this.vendorChannelService = vendorChannelService;
     this.deploymentChannelService = deploymentChannelService;
 
-    const MIN_INTERVAL_MS = 60000; // 1 minute
-    const MAX_INTERVAL_MS = 900000; // 15 minutes -- design.md's hard SLA cap
-    const DEFAULT_INTERVAL_MS = 900000; // 15 minutes
+    const MIN_INTERVAL_SECONDS = 60; // 1 minute
+    const MAX_INTERVAL_SECONDS = 900; // 15 minutes -- design.md's hard SLA cap
+    const DEFAULT_INTERVAL_SECONDS = 900; // 15 minutes
 
-    this.intervalMs = Math.min(
-      MAX_INTERVAL_MS,
-      Math.max(MIN_INTERVAL_MS, parseInt(process.env.EXPIRY_SCHEDULER_INTERVAL_MS, 10) || DEFAULT_INTERVAL_MS)
+    const intervalSeconds = Math.min(
+      MAX_INTERVAL_SECONDS,
+      Math.max(
+        MIN_INTERVAL_SECONDS,
+        parseInt(process.env.EXPIRY_SCHEDULER_INTERVAL_SECONDS, 10) || DEFAULT_INTERVAL_SECONDS
+      )
     );
+    this.intervalMs = intervalSeconds * 1000;
 
     this.timer = null;
   }

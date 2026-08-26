@@ -23,7 +23,12 @@ jest.mock('../config/database', () => ({
 }));
 
 jest.mock('./UserProvisioningService', () => ({
-  createAndAddUser: jest.fn()
+  createAndAddUser: jest.fn(),
+  // takserver-enrollment Requirement 6.6 (task 5.2):
+  // `resolveAndCheckCallsignSuffixForApproval` is now a thin adapter over
+  // this resolver rather than its own `computeDefaultCallsignSuffix` call
+  // + its own `Team.getAncestorChain` read.
+  resolveNewUserIdentity: jest.fn()
 }));
 
 // Task 10.1 (Requirement 6.1): the `team_change` branch no longer calls
@@ -104,13 +109,18 @@ describe('RequestApprovalService.approveRequest - new_account', () => {
     service = new RequestApprovalService();
     service.emailService.sendApprovalEmail = jest.fn().mockResolvedValue(true);
     originalFetch = global.fetch;
-    // Default: no Member_List collision, and an ancestor chain resolving
-    // to a non-user_defined format -- most tests in this suite don't
-    // exercise the callsign_suffix resolution/uniqueness logic (task
-    // 24.3) at all, so these defaults keep them passing unchanged.
-    Team.getAncestorChain.mockResolvedValue([{ id: 1, callsign_name_format: 'full_name' }]);
-    Team.getFullMemberList.mockResolvedValue([]);
-    CallsignService.computeDefaultCallsignSuffix.mockReturnValue('New-User');
+    // Default: `resolveAndCheckCallsignSuffixForApproval` is a thin
+    // adapter over `resolveNewUserIdentity` (task 5.2) -- most tests in
+    // this suite don't exercise the callsign_suffix/username resolution
+    // logic itself, so this default (a policy-disabled Organisation
+    // returning the email verbatim as `username` and the computed
+    // default as `callsignSuffix`) keeps them passing unchanged.
+    UserProvisioningService.resolveNewUserIdentity.mockResolvedValue({
+      username: 'newuser@example.com',
+      callsignSuffix: 'New-User',
+      pseudonymous: false,
+      claimId: null
+    });
   });
 
   afterEach(() => {
@@ -166,6 +176,14 @@ describe('RequestApprovalService.approveRequest - new_account', () => {
       expect.stringContaining("SET status = 'approved'"),
       [1, 9]
     );
+    expect(UserProvisioningService.resolveNewUserIdentity).toHaveBeenCalledWith(null, {
+      firstName: 'New',
+      lastName: 'User',
+      email: 'newuser@example.com',
+      teamId: 7,
+      requestedUsername: 'newuser@example.com',
+      requestedCallsignSuffix: undefined
+    });
     expect(UserProvisioningService.createAndAddUser).toHaveBeenCalledWith(mockClient, {
       authentikUserId: 4242,
       username: 'newuser@example.com',
@@ -174,7 +192,8 @@ describe('RequestApprovalService.approveRequest - new_account', () => {
       lastName: 'User',
       teamId: 7,
       callsign_suffix: 'New-User',
-      createdBy: 9
+      createdBy: 9,
+      claimId: null
     });
     expect(mockClient.query).toHaveBeenCalledWith('COMMIT');
     expect(mockClient.release).toHaveBeenCalledTimes(1);
@@ -468,12 +487,27 @@ describe('RequestApprovalService.approveRequest - new_account', () => {
 
 /**
  * Unit tests for `RequestApprovalService.approveRequest`'s Requirement
- * 11.12/11.13/11.15/11.16 (task 24.3) `callsign_suffix` resolution and
- * uniqueness-check logic, for `new_account` requests only. These verify
- * the override > stored-value > computed-default precedence, that the
- * uniqueness check runs BEFORE the Authentik user is ever created (so a
- * collision requires no compensating action), and that a collision is
- * rejected with nothing committed.
+ * 11.12/11.13/11.15/11.16 (task 24.3) `callsign_suffix` resolution,
+ * REWRITTEN by takserver-enrollment task 5.2 for the consolidation onto
+ * `UserProvisioningService.resolveNewUserIdentity`.
+ *
+ * `resolveAndCheckCallsignSuffixForApproval` is now a THIN ADAPTER: it no
+ * longer calls `Team.getAncestorChain`, `Team.getFullMemberList` or
+ * `CallsignService.computeDefaultCallsignSuffix` itself (all three are
+ * REMOVED from this method -- they are `resolveNewUserIdentity`'s job
+ * now, from the single ancestor-chain read it performs internally). So
+ * these tests no longer assert against those three mocks; they assert
+ * the adapter's own remaining job instead: computing the single
+ * `requestedCallsignSuffix` value (override > the request's own stored
+ * value, else `undefined`) passed to `resolveNewUserIdentity`, and
+ * threading whatever `resolveNewUserIdentity` resolves (`username`,
+ * `callsignSuffix`, `claimId`) through to `createAndAddUser` unchanged.
+ * The uniqueness check itself (`checkCallsignSuffixUniqueness`, via
+ * `CallsignSuffixConflictError`) now lives inside
+ * `resolveNewUserIdentity`, so the collision test asserts that a
+ * rejection from THAT mock propagates before the Authentik user is ever
+ * created, rather than asserting `Team.getFullMemberList` was consulted
+ * directly.
  */
 describe('RequestApprovalService.approveRequest - callsign_suffix resolution (task 24.3)', () => {
   let service;
@@ -484,9 +518,6 @@ describe('RequestApprovalService.approveRequest - callsign_suffix resolution (ta
     service = new RequestApprovalService();
     service.emailService.sendApprovalEmail = jest.fn().mockResolvedValue(true);
     originalFetch = global.fetch;
-    Team.getAncestorChain.mockResolvedValue([{ id: 1, callsign_name_format: 'full_name' }]);
-    Team.getFullMemberList.mockResolvedValue([]);
-    CallsignService.computeDefaultCallsignSuffix.mockReturnValue('New-User');
   });
 
   afterEach(() => {
@@ -516,7 +547,7 @@ describe('RequestApprovalService.approveRequest - callsign_suffix resolution (ta
     };
   }
 
-  it('uses the request\'s own stored callsign_suffix when no override is supplied', async () => {
+  it('passes the request\'s own stored callsign_suffix as requestedCallsignSuffix when no override is supplied, and threads the resolver\'s result to createAndAddUser', async () => {
     mockAuthentikSuccess();
     pool.query.mockImplementation((sql) => {
       if (sql.includes('SELECT * FROM access_requests WHERE id = $1 AND status = $2')) {
@@ -527,17 +558,24 @@ describe('RequestApprovalService.approveRequest - callsign_suffix resolution (ta
     const mockClient = buildHappyPathClient({ callsign_suffix: 'Stored-Suffix' });
     pool.connect.mockResolvedValue(mockClient);
     UserProvisioningService.createAndAddUser.mockResolvedValue({ localUserId: 55, queuedGroups: 1 });
+    UserProvisioningService.resolveNewUserIdentity.mockResolvedValue({
+      username: 'newuser@example.com',
+      callsignSuffix: 'Stored-Suffix',
+      pseudonymous: false,
+      claimId: null
+    });
 
     await service.approveRequest(1, 9);
 
-    expect(CallsignService.computeDefaultCallsignSuffix).not.toHaveBeenCalled();
-    expect(Team.getFullMemberList).toHaveBeenCalledWith(7);
+    expect(UserProvisioningService.resolveNewUserIdentity).toHaveBeenCalledWith(null, expect.objectContaining({
+      requestedCallsignSuffix: 'Stored-Suffix'
+    }));
     expect(UserProvisioningService.createAndAddUser).toHaveBeenCalledWith(mockClient, expect.objectContaining({
       callsign_suffix: 'Stored-Suffix'
     }));
   });
 
-  it('computes the default when there is no override and no stored value', async () => {
+  it('passes undefined as requestedCallsignSuffix when there is no override and no stored value, leaving default computation to the resolver', async () => {
     mockAuthentikSuccess();
     pool.query.mockImplementation((sql) => {
       if (sql.includes('SELECT * FROM access_requests WHERE id = $1 AND status = $2')) {
@@ -548,18 +586,29 @@ describe('RequestApprovalService.approveRequest - callsign_suffix resolution (ta
     const mockClient = buildHappyPathClient({ callsign_suffix: null });
     pool.connect.mockResolvedValue(mockClient);
     UserProvisioningService.createAndAddUser.mockResolvedValue({ localUserId: 55, queuedGroups: 1 });
-    CallsignService.computeDefaultCallsignSuffix.mockReturnValue('New-User');
+    UserProvisioningService.resolveNewUserIdentity.mockResolvedValue({
+      username: 'newuser@example.com',
+      callsignSuffix: 'New-User',
+      pseudonymous: false,
+      claimId: null
+    });
 
     await service.approveRequest(1, 9);
 
-    expect(Team.getAncestorChain).toHaveBeenCalledWith(7);
-    expect(CallsignService.computeDefaultCallsignSuffix).toHaveBeenCalledWith('New', 'User', 'full_name');
+    expect(UserProvisioningService.resolveNewUserIdentity).toHaveBeenCalledWith(null, {
+      firstName: 'New',
+      lastName: 'User',
+      email: 'newuser@example.com',
+      teamId: 7,
+      requestedUsername: 'newuser@example.com',
+      requestedCallsignSuffix: undefined
+    });
     expect(UserProvisioningService.createAndAddUser).toHaveBeenCalledWith(mockClient, expect.objectContaining({
       callsign_suffix: 'New-User'
     }));
   });
 
-  it('uses the override, ignoring both the stored value and the computed default', async () => {
+  it('uses the override, ignoring the stored value, when computing requestedCallsignSuffix', async () => {
     mockAuthentikSuccess();
     pool.query.mockImplementation((sql) => {
       if (sql.includes('SELECT * FROM access_requests WHERE id = $1 AND status = $2')) {
@@ -570,24 +619,31 @@ describe('RequestApprovalService.approveRequest - callsign_suffix resolution (ta
     const mockClient = buildHappyPathClient({ callsign_suffix: 'Stored-Suffix' });
     pool.connect.mockResolvedValue(mockClient);
     UserProvisioningService.createAndAddUser.mockResolvedValue({ localUserId: 55, queuedGroups: 1 });
+    UserProvisioningService.resolveNewUserIdentity.mockResolvedValue({
+      username: 'newuser@example.com',
+      callsignSuffix: 'Override-Suffix',
+      pseudonymous: false,
+      claimId: null
+    });
 
     await service.approveRequest(1, 9, '', 'Override-Suffix');
 
-    expect(CallsignService.computeDefaultCallsignSuffix).not.toHaveBeenCalled();
+    expect(UserProvisioningService.resolveNewUserIdentity).toHaveBeenCalledWith(null, expect.objectContaining({
+      requestedCallsignSuffix: 'Override-Suffix'
+    }));
     expect(UserProvisioningService.createAndAddUser).toHaveBeenCalledWith(mockClient, expect.objectContaining({
       callsign_suffix: 'Override-Suffix'
     }));
   });
 
-  it('rejects with a CallsignSuffixConflictError before creating the Authentik user or committing anything, on a Member_List collision', async () => {
+  it('propagates a CallsignSuffixConflictError thrown by resolveNewUserIdentity before creating the Authentik user or acquiring a database client', async () => {
     pool.query.mockImplementation((sql) => {
       if (sql.includes('SELECT * FROM access_requests WHERE id = $1 AND status = $2')) {
         return Promise.resolve({ rows: [{ ...PENDING_NEW_ACCOUNT_REQUEST, callsign_suffix: null }] });
       }
       return Promise.resolve({ rows: [] });
     });
-    Team.getFullMemberList.mockResolvedValue([{ id: 99, callsign_suffix: 'New-User' }]);
-    CallsignService.computeDefaultCallsignSuffix.mockReturnValue('New-User');
+    UserProvisioningService.resolveNewUserIdentity.mockRejectedValueOnce(new CallsignSuffixConflictError('New-User'));
     global.fetch = jest.fn();
 
     await expect(service.approveRequest(1, 9)).rejects.toThrow(CallsignSuffixConflictError);

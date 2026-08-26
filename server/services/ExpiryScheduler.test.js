@@ -148,42 +148,42 @@ describe('ExpiryScheduler start()/stop() lifecycle', () => {
  * elsewhere (e.g. SYNC_WORKER_BATCH_SIZE/SYNC_WORKER_CONCURRENCY).
  */
 describe('ExpiryScheduler interval configuration', () => {
-  const originalEnv = process.env.EXPIRY_SCHEDULER_INTERVAL_MS;
+  const originalEnv = process.env.EXPIRY_SCHEDULER_INTERVAL_SECONDS;
 
   afterEach(() => {
     if (originalEnv === undefined) {
-      delete process.env.EXPIRY_SCHEDULER_INTERVAL_MS;
+      delete process.env.EXPIRY_SCHEDULER_INTERVAL_SECONDS;
     } else {
-      process.env.EXPIRY_SCHEDULER_INTERVAL_MS = originalEnv;
+      process.env.EXPIRY_SCHEDULER_INTERVAL_SECONDS = originalEnv;
     }
   });
 
   it('defaults to 900000ms (15 minutes) when unset', () => {
-    delete process.env.EXPIRY_SCHEDULER_INTERVAL_MS;
+    delete process.env.EXPIRY_SCHEDULER_INTERVAL_SECONDS;
     const scheduler = new ExpiryScheduler();
     expect(scheduler.intervalMs).toBe(900000);
   });
 
   it('respects a valid configured value within the allowed range', () => {
-    process.env.EXPIRY_SCHEDULER_INTERVAL_MS = '300000';
+    process.env.EXPIRY_SCHEDULER_INTERVAL_SECONDS = '300';
     const scheduler = new ExpiryScheduler();
     expect(scheduler.intervalMs).toBe(300000);
   });
 
-  it('clamps a value above 900000ms down to 900000ms', () => {
-    process.env.EXPIRY_SCHEDULER_INTERVAL_MS = '3600000';
+  it('clamps a value above 900 seconds down to 900000ms', () => {
+    process.env.EXPIRY_SCHEDULER_INTERVAL_SECONDS = '3600';
     const scheduler = new ExpiryScheduler();
     expect(scheduler.intervalMs).toBe(900000);
   });
 
-  it('clamps a value below 60000ms up to 60000ms', () => {
-    process.env.EXPIRY_SCHEDULER_INTERVAL_MS = '1000';
+  it('clamps a value below 60 seconds up to 60000ms', () => {
+    process.env.EXPIRY_SCHEDULER_INTERVAL_SECONDS = '1';
     const scheduler = new ExpiryScheduler();
     expect(scheduler.intervalMs).toBe(60000);
   });
 
   it('falls back to the default for a non-numeric value', () => {
-    process.env.EXPIRY_SCHEDULER_INTERVAL_MS = 'not-a-number';
+    process.env.EXPIRY_SCHEDULER_INTERVAL_SECONDS = 'not-a-number';
     const scheduler = new ExpiryScheduler();
     expect(scheduler.intervalMs).toBe(900000);
   });

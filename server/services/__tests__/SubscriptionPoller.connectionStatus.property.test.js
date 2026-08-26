@@ -460,7 +460,12 @@ async function runPoll(entries, initialRows) {
   const log = { statements: [], unscoped: [], unmodelled: [] };
   const pool = createModelPool(table, log);
   const takServerService = {
-    getClientEndpoints: jest.fn().mockResolvedValue(entries.map(toClientEndpoint))
+    getClientEndpoints: jest.fn().mockResolvedValue(entries.map(toClientEndpoint)),
+    // Requirement 13 freshening follow-up: kept a no-op throughout this model
+    // (which is about Connection_Status/Property 17, not the freshening
+    // merge -- that has its own coverage in SubscriptionPoller.test.js), so
+    // `summary.freshened` is always 0 here.
+    getAllSubscriptions: jest.fn().mockResolvedValue([])
   };
 
   const summary = await new SubscriptionPoller({ takServerService, pool }).run();
@@ -565,6 +570,7 @@ describe('Property 17: One poll writes current status for every reported UID, in
         entries: entries.length,
         observed: reportedUids.filter((uid) => expected.get(uid).time !== null).length,
         skipped: countUnusableEntries(entries),
+        freshened: 0,
         updated: trackedReported.length,
         failed: 0,
         connected: reportedUids.filter((uid) => expected.get(uid).connected).length,

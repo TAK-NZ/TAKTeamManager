@@ -794,6 +794,30 @@ const rowScopedResolvers = {
   },
 
   /**
+   * `device:read:team_admin` — takserver-enrollment Criteria 3.6, 3.7,
+   * 3.8: backs `GET /api/devices/team/:teamId` (task 8.3's team device
+   * listing). Satisfied if the requesting user is a Global_Manager OR is
+   * an admin (per `Team.isAdmin`) of the specific team named by the
+   * `:teamId` route param — mirrors `team:update` above exactly, since
+   * listing a team's devices is the same authorization boundary as
+   * updating that team.
+   *
+   * `Team.isAdmin` resolves Team_Admin through the Ancestor_Chain, so an
+   * Organisation admin qualifies for a device on any Sub_Team beneath it,
+   * and an INHERITED admin row (`inherited_from_team_id` NOT NULL) never
+   * confers Team_Admin (Criterion 3.6).
+   *
+   * @param {import('express').Request} req
+   * @returns {Promise<boolean>}
+   */
+  'device:read:team_admin': async (req) => {
+    if (req.user && req.user.is_global_manager) {
+      return true;
+    }
+    return Team.isAdmin(req.params.teamId, req.user && req.user.userId);
+  },
+
+  /**
    * `admin:excluded_domains:manage` — Global_Manager-only.
    *
    * @param {import('express').Request} req

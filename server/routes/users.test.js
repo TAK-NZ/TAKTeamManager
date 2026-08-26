@@ -234,6 +234,133 @@ describe('GET /api/users excludes Team_Owned_Device rows (Requirement 27.9)', ()
   });
 });
 
+/**
+ * takserver-enrollment Requirement 13.2/13.6: `GET /api/users` projects
+ * `live_certificate_count`, derived from a `certs` derived-table LEFT JOIN
+ * added to the SAME batched team-name query -- never a second query --
+ * so the Multiple_Certificate_Warning can be rendered without a per-row
+ * round trip. Row presence in `tak_devices` (with `revoked = false`) is
+ * what "live certificate" means; a revoked row or a row with a null
+ * `user_id` must never be counted.
+ */
+describe('GET /api/users live certificate count (Requirement 13.2, 13.6)', () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    app = buildApp();
+  });
+
+  it('attaches live_certificate_count: 0 for a user with no certificate rows', async () => {
+    authentikService.getUsers.mockResolvedValue({
+      results: [{ pk: 1, username: 'alice' }],
+      count: 1
+    });
+    pool.query.mockResolvedValue({
+      rows: [{ authentik_user_id: 1, team_name: null, is_team_device: false, live_certificate_count: 0 }]
+    });
+
+    const res = await request(app).get('/api/users');
+
+    expect(res.status).toBe(200);
+    const alice = res.body.users.find((u) => u.pk === 1);
+    expect(alice.live_certificate_count).toBe(0);
+  });
+
+  it('attaches live_certificate_count: 1 for a user with exactly one live certificate', async () => {
+    authentikService.getUsers.mockResolvedValue({
+      results: [{ pk: 1, username: 'alice' }],
+      count: 1
+    });
+    pool.query.mockResolvedValue({
+      rows: [{ authentik_user_id: 1, team_name: null, is_team_device: false, live_certificate_count: 1 }]
+    });
+
+    const res = await request(app).get('/api/users');
+
+    expect(res.status).toBe(200);
+    const alice = res.body.users.find((u) => u.pk === 1);
+    expect(alice.live_certificate_count).toBe(1);
+  });
+
+  it('attaches the correct count for a user with 2 or more live certificates', async () => {
+    authentikService.getUsers.mockResolvedValue({
+      results: [{ pk: 1, username: 'alice' }],
+      count: 1
+    });
+    pool.query.mockResolvedValue({
+      rows: [{ authentik_user_id: 1, team_name: null, is_team_device: false, live_certificate_count: 3 }]
+    });
+
+    const res = await request(app).get('/api/users');
+
+    expect(res.status).toBe(200);
+    const alice = res.body.users.find((u) => u.pk === 1);
+    expect(alice.live_certificate_count).toBe(3);
+  });
+
+  it('defaults live_certificate_count to 0 (not null/undefined) for a user absent from the query result rows', async () => {
+    authentikService.getUsers.mockResolvedValue({
+      results: [{ pk: 1, username: 'alice' }],
+      count: 1
+    });
+    // No corresponding row at all -- the LEFT JOIN chain still produces a
+    // row per user in the real query, but this exercises the JS-side
+    // fallback for a user missing from the map.
+    pool.query.mockResolvedValue({ rows: [] });
+
+    const res = await request(app).get('/api/users');
+
+    expect(res.status).toBe(200);
+    const alice = res.body.users.find((u) => u.pk === 1);
+    expect(alice.live_certificate_count).toBe(0);
+    expect(alice.live_certificate_count).not.toBeNull();
+    expect(alice.live_certificate_count).not.toBeUndefined();
+  });
+
+  it('issues the SAME number of pool.query calls as before this change (no new round trip)', async () => {
+    authentikService.getUsers.mockResolvedValue({
+      results: [
+        { pk: 1, username: 'alice' },
+        { pk: 2, username: 'bob' },
+        { pk: 3, username: 'carol' }
+      ],
+      count: 3
+    });
+    pool.query.mockResolvedValue({
+      rows: [
+        { authentik_user_id: 1, team_name: 'Alpha Team', is_team_device: false, live_certificate_count: 2 },
+        { authentik_user_id: 2, team_name: 'Alpha Team', is_team_device: false, live_certificate_count: 0 },
+        { authentik_user_id: 3, team_name: 'Alpha Team', is_team_device: false, live_certificate_count: 1 }
+      ]
+    });
+
+    const res = await request(app).get('/api/users');
+
+    expect(res.status).toBe(200);
+    // Exactly one call for the whole batch -- same as the pre-existing
+    // team-name lookup's call count, independent of the number of users
+    // returned (Criterion 13.6).
+    expect(pool.query).toHaveBeenCalledTimes(1);
+  });
+
+  it('the SQL text includes the certs derived-table join, scoped to non-revoked rows with a non-null user_id', async () => {
+    authentikService.getUsers.mockResolvedValue({
+      results: [{ pk: 1, username: 'alice' }],
+      count: 1
+    });
+    pool.query.mockResolvedValue({ rows: [] });
+
+    await request(app).get('/api/users');
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    const [sql] = pool.query.mock.calls[0];
+    expect(sql).toMatch(/FROM tak_devices/);
+    expect(sql).toMatch(/user_id IS NOT NULL AND revoked = false/);
+    expect(sql).toMatch(/COALESCE\(certs\.live_certificate_count, 0\) AS live_certificate_count/);
+  });
+});
+
 describe('GET /api/users pagination (Requirement 11.4)', () => {
   let app;
 

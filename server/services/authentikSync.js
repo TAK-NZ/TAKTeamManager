@@ -2,6 +2,7 @@ const axios = require('axios');
 const pLimit = require('p-limit');
 const db = require('../config/database');
 const { createLogger } = require('../config/logger');
+const { normaliseAuthentikEmail } = require('../utils/authentikEmail');
 
 const logger = createLogger('authentikSync');
 
@@ -201,25 +202,93 @@ class AuthentikSyncService {
       // synced from Authentik. first_name, last_name, is_active, and tak_role
       // are LOCAL-authoritative and never overwritten by Authentik values.
       //
-      // Skipped when the Authentik user has no email: `users.email` is a
-      // UNIQUE NOT NULL column, and service-account users with no email
-      // would violate that constraint.
+      // takserver-enrollment Requirement 5.6: this upsert is NOT skipped for
+      // an emailless Authentik principal any more. `users.email` is nullable
+      // now (Requirement 5.3), guarded instead by the
+      // users_email_required_unless_device CHECK constraint -- a Team_Owned_
+      // Device satisfies it via its existing is_team_device = true row and
+      // therefore syncs normally. The one remaining reason a sync can still
+      // skip a principal is a genuinely emailless NON-device row with no
+      // local `users` row yet: the CHECK constraint rejects that INSERT, and
+      // the narrow catch below (23514 on
+      // users_email_required_unless_device) is what decides it, logging at
+      // warn and skipping that principal's users AND user_cache writes,
+      // rather than silently excluding it as the old `if (user.email)` guard
+      // did for every emailless principal including every Team_Owned_Device.
       const takRoleFromAuthentik = user.attributes?.takRole ?? null;
       const seedFirstName = user.attributes?.first_name || user.name || user.username;
       const seedLastName = user.attributes?.last_name || '';
 
-      if (user.email) {
-        await db.query(
-          'INSERT INTO users (authentik_user_id, username, email, first_name, last_name, is_active, tak_role) VALUES ($1, $2, $3, $4, $5, true, COALESCE($6, \'Team Member\')) ON CONFLICT (authentik_user_id) DO UPDATE SET username = $2, email = $3',
+      // takserver-enrollment Requirement 5.5: normalise Authentik's
+      // Empty_String_Email ('') to null exactly once, and bind that single
+      // value to `email` in BOTH the `users` upsert and the `user_cache`
+      // upsert below, so "no email" is NULL consistently on both tables for
+      // the same principal rather than NULL on one and '' on the other.
+      const email = normaliseAuthentikEmail(user.email);
+
+      // BUGFIX (found during takserver-enrollment task 12.2 live
+      // verification): `is_team_device` was omitted from the INSERT's
+      // column list below, so Postgres evaluated the tentative INSERT
+      // tuple's `is_team_device` at the column DEFAULT (false) against the
+      // users_email_required_unless_device CHECK constraint BEFORE
+      // `ON CONFLICT ... DO UPDATE` ever ran -- per Postgres's documented
+      // INSERT ... ON CONFLICT semantics, the proposed row is checked
+      // against constraints before conflict resolution. For an EXISTING
+      // Team_Owned_Device row (email NULL, is_team_device already true in
+      // the stored row), that made the tentative tuple (email=NULL,
+      // is_team_device=false) violate the CHECK constraint on EVERY sync,
+      // even though the real stored row already satisfied it -- and the
+      // catch below misclassified it as "genuinely emailless principal
+      // with no local row", silently skipping this device's users AND
+      // user_cache writes on every run. The device kept working (its
+      // `users` row was written once by DeviceEnrollmentService.createDevice)
+      // but was never reconciled by sync again.
+      //
+      // The fix: the VALUES clause's own `is_team_device` expression reads
+      // the row's EXISTING stored value via a same-statement subquery
+      // keyed on authentik_user_id (reusing $1 -- no new bound parameter),
+      // defaulting to false only when no row exists yet (a genuinely new
+      // principal, which is never a device on this path -- devices are
+      // created by DeviceEnrollmentService.createDevice's own INSERT, never
+      // materialized for the first time here). Doing this as a subquery
+      // inside the single INSERT statement, rather than a separate SELECT
+      // issued beforehand, keeps the read and the write atomic within one
+      // round trip: there is no window between "read is_team_device" and
+      // "write the row" for Postgres to race in, which is a strictly
+      // tighter guarantee than the other reads in this function settle for
+      // (e.g. the push-to-Authentik SELECTs below, which already tolerate a
+      // race against a concurrent write for the same principal). It is
+      // deliberately NOT added to `ON CONFLICT ... DO UPDATE SET`: the
+      // local `users` row is the authority for this column, and the update
+      // path must leave whatever value the row already holds untouched.
+      let isTeamDevice = false;
+      let localUserId = null;
+      try {
+        const usersUpsertResult = await db.query(
+          'INSERT INTO users (authentik_user_id, username, email, first_name, last_name, is_active, tak_role, is_team_device) VALUES ($1, $2, $3, $4, $5, true, COALESCE($6, \'Team Member\'), COALESCE((SELECT is_team_device FROM users WHERE authentik_user_id = $1), false)) ON CONFLICT (authentik_user_id) DO UPDATE SET username = $2, email = $3 RETURNING id, is_team_device',
           [
             user.pk,
             user.username,
-            user.email,
+            email,
             seedFirstName,
             seedLastName,
             takRoleFromAuthentik
           ]
         );
+        localUserId = usersUpsertResult.rows[0]?.id ?? null;
+        isTeamDevice = usersUpsertResult.rows[0]?.is_team_device === true;
+      } catch (usersUpsertError) {
+        if (
+          usersUpsertError.code === '23514' &&
+          usersUpsertError.constraint === 'users_email_required_unless_device'
+        ) {
+          logger.warn(
+            { authentikUserId: user.pk },
+            'Skipped users/user_cache sync for an emailless Authentik principal with no local row (users_email_required_unless_device)'
+          );
+          return;
+        }
+        throw usersUpsertError;
       }
 
       // user_cache upsert: TAK Team Manager is authoritative for first_name,
@@ -227,11 +296,20 @@ class AuthentikSyncService {
       // bootstrap. On INSERT, seed all values from Authentik. On UPDATE, only
       // sync identity fields (username, email) and admin-related fields
       // (groups, is_admin) from Authentik.
+      //
+      // takserver-enrollment Requirement 5.6: is_team_device is added to the
+      // INSERT column list, sourced from the `users` upsert's
+      // RETURNING is_team_device above -- the local `users` row is the
+      // authority for it, since Authentik carries no such field.
+      // Deliberately absent from ON CONFLICT DO UPDATE SET, so the cache
+      // adopts the flag on first insert and never overwrites it afterwards,
+      // matching how this upsert already treats first_name/tak_role as
+      // bootstrap-then-local.
       await db.query(`
         INSERT INTO user_cache (
           authentik_id, username, email, first_name, last_name, 
-          is_active, tak_role, tak_color, tak_callsign, groups, is_admin
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          is_active, tak_role, tak_color, tak_callsign, groups, is_admin, is_team_device
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         ON CONFLICT (authentik_id) DO UPDATE SET
           username = EXCLUDED.username,
           email = EXCLUDED.email,
@@ -241,7 +319,7 @@ class AuthentikSyncService {
       `, [
         user.pk,
         user.username,
-        user.email,
+        email,
         seedFirstName,
         seedLastName,
         true,
@@ -249,15 +327,23 @@ class AuthentikSyncService {
         user.attributes?.takColor,
         user.attributes?.takCallsign,
         groupNames,
-        isAdmin
+        isAdmin,
+        isTeamDevice
       ]);
 
       // --- Push local-authoritative attributes to Authentik when they differ ---
       // TAK Team Manager is authoritative for: first_name, last_name,
       // tak_callsign, tak_color, tak_role, is_active. Only PATCH if at least
-      // one value differs (avoids unnecessary API calls). Skip for users with
-      // no email (service accounts that don't have a local `users` row).
-      if (user.email) {
+      // one value differs (avoids unnecessary API calls).
+      //
+      // takserver-enrollment Requirement 5.6: this guard is keyed on "has a
+      // local `users` row" (localUserId), not "has an email" -- that is the
+      // condition the comment above always meant. With email now nullable,
+      // "has an email" and "has a local row" are different questions: there
+      // is nothing local to push for a principal with no local row, and a
+      // Team_Owned_Device with a local row and no email has a tak_role
+      // worth pushing back like any other principal.
+      if (localUserId) {
         try {
           // Read the LOCAL authoritative values for this user
           const localResult = await db.query(
@@ -357,7 +443,22 @@ class AuthentikSyncService {
   }
 
   startPeriodicSync() {
-    const intervalMinutes = parseInt(process.env.SYNC_INTERVAL_MINUTES) || 10;
+    // Clamped to a 1-minute floor, mirroring the guard already used for the
+    // Sync_Worker's own scheduled jobs (ExpiryScheduler, RetentionCleanupJob,
+    // SubscriptionPoller, DeviceSync, AdminCredentialRefreshJob): a
+    // misconfigured 0 or negative value would otherwise fire `setInterval`
+    // on effectively every tick. `this.isRunning` already collapses any
+    // overlapping tick into a no-op, so the floor is a sanity guard against
+    // busy-looping the timer itself, not a correctness requirement. No
+    // upper bound is imposed -- nothing pins a maximum staleness for this
+    // reconciliation sweep.
+    const MIN_INTERVAL_MINUTES = 1;
+    const DEFAULT_INTERVAL_MINUTES = 10;
+
+    const intervalMinutes = Math.max(
+      MIN_INTERVAL_MINUTES,
+      parseInt(process.env.SYNC_INTERVAL_MINUTES, 10) || DEFAULT_INTERVAL_MINUTES
+    );
     logger.info({ intervalMinutes }, 'Starting periodic Authentik sync');
 
     // Run initial sync. syncUsers() already has its own internal try/catch

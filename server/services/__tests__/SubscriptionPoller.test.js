@@ -9,7 +9,7 @@ jest.mock('../../config/logger', () => ({
 
 const pool = require('../../config/database');
 const SubscriptionPoller = require('../SubscriptionPoller');
-const { parseLastEventTime } = require('../SubscriptionPoller');
+const { parseLastEventTime, mergeSubscriptionFreshness } = require('../SubscriptionPoller');
 const TakServerService = require('../TakServerService');
 
 /**
@@ -62,9 +62,18 @@ function clientEndpoint(overrides = {}) {
   };
 }
 
-/** @returns {{getClientEndpoints: jest.Mock}} */
-function createTakServerService(clientEndpoints = []) {
-  return { getClientEndpoints: jest.fn().mockResolvedValue(clientEndpoints) };
+/**
+ * @returns {{getClientEndpoints: jest.Mock, getAllSubscriptions: jest.Mock}}
+ *   `getAllSubscriptions` defaults to an empty live-subscriptions table, so
+ *   the freshening step (Requirement 13 freshening follow-up) is a no-op for
+ *   every existing caller unless a test explicitly overrides it -- keeping
+ *   `freshened: 0` the default in every summary assertion below.
+ */
+function createTakServerService(clientEndpoints = [], liveSubscriptions = []) {
+  return {
+    getClientEndpoints: jest.fn().mockResolvedValue(clientEndpoints),
+    getAllSubscriptions: jest.fn().mockResolvedValue(liveSubscriptions)
+  };
 }
 
 /**
@@ -75,7 +84,7 @@ function createTakServerService(clientEndpoints = []) {
  * @param {Array<object>} entries the `ClientEndpoint` list the API answers with.
  * @returns {{service: TakServerService, requestedPaths: string[]}}
  */
-function createEndpointBackedTakServerService(entries = []) {
+function createEndpointBackedTakServerService(entries = [], liveSubscriptions = []) {
   const requestedPaths = [];
   const service = new TakServerService({ TAK_SERVER_URL: 'https://tak.example.test' });
 
@@ -83,6 +92,7 @@ function createEndpointBackedTakServerService(entries = []) {
     get: jest.fn(async (path) => {
       requestedPaths.push(path);
       if (path === '/Marti/api/clientEndPoints') return { data: { data: entries } };
+      if (path === '/Marti/api/subscriptions/all') return { data: { data: liveSubscriptions } };
       throw new Error(`Unexpected TAK Server request in SubscriptionPoller test: ${path}`);
     })
   };
@@ -133,36 +143,36 @@ function unreportedSweepCalls() {
  * none is imposed.
  */
 describe('SubscriptionPoller interval configuration', () => {
-  const originalEnv = process.env.DEVICE_MGMT_POLL_INTERVAL_MS;
+  const originalEnv = process.env.DEVICE_MGMT_POLL_INTERVAL_SECONDS;
 
   afterEach(() => {
     if (originalEnv === undefined) {
-      delete process.env.DEVICE_MGMT_POLL_INTERVAL_MS;
+      delete process.env.DEVICE_MGMT_POLL_INTERVAL_SECONDS;
     } else {
-      process.env.DEVICE_MGMT_POLL_INTERVAL_MS = originalEnv;
+      process.env.DEVICE_MGMT_POLL_INTERVAL_SECONDS = originalEnv;
     }
   });
 
   it('defaults to 300000ms (5 minutes) when unset', () => {
-    delete process.env.DEVICE_MGMT_POLL_INTERVAL_MS;
+    delete process.env.DEVICE_MGMT_POLL_INTERVAL_SECONDS;
     const poller = new SubscriptionPoller({ takServerService: createTakServerService(), pool });
     expect(poller.intervalMs).toBe(5 * 60 * 1000);
   });
 
   it('respects a valid configured value above the minimum', () => {
-    process.env.DEVICE_MGMT_POLL_INTERVAL_MS = '120000';
+    process.env.DEVICE_MGMT_POLL_INTERVAL_SECONDS = '120';
     const poller = new SubscriptionPoller({ takServerService: createTakServerService(), pool });
     expect(poller.intervalMs).toBe(120000);
   });
 
-  it('clamps a value below 60000ms up to 60000ms', () => {
-    process.env.DEVICE_MGMT_POLL_INTERVAL_MS = '500';
+  it('clamps a value below 60 seconds up to 60000ms', () => {
+    process.env.DEVICE_MGMT_POLL_INTERVAL_SECONDS = '5';
     const poller = new SubscriptionPoller({ takServerService: createTakServerService(), pool });
     expect(poller.intervalMs).toBe(60000);
   });
 
   it('falls back to the default for a non-numeric value', () => {
-    process.env.DEVICE_MGMT_POLL_INTERVAL_MS = 'soon';
+    process.env.DEVICE_MGMT_POLL_INTERVAL_SECONDS = 'soon';
     const poller = new SubscriptionPoller({ takServerService: createTakServerService(), pool });
     expect(poller.intervalMs).toBe(5 * 60 * 1000);
   });
@@ -278,6 +288,7 @@ describe('SubscriptionPoller.run last-seen recording', () => {
       entries: 2,
       observed: 2,
       skipped: 0,
+      freshened: 0,
       updated: 2,
       failed: 0,
       connected: 0,
@@ -311,6 +322,7 @@ describe('SubscriptionPoller.run last-seen recording', () => {
       entries: 2,
       observed: 2,
       skipped: 0,
+      freshened: 0,
       updated: 2,
       failed: 0,
       connected: 1,
@@ -383,6 +395,7 @@ describe('SubscriptionPoller.run last-seen recording', () => {
       entries: 1,
       observed: 1,
       skipped: 0,
+      freshened: 0,
       updated: 0,
       failed: 0,
       connected: 0,
@@ -431,6 +444,7 @@ describe('SubscriptionPoller.run last-seen recording', () => {
       entries: 0,
       observed: 0,
       skipped: 0,
+      freshened: 0,
       updated: 0,
       failed: 0,
       connected: 0,
@@ -465,6 +479,7 @@ describe('SubscriptionPoller.run last-seen recording', () => {
       entries: 4,
       observed: 2,
       skipped: 0,
+      freshened: 0,
       updated: 2,
       failed: 0,
       connected: 0,
@@ -491,6 +506,7 @@ describe('SubscriptionPoller.run last-seen recording', () => {
       entries: 6,
       observed: 1,
       skipped: 5,
+      freshened: 0,
       updated: 1,
       failed: 0,
       connected: 0,
@@ -530,6 +546,7 @@ describe('SubscriptionPoller.run last-seen recording', () => {
       entries: 3,
       observed: 1,
       skipped: 2,
+      freshened: 0,
       updated: 3,
       failed: 0,
       connected: 0,
@@ -563,6 +580,7 @@ describe('SubscriptionPoller.run last-seen recording', () => {
       entries: 3,
       observed: 1,
       skipped: 2,
+      freshened: 0,
       updated: 3,
       failed: 0,
       connected: 0,
@@ -686,6 +704,7 @@ describe('SubscriptionPoller.run failure handling', () => {
       entries: 3,
       observed: 3,
       skipped: 0,
+      freshened: 0,
       updated: 2,
       failed: 1,
       connected: 0,
@@ -730,7 +749,7 @@ describe('SubscriptionPoller request surface (Requirements 13.7, 14.4)', () => {
     pool.query.mockResolvedValue({ rowCount: 1 });
   });
 
-  it('requests /Marti/api/clientEndPoints with no query parameters, and nothing else', async () => {
+  it('requests /Marti/api/clientEndPoints with no query parameters, and the live-subscriptions freshening endpoint, and nothing else', async () => {
     const { service, requestedPaths } = createEndpointBackedTakServerService([
       clientEndpoint({ uid: 'uid-1' })
     ]);
@@ -738,7 +757,10 @@ describe('SubscriptionPoller request surface (Requirements 13.7, 14.4)', () => {
 
     const summary = await poller.run();
 
-    expect(requestedPaths).toEqual(['/Marti/api/clientEndPoints']);
+    // Requirement 13 freshening follow-up: `/Marti/api/subscriptions/all` is
+    // now a SECOND, deliberate request -- see the file header for why. What
+    // Requirement 14.4 still forbids is `/Marti/clients`, asserted below.
+    expect(requestedPaths).toEqual(['/Marti/api/clientEndPoints', '/Marti/api/subscriptions/all']);
     expect(requestedPaths.some((path) => path.includes('/Marti/clients'))).toBe(false);
 
     // One argument only: no `params`, so never `showCurrentlyConnectedClients`.
@@ -747,6 +769,7 @@ describe('SubscriptionPoller request surface (Requirements 13.7, 14.4)', () => {
       entries: 1,
       observed: 1,
       skipped: 0,
+      freshened: 0,
       updated: 1,
       failed: 0,
       connected: 0,
@@ -776,11 +799,15 @@ describe('SubscriptionPoller request surface (Requirements 13.7, 14.4)', () => {
 
     const summary = await poller.run();
 
-    expect(requestedPaths).toEqual(['/Marti/api/clientEndPoints']);
+    // The freshening fetch still runs, and its own mocked implementation
+    // above answers it with the same shape, so it is requested exactly once
+    // too.
+    expect(requestedPaths).toEqual(['/Marti/api/clientEndPoints', '/Marti/api/subscriptions/all']);
     expect(summary).toEqual({
       entries: 0,
       observed: 0,
       skipped: 0,
+      freshened: 0,
       updated: 0,
       failed: 0,
       connected: 0,
@@ -798,9 +825,12 @@ describe('SubscriptionPoller request surface (Requirements 13.7, 14.4)', () => {
     );
   });
 
-  it('calls no TakServerService method other than getClientEndpoints', async () => {
+  it('calls no TakServerService method other than getClientEndpoints and getAllSubscriptions', async () => {
     const accessed = [];
-    const target = { getClientEndpoints: jest.fn().mockResolvedValue([clientEndpoint({ uid: 'uid-1' })]) };
+    const target = {
+      getClientEndpoints: jest.fn().mockResolvedValue([clientEndpoint({ uid: 'uid-1' })]),
+      getAllSubscriptions: jest.fn().mockResolvedValue([])
+    };
     const recordingService = new Proxy(target, {
       get(object, property) {
         if (typeof property === 'string') accessed.push(property);
@@ -811,7 +841,7 @@ describe('SubscriptionPoller request surface (Requirements 13.7, 14.4)', () => {
 
     await poller.run();
 
-    expect(accessed).toEqual(['getClientEndpoints']);
+    expect(accessed).toEqual(['getClientEndpoints', 'getAllSubscriptions']);
     expect(accessed).not.toContain('getConnectedSubscriptions');
   });
 
@@ -997,6 +1027,7 @@ describe('SubscriptionPoller.run connection status (task 28.6)', () => {
         entries: 1,
         observed: 1,
         skipped: 0,
+        freshened: 0,
         // `rowCount` means "a row exists for this uid" now, not "Last_Seen
         // moved": the row matched, so the status write counted.
         updated: 1,
@@ -1044,6 +1075,7 @@ describe('SubscriptionPoller.run connection status (task 28.6)', () => {
         // Not `observed`: this poll could not move that Device's Last_Seen.
         observed: 0,
         skipped: 1,
+        freshened: 0,
         updated: 1,
         failed: 0,
         connected: 1,
@@ -1480,5 +1512,276 @@ describe('SubscriptionPoller.run connection alias (task 30.5)', () => {
     // array alone -- if the clamp were back in the `WHERE`, this statement would
     // not have matched the row and the status above would not have landed.
     expect(sql.slice(sql.search(/\bWHERE\b/))).toBe('WHERE client_uid = ANY($1::text[])');
+  });
+});
+
+/**
+ * Requirement 13 freshening follow-up: unit tests for
+ * `mergeSubscriptionFreshness()` in isolation. TAK Server's live subscription
+ * table (`GET /Marti/api/subscriptions/all`) tracks a currently-reporting
+ * connection's freshness far more granularly than `ClientEndpoint.
+ * lastEventTime` does -- verified live, one CloudTAK connection's
+ * `lastEventTime` sat unchanged for over 20 minutes of consecutive
+ * `lastStatus: "Connected"` polls while its live-subscription entry's
+ * `lastReportMilliseconds` advanced multiple times within a single minute.
+ * This is the pure merge step that closes that gap, called from `run()`
+ * after `extractLastEventTimes()` and before the per-uid write loop.
+ */
+describe('mergeSubscriptionFreshness', () => {
+  /** A `SubscriptionInfo`-shaped live entry, matching the live payload's fields. */
+  function subscriptionInfo(overrides = {}) {
+    return {
+      dn: null,
+      callsign: 'FENZ-STL-C.Elsen',
+      clientUid: 'uid-1',
+      lastReportMilliseconds: Date.parse('2026-08-25T04:40:50.553Z'),
+      takClient: 'CloudTAK',
+      username: 'chris@chriselsen.net',
+      ...overrides
+    };
+  }
+
+  it('advances a reported uid\'s lastEventTime when the live subscription reports a later time', () => {
+    const reportedByUid = new Map([
+      ['uid-1', { lastEventTime: new Date('2026-08-25T04:26:26.181Z'), connected: true }]
+    ]);
+    const laterMs = Date.parse('2026-08-25T04:40:50.553Z');
+
+    const freshened = mergeSubscriptionFreshness(reportedByUid, [
+      subscriptionInfo({ clientUid: 'uid-1', lastReportMilliseconds: laterMs })
+    ]);
+
+    expect(freshened).toBe(1);
+    expect(reportedByUid.get('uid-1').lastEventTime).toEqual(new Date(laterMs));
+    // `connected` is untouched -- this merge concerns Last_Seen only.
+    expect(reportedByUid.get('uid-1').connected).toBe(true);
+  });
+
+  it('does not move lastEventTime backward when the live subscription reports an earlier time (Monotonic_Guard)', () => {
+    const stored = new Date('2026-08-25T04:40:50.553Z');
+    const reportedByUid = new Map([['uid-1', { lastEventTime: stored, connected: true }]]);
+    const earlierMs = Date.parse('2026-08-25T04:26:26.181Z');
+
+    const freshened = mergeSubscriptionFreshness(reportedByUid, [
+      subscriptionInfo({ clientUid: 'uid-1', lastReportMilliseconds: earlierMs })
+    ]);
+
+    expect(freshened).toBe(0);
+    // The very same Date instance -- not rewound, not replaced with an equal
+    // value either.
+    expect(reportedByUid.get('uid-1').lastEventTime).toBe(stored);
+  });
+
+  it('sets lastEventTime from the live subscription when the primary source reported none at all (Requirement 13.6 territory)', () => {
+    // An entry whose ClientEndpoint.lastEventTime was absent/unparseable still
+    // reaches this map with `lastEventTime: null` (task 28.2, Requirement
+    // 20.4) -- carrying a status but no timestamp. The live-subscriptions
+    // merge can still supply one.
+    const reportedByUid = new Map([['uid-1', { lastEventTime: null, connected: true }]]);
+    const reportMs = Date.parse('2026-08-25T04:40:50.553Z');
+
+    const freshened = mergeSubscriptionFreshness(reportedByUid, [
+      subscriptionInfo({ clientUid: 'uid-1', lastReportMilliseconds: reportMs })
+    ]);
+
+    expect(freshened).toBe(1);
+    expect(reportedByUid.get('uid-1').lastEventTime).toEqual(new Date(reportMs));
+  });
+
+  it('does not insert a uid the primary source did not report this poll (additive only, Requirement 22.2 parity)', () => {
+    // `uid-untracked` is not a key of `reportedByUid` at all -- the primary
+    // source (`getClientEndpoints()`) never reported it this poll. The live
+    // subscription naming it must not add it: this merge freshens an EXISTING
+    // reported uid's timestamp, it never widens which uids a poll reports.
+    const reportedByUid = new Map([['uid-1', { lastEventTime: null, connected: false }]]);
+
+    const freshened = mergeSubscriptionFreshness(reportedByUid, [
+      subscriptionInfo({ clientUid: 'uid-untracked', lastReportMilliseconds: Date.now() })
+    ]);
+
+    expect(freshened).toBe(0);
+    expect(reportedByUid.has('uid-untracked')).toBe(false);
+    expect(reportedByUid.size).toBe(1);
+  });
+
+  it('skips entries with an empty clientUid without logging -- the normal shape for a non-Device connection (e.g. a CloudTAK ETL)', () => {
+    const reportedByUid = new Map([['uid-1', { lastEventTime: null, connected: false }]]);
+
+    const freshened = mergeSubscriptionFreshness(reportedByUid, [
+      subscriptionInfo({ dn: 'CN=etl-adsbx, OU=TAK Unit, O=TAK', clientUid: '', callsign: 'tls:7101' })
+    ]);
+
+    expect(freshened).toBe(0);
+    expect(reportedByUid.get('uid-1').lastEventTime).toBeNull();
+  });
+
+  it.each([
+    ['missing clientUid', { clientUid: undefined }],
+    ['null clientUid', { clientUid: null }],
+    ['numeric clientUid', { clientUid: 42 }],
+    ['missing lastReportMilliseconds', { lastReportMilliseconds: undefined }],
+    ['null lastReportMilliseconds', { lastReportMilliseconds: null }],
+    ['string lastReportMilliseconds', { lastReportMilliseconds: '1787633240530' }],
+    ['NaN lastReportMilliseconds', { lastReportMilliseconds: NaN }],
+    ['Infinity lastReportMilliseconds', { lastReportMilliseconds: Infinity }]
+  ])('is total: does not throw and leaves the map unchanged for %s', (_label, overrides) => {
+    const reportedByUid = new Map([['uid-1', { lastEventTime: null, connected: false }]]);
+
+    expect(() =>
+      mergeSubscriptionFreshness(reportedByUid, [subscriptionInfo({ clientUid: 'uid-1', ...overrides })])
+    ).not.toThrow();
+    expect(reportedByUid.get('uid-1').lastEventTime).toBeNull();
+  });
+
+  it.each([
+    ['a non-object entry (string)', 'not-an-object'],
+    ['a non-object entry (number)', 42],
+    ['null', null]
+  ])('is total: does not throw for %s as a list entry', (_label, entry) => {
+    const reportedByUid = new Map([['uid-1', { lastEventTime: null, connected: false }]]);
+
+    expect(() => mergeSubscriptionFreshness(reportedByUid, [entry])).not.toThrow();
+  });
+
+  it('freshens multiple reported uids independently in one call, counting only those it actually advances', () => {
+    const reportedByUid = new Map([
+      ['uid-a', { lastEventTime: new Date('2026-01-01T00:00:00Z'), connected: true }],
+      ['uid-b', { lastEventTime: new Date('2026-06-01T00:00:00Z'), connected: false }],
+      ['uid-c', { lastEventTime: null, connected: false }]
+    ]);
+
+    const freshened = mergeSubscriptionFreshness(reportedByUid, [
+      // Advances uid-a.
+      subscriptionInfo({ clientUid: 'uid-a', lastReportMilliseconds: Date.parse('2026-02-01T00:00:00Z') }),
+      // Does NOT advance uid-b: earlier than what is already stored.
+      subscriptionInfo({ clientUid: 'uid-b', lastReportMilliseconds: Date.parse('2026-01-01T00:00:00Z') }),
+      // Advances uid-c from null.
+      subscriptionInfo({ clientUid: 'uid-c', lastReportMilliseconds: Date.parse('2026-03-01T00:00:00Z') })
+    ]);
+
+    expect(freshened).toBe(2);
+    expect(reportedByUid.get('uid-a').lastEventTime).toEqual(new Date('2026-02-01T00:00:00Z'));
+    expect(reportedByUid.get('uid-b').lastEventTime).toEqual(new Date('2026-06-01T00:00:00Z'));
+    expect(reportedByUid.get('uid-c').lastEventTime).toEqual(new Date('2026-03-01T00:00:00Z'));
+  });
+});
+
+/**
+ * Requirement 13 freshening follow-up: `run()`-level integration of the
+ * freshening merge -- the interaction between the two fetches, the
+ * per-uid write loop consuming the freshened value, and the best-effort
+ * failure handling that must never touch `outcome` or the primary source's
+ * own guarantees.
+ */
+describe('SubscriptionPoller.run live-subscriptions freshening', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    pool.query.mockResolvedValue({ rowCount: 1 });
+  });
+
+  it('writes the freshened (later) timestamp, not the primary source\'s own lastEventTime, when the live subscription is more recent', async () => {
+    const takServerService = createTakServerService(
+      [clientEndpoint({ uid: 'uid-1', lastEventTime: '2026-08-25T04:26:26.181Z', lastStatus: 'Connected' })],
+      [
+        {
+          clientUid: 'uid-1',
+          lastReportMilliseconds: Date.parse('2026-08-25T04:40:50.553Z')
+        }
+      ]
+    );
+    const poller = new SubscriptionPoller({ takServerService, pool });
+
+    const summary = await poller.run();
+
+    expect(recordedLastSeen()).toEqual([[['uid-1'], new Date('2026-08-25T04:40:50.553Z')]]);
+    expect(summary).toEqual({
+      entries: 1,
+      observed: 1,
+      skipped: 0,
+      freshened: 1,
+      updated: 1,
+      failed: 0,
+      connected: 1,
+      disconnected: 0,
+      // The mocked pool answers every statement with rowCount: 1 (this
+      // describe block's beforeEach), including the unreported sweep -- same
+      // convention the other describe blocks in this file use.
+      unreported: 1
+    });
+  });
+
+  it('reports freshened: 0 and writes the primary source\'s own value when the live subscription has nothing newer', async () => {
+    const takServerService = createTakServerService(
+      [clientEndpoint({ uid: 'uid-1', lastEventTime: '2026-08-25T04:40:50.553Z', lastStatus: 'Connected' })],
+      [{ clientUid: 'uid-1', lastReportMilliseconds: Date.parse('2026-08-25T04:26:26.181Z') }]
+    );
+    const poller = new SubscriptionPoller({ takServerService, pool });
+
+    const summary = await poller.run();
+
+    expect(recordedLastSeen()).toEqual([[['uid-1'], new Date('2026-08-25T04:40:50.553Z')]]);
+    expect(summary.freshened).toBe(0);
+  });
+
+  it('leaves a Device the live-subscriptions table cannot identify (empty clientUid, e.g. a CloudTAK ETL) sourced from lastEventTime alone', async () => {
+    const takServerService = createTakServerService(
+      [clientEndpoint({ uid: 'etl-adsbx', lastEventTime: '2026-08-25T04:00:00.000Z' })],
+      [{ dn: 'CN=etl-adsbx, OU=TAK Unit, O=TAK', clientUid: '', lastReportMilliseconds: Date.now() }]
+    );
+    const poller = new SubscriptionPoller({ takServerService, pool });
+
+    const summary = await poller.run();
+
+    expect(recordedLastSeen()).toEqual([[['etl-adsbx'], new Date('2026-08-25T04:00:00.000Z')]]);
+    expect(summary.freshened).toBe(0);
+  });
+
+  it('does not fail the run, does not touch outcome, and logs at warn (not error) when the live-subscriptions fetch rejects', async () => {
+    const takServerService = createTakServerService([clientEndpoint({ uid: 'uid-1' })]);
+    takServerService.getAllSubscriptions.mockRejectedValue(new Error('subscriptions endpoint unreachable'));
+
+    const summary = await new SubscriptionPoller({ takServerService, pool }).run();
+
+    // The run still COMPLETES -- this is best-effort, not a second
+    // documented-endpoint failure path (contrast the primary fetch's
+    // failure handling, which returns undefined).
+    expect(summary).toBeDefined();
+    expect(summary.freshened).toBe(0);
+    expect(summary.updated).toBe(1);
+    expect(mockLoggerInstance.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error), endpoint: '/Marti/api/subscriptions/all' }),
+      expect.stringContaining('live subscriptions')
+    );
+    expect(mockLoggerInstance.error).not.toHaveBeenCalled();
+    expect(mockLoggerInstance.info).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: 'completed' }),
+      'Subscription poll completed'
+    );
+  });
+
+  it('does not fail the run and logs at warn when the live-subscriptions payload is malformed (not a list)', async () => {
+    const takServerService = createTakServerService([clientEndpoint({ uid: 'uid-1' })]);
+    takServerService.getAllSubscriptions.mockResolvedValue({ not: 'a list' });
+
+    const summary = await new SubscriptionPoller({ takServerService, pool }).run();
+
+    expect(summary).toBeDefined();
+    expect(summary.freshened).toBe(0);
+    expect(summary.updated).toBe(1);
+    expect(mockLoggerInstance.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ endpoint: '/Marti/api/subscriptions/all', payloadType: 'object' }),
+      expect.stringContaining('malformed')
+    );
+    expect(mockLoggerInstance.error).not.toHaveBeenCalled();
+  });
+
+  it('freshening failure does not prevent the per-uid write or the unreported sweep from running', async () => {
+    const takServerService = createTakServerService([clientEndpoint({ uid: 'uid-1' })]);
+    takServerService.getAllSubscriptions.mockRejectedValue(new Error('boom'));
+
+    await new SubscriptionPoller({ takServerService, pool }).run();
+
+    expect(lastSeenUpdateCalls()).toHaveLength(1);
+    expect(unreportedSweepCalls()).toHaveLength(1);
   });
 });

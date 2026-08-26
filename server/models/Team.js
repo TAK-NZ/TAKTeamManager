@@ -55,6 +55,49 @@ class CallsignLevelSelectionSubTeamError extends Error {
   }
 }
 
+/**
+ * takserver-enrollment Requirement 6.2 (task 5.4): thrown by
+ * `Team.create`/`Team.update` when a `pseudonymous_usernames` value is
+ * supplied for a Sub_Team (a team whose `parent_team_id` is not null).
+ * The Pseudonymous_Username_Policy is Organisation-only in EXACTLY the
+ * way `callsign_level_selection` already is, so this mirrors
+ * `CallsignLevelSelectionSubTeamError`'s placement (outside the
+ * create/update try/catch, so it always propagates distinctly to the
+ * caller rather than being swallowed by the fallback-to-basic-creation
+ * catch) and its typed-rejection shape.
+ */
+class PseudonymousUsernamePolicySubTeamError extends Error {
+  constructor(message = 'pseudonymousUsernames can only be set on an Organisation') {
+    super(message);
+    this.name = 'PseudonymousUsernamePolicySubTeamError';
+  }
+}
+
+/**
+ * takserver-enrollment Requirement 7.2/7.3 (task 5.4): thrown by
+ * `Team.update` when a request attempts to change an EXISTING
+ * Organisation's `pseudonymous_usernames` value (a resubmission of the
+ * current value is accepted as a no-op; see `Team.update`). The
+ * Pseudonymous_Username_Policy is fixed at Organisation creation, and
+ * per Criterion 7.3 the rejection must state the CONCRETE consequence,
+ * not merely cite a policy: enabling/disabling it on an existing
+ * Organisation would require every existing member's username to
+ * change, and each such change invalidates that member's certificate
+ * Common Name, every certificate issued under it, and every device
+ * record referencing it, forcing every device in the Organisation to
+ * re-enroll. The same sentence appears here and in the rejection
+ * message a caller sees, deliberately -- a rejection message and a code
+ * comment that disagree are two chances to get the reason wrong.
+ */
+class PseudonymousUsernamePolicyImmutableError extends Error {
+  constructor(
+    message = "Pseudonymous usernames cannot be enabled or disabled on an existing Organisation. Doing so would require every existing member's username to change, and each change invalidates that member's certificate Common Name, every certificate issued under it, and every device record referencing it -- forcing every device in this Organisation to re-enroll. Change a member's Callsign Suffix, first name or last name instead; none of those appear in a certificate."
+  ) {
+    super(message);
+    this.name = 'PseudonymousUsernamePolicyImmutableError';
+  }
+}
+
 class Team {
   static async create(teamData) {
     const { name, description, callsign_prefix, visibility, can_join, parent_team_id, created_by } = teamData;
@@ -69,6 +112,12 @@ class Team {
     // validated/defaulted (root team) or forced to `null` (Sub_Team)
     // below, before ever reaching the INSERT.
     let { callsign_level_selection } = teamData;
+    // takserver-enrollment Requirement 6.1/6.2 (task 5.4):
+    // `pseudonymous_usernames` is an Organisation-only field, mirroring
+    // `callsign_level_selection` exactly: declared with `let` because it
+    // is defaulted to `false` (root team) or forced to `null` (Sub_Team)
+    // below, before ever reaching the INSERT.
+    let { pseudonymous_usernames } = teamData;
 
     // Requirement 2.2/2.3: compute the Team_Depth this Sub_Team would
     // occupy (the parent's Team_Depth plus one), or 0 for a root
@@ -137,10 +186,38 @@ class Team {
       }
     }
 
+    // takserver-enrollment Requirement 6.1/6.2 (task 5.4):
+    // `pseudonymous_usernames` is only ever stored on an Organisation row
+    // (`parent_team_id IS NULL`) -- a Sub_Team's value is always `NULL`,
+    // and a Sub_Team creation request that supplies one is a typed
+    // rejection, exactly as `callsign_level_selection` already behaves.
+    // This guard is deliberately OUTSIDE the try/catch below, for the
+    // same reason the `callsign_level_selection` guard above is: a typed
+    // rejection here must propagate to the caller, never be swallowed by
+    // the fallback-to-basic-creation catch.
+    if (parent_team_id) {
+      // Sub_Team: reject if the caller supplied a value at all.
+      // `undefined`/`null` means "not supplied" and is accepted
+      // silently, always storing NULL.
+      if (pseudonymous_usernames !== undefined && pseudonymous_usernames !== null) {
+        throw new PseudonymousUsernamePolicySubTeamError();
+      }
+      pseudonymous_usernames = null;
+    } else {
+      // Organisation (root team): default to `false` when omitted
+      // (Criterion 6.1 -- the migration itself deliberately carries no
+      // column default, so the application supplies one here).
+      if (pseudonymous_usernames === undefined || pseudonymous_usernames === null) {
+        pseudonymous_usernames = false;
+      } else {
+        pseudonymous_usernames = Boolean(pseudonymous_usernames);
+      }
+    }
+
     try {
       const result = await pool.query(
-        'INSERT INTO teams (name, description, callsign_prefix, color, visibility, can_join, parent_team_id, created_by, callsign_name_format, callsign_level_selection) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *',
-        [name, description, callsign_prefix, color, visibility, can_join, parent_team_id, created_by, callsign_name_format, callsign_level_selection]
+        'INSERT INTO teams (name, description, callsign_prefix, color, visibility, can_join, parent_team_id, created_by, callsign_name_format, callsign_level_selection, pseudonymous_usernames) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *',
+        [name, description, callsign_prefix, color, visibility, can_join, parent_team_id, created_by, callsign_name_format, callsign_level_selection, pseudonymous_usernames]
       );
       
       const team = result.rows[0];
@@ -223,8 +300,15 @@ class Team {
    * (root, `parent_team_id IS NULL`) down to and including the given Team
    * itself -- ordered ROOT-FIRST, each row carrying `id`, `name`,
    * `callsign_prefix`, `color`, `callsign_name_format`, `visibility`,
-   * `parent_team_id`, and `depth` (0 at the Organisation, incrementing by
-   * one per level down to the given Team).
+   * `parent_team_id`, `pseudonymous_usernames`, and `depth` (0 at the
+   * Organisation, incrementing by one per level down to the given Team).
+   *
+   * takserver-enrollment Requirement 6.7 (task 5.1): `pseudonymous_usernames`
+   * is included so `UserProvisioningService.resolveNewUserIdentity` can read
+   * the Pseudonymous_Username_Policy from this same single call -- index 0
+   * (the Organisation) is the only row where the value is authoritative; on
+   * every other row it is always `NULL` (Sub_Teams never carry a value) and
+   * must never be read positionally from the tail.
    *
    * Implemented as a single recursive CTE that walks UPWARD from `teamId`
    * (counting `hops_from_target`, which is easy to compute without knowing
@@ -247,16 +331,19 @@ class Team {
         WITH RECURSIVE ancestors AS (
           SELECT id, parent_team_id, name, callsign_prefix, color,
                  callsign_name_format, visibility, callsign_level_selection,
+                 pseudonymous_usernames,
                  0 AS hops_from_target
           FROM teams WHERE id = $1
           UNION ALL
           SELECT t.id, t.parent_team_id, t.name, t.callsign_prefix, t.color,
                  t.callsign_name_format, t.visibility, t.callsign_level_selection,
+                 t.pseudonymous_usernames,
                  a.hops_from_target + 1
           FROM teams t JOIN ancestors a ON t.id = a.parent_team_id
         )
         SELECT id, parent_team_id, name, callsign_prefix, color,
                callsign_name_format, visibility, callsign_level_selection,
+               pseudonymous_usernames,
                (SELECT MAX(hops_from_target) FROM ancestors) - hops_from_target AS depth
         FROM ancestors ORDER BY depth ASC
       `, [teamId]);
@@ -648,24 +735,33 @@ class Team {
     // Requirement 5.2/5.6 (task 8.1): `callsign_level_selection` is
     // validated/rejected below, before ever reaching the UPDATE.
     let { callsign_level_selection } = updateData;
+    // takserver-enrollment Requirement 7.2/7.3 (task 5.4):
+    // `pseudonymous_usernames` is validated/rejected below, before ever
+    // reaching the UPDATE. Unlike `callsign_level_selection`, a value
+    // supplied on an EXISTING Organisation is only ever a no-op
+    // (resubmitting the currently-stored value) or a rejection -- there
+    // is no "change" case that reaches the UPDATE at all.
+    let { pseudonymous_usernames } = updateData;
 
-    // Requirement 3.3/5.6: determine whether `teamId` is a Sub_Team (a
+    // Requirement 3.3/5.6/7.2: determine whether `teamId` is a Sub_Team (a
     // non-null `parent_team_id`) BEFORE building the UPDATE, so the
     // ignore-on-Sub_Team behaviour (color/callsign_name_format) and the
-    // reject-on-Sub_Team behaviour (callsign_level_selection) both apply
-    // regardless of whether this same call is also moving the team to a
-    // new parent (`updateData.parent_team_id`) -- the check is against
-    // the team's CURRENT (pre-update) parent, consistent with `color`/
+    // reject-on-Sub_Team behaviour (callsign_level_selection,
+    // pseudonymous_usernames) both apply regardless of whether this same
+    // call is also moving the team to a new parent
+    // (`updateData.parent_team_id`) -- the check is against the team's
+    // CURRENT (pre-update) parent, consistent with `color`/
     // `callsign_name_format` already having been fixed to the
     // Organisation's value at creation time and only ever needing to be
     // ignored (never re-derived) on update. This single `findById` lookup
-    // is reused for both checks to avoid a duplicate query when multiple
-    // Organisation-only fields are updated together.
+    // is reused for all these checks to avoid a duplicate query when
+    // multiple Organisation-only fields are updated together.
     let existingTeam;
     if (
       color !== undefined ||
       callsign_name_format !== undefined ||
-      callsign_level_selection !== undefined
+      callsign_level_selection !== undefined ||
+      pseudonymous_usernames !== undefined
     ) {
       existingTeam = await this.findById(teamId);
     }
@@ -683,6 +779,12 @@ class Team {
       if (callsign_level_selection !== undefined) {
         throw new CallsignLevelSelectionSubTeamError();
       }
+      // Requirement 6.2: reject (never silently ignore) a
+      // pseudonymous_usernames value supplied on a Sub_Team update,
+      // mirroring callsign_level_selection's typed rejection exactly.
+      if (pseudonymous_usernames !== undefined) {
+        throw new PseudonymousUsernamePolicySubTeamError();
+      }
     } else if (callsign_level_selection !== undefined && callsign_level_selection !== null) {
       // Organisation: validate every element is an integer in
       // [1, MAX_TEAM_DEPTH] (Requirement 5.2). `null` is accepted
@@ -698,10 +800,41 @@ class Team {
       }
     }
 
+    // takserver-enrollment Requirement 7.2/7.3 (task 5.4): the
+    // Pseudonymous_Username_Policy is fixed at Organisation creation. A
+    // request that supplies `pseudonymous_usernames` on an EXISTING
+    // Organisation is accepted ONLY when the submitted value equals the
+    // currently-stored one (a no-op, normalised to a boolean since the
+    // stored column may be `false`/`true` and the request body may carry
+    // either a boolean or a truthy/falsy equivalent) -- any other
+    // submitted value is rejected, stating the concrete consequence
+    // being prevented (Criterion 7.3) rather than merely citing a
+    // policy. This check runs BEFORE the UPDATE, deliberately outside
+    // the try/catch below, for the same reason every other typed
+    // rejection in this method is: it must always propagate to the
+    // caller distinctly, never be swallowed by a fallback path.
+    if (
+      existingTeam &&
+      existingTeam.parent_team_id === null &&
+      pseudonymous_usernames !== undefined
+    ) {
+      const storedValue = Boolean(existingTeam.pseudonymous_usernames);
+      const submittedValue = Boolean(pseudonymous_usernames);
+      if (submittedValue !== storedValue) {
+        throw new PseudonymousUsernamePolicyImmutableError();
+      }
+      // A no-op resubmission of the current value: nothing to change,
+      // so the UPDATE's own COALESCE below simply leaves the column
+      // untouched. `undefined` here (rather than passing the boolean
+      // through) keeps the UPDATE statement's COALESCE fallback
+      // behaviour uniform with every other "not supplied" field.
+      pseudonymous_usernames = undefined;
+    }
+
     try {
       const result = await pool.query(
-        'UPDATE teams SET name = COALESCE($1, name), description = COALESCE($2, description), visibility = COALESCE($3, visibility), can_join = COALESCE($4, can_join), parent_team_id = $5, callsign_name_format = COALESCE($6, callsign_name_format), color = COALESCE($8, color), callsign_level_selection = COALESCE($9, callsign_level_selection), updated_at = CURRENT_TIMESTAMP WHERE id = $7 RETURNING *',
-        [name, description, visibility, can_join, parent_team_id, callsign_name_format, teamId, color, callsign_level_selection]
+        'UPDATE teams SET name = COALESCE($1, name), description = COALESCE($2, description), visibility = COALESCE($3, visibility), can_join = COALESCE($4, can_join), parent_team_id = $5, callsign_name_format = COALESCE($6, callsign_name_format), color = COALESCE($8, color), callsign_level_selection = COALESCE($9, callsign_level_selection), pseudonymous_usernames = COALESCE($10, pseudonymous_usernames), updated_at = CURRENT_TIMESTAMP WHERE id = $7 RETURNING *',
+        [name, description, visibility, can_join, parent_team_id, callsign_name_format, teamId, color, callsign_level_selection, pseudonymous_usernames]
       );
       const updatedTeam = result.rows[0];
 
@@ -1137,5 +1270,7 @@ class Team {
 Team.TeamDepthExceededError = TeamDepthExceededError;
 Team.CallsignLevelSelectionRangeError = CallsignLevelSelectionRangeError;
 Team.CallsignLevelSelectionSubTeamError = CallsignLevelSelectionSubTeamError;
+Team.PseudonymousUsernamePolicySubTeamError = PseudonymousUsernamePolicySubTeamError;
+Team.PseudonymousUsernamePolicyImmutableError = PseudonymousUsernamePolicyImmutableError;
 
 module.exports = Team;

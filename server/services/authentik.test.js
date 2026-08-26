@@ -9,15 +9,22 @@
 
 jest.mock('axios');
 
+const mockLoggerInstance = { info: jest.fn(), error: jest.fn(), warn: jest.fn() };
+jest.mock('../config/logger', () => ({
+  createLogger: jest.fn(() => mockLoggerInstance)
+}));
+
 describe('AuthentikService.createAppPasswordToken', () => {
   let mockClient;
   let authentikService;
 
   beforeEach(() => {
     jest.resetModules();
+    jest.clearAllMocks();
     mockClient = {
       post: jest.fn(),
-      get: jest.fn()
+      get: jest.fn(),
+      delete: jest.fn()
     };
     // Re-require axios AFTER resetModules so the mocked `create` is set on
     // the SAME axios module instance `./authentik` resolves when it is
@@ -72,5 +79,62 @@ describe('AuthentikService.createAppPasswordToken', () => {
     });
 
     expect(mockClient.get).toHaveBeenCalledWith('/core/tokens/device%20enrollment%2Fweird/view_key/');
+  });
+
+  it('propagates a token-creation failure with no compensating delete attempted', async () => {
+    const createError = new Error('Authentik unreachable');
+    mockClient.post.mockRejectedValue(createError);
+
+    await expect(
+      authentikService.createAppPasswordToken(987, {
+        identifier: 'device-enrollment-abc',
+        expiresInMinutes: 30
+      })
+    ).rejects.toBe(createError);
+
+    expect(mockClient.get).not.toHaveBeenCalled();
+    expect(mockClient.delete).not.toHaveBeenCalled();
+  });
+
+  it('compensates a key-fetch failure by deleting the token, then rethrows the ORIGINAL key-fetch error', async () => {
+    mockClient.post.mockResolvedValue({
+      data: { identifier: 'device-enrollment-abc', expires: '2024-01-01T00:30:00.000Z' }
+    });
+    const keyFetchError = new Error('view_key endpoint unreachable');
+    mockClient.get.mockRejectedValue(keyFetchError);
+    mockClient.delete.mockResolvedValue({ status: 204 });
+
+    await expect(
+      authentikService.createAppPasswordToken(987, {
+        identifier: 'device-enrollment-abc',
+        expiresInMinutes: 30
+      })
+    ).rejects.toBe(keyFetchError);
+
+    expect(mockClient.delete).toHaveBeenCalledWith('/core/tokens/device-enrollment-abc/');
+    expect(mockLoggerInstance.error).not.toHaveBeenCalled();
+  });
+
+  it('logs the token IDENTIFIER (never a key) at error level, and still rethrows the original key-fetch error, when the compensating delete also fails', async () => {
+    mockClient.post.mockResolvedValue({
+      data: { identifier: 'device-enrollment-abc', expires: '2024-01-01T00:30:00.000Z' }
+    });
+    const keyFetchError = new Error('view_key endpoint unreachable');
+    mockClient.get.mockRejectedValue(keyFetchError);
+    const deleteError = new Error('delete also unreachable');
+    mockClient.delete.mockRejectedValue(deleteError);
+
+    await expect(
+      authentikService.createAppPasswordToken(987, {
+        identifier: 'device-enrollment-abc',
+        expiresInMinutes: 30
+      })
+    ).rejects.toBe(keyFetchError);
+
+    expect(mockClient.delete).toHaveBeenCalledWith('/core/tokens/device-enrollment-abc/');
+    expect(mockLoggerInstance.error).toHaveBeenCalledTimes(1);
+    const [logFields] = mockLoggerInstance.error.mock.calls[0];
+    expect(logFields.identifier).toBe('device-enrollment-abc');
+    expect(logFields).not.toHaveProperty('key');
   });
 });

@@ -34,7 +34,9 @@ jest.mock('../models/Team', () => {
   const {
     TeamDepthExceededError,
     CallsignLevelSelectionRangeError,
-    CallsignLevelSelectionSubTeamError
+    CallsignLevelSelectionSubTeamError,
+    PseudonymousUsernamePolicySubTeamError,
+    PseudonymousUsernamePolicyImmutableError
   } = jest.requireActual('../models/Team');
   return {
     getAllTeams: jest.fn(),
@@ -49,7 +51,9 @@ jest.mock('../models/Team', () => {
     update: jest.fn(),
     TeamDepthExceededError,
     CallsignLevelSelectionRangeError,
-    CallsignLevelSelectionSubTeamError
+    CallsignLevelSelectionSubTeamError,
+    PseudonymousUsernamePolicySubTeamError,
+    PseudonymousUsernamePolicyImmutableError
   };
 });
 
@@ -362,6 +366,12 @@ describe('callsignPrefix character-class validation (Requirements 3.8, 3.9)', ()
   });
 
   describe('POST /api/teams', () => {
+    // Load-bearing: `-` is excluded from callsignPrefix's character class
+    // because it is BOTH the Callsign segment separator (Requirement 8)
+    // and the Managed_Identifier separator (takserver-enrollment
+    // Requirement 1) -- a prefix containing one would make the boundary
+    // between the prefix and whatever follows ambiguous. See
+    // server/utils/callsignValidation.js's header comment.
     it('rejects a callsignPrefix containing a "-" with 400', async () => {
       const res = await request(app)
         .post('/api/teams')
@@ -382,23 +392,134 @@ describe('callsignPrefix character-class validation (Requirements 3.8, 3.9)', ()
       expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ callsign_prefix: 'NZP0' }));
     });
 
-    it('accepts an omitted callsignPrefix', async () => {
-      Team.create.mockResolvedValue({ id: 1, name: 'Police' });
-
+    // takserver-enrollment Criterion 2.1: an Organisation (no
+    // parentTeamId) now REQUIRES a non-empty callsignPrefix. These three
+    // cases used to accept a missing/empty/whitespace-only prefix on
+    // Organisation creation -- that assumption is stale now that the
+    // requirement is mandatory, so the assertions are updated to the new,
+    // intentional behaviour rather than weakened to keep passing.
+    it('rejects an omitted callsignPrefix for an Organisation with 400, naming the field', async () => {
       const res = await request(app)
         .post('/api/teams')
         .send({ name: 'Police' });
 
-      expect(res.status).toBe(201);
-      expect(Team.create).toHaveBeenCalled();
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/callsignPrefix/);
+      expect(Team.create).not.toHaveBeenCalled();
     });
 
-    it('accepts an empty-string callsignPrefix', async () => {
-      Team.create.mockResolvedValue({ id: 1, name: 'Police', callsign_prefix: '' });
-
+    it('rejects an empty-string callsignPrefix for an Organisation with 400, naming the field', async () => {
       const res = await request(app)
         .post('/api/teams')
         .send({ name: 'Police', callsignPrefix: '' });
+
+      expect(res.status).toBe(400);
+      // Criterion 2.1: the error must name the missing field, not just
+      // carry a 400 status -- checked precisely (exact message), not via
+      // a substring match alone, for both this and the omitted-field case
+      // above.
+      expect(res.body.error).toBe('callsignPrefix is required for an Organisation');
+      expect(Team.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects a whitespace-only callsignPrefix for an Organisation with 400, naming the field', async () => {
+      const res = await request(app)
+        .post('/api/teams')
+        .send({ name: 'Police', callsignPrefix: '   ' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('callsignPrefix is required for an Organisation');
+      expect(Team.create).not.toHaveBeenCalled();
+    });
+
+    // takserver-enrollment task 4.3 edge case: a whitespace variant other
+    // than the plain U+0020 space -- a tab, a newline, and U+00A0
+    // (non-breaking space) -- must be treated as empty too. JS's
+    // String.prototype.trim() (used by the handler's own emptiness check)
+    // and validator.js's trim() sanitizer (which runs first, as part of
+    // this route's .trim() chain, and mirrors the same \s character
+    // class) both strip U+00A0, so there is no divergence between the two
+    // trimming points on the server for this input.
+    it('rejects a callsignPrefix of only a tab, newline or non-breaking space for an Organisation with 400', async () => {
+      for (const exoticWhitespace of ['\t', '\n', '\u00A0']) {
+        Team.create.mockClear();
+        const res = await request(app)
+          .post('/api/teams')
+          .send({ name: 'Police', callsignPrefix: exoticWhitespace });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('callsignPrefix is required for an Organisation');
+        expect(Team.create).not.toHaveBeenCalled();
+      }
+    });
+
+    // takserver-enrollment task 4.3 edge case: parentTeamId is explicitly
+    // `null` (the value the Client always sends for a top-level team,
+    // per this route's own comment above) rather than omitted from the
+    // request body at all -- both must be treated identically as "this is
+    // an Organisation, a prefix is required".
+    it('rejects a missing callsignPrefix when parentTeamId is explicitly null (not merely omitted)', async () => {
+      const res = await request(app)
+        .post('/api/teams')
+        .send({ name: 'Police', parentTeamId: null });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('callsignPrefix is required for an Organisation');
+      expect(Team.create).not.toHaveBeenCalled();
+    });
+
+    // takserver-enrollment task 4.3 edge case: a prefix that IS non-empty
+    // but consists ENTIRELY of characters outside [A-Za-z0-9] (here, a
+    // bare "-") must be caught -- the requirement is that it never
+    // reaches Team.create, regardless of which of the two independent
+    // checks (the express-validator character-class .custom() chain, or
+    // the handler's own "required for an Organisation" emptiness check)
+    // is the one that catches it. Asserted here as the validator-chain
+    // shape (`res.body.errors`, not `res.body.error`), since the
+    // character-class check runs as request-shape validation BEFORE the
+    // handler body executes, so it is the one that actually fires first
+    // for this input -- the emptiness check never gets a chance to run.
+    it('rejects a callsignPrefix of only disallowed characters ("-") via the character-class check, not the emptiness check', async () => {
+      const res = await request(app)
+        .post('/api/teams')
+        .send({ name: 'Police', callsignPrefix: '-' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.errors).toBeDefined();
+      expect(res.body.error).toBeUndefined();
+      expect(Team.create).not.toHaveBeenCalled();
+    });
+
+    // takserver-enrollment task 4.3 edge case: parentTeamId of `0` is a
+    // falsy-but-valid-looking id. `body('parentTeamId').optional({
+    // nullable: true }).isInt()` accepts 0 as a valid integer, and the
+    // handler's `if (!parentTeamId)` Organisation-classification check
+    // is then true for it (0 is falsy), so a request carrying
+    // `parentTeamId: 0` is classified as an Organisation and REQUIRES a
+    // prefix -- documented here as the current, intentional behaviour
+    // rather than a misclassification bug: `teams.id` is a Postgres
+    // `serial`/`integer` primary key starting at 1 (see the baseline
+    // migration), so 0 can never be a real team id and this classifying
+    // as "no parent" is therefore never actually ambiguous in practice.
+    it('classifies parentTeamId: 0 as an Organisation (falsy, and no real team ever has id 0), requiring a prefix', async () => {
+      const res = await request(app)
+        .post('/api/teams')
+        .send({ name: 'Police', parentTeamId: 0 });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('callsignPrefix is required for an Organisation');
+      expect(Team.create).not.toHaveBeenCalled();
+    });
+
+    // Criterion 2.3: a Sub_Team's prefix stays optional exactly as it is
+    // today -- the requirement applies to Organisations only.
+    it('accepts an omitted callsignPrefix for a Sub_Team', async () => {
+      Team.findById.mockResolvedValue({ id: 9, color: 'Blue', parent_team_id: null });
+      Team.create.mockResolvedValue({ id: 2, name: 'Sub', parent_team_id: 9 });
+
+      const res = await request(app)
+        .post('/api/teams')
+        .send({ name: 'Sub', parentTeamId: 9 });
 
       expect(res.status).toBe(201);
       expect(Team.create).toHaveBeenCalled();
@@ -419,6 +540,24 @@ describe('callsignPrefix character-class validation (Requirements 3.8, 3.9)', ()
       expect(Team.update).not.toHaveBeenCalled();
     });
 
+    // takserver-enrollment task 4.3 edge case: a callsignPrefix of only
+    // disallowed characters ("-") is caught by the character-class
+    // .custom() validator (a validation error, `res.body.errors`) rather
+    // than ever reaching the handler's own "cannot be cleared" emptiness
+    // check (`res.body.error`) -- the character-class check runs as
+    // request-shape validation before the handler body, so it fires
+    // first regardless of the emptiness rule existing at all.
+    it('rejects a callsignPrefix of only disallowed characters ("-") on edit via the character-class check, not the emptiness check', async () => {
+      const res = await request(app)
+        .put('/api/teams/42')
+        .send({ callsignPrefix: '-' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.errors).toBeDefined();
+      expect(res.body.error).toBeUndefined();
+      expect(Team.update).not.toHaveBeenCalled();
+    });
+
     it('accepts a letters+digits callsignPrefix', async () => {
       Team.update.mockResolvedValue({ id: 42, callsign_prefix: 'NZP0' });
 
@@ -430,6 +569,10 @@ describe('callsignPrefix character-class validation (Requirements 3.8, 3.9)', ()
       expect(Team.update).toHaveBeenCalled();
     });
 
+    // takserver-enrollment Criterion 2.2: an omitted callsignPrefix on an
+    // edit means "not supplied on this request", not "clear it" -- the
+    // existing value is left unchanged. This is unaffected by the
+    // requirement becoming mandatory, so the assertion is unchanged.
     it('accepts an omitted callsignPrefix', async () => {
       Team.update.mockResolvedValue({ id: 42 });
 
@@ -441,15 +584,111 @@ describe('callsignPrefix character-class validation (Requirements 3.8, 3.9)', ()
       expect(Team.update).toHaveBeenCalled();
     });
 
-    it('accepts an empty-string callsignPrefix', async () => {
-      Team.update.mockResolvedValue({ id: 42, callsign_prefix: '' });
-
+    // Criterion 2.2: an explicit empty-string callsignPrefix on an
+    // Organisation edit now means "clear it", which the requirement
+    // rejects. This assumption is stale now that the field is mandatory
+    // and is updated to the new, intentional behaviour.
+    it('rejects an empty-string callsignPrefix on an Organisation edit with 400, naming the field', async () => {
       const res = await request(app)
         .put('/api/teams/42')
         .send({ callsignPrefix: '' });
 
+      expect(res.status).toBe(400);
+      // Criterion 2.1's "naming the missing field" requirement extends to
+      // the edit path's own distinct message (Criterion 2.2), checked
+      // precisely rather than by substring alone.
+      expect(res.body.error).toBe('callsignPrefix is required for an Organisation and cannot be cleared');
+      expect(Team.update).not.toHaveBeenCalled();
+    });
+
+    it('rejects a whitespace-only callsignPrefix on an Organisation edit with 400, naming the field', async () => {
+      const res = await request(app)
+        .put('/api/teams/42')
+        .send({ callsignPrefix: '   ' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('callsignPrefix is required for an Organisation and cannot be cleared');
+      expect(Team.update).not.toHaveBeenCalled();
+    });
+
+    // takserver-enrollment task 4.3 edge case: exotic whitespace (tab,
+    // newline, non-breaking space) on the edit path, mirroring the
+    // create-path assertion above -- confirms no divergence between the
+    // two call sites' identical `typeof callsignPrefix === 'string' ?
+    // callsignPrefix.trim() : callsignPrefix` treatment.
+    it('rejects a callsignPrefix of only a tab, newline or non-breaking space on an Organisation edit with 400', async () => {
+      for (const exoticWhitespace of ['\t', '\n', '\u00A0']) {
+        Team.update.mockClear();
+        const res = await request(app)
+          .put('/api/teams/42')
+          .send({ callsignPrefix: exoticWhitespace });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('callsignPrefix is required for an Organisation and cannot be cleared');
+        expect(Team.update).not.toHaveBeenCalled();
+      }
+    });
+
+    it('accepts an edit leaving a non-empty callsignPrefix unchanged', async () => {
+      Team.update.mockResolvedValue({ id: 42, callsign_prefix: 'NZP0' });
+
+      const res = await request(app)
+        .put('/api/teams/42')
+        .send({ callsignPrefix: 'NZP0' });
+
       expect(res.status).toBe(200);
       expect(Team.update).toHaveBeenCalled();
+    });
+
+    // Criterion 2.3: a Sub_Team's prefix stays optional -- clearing it on
+    // a Sub_Team edit is still accepted.
+    it('accepts an empty-string callsignPrefix on a Sub_Team edit', async () => {
+      Team.findById.mockResolvedValue({ id: 43, color: 'Blue', parent_team_id: 9 });
+      Team.update.mockResolvedValue({ id: 43, callsign_prefix: '' });
+
+      const res = await request(app)
+        .put('/api/teams/43')
+        .send({ callsignPrefix: '' });
+
+      expect(res.status).toBe(200);
+      expect(Team.update).toHaveBeenCalled();
+    });
+
+    // takserver-enrollment task 4.3 edge case: re-parenting a Sub_Team to
+    // become an Organisation via PUT (parentTeamId: null on a team whose
+    // CURRENT parent_team_id is non-null). `Team.update`'s own UPDATE
+    // statement sets `parent_team_id = $5` unconditionally (no guard
+    // against re-parenting), so this is possible in principle -- but
+    // this route's own Criterion 2.2 guard checks `team.parent_team_id
+    // === null` against the PRE-update row (`Team.findById`'s result,
+    // fetched before Team.update runs), not the team's prospective
+    // POST-update classification. A Sub_Team with no prefix that is
+    // re-parented to root therefore does NOT trip the "prefix required"
+    // check here, and Team.update has no independent check of its own
+    // for this case either (unlike callsign_level_selection/
+    // pseudonymous_usernames, which Team.update DOES re-derive
+    // Organisation-vs-Sub_Team status for on every update). This is
+    // documented as a discovered gap relative to Criterion 2.1's "an
+    // Organisation must have a prefix" intent -- not asserted as
+    // "correct" behaviour, since the resulting row would be an
+    // Organisation with an empty callsign_prefix. Retroactive enforcement
+    // on re-parent was flagged during test-writing rather than silently
+    // fixed, since design.md's own Criterion 2.8 discussion frames the
+    // requirement as enforced "in the create and edit paths" without
+    // naming re-parenting explicitly.
+    it('KNOWN GAP: re-parenting a prefix-less Sub_Team to become an Organisation (parentTeamId: null) is NOT retroactively required to carry a prefix', async () => {
+      Team.findById.mockResolvedValue({ id: 43, color: 'Blue', parent_team_id: 9, callsign_prefix: null });
+      Team.update.mockResolvedValue({ id: 43, parent_team_id: null, callsign_prefix: null });
+
+      const res = await request(app)
+        .put('/api/teams/43')
+        .send({ parentTeamId: null });
+
+      // Current behaviour: accepted, and Team.update is reached -- the
+      // Criterion 2.2 guard only fires when the team was ALREADY an
+      // Organisation before this request.
+      expect(res.status).toBe(200);
+      expect(Team.update).toHaveBeenCalledWith('43', expect.objectContaining({ parent_team_id: null }));
     });
   });
 });
@@ -516,12 +755,18 @@ describe('callsignNameFormat enum validation (Requirements 8.6, 8.7, 11.5)', () 
   });
 
   describe('POST /api/teams', () => {
+    // takserver-enrollment Criterion 2.1: an Organisation now requires a
+    // non-empty callsignPrefix, so these Organisation-creation requests
+    // (no parentTeamId) carry one -- unrelated to what this describe
+    // block itself is testing (callsignNameFormat's own enum
+    // acceptance), but required for the request to reach Team.create at
+    // all.
     it('accepts callsignNameFormat "first_initial_dot_last"', async () => {
       Team.create.mockResolvedValue({ id: 1, name: 'Org', callsign_name_format: 'first_initial_dot_last' });
 
       const res = await request(app)
         .post('/api/teams')
-        .send({ name: 'Org', callsignNameFormat: 'first_initial_dot_last' });
+        .send({ name: 'Org', callsignPrefix: 'ORG', callsignNameFormat: 'first_initial_dot_last' });
 
       expect(res.status).toBe(201);
       expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ callsign_name_format: 'first_initial_dot_last' }));
@@ -532,7 +777,7 @@ describe('callsignNameFormat enum validation (Requirements 8.6, 8.7, 11.5)', () 
 
       const res = await request(app)
         .post('/api/teams')
-        .send({ name: 'Org', callsignNameFormat: 'user_defined' });
+        .send({ name: 'Org', callsignPrefix: 'ORG', callsignNameFormat: 'user_defined' });
 
       expect(res.status).toBe(201);
       expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ callsign_name_format: 'user_defined' }));
@@ -541,7 +786,7 @@ describe('callsignNameFormat enum validation (Requirements 8.6, 8.7, 11.5)', () 
     it('rejects an invalid callsignNameFormat value with 400', async () => {
       const res = await request(app)
         .post('/api/teams')
-        .send({ name: 'Org', callsignNameFormat: 'bogus_format' });
+        .send({ name: 'Org', callsignPrefix: 'ORG', callsignNameFormat: 'bogus_format' });
 
       expect(res.status).toBe(400);
       expect(Team.create).not.toHaveBeenCalled();
@@ -607,10 +852,15 @@ describe('callsignLevelSelection validation (Requirements 5.1, 5.2, 5.6)', () =>
   });
 
   describe('POST /api/teams', () => {
+    // takserver-enrollment Criterion 2.1: an Organisation now requires a
+    // non-empty callsignPrefix -- added to these Organisation-creation
+    // requests (no parentTeamId) so each still reaches the
+    // callsignLevelSelection validation this describe block actually
+    // tests, rather than being rejected earlier for a missing prefix.
     it('rejects a non-array callsignLevelSelection with 400 before calling Team.create', async () => {
       const res = await request(app)
         .post('/api/teams')
-        .send({ name: 'FENZ', callsignLevelSelection: 'not-an-array' });
+        .send({ name: 'FENZ', callsignPrefix: 'FENZ', callsignLevelSelection: 'not-an-array' });
 
       expect(res.status).toBe(400);
       expect(Team.create).not.toHaveBeenCalled();
@@ -619,7 +869,7 @@ describe('callsignLevelSelection validation (Requirements 5.1, 5.2, 5.6)', () =>
     it('rejects a callsignLevelSelection with a non-integer element with 400 before calling Team.create', async () => {
       const res = await request(app)
         .post('/api/teams')
-        .send({ name: 'FENZ', callsignLevelSelection: [1, 'two'] });
+        .send({ name: 'FENZ', callsignPrefix: 'FENZ', callsignLevelSelection: [1, 'two'] });
 
       expect(res.status).toBe(400);
       expect(Team.create).not.toHaveBeenCalled();
@@ -630,7 +880,7 @@ describe('callsignLevelSelection validation (Requirements 5.1, 5.2, 5.6)', () =>
 
       const res = await request(app)
         .post('/api/teams')
-        .send({ name: 'FENZ', callsignLevelSelection: [1, 2, 6] });
+        .send({ name: 'FENZ', callsignPrefix: 'FENZ', callsignLevelSelection: [1, 2, 6] });
 
       expect(res.status).toBe(400);
       expect(res.body.error).toBe('callsignLevelSelection values must be between 1 and 5');
@@ -655,7 +905,7 @@ describe('callsignLevelSelection validation (Requirements 5.1, 5.2, 5.6)', () =>
 
       const res = await request(app)
         .post('/api/teams')
-        .send({ name: 'FENZ', callsignLevelSelection: [1, 3, 5] });
+        .send({ name: 'FENZ', callsignPrefix: 'FENZ', callsignLevelSelection: [1, 3, 5] });
 
       expect(res.status).toBe(201);
       expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ callsign_level_selection: [1, 3, 5] }));
@@ -760,6 +1010,241 @@ describe('callsignLevelSelection validation (Requirements 5.1, 5.2, 5.6)', () =>
       expect(res.status).toBe(200);
       expect(UserAttributesService.updateTeamUserAttributes).not.toHaveBeenCalled();
     });
+  });
+});
+
+/**
+ * Unit tests for `pseudonymousUsernames` handling on `POST /api/teams`
+ * and `PUT /api/teams/:teamId` (takserver-enrollment Requirements 6.1,
+ * 6.2, 7.1, 7.2, task 5.4).
+ *
+ * `Team.create`/`Team.update` are mocked to throw the REAL typed errors
+ * (`PseudonymousUsernamePolicySubTeamError`/
+ * `PseudonymousUsernamePolicyImmutableError`), so these tests are scoped
+ * to the route handlers' own request-shape validation and
+ * `instanceof`-catch/response mapping, not the model layer's own
+ * Sub_Team-rejection/immutability logic (covered separately by
+ * `Team.test.js`), mirroring the callsignLevelSelection describe block
+ * above exactly.
+ */
+describe('pseudonymousUsernames validation (takserver-enrollment Requirements 6.1, 6.2, 7.1, 7.2)', () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockIsAdmin = true;
+    app = buildApp();
+  });
+
+  describe('POST /api/teams', () => {
+    it('rejects a non-boolean pseudonymousUsernames with 400 before calling Team.create', async () => {
+      const res = await request(app)
+        .post('/api/teams')
+        .send({ name: 'FENZ', callsignPrefix: 'FENZ', pseudonymousUsernames: 'not-a-boolean' });
+
+      expect(res.status).toBe(400);
+      expect(Team.create).not.toHaveBeenCalled();
+    });
+
+    it('responds 400 with the exact Sub_Team message when Team.create throws PseudonymousUsernamePolicySubTeamError', async () => {
+      Team.findById.mockResolvedValue({ id: 42, color: 'Blue', parent_team_id: 1 });
+      Team.create.mockRejectedValue(new Team.PseudonymousUsernamePolicySubTeamError());
+
+      const res = await request(app)
+        .post('/api/teams')
+        .send({ name: 'Sub Team', parentTeamId: 42, pseudonymousUsernames: true });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('pseudonymousUsernames can only be set on an Organisation');
+      expect(res.body.team).toBeUndefined();
+    });
+
+    it('passes a supplied pseudonymousUsernames through to Team.create as pseudonymous_usernames', async () => {
+      Team.create.mockResolvedValue({ id: 1, name: 'FENZ', pseudonymous_usernames: true });
+
+      const res = await request(app)
+        .post('/api/teams')
+        .send({ name: 'FENZ', callsignPrefix: 'FENZ', pseudonymousUsernames: true });
+
+      expect(res.status).toBe(201);
+      expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ pseudonymous_usernames: true }));
+    });
+
+    it('passes undefined through to Team.create as pseudonymous_usernames when omitted, so Team.create supplies the false default', async () => {
+      Team.create.mockResolvedValue({ id: 1, name: 'FENZ', pseudonymous_usernames: false });
+
+      const res = await request(app)
+        .post('/api/teams')
+        .send({ name: 'FENZ', callsignPrefix: 'FENZ' });
+
+      expect(res.status).toBe(201);
+      expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ pseudonymous_usernames: undefined }));
+    });
+
+    // takserver-enrollment Requirement 6.1/6.2 (task 5.9): the fourth of
+    // the four (parent_team_id present/absent) x (pseudonymous_usernames
+    // supplied/absent) combinations -- the other three (Sub_Team+supplied,
+    // Organisation+absent, Organisation+supplied) are already covered by
+    // the three tests immediately above. A Sub_Team creation that omits
+    // pseudonymousUsernames entirely passes `undefined` through to
+    // Team.create exactly like the Organisation+absent case; Team.create
+    // itself (covered by Team.test.js) is what stores `null` rather than
+    // defaulting to `false` for a Sub_Team. This route-level test confirms
+    // the route does not special-case a Sub_Team's omitted value.
+    it('passes undefined through to Team.create as pseudonymous_usernames when omitted on Sub_Team creation, and reflects Team.create\'s null result', async () => {
+      Team.findById.mockResolvedValue({ id: 42, color: 'Blue', parent_team_id: null });
+      Team.create.mockResolvedValue({ id: 2, name: 'Sub Team', parent_team_id: 42, pseudonymous_usernames: null });
+
+      const res = await request(app)
+        .post('/api/teams')
+        .send({ name: 'Sub Team', parentTeamId: 42 });
+
+      expect(res.status).toBe(201);
+      expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ pseudonymous_usernames: undefined }));
+      expect(res.body.team.pseudonymous_usernames).toBeNull();
+    });
+  });
+
+  describe('PUT /api/teams/:teamId', () => {
+    beforeEach(() => {
+      Team.findById.mockResolvedValue({ id: 42, color: 'Blue', parent_team_id: null, pseudonymous_usernames: false });
+    });
+
+    it('rejects a non-boolean pseudonymousUsernames with 400 before calling Team.update', async () => {
+      const res = await request(app)
+        .put('/api/teams/42')
+        .send({ pseudonymousUsernames: 'not-a-boolean' });
+
+      expect(res.status).toBe(400);
+      expect(Team.update).not.toHaveBeenCalled();
+    });
+
+    it('responds 400 with the exact Sub_Team message when Team.update throws PseudonymousUsernamePolicySubTeamError', async () => {
+      Team.update.mockRejectedValue(new Team.PseudonymousUsernamePolicySubTeamError());
+
+      const res = await request(app)
+        .put('/api/teams/42')
+        .send({ pseudonymousUsernames: true });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('pseudonymousUsernames can only be set on an Organisation');
+      expect(res.body.team).toBeUndefined();
+    });
+
+    it('responds 400 with the concrete-consequence message when Team.update throws PseudonymousUsernamePolicyImmutableError', async () => {
+      Team.update.mockRejectedValue(new Team.PseudonymousUsernamePolicyImmutableError());
+
+      const res = await request(app)
+        .put('/api/teams/42')
+        .send({ pseudonymousUsernames: true });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/re-enroll/);
+      expect(res.body.error).toMatch(/certificate Common Name/);
+      expect(res.body.team).toBeUndefined();
+    });
+
+    it('passes a supplied pseudonymousUsernames through to Team.update as pseudonymous_usernames', async () => {
+      Team.update.mockResolvedValue({ id: 42, pseudonymous_usernames: false });
+
+      const res = await request(app)
+        .put('/api/teams/42')
+        .send({ pseudonymousUsernames: false });
+
+      expect(res.status).toBe(200);
+      expect(Team.update).toHaveBeenCalledWith('42', expect.objectContaining({ pseudonymous_usernames: false }));
+    });
+
+    // takserver-enrollment Requirement 7.2 (task 5.9): resubmitting the
+    // SAME value the Organisation already has stored is accepted as a
+    // no-op, not rejected -- Team.update itself (Team.test.js's "accepts
+    // a resubmission of the current value on an Organisation as a no-op"
+    // test) is what implements the no-op/reject branch; this route-level
+    // test confirms the route's own 200 response path is reached rather
+    // than the PseudonymousUsernamePolicyImmutableError catch block, when
+    // Team.update resolves (rather than rejects) for a same-value
+    // resubmission.
+    it('accepts a same-value resubmission of pseudonymousUsernames on an existing Organisation as a no-op (200, not the immutability rejection)', async () => {
+      Team.findById.mockResolvedValue({ id: 42, color: 'Blue', parent_team_id: null, pseudonymous_usernames: true });
+      Team.update.mockResolvedValue({ id: 42, pseudonymous_usernames: true });
+
+      const res = await request(app)
+        .put('/api/teams/42')
+        .send({ pseudonymousUsernames: true });
+
+      expect(res.status).toBe(200);
+      expect(res.body.team.pseudonymous_usernames).toBe(true);
+      expect(res.body.error).toBeUndefined();
+    });
+  });
+});
+
+/**
+ * Structural guard, takserver-enrollment Requirement 7.1 (task 5.9): no
+ * route anywhere in `server/routes/users.js` accepts a change to an
+ * existing user's `username`. Requirement 7.1 requires "no interface,
+ * route, or administrative action that changes an existing user's
+ * username", and per task 5.4's own note there is no user-EDIT route in
+ * `server/routes/users.js` today at all -- the verbs are `GET /`,
+ * `GET /me`, `POST /`, `GET /search`, `GET /available`,
+ * `POST /callsign-suffix-preview`, `POST /create-and-add`,
+ * `POST /add-to-team`, `DELETE /remove-from-team/:userId`,
+ * `POST /:userId/transfer`, `POST /:userId/resend-welcome`. Since there
+ * is no route to hit with a rejection assertion, this is confirmed by a
+ * STRUCTURAL ABSENCE check instead: no `router.put`/`router.patch` call
+ * exists in that file at all (the only mutation verbs capable of editing
+ * an existing resource in place), and `router.post` calls that touch an
+ * EXISTING user (`add-to-team`, `transfer`, `resend-welcome`,
+ * `remove-from-team`) accept no `username` field in their body-validation
+ * chain.
+ *
+ * A change here that adds a PUT/PATCH route, or a POST route that reads
+ * `req.body.username` for an existing user, must fail this test rather
+ * than silently reopening a username-change path -- the reason a
+ * standalone `describe` reads the real source file rather than mocking
+ * the router.
+ */
+describe('server/routes/users.js has no username-change path (takserver-enrollment Requirement 7.1)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const usersRouteSource = fs.readFileSync(
+    path.join(__dirname, 'users.js'),
+    'utf8'
+  );
+
+  it('defines no router.put or router.patch route at all', () => {
+    expect(usersRouteSource).not.toMatch(/router\.put\(/);
+    expect(usersRouteSource).not.toMatch(/router\.patch\(/);
+  });
+
+  it('the existing-user POST routes (add-to-team, transfer, resend-welcome) read no username field from the request body', () => {
+    // Anti-vacuity: confirm the routes this test is scoped to actually
+    // exist in the source before asserting anything about their bodies.
+    expect(usersRouteSource).toContain("router.post('/add-to-team'");
+    expect(usersRouteSource).toContain("router.post('/:userId/transfer'");
+    expect(usersRouteSource).toContain("router.post('/:userId/resend-welcome'");
+
+    const routeStarts = [
+      "router.post('/add-to-team'",
+      "router.post('/:userId/transfer'",
+      "router.post('/:userId/resend-welcome'",
+      "router.delete('/remove-from-team/:userId'"
+    ];
+    for (const marker of routeStarts) {
+      const startIndex = usersRouteSource.indexOf(marker);
+      expect(startIndex).toBeGreaterThan(-1);
+      // Slice to the next top-level route declaration (or EOF), and
+      // confirm no `body('username'` validator and no
+      // `req.body.username` read appears inside that route's own
+      // handler.
+      const nextRouteIndex = usersRouteSource.indexOf('router.', startIndex + marker.length);
+      const routeBlock = usersRouteSource.slice(
+        startIndex,
+        nextRouteIndex > -1 ? nextRouteIndex : usersRouteSource.length
+      );
+      expect(routeBlock).not.toContain("body('username'");
+      expect(routeBlock).not.toContain('req.body.username');
+    }
   });
 });
 

@@ -188,3 +188,75 @@ describe('Users Last Login cell renders through FormattedDate (task 6.7)', () =>
     expect(container.querySelector('[aria-describedby]')).toBeNull()
   })
 })
+
+// takserver-enrollment Criterion 13.6 (task 11.5): `GET /api/users`'
+// `live_certificate_count` field (added by server task 8.6, from the SAME
+// batched query this page's own `usersAPI.getAll()` fetch already runs --
+// no second request) reaches this view and drives
+// `MultipleCertificateWarning` here too, exactly as it does on
+// `TeamDeviceList` (Criterion 13.6's other consumer). This is deliberately
+// NOT gated on `devicesEnabled`/`deviceManagementAPI.probeEnabled`: per
+// design decision 17, the count is already zero -- and therefore already
+// inert -- whenever DEVICE_MGMT_ENABLED is off, so no second flag check is
+// needed or wanted.
+describe('live_certificate_count drives MultipleCertificateWarning in the Users view (takserver-enrollment Criterion 13.6)', () => {
+  let container
+  let root
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    vi.clearAllMocks()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false })
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    vi.restoreAllMocks()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  const mountWith = async (users) => {
+    usersAPI.getAll.mockResolvedValue({ data: { users } })
+    root = createRoot(container)
+    await act(async () => {
+      root.render(<Users />)
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+  }
+
+  it.each([
+    [0, false],
+    [1, false],
+    [2, true]
+  ])('renders the warning if and only if live_certificate_count is %i (expected to warn: %s)', async (count, shouldWarn) => {
+    await mountWith([userRow({ live_certificate_count: count })])
+
+    if (shouldWarn) {
+      expect(container.textContent).toContain(String(count))
+      expect(container.querySelector('[role="alert"]')).toBeNull()
+    } else {
+      // At 0 or 1 the row renders with nothing extra: no certificate count
+      // rendered as a standalone warning string anywhere in the row.
+      const row = container.querySelector('tbody tr')
+      expect(row.textContent).not.toMatch(/active TAK Server certificates?/)
+    }
+  })
+
+  it('does not throw and renders nothing extra for a user row missing the field entirely', async () => {
+    const { live_certificate_count, ...rowWithoutField } = userRow()
+    await expect(mountWith([rowWithoutField])).resolves.not.toThrow()
+    const row = container.querySelector('tbody tr')
+    expect(row.textContent).not.toMatch(/active TAK Server certificates?/)
+  })
+})

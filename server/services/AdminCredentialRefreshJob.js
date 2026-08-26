@@ -57,14 +57,17 @@ class AdminCredentialRefreshJob {
     // is imposed -- requirements.md/design.md state no maximum for this job --
     // while a lower bound guards against a misconfigured near-zero interval
     // turning credential refresh into a tight loop against Secrets Manager
-    // (or the filesystem).
-    const MIN_INTERVAL_MS = 60000; // 1 minute
-    const DEFAULT_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+    // (or the filesystem). Clamped in seconds and converted to milliseconds
+    // once at the end -- the field stays `intervalMs` because `setInterval`
+    // takes milliseconds.
+    const MIN_INTERVAL_SECONDS = 60; // 1 minute
+    const DEFAULT_INTERVAL_SECONDS = 24 * 60 * 60; // 24 hours
 
-    this.intervalMs = Math.max(
-      MIN_INTERVAL_MS,
-      parseInt(process.env.TAK_ADMIN_CERT_REFRESH_INTERVAL_MS, 10) || DEFAULT_INTERVAL_MS
+    const intervalSeconds = Math.max(
+      MIN_INTERVAL_SECONDS,
+      parseInt(process.env.TAK_ADMIN_CERT_REFRESH_INTERVAL_SECONDS, 10) || DEFAULT_INTERVAL_SECONDS
     );
+    this.intervalMs = intervalSeconds * 1000;
 
     this.timer = null;
   }

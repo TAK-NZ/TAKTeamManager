@@ -836,32 +836,43 @@ class BulkImportService {
     const email = getRequiredField(row, 'email');
     const firstName = getRequiredField(row, 'firstName');
     const lastName = getRequiredField(row, 'lastName');
-    const username = (row.username && String(row.username).trim()) || email.split('@')[0];
+    const requestedUsername = (row.username && String(row.username).trim()) || email.split('@')[0];
     // Requirement 11.6, 11.7, 11.14 (task 22.2): optional callsignSuffix
     // CSV column, read via the same readOptionalField helper already
     // used for visibility/callsignPrefix (task 18.2).
     const requestedCallsignSuffix = readOptionalField(row, 'callsignSuffix') || undefined;
 
-    // Requirement 11.6, 11.7, 11.14, 11.15 (task 22.2): resolve/default/
-    // uniqueness-check this row's callsign_suffix BEFORE Phase 1's
-    // Authentik call, for the same "avoid orphaning an Authentik user
-    // for a request-validation failure" reasoning as the two route
-    // entry points above. A thrown CallsignSuffixRequiredError/
-    // CallsignSuffixConflictError here propagates naturally out of this
-    // function and is caught by importUsers's existing per-row
-    // try/catch, recording it as this row's own failure without
-    // affecting any other row.
-    const resolvedCallsignSuffix = await UserProvisioningService.resolveCallsignSuffixForNewUser(null, {
+    // takserver-enrollment Requirements 6.3, 6.6, 6.8 (task 5.3):
+    // resolve the username AND the callsign_suffix default together via
+    // the single Phase-0 choke point, BEFORE Phase 1's Authentik call --
+    // the same "avoid orphaning an Authentik user for a
+    // request-validation failure" reasoning as the two route entry
+    // points. `requestedUsername` is the existing `row.username ||
+    // email.split('@')[0]` derivation, passed IN rather than used
+    // directly, so a Pseudonymous_Organisation can override it with a
+    // minted Pseudonymous_Username. Under a policy-disabled
+    // Organisation the resolver returns it verbatim (Criterion 6.8).
+    // A thrown CallsignSuffixRequiredError/CallsignSuffixConflictError/
+    // OrganisationPrefixMissingError/ManagedIdentifierExhaustionError
+    // here propagates naturally out of this function and is caught by
+    // importUsers's existing per-row try/catch, recording it as this
+    // row's own failure (via `error.message`) without affecting any
+    // other row.
+    const identity = await UserProvisioningService.resolveNewUserIdentity(null, {
       firstName,
       lastName,
+      email,
       teamId,
+      requestedUsername,
       requestedCallsignSuffix
     });
+    const { username, callsignSuffix: resolvedCallsignSuffix, claimId } = identity;
 
     // --- Phase 1: Authentik user creation (no open DB transaction, per
     // the same "an external HTTP call must never be issued from inside
     // an open DB transaction" phasing established by
-    // `UserProvisioningService.createAndAddUser`'s callers). ---
+    // `UserProvisioningService.createAndAddUser`'s callers). Uses the
+    // RESOLVED username, not the raw CSV-derived one. ---
     const authentikUser = await authentikService.createUser({
       username,
       name: `${firstName} ${lastName}`,
@@ -883,7 +894,13 @@ class BulkImportService {
         lastName,
         teamId,
         callsign_suffix: resolvedCallsignSuffix,
-        createdBy: importingUser?.userId ?? null
+        createdBy: importingUser?.userId ?? null,
+        // takserver-enrollment Requirement 6.6 (task 5.3): when the
+        // target Organisation is pseudonymous, `claimId` names the
+        // Claim_Row `resolveNewUserIdentity` already inserted under
+        // `username` above -- adopted instead of the generic upsert.
+        // `undefined` for a policy-disabled Organisation.
+        claimId
       });
 
       await client.query('COMMIT');

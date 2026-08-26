@@ -370,9 +370,16 @@ class TakServerService {
    * string, which is the default this feature uses.
    *
    * `GET /Marti/api/subscriptions/all` (`ApiResponseSetSubscriptionInfo`) is
-   * deliberately NOT used as the source (Requirement 13.2): its
-   * `SubscriptionInfo.clientUid` was empty in 14 of 16 live entries, so it
-   * cannot supply the join key.
+   * NOT the Last_Seen source of record (Requirement 13.2): its
+   * `SubscriptionInfo.clientUid` was empty in 14 of 16 live entries (12 of 14
+   * on a later check -- the remaining 2 are the ETL/service connections,
+   * identified by `dn` instead of `clientUid`), so it cannot supply the join
+   * key for most rows and cannot replace this method's history. It IS used as
+   * a SUPPLEMENTARY freshness signal, exclusively for entries where
+   * `clientUid` is populated -- see `getAllSubscriptions()` below and
+   * `SubscriptionPoller.mergeSubscriptionFreshness()`, which is where the
+   * reasoning for adding it back in lives, since it is the caller's decision,
+   * not this method's.
    *
    * A failure is NEVER degraded to an empty result, and there is deliberately
    * no 404-as-empty branch here (Requirements 14.1, 14.2, 14.4): this endpoint
@@ -397,6 +404,46 @@ class TakServerService {
     const response = query
       ? await this.client.get('/Marti/api/clientEndPoints', { params: query })
       : await this.client.get('/Marti/api/clientEndPoints');
+
+    return unwrapArray(response);
+  }
+
+  /**
+   * device-management Requirement 13 (freshness follow-up): fetches TAK
+   * Server's LIVE subscription table -- `GET /Marti/api/subscriptions/all`
+   * (OpenAPI `getAllSubscriptions` -> `ApiResponseSetSubscriptionInfo`), the
+   * same view TAK Server's own admin UI (`/Marti/clients/index.html`) reads,
+   * which is why it updates every few seconds for a connection that is
+   * actively reporting while `getClientEndpoints()`'s `lastEventTime` can sit
+   * unchanged for many minutes at a time for the identical connection.
+   *
+   * NOT a replacement for `getClientEndpoints()` (see the note on that
+   * method): `SubscriptionInfo.clientUid` is empty for every connection TAK
+   * Server cannot attribute to a client certificate -- verified live, 12 of 14
+   * entries, all of them CloudTAK's own ETL/service ingest connections
+   * (`etl-capnz-metservice`, `etl-adsbx`, etc.), identified by `dn` instead.
+   * Those have no `tak_devices` row to update and are not Devices this
+   * feature tracks at all. Only the entries WITH a populated `clientUid` --
+   * real end-user Devices with a currently live session -- are usable here,
+   * and the caller (`SubscriptionPoller.mergeSubscriptionFreshness()`) filters
+   * on exactly that.
+   *
+   * `SubscriptionInfo` carries no `lastStatus`: every entry in this view is,
+   * by construction, a live subscription, so there is nothing here for
+   * Connection_Status to read that `ClientEndpoint.lastStatus` does not
+   * already provide more completely (including disconnected Devices).
+   *
+   * Same envelope-unwrap and same no-degraded-empty-result discipline as
+   * `getClientEndpoints()`: a 200 with no `data` array unwraps to `[]` (a
+   * legitimately empty live-subscription table), and any other failure
+   * rejects rather than being swallowed, so the caller's never-throwing
+   * `run()` can log it and skip the freshening step for that poll without
+   * losing the run.
+   *
+   * @returns {Promise<Array<object>>} the `SubscriptionInfo` list.
+   */
+  async getAllSubscriptions() {
+    const response = await this.client.get('/Marti/api/subscriptions/all');
 
     return unwrapArray(response);
   }

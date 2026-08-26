@@ -1334,6 +1334,181 @@ describe('Team.create / Team.update callsign_level_selection (Requirement 5.1/5.
 });
 
 /**
+ * Unit tests for `Team.create`/`Team.update`'s
+ * `pseudonymous_usernames` accept/default/reject/immutability behaviour
+ * (takserver-enrollment Requirements 6.1, 6.2, 7.1, 7.2, 7.3, task 5.4).
+ *
+ * `Team.create` must accept `pseudonymous_usernames` only for a root
+ * (Organisation) team -- defaulting to `false` when omitted -- and store
+ * `null` for a Sub_Team, rejecting (never silently ignoring) a supplied
+ * value for a Sub_Team, mirroring `callsign_level_selection` exactly.
+ * `Team.update` must accept a resubmission of the CURRENT value as a
+ * no-op and reject any actual change on an existing Organisation, and
+ * reject any value at all on a Sub_Team.
+ */
+describe('Team.create / Team.update pseudonymous_usernames (takserver-enrollment Requirement 6.1/6.2/7.1/7.2/7.3)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.spyOn(Team, 'createTeamChannel').mockResolvedValue({ id: 999 });
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  describe('Team.create', () => {
+    it('defaults pseudonymous_usernames to false when omitted on Organisation creation', async () => {
+      pool.query.mockResolvedValue({
+        rows: [{ id: 1, name: 'FENZ', parent_team_id: null, pseudonymous_usernames: false }]
+      });
+
+      const team = await Team.create({ name: 'FENZ', parent_team_id: null });
+
+      const insertCall = pool.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO teams'));
+      expect(insertCall).toBeDefined();
+      const [, params] = insertCall;
+      expect(params).toEqual(expect.arrayContaining([false]));
+      expect(team.pseudonymous_usernames).toBe(false);
+    });
+
+    it('stores true when pseudonymous_usernames is supplied on Organisation creation', async () => {
+      pool.query.mockResolvedValue({
+        rows: [{ id: 1, name: 'FENZ', parent_team_id: null, pseudonymous_usernames: true }]
+      });
+
+      const team = await Team.create({ name: 'FENZ', parent_team_id: null, pseudonymous_usernames: true });
+
+      const insertCall = pool.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO teams'));
+      const [, params] = insertCall;
+      expect(params).toEqual(expect.arrayContaining([true]));
+      expect(team.pseudonymous_usernames).toBe(true);
+    });
+
+    it('throws PseudonymousUsernamePolicySubTeamError when pseudonymous_usernames is supplied on Sub_Team creation, without inserting', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('WITH RECURSIVE ancestors') && sql.includes('MAX(hops_from_target) AS depth')) {
+          return Promise.resolve({ rows: [{ depth: 0 }] });
+        }
+        return Promise.resolve({ rows: [{ id: 1, parent_team_id: null, color: 'Red', callsign_name_format: 'full_name', depth: 0 }] });
+      });
+
+      await expect(
+        Team.create({ name: 'Station 40', parent_team_id: 1, pseudonymous_usernames: true })
+      ).rejects.toThrow(Team.PseudonymousUsernamePolicySubTeamError);
+
+      const insertCalls = pool.query.mock.calls.filter(([sql]) => sql.includes('INSERT INTO teams'));
+      expect(insertCalls).toHaveLength(0);
+      expect(Team.createTeamChannel).not.toHaveBeenCalled();
+    });
+
+    it('succeeds with NULL pseudonymous_usernames when Sub_Team creation omits it', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('WITH RECURSIVE ancestors') && sql.includes('MAX(hops_from_target) AS depth')) {
+          return Promise.resolve({ rows: [{ depth: 0 }] });
+        }
+        if (typeof sql === 'string' && sql.includes('WITH RECURSIVE ancestors')) {
+          return Promise.resolve({
+            rows: [{ id: 1, parent_team_id: null, color: 'Red', callsign_name_format: 'full_name', depth: 0 }]
+          });
+        }
+        if (typeof sql === 'string' && sql.includes('INSERT INTO teams')) {
+          return Promise.resolve({ rows: [{ id: 10, name: 'Station 40', parent_team_id: 1, pseudonymous_usernames: null }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      const team = await Team.create({ name: 'Station 40', parent_team_id: 1 });
+
+      const insertCall = pool.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO teams'));
+      const [, params] = insertCall;
+      expect(params).toEqual(expect.arrayContaining([null]));
+      expect(team.pseudonymous_usernames).toBeNull();
+    });
+  });
+
+  describe('Team.update', () => {
+    it('accepts a resubmission of the current value on an Organisation as a no-op', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+          return Promise.resolve({ rows: [{ id: 1, parent_team_id: null, pseudonymous_usernames: true }] });
+        }
+        if (typeof sql === 'string' && sql.includes('UPDATE teams')) {
+          return Promise.resolve({ rows: [{ id: 1, pseudonymous_usernames: true }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      const updated = await Team.update(1, { pseudonymous_usernames: true });
+
+      const updateCall = pool.query.mock.calls.find(([sql]) => sql.includes('UPDATE teams'));
+      const [, params] = updateCall;
+      // Resubmitting the current value is a no-op: undefined reaches the
+      // UPDATE's COALESCE, leaving the stored value untouched.
+      expect(params).toContain(undefined);
+      expect(updated.pseudonymous_usernames).toBe(true);
+    });
+
+    it('throws PseudonymousUsernamePolicyImmutableError naming the concrete consequence when changing an existing Organisation value, without updating', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+          return Promise.resolve({ rows: [{ id: 1, parent_team_id: null, pseudonymous_usernames: false }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      await expect(
+        Team.update(1, { pseudonymous_usernames: true })
+      ).rejects.toThrow(Team.PseudonymousUsernamePolicyImmutableError);
+
+      const updateCalls = pool.query.mock.calls.filter(([sql]) => sql.includes('UPDATE teams'));
+      expect(updateCalls).toHaveLength(0);
+
+      try {
+        await Team.update(1, { pseudonymous_usernames: true });
+        throw new Error('expected Team.update to throw');
+      } catch (error) {
+        expect(error.message).toMatch(/re-enroll/);
+        expect(error.message).toMatch(/certificate Common Name/);
+      }
+    });
+
+    it('throws PseudonymousUsernamePolicySubTeamError when pseudonymous_usernames is supplied on Sub_Team update, without updating', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+          return Promise.resolve({ rows: [{ id: 5, parent_team_id: 3 }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      await expect(
+        Team.update(5, { pseudonymous_usernames: true })
+      ).rejects.toThrow(Team.PseudonymousUsernamePolicySubTeamError);
+
+      const updateCalls = pool.query.mock.calls.filter(([sql]) => sql.includes('UPDATE teams'));
+      expect(updateCalls).toHaveLength(0);
+    });
+
+    it('leaves pseudonymous_usernames unchanged (via COALESCE) when omitted from the update, and does not look up the existing team', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('UPDATE teams')) {
+          return Promise.resolve({ rows: [{ id: 1, name: 'Renamed' }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      await Team.update(1, { name: 'Renamed' });
+
+      // No findById lookup when none of color/callsign_name_format/
+      // callsign_level_selection/pseudonymous_usernames is supplied.
+      expect(pool.query).toHaveBeenCalledTimes(1);
+      const [sql, params] = pool.query.mock.calls[0];
+      expect(sql).toContain('UPDATE teams');
+      expect(params).toContain(undefined);
+    });
+  });
+});
+
+/**
  * Unit tests for `Team.getJoinableTeams` (Requirement 7.1/7.2, task 15.1).
  *
  * The public, unauthenticated team-access-request flow's joinable-teams

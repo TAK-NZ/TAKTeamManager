@@ -170,6 +170,7 @@ const PORT = process.env.PORT || 3000;
   app.use('/api/mou', require('./routes/mou'));
   app.use('/api/communications', require('./routes/communications'));
   app.use('/api/devices', require('./routes/devices'));
+  app.use('/api/enrollment', require('./routes/enrollment'));
   app.use('/api/bulk-import', require('./routes/bulkImport'));
 
   // Device_Management (device-management Requirements 1.8, 1.9, task

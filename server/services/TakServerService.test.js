@@ -870,6 +870,76 @@ describe('TakServerService.getClientEndpoints', () => {
 });
 
 /**
+ * device-management Requirement 13 (freshness follow-up): `getAllSubscriptions()`
+ * fetches the live subscription table, TAK Server's own admin UI's data
+ * source, so a currently-reporting connection's freshness is not limited to
+ * however infrequently `getClientEndpoints()`'s `lastEventTime` happens to
+ * advance for it.
+ */
+describe('TakServerService.getAllSubscriptions', () => {
+  const SUBSCRIPTIONS_PATH = '/Marti/api/subscriptions/all';
+
+  /**
+   * The live shape: most entries carry NO `clientUid` (CloudTAK's own
+   * ETL/service ingest connections, identified by `dn` instead), and only a
+   * real end-user Device's live session carries one.
+   *
+   * @param {object} [overrides]
+   * @returns {object}
+   */
+  function makeSubscriptionInfo(overrides = {}) {
+    return {
+      dn: null,
+      callsign: 'FENZ-STL-C.Elsen',
+      clientUid: 'ANDROID-CloudTAK-chris@chriselsen.net',
+      lastReportMilliseconds: 1787633240530,
+      takClient: 'CloudTAK',
+      username: 'chris@chriselsen.net',
+      ...overrides
+    };
+  }
+
+  it('GETs /Marti/api/subscriptions/all with no query parameters, and unwraps the ApiResponse envelope', async () => {
+    const subscriptions = [
+      makeSubscriptionInfo(),
+      makeSubscriptionInfo({ dn: 'CN=etl-adsbx, OU=TAK Unit, O=TAK', clientUid: '', callsign: 'tls:7101' })
+    ];
+    mockGet.mockResolvedValue({
+      data: { version: '3', type: 'SubscriptionInfo', data: subscriptions }
+    });
+
+    const service = new TakServerService(TEST_ENV);
+    const result = await service.getAllSubscriptions();
+
+    expect(mockGet).toHaveBeenCalledTimes(1);
+    expect(mockGet).toHaveBeenCalledWith(SUBSCRIPTIONS_PATH);
+    // Returned as-is: camelCase SubscriptionInfo fields, no re-mapping, no
+    // filtering on clientUid here -- that is the caller's job.
+    expect(result).toEqual(subscriptions);
+  });
+
+  it.each([
+    ['a 404', { response: { status: 404 } }],
+    ['a 500', { response: { status: 500 } }],
+    ['a transport failure', new Error('socket hang up')]
+  ])('rejects on %s rather than reporting an empty result', async (_label, failure) => {
+    mockGet.mockRejectedValue(failure);
+
+    const service = new TakServerService(TEST_ENV);
+
+    await expect(service.getAllSubscriptions()).rejects.toBe(failure);
+  });
+
+  it('reads an envelope with no data array as a legitimately empty live-subscription table', async () => {
+    mockGet.mockResolvedValue({ data: { version: '3', messages: [] } });
+
+    const service = new TakServerService(TEST_ENV);
+
+    await expect(service.getAllSubscriptions()).resolves.toEqual([]);
+  });
+});
+
+/**
  * device-management Requirement 14.4: `/Marti/clients` is absent from
  * `tak-server-openapispec.json` and answers 404 live, so
  * `getConnectedSubscriptions()` is DELETED rather than repointed -- no caller

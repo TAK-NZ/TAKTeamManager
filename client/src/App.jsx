@@ -16,6 +16,8 @@ import GlobalChannels from './pages/GlobalChannels'
 import Login from './pages/Login'
 import Admin from './pages/Admin'
 import AuditLogs from './pages/AuditLogs'
+import EnrollmentView from './pages/EnrollmentView'
+import Downloads from './pages/Downloads'
 
 function App() {
   const [user, setUser] = useState(null)
@@ -165,6 +167,8 @@ function App() {
           <Route path="/global-channels" element={<GlobalChannels user={user} />} />
           <Route path="/admin" element={<Admin user={user} />} />
           <Route path="/audit-logs" element={<AuditLogs user={user} />} />
+          <Route path="/enrollment" element={<EnrollmentView />} />
+          <Route path="/downloads" element={<Downloads />} />
           {/* Catch-all: an unknown path would otherwise render the Layout
               with no page content at all (an empty shell with just the
               nav). Redirect to the Dashboard instead. `replace` keeps the

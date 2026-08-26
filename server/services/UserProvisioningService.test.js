@@ -21,11 +21,25 @@ jest.mock('./EventPublisher', () => ({
 
 jest.mock('../models/Team', () => ({
   getAncestorChain: jest.fn(),
-  getFullMemberList: jest.fn()
+  getFullMemberList: jest.fn(),
+  findById: jest.fn()
 }));
 
 jest.mock('./CallsignService', () => ({
   computeDefaultCallsignSuffix: jest.fn()
+}));
+
+// `resolveNewUserIdentity`'s pseudonymous branch calls
+// `ManagedIdentifierService.mintUniqueIdentifier`, which is NOT mocked here
+// (see the `resolveNewUserIdentity` describe block below): its own
+// `generateManagedIdentifier` call is real, so the minted username is a
+// genuine Managed_Identifier rather than a value this test file invented,
+// and its `claim(candidate)` callback runs the real `pool.query` call
+// `UserProvisioningService` wires up -- so only the underlying `pool` needs
+// mocking, matching the `jest.mock('../config/database', ...)` idiom every
+// other server service unit test in this file's sibling tests uses.
+jest.mock('../config/database', () => ({
+  query: jest.fn()
 }));
 
 const fc = require('fast-check');
@@ -36,6 +50,9 @@ const CallsignService = require('./CallsignService');
 const { CallsignSuffixConflictError } = require('./CallsignSuffixUniquenessService');
 const { hierarchyArb } = require('./__fixtures__/transferArbitraries');
 const UserProvisioningService = require('./UserProvisioningService');
+const pool = require('../config/database');
+const ManagedIdentifierService = require('./ManagedIdentifierService');
+const { isManagedIdentifier } = require('../utils/managedIdentifier');
 
 function buildMockClient(queryImpl) {
   return {
@@ -204,12 +221,19 @@ describe('UserProvisioningService.createAndAddUser', () => {
 });
 
 /**
- * Unit tests for `UserProvisioningService.resolveCallsignSuffixForNewUser`
+ * Unit tests for `UserProvisioningService.resolveNewUserIdentity`
+ * (takserver-enrollment Requirements 6.3, 6.5, 6.7, 6.8, 9.1, 9.2, 9.3, 9.4,
+ * 8.1; task 5.1), which REPLACES `resolveCallsignSuffixForNewUser`
  * (Requirements 11.6, 11.7, 11.14, 11.15; task 22.1).
  * `Team.getAncestorChain`/`Team.getFullMemberList` and
- * `CallsignService.computeDefaultCallsignSuffix` are mocked directly.
+ * `CallsignService.computeDefaultCallsignSuffix` are mocked directly, as
+ * before. The policy-disabled cases below carry an explicit
+ * `requestedUsername` and `email` -- inputs the old function never took --
+ * chosen to match what each case is actually testing, and assert against
+ * `result.callsignSuffix` (the new function returns an object, not a bare
+ * string).
  */
-describe('UserProvisioningService.resolveCallsignSuffixForNewUser', () => {
+describe('UserProvisioningService.resolveNewUserIdentity', () => {
   const fakeClient = {};
 
   beforeEach(() => {
@@ -218,32 +242,38 @@ describe('UserProvisioningService.resolveCallsignSuffixForNewUser', () => {
 
   it('resolves to the requested suffix when callsign_name_format is user_defined and a value is supplied', async () => {
     Team.getAncestorChain.mockResolvedValueOnce([
-      { id: 1, parent_team_id: null, callsign_name_format: 'user_defined', depth: 0 },
+      { id: 1, parent_team_id: null, callsign_name_format: 'user_defined', pseudonymous_usernames: false, depth: 0 },
       { id: 7, parent_team_id: 1, callsign_name_format: 'user_defined', depth: 1 }
     ]);
     Team.getFullMemberList.mockResolvedValueOnce([]);
 
-    const result = await UserProvisioningService.resolveCallsignSuffixForNewUser(fakeClient, {
+    const result = await UserProvisioningService.resolveNewUserIdentity(fakeClient, {
       firstName: 'John',
       lastName: 'Doe',
+      email: 'john.doe@example.com',
       teamId: 7,
+      requestedUsername: 'john.doe',
       requestedCallsignSuffix: 'Badge123'
     });
 
-    expect(result).toBe('Badge123');
+    expect(result.callsignSuffix).toBe('Badge123');
+    expect(result.username).toBe('john.doe');
+    expect(result.pseudonymous).toBe(false);
     expect(CallsignService.computeDefaultCallsignSuffix).not.toHaveBeenCalled();
   });
 
   it('throws CallsignSuffixRequiredError when callsign_name_format is user_defined and no value is supplied', async () => {
     Team.getAncestorChain.mockResolvedValueOnce([
-      { id: 1, parent_team_id: null, callsign_name_format: 'user_defined', depth: 0 }
+      { id: 1, parent_team_id: null, callsign_name_format: 'user_defined', pseudonymous_usernames: false, depth: 0 }
     ]);
 
     await expect(
-      UserProvisioningService.resolveCallsignSuffixForNewUser(fakeClient, {
+      UserProvisioningService.resolveNewUserIdentity(fakeClient, {
         firstName: 'John',
         lastName: 'Doe',
+        email: 'john.doe@example.com',
         teamId: 1,
+        requestedUsername: 'john.doe',
         requestedCallsignSuffix: undefined
       })
     ).rejects.toThrow(UserProvisioningService.CallsignSuffixRequiredError);
@@ -253,14 +283,16 @@ describe('UserProvisioningService.resolveCallsignSuffixForNewUser', () => {
 
   it('throws CallsignSuffixRequiredError when callsign_name_format is user_defined and an empty/whitespace value is supplied', async () => {
     Team.getAncestorChain.mockResolvedValueOnce([
-      { id: 1, parent_team_id: null, callsign_name_format: 'user_defined', depth: 0 }
+      { id: 1, parent_team_id: null, callsign_name_format: 'user_defined', pseudonymous_usernames: false, depth: 0 }
     ]);
 
     await expect(
-      UserProvisioningService.resolveCallsignSuffixForNewUser(fakeClient, {
+      UserProvisioningService.resolveNewUserIdentity(fakeClient, {
         firstName: 'John',
         lastName: 'Doe',
+        email: 'john.doe@example.com',
         teamId: 1,
+        requestedUsername: 'john.doe',
         requestedCallsignSuffix: '   '
       })
     ).rejects.toThrow(UserProvisioningService.CallsignSuffixRequiredError);
@@ -268,43 +300,48 @@ describe('UserProvisioningService.resolveCallsignSuffixForNewUser', () => {
 
   it('computes the default via CallsignService when callsign_name_format is not user_defined and no value is supplied', async () => {
     Team.getAncestorChain.mockResolvedValueOnce([
-      { id: 1, parent_team_id: null, callsign_name_format: 'full_name', depth: 0 },
+      { id: 1, parent_team_id: null, callsign_name_format: 'full_name', pseudonymous_usernames: false, depth: 0 },
       { id: 7, parent_team_id: 1, callsign_name_format: 'full_name', depth: 1 }
     ]);
     CallsignService.computeDefaultCallsignSuffix.mockReturnValueOnce('John Doe');
     Team.getFullMemberList.mockResolvedValueOnce([]);
 
-    const result = await UserProvisioningService.resolveCallsignSuffixForNewUser(fakeClient, {
+    const result = await UserProvisioningService.resolveNewUserIdentity(fakeClient, {
       firstName: 'John',
       lastName: 'Doe',
+      email: 'john.doe@example.com',
       teamId: 7,
+      requestedUsername: 'john.doe@example.com',
       requestedCallsignSuffix: undefined
     });
 
     expect(CallsignService.computeDefaultCallsignSuffix).toHaveBeenCalledWith('John', 'Doe', 'full_name');
-    expect(result).toBe('John Doe');
+    expect(result.callsignSuffix).toBe('John Doe');
+    expect(result.username).toBe('john.doe@example.com');
   });
 
   it('prefers a supplied requestedCallsignSuffix over the computed default for a non-user_defined format', async () => {
     Team.getAncestorChain.mockResolvedValueOnce([
-      { id: 1, parent_team_id: null, callsign_name_format: 'full_name', depth: 0 }
+      { id: 1, parent_team_id: null, callsign_name_format: 'full_name', pseudonymous_usernames: false, depth: 0 }
     ]);
     Team.getFullMemberList.mockResolvedValueOnce([]);
 
-    const result = await UserProvisioningService.resolveCallsignSuffixForNewUser(fakeClient, {
+    const result = await UserProvisioningService.resolveNewUserIdentity(fakeClient, {
       firstName: 'John',
       lastName: 'Doe',
+      email: 'john.doe@example.com',
       teamId: 1,
+      requestedUsername: 'john.doe@example.com',
       requestedCallsignSuffix: 'Badge123'
     });
 
-    expect(result).toBe('Badge123');
+    expect(result.callsignSuffix).toBe('Badge123');
     expect(CallsignService.computeDefaultCallsignSuffix).not.toHaveBeenCalled();
   });
 
   it('propagates CallsignSuffixConflictError from a uniqueness collision', async () => {
     Team.getAncestorChain.mockResolvedValueOnce([
-      { id: 1, parent_team_id: null, callsign_name_format: 'full_name', depth: 0 }
+      { id: 1, parent_team_id: null, callsign_name_format: 'full_name', pseudonymous_usernames: false, depth: 0 }
     ]);
     CallsignService.computeDefaultCallsignSuffix.mockReturnValueOnce('John Doe');
     Team.getFullMemberList.mockResolvedValueOnce([
@@ -312,10 +349,12 @@ describe('UserProvisioningService.resolveCallsignSuffixForNewUser', () => {
     ]);
 
     await expect(
-      UserProvisioningService.resolveCallsignSuffixForNewUser(fakeClient, {
+      UserProvisioningService.resolveNewUserIdentity(fakeClient, {
         firstName: 'John',
         lastName: 'Doe',
+        email: 'john.doe@example.com',
         teamId: 1,
+        requestedUsername: 'john.doe@example.com',
         requestedCallsignSuffix: undefined
       })
     ).rejects.toThrow(CallsignSuffixConflictError);
@@ -323,24 +362,138 @@ describe('UserProvisioningService.resolveCallsignSuffixForNewUser', () => {
 
   it('calls Team.getAncestorChain with teamId and uses the root (depth 0) row\'s callsign_name_format', async () => {
     Team.getAncestorChain.mockResolvedValueOnce([
-      { id: 1, parent_team_id: null, callsign_name_format: 'first_initial_last', depth: 0 },
+      { id: 1, parent_team_id: null, callsign_name_format: 'first_initial_last', pseudonymous_usernames: false, depth: 0 },
       { id: 5, parent_team_id: 1, callsign_name_format: 'first_initial_last', depth: 1 },
       { id: 9, parent_team_id: 5, callsign_name_format: 'first_initial_last', depth: 2 }
     ]);
     CallsignService.computeDefaultCallsignSuffix.mockReturnValueOnce('J Doe');
     Team.getFullMemberList.mockResolvedValueOnce([]);
 
-    const result = await UserProvisioningService.resolveCallsignSuffixForNewUser(fakeClient, {
+    const result = await UserProvisioningService.resolveNewUserIdentity(fakeClient, {
       firstName: 'John',
       lastName: 'Doe',
+      email: 'john.doe@example.com',
       teamId: 9,
+      requestedUsername: 'john.doe@example.com',
       requestedCallsignSuffix: undefined
     });
 
     expect(Team.getAncestorChain).toHaveBeenCalledWith(9);
     expect(CallsignService.computeDefaultCallsignSuffix).toHaveBeenCalledWith('John', 'Doe', 'first_initial_last');
     expect(Team.getFullMemberList).toHaveBeenCalledWith(9);
-    expect(result).toBe('J Doe');
+    expect(result.callsignSuffix).toBe('J Doe');
+    expect(result.organisationId).toBe(1);
+    expect(result.organisationPrefix).toBeUndefined();
+  });
+
+  /**
+   * The previously-untested pseudonymous/policy-enabled path (Requirements
+   * 6.3, 6.5, 6.7, 8.1, 9.1, 9.2). `ManagedIdentifierService` runs for
+   * real -- only the underlying `pool.query` the Claim_Row `INSERT` reaches
+   * is mocked, per the module-level `jest.mock('../config/database', ...)`
+   * above -- so a minted username is a genuine `generateManagedIdentifier`
+   * output, checked here via `isManagedIdentifier` rather than by
+   * re-deriving the exact seven-character body (which is random and cannot
+   * be predicted by the test).
+   */
+  describe('the pseudonymous/policy-enabled path', () => {
+    it('mints a Pseudonymous_Username, ignores requestedUsername, and never computes a name-derived default', async () => {
+      Team.getAncestorChain.mockResolvedValueOnce([
+        {
+          id: 3,
+          parent_team_id: null,
+          callsign_name_format: 'full_name',
+          pseudonymous_usernames: true,
+          callsign_prefix: 'AUK',
+          depth: 0
+        }
+      ]);
+      Team.getFullMemberList.mockResolvedValueOnce([]);
+      pool.query.mockResolvedValueOnce({ rows: [{ id: 555 }] });
+
+      const result = await UserProvisioningService.resolveNewUserIdentity(fakeClient, {
+        firstName: 'John',
+        lastName: 'Doe',
+        email: 'john.doe@example.com',
+        teamId: 3,
+        requestedUsername: 'john.doe@example.com',
+        requestedCallsignSuffix: 'Badge123'
+      });
+
+      expect(isManagedIdentifier(result.username)).toBe(true);
+      expect(result.username.startsWith('AUK-U')).toBe(true);
+      expect(result.username).not.toBe('john.doe@example.com');
+      expect(result.pseudonymous).toBe(true);
+      expect(result.callsignSuffix).toBe('Badge123');
+      expect(result.claimId).toBe(555);
+      expect(CallsignService.computeDefaultCallsignSuffix).not.toHaveBeenCalled();
+
+      // The Claim_Row insert ran against the shared `pool`, carrying the
+      // real supplied email (design decision 5) and authentik_user_id NULL
+      // / is_active false (the two columns that make it invisible to every
+      // existing surface).
+      expect(pool.query).toHaveBeenCalledTimes(1);
+      const [claimSql, claimParams] = pool.query.mock.calls[0];
+      expect(claimSql).toContain('INSERT INTO users');
+      expect(claimParams).toEqual([result.username, 'john.doe@example.com', 'John', 'Doe']);
+    });
+
+    it('throws CallsignSuffixRequiredError for a blank requestedCallsignSuffix and never attempts a mint', async () => {
+      Team.getAncestorChain.mockResolvedValueOnce([
+        {
+          id: 3,
+          parent_team_id: null,
+          callsign_name_format: 'full_name',
+          pseudonymous_usernames: true,
+          callsign_prefix: 'AUK',
+          depth: 0
+        }
+      ]);
+
+      await expect(
+        UserProvisioningService.resolveNewUserIdentity(fakeClient, {
+          firstName: 'John',
+          lastName: 'Doe',
+          email: 'john.doe@example.com',
+          teamId: 3,
+          requestedUsername: 'john.doe@example.com',
+          requestedCallsignSuffix: '   '
+        })
+      ).rejects.toThrow(UserProvisioningService.CallsignSuffixRequiredError);
+
+      // No Claim_Row insert / mint attempt occurred: Callsign_Default_
+      // Suppression's validation runs BEFORE any mint attempt (Criteria
+      // 9.1, 9.2), so a request-validation failure never reaches the
+      // Claim_Row.
+      expect(pool.query).not.toHaveBeenCalled();
+      expect(Team.getFullMemberList).not.toHaveBeenCalled();
+    });
+
+    it('throws OrganisationPrefixMissingError when the Organisation has no valid callsign_prefix', async () => {
+      Team.getAncestorChain.mockResolvedValueOnce([
+        {
+          id: 3,
+          parent_team_id: null,
+          callsign_name_format: 'full_name',
+          pseudonymous_usernames: true,
+          callsign_prefix: null,
+          depth: 0
+        }
+      ]);
+
+      await expect(
+        UserProvisioningService.resolveNewUserIdentity(fakeClient, {
+          firstName: 'John',
+          lastName: 'Doe',
+          email: 'john.doe@example.com',
+          teamId: 3,
+          requestedUsername: 'john.doe@example.com',
+          requestedCallsignSuffix: 'Badge123'
+        })
+      ).rejects.toThrow(ManagedIdentifierService.OrganisationPrefixMissingError);
+
+      expect(pool.query).not.toHaveBeenCalled();
+    });
   });
 });
 

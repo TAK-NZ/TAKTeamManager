@@ -118,7 +118,12 @@ jest.mock('../config/permissions.registry', () => {
       'GET /api/device-management/users/:userId/devices': ['device_mgmt:read:managed'],
       'POST /api/device-management/users/:userId/devices/:clientUid/revoke': [
         'device_mgmt:revoke:managed'
-      ]
+      ],
+      // takserver-enrollment task 8.4/8.5: the team device listing route,
+      // mirrored from the production registry so the
+      // `device:read:team_admin` resolver can be exercised through the
+      // middleware.
+      'GET /api/devices/team/:teamId': ['device:read:team_admin']
     },
     roleDefaults: {
       global_manager: ['*'],
@@ -209,6 +214,10 @@ function buildApp(user) {
     authorize,
     (req, res) => res.status(200).json({ ok: true })
   );
+  // takserver-enrollment task 8.5: the team device listing route, gated by
+  // `device:read:team_admin`. Reads only the `:teamId` route param, so no
+  // body parser is needed.
+  app.get('/api/devices/team/:teamId', authorize, (req, res) => res.status(200).json({ ok: true }));
   return app;
 }
 
@@ -1526,6 +1535,124 @@ describe('authorize (task 12.1: device_mgmt:*:managed row-scoped resolvers)', ()
       expect(res.status).toBe(200);
       expect(mockIsManagedUser).not.toHaveBeenCalled();
       expect(mockFindDeviceRow).not.toHaveBeenCalled();
+    });
+  });
+});
+
+/**
+ * takserver-enrollment task 8.5 (Criteria 3.6, 3.7, 3.8): the
+ * `device:read:team_admin` row-scoped resolver, backing
+ * `GET /api/devices/team/:teamId`. Mirrors the `team:update` /
+ * `team:members:add` shape exactly: Global_Manager OR
+ * `Team.isAdmin(:teamId, req.user.userId)`.
+ *
+ * The most important case here is the `req.user.userId` vs `req.user.id`
+ * trap the file's own header comment calls out: a test that sets those
+ * two fields to DIFFERENT values confirms the resolver passes the LOCAL
+ * id, not the Authentik id.
+ */
+describe('authorize (task 8.5: device:read:team_admin row-scoped resolver)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('permits a Global_Manager without ever consulting Team.isAdmin', async () => {
+    const app = buildApp({ userId: 1, id: 'authentik-id-1', is_global_manager: true });
+
+    const res = await request(app).get('/api/devices/team/42').set('X-Forwarded-For', TEST_IP);
+
+    expect(res.status).toBe(200);
+    expect(mockIsAdmin).not.toHaveBeenCalled();
+    expect(mockWarn).not.toHaveBeenCalled();
+  });
+
+  it('permits a direct Team_Admin of the exact :teamId', async () => {
+    mockIsAdmin.mockResolvedValueOnce(true);
+    const app = buildApp({ userId: 1, id: 'authentik-id-1', is_global_manager: false });
+
+    const res = await request(app).get('/api/devices/team/42').set('X-Forwarded-For', TEST_IP);
+
+    expect(res.status).toBe(200);
+    expect(mockIsAdmin).toHaveBeenCalledWith('42', 1);
+    expect(mockWarn).not.toHaveBeenCalled();
+  });
+
+  it('permits an admin of an ANCESTOR team, via Team.isAdmin\u2019s own Ancestor_Chain walk', async () => {
+    // Team.isAdmin itself resolves the Ancestor_Chain (see
+    // server/models/Team.js); the resolver only has to call it with the
+    // right arguments and trust its answer. Modelled here as
+    // Team.isAdmin simply returning true for the ancestor case.
+    mockIsAdmin.mockResolvedValueOnce(true);
+    const app = buildApp({ userId: 1, id: 'authentik-id-1', is_global_manager: false });
+
+    const res = await request(app).get('/api/devices/team/7').set('X-Forwarded-For', TEST_IP);
+
+    expect(res.status).toBe(200);
+    expect(mockIsAdmin).toHaveBeenCalledWith('7', 1);
+  });
+
+  it('denies a user with only an INHERITED admin row on the target team (Team.isAdmin returns false)', async () => {
+    // Team.isAdmin's own query filters on `inherited_from_team_id IS
+    // NULL`, so an inherited-only admin row makes it resolve false; the
+    // resolver just has to propagate that.
+    mockIsAdmin.mockResolvedValueOnce(false);
+    const app = buildApp({ userId: 1, id: 'authentik-id-1', is_global_manager: false });
+
+    const res = await request(app).get('/api/devices/team/42').set('X-Forwarded-For', TEST_IP);
+
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: 'Forbidden' });
+    expect(mockWarn).toHaveBeenCalledTimes(1);
+    const [payload] = mockWarn.mock.calls[0];
+    expect(payload).toEqual({
+      ip: TEST_IP,
+      route: '/api/devices/team/42',
+      reason: 'permission_denied'
+    });
+  });
+
+  it('denies an unrelated user with no admin relationship at all', async () => {
+    mockIsAdmin.mockResolvedValueOnce(false);
+    const app = buildApp({ userId: 99, id: 'authentik-id-99', is_global_manager: false });
+
+    const res = await request(app).get('/api/devices/team/42').set('X-Forwarded-For', TEST_IP);
+
+    expect(res.status).toBe(403);
+    expect(mockIsAdmin).toHaveBeenCalledWith('42', 99);
+  });
+
+  it('passes req.user.userId (the LOCAL users.id) to Team.isAdmin, never req.user.id (the Authentik id)', async () => {
+    mockIsAdmin.mockResolvedValueOnce(true);
+    // Deliberately different values so a resolver that read the wrong
+    // field would be observable here rather than accidentally agreeing.
+    const app = buildApp({ userId: 555, id: 'authentik-uuid-does-not-match', is_global_manager: false });
+
+    const res = await request(app).get('/api/devices/team/42').set('X-Forwarded-For', TEST_IP);
+
+    expect(res.status).toBe(200);
+    expect(mockIsAdmin).toHaveBeenCalledWith('42', 555);
+    expect(mockIsAdmin).not.toHaveBeenCalledWith('42', 'authentik-uuid-does-not-match');
+  });
+
+  it('fails closed (403) when Team.isAdmin throws, without a resolver-local try/catch', async () => {
+    mockIsAdmin.mockRejectedValueOnce(new Error('db connection lost'));
+    const app = buildApp({ userId: 1, id: 'authentik-id-1', is_global_manager: false });
+
+    const res = await request(app).get('/api/devices/team/42').set('X-Forwarded-For', TEST_IP);
+
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: 'Forbidden' });
+    expect(mockWarn).toHaveBeenCalledTimes(1);
+    const [payload] = mockWarn.mock.calls[0];
+    expect(payload).toEqual({
+      ip: TEST_IP,
+      route: '/api/devices/team/42',
+      reason: 'resolver_exception'
+    });
+    expect(mockError).toHaveBeenCalledTimes(1);
+    expect(mockError.mock.calls[0][0]).toMatchObject({
+      errorCategory: 'authorization_check_exception',
+      permission: 'device:read:team_admin'
     });
   });
 });

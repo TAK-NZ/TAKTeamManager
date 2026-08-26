@@ -9,9 +9,10 @@ const authentikService = require('../services/authentik');
 const UserAttributesService = require('../services/userAttributes');
 const TeamMembershipService = require('../services/TeamMembershipService');
 const UserProvisioningService = require('../services/UserProvisioningService');
+const ManagedIdentifierService = require('../services/ManagedIdentifierService');
 const DirectoryScopeService = require('../services/DirectoryScopeService');
 const { buildEmailDomainLikePatterns, partitionCandidates } = require('../utils/directoryScope');
-const { CallsignSuffixConflictError } = require('../services/CallsignSuffixUniquenessService');
+const { CallsignSuffixConflictError, checkCallsignSuffixUniqueness } = require('../services/CallsignSuffixUniquenessService');
 const {
   TeamTransferService,
   NoCurrentTeamError,
@@ -117,6 +118,19 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
     // user with no local `users` row yet) is exactly the signal that no
     // local per-user resource can exist for that row.
     const localUserIdByAuthentikUserId = new Map();
+    // takserver-enrollment Requirement 13.2/13.6: authentik_user_id ->
+    // live certificate count, built from the SAME batched query below via
+    // an additional `certs` derived-table LEFT JOIN keyed on `u.id`. A
+    // `tak_devices` row's mere existence (with `revoked = false`) IS what
+    // "live certificate" means -- `device-management` Requirement 17
+    // deletes every row whose underlying certificate is no longer live on
+    // each fully-successful sync, so counting rows needs no further
+    // filtering. Projecting it here, exactly like `local_user_id` above,
+    // lets the Users view render the Multiple_Certificate_Warning without
+    // a second round trip per row; it is NOT flag-gated by
+    // `isDeviceMgmtEnabled()` because while device-management is off
+    // nothing populates `tak_devices`, so every count is already zero.
+    const liveCertificateCountByAuthentikUserId = new Map();
     // Requirement 11.2/11.3: authentik_user_id -> the local scoping facts,
     // built from the SAME batched query below. Each entry carries the
     // candidate's Direct_Membership Organisation id (the root of its
@@ -147,11 +161,18 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
                  WHEN t.parent_team_id IS NOT NULL THEN
                    COALESCE(root.root_callsign_prefix, root.root_name, '') || ' - ' || t.name
                  ELSE t.name
-               END AS team_name
+               END AS team_name,
+               COALESCE(certs.live_certificate_count, 0) AS live_certificate_count
         FROM users u
         LEFT JOIN team_memberships tm ON u.id = tm.user_id AND tm.inherited_from_team_id IS NULL
         LEFT JOIN teams t ON tm.team_id = t.id
         LEFT JOIN team_root root ON root.team_id = t.id AND root.parent_team_id IS NULL
+        LEFT JOIN (
+          SELECT user_id, COUNT(*)::int AS live_certificate_count
+          FROM tak_devices
+          WHERE user_id IS NOT NULL AND revoked = false
+          GROUP BY user_id
+        ) certs ON certs.user_id = u.id
         WHERE u.authentik_user_id = ANY($1)
       `, [authentikUserIds]);
 
@@ -159,6 +180,7 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
         teamNameByAuthentikUserId.set(row.authentik_user_id, row.team_name);
         isTeamDeviceByAuthentikUserId.set(row.authentik_user_id, row.is_team_device === true);
         localUserIdByAuthentikUserId.set(row.authentik_user_id, row.local_user_id ?? null);
+        liveCertificateCountByAuthentikUserId.set(row.authentik_user_id, row.live_certificate_count ?? 0);
         // The `users` row exists locally, so its email/first_name are known,
         // but scoping only needs the org facts here; the email a candidate is
         // matched on comes from the Authentik payload in `toFacts` below,
@@ -186,7 +208,13 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
         // device-management task 15.4: additive, and null for a user with no
         // local `users` row. `pk` (Authentik) is left untouched, so every
         // existing consumer of this response is unaffected.
-        local_user_id: localUserIdByAuthentikUserId.get(user.pk) ?? null
+        local_user_id: localUserIdByAuthentikUserId.get(user.pk) ?? null,
+        // takserver-enrollment Requirement 13.2/13.6: additive, and 0 for a
+        // user absent from the batched query result (no local `users` row)
+        // or with zero live `tak_devices` rows -- never null/undefined, so
+        // the Multiple_Certificate_Warning can compare against a number
+        // unconditionally.
+        live_certificate_count: liveCertificateCountByAuthentikUserId.get(user.pk) ?? 0
       }));
 
     // Requirement 10: a Global_Manager's response is not scoped at all.
@@ -323,33 +351,58 @@ router.post('/', authenticateToken, authorize, [
     // centrally by authorize.js via the 'POST /api/users': ['user:create:team_admin']
     // Permission_Registry entry.
 
-    // Requirement 11.6, 11.7, 11.14, 11.15 (task 22.2): resolve/default/
-    // uniqueness-check this new user's callsign_suffix BEFORE creating
-    // anything in Authentik, so a CallsignSuffixRequiredError/
-    // CallsignSuffixConflictError is returned as a 400 without ever
-    // creating an Authentik user for what is fundamentally a
-    // request-validation failure.
-    let resolvedCallsignSuffix;
+    // takserver-enrollment Requirements 6.3, 6.6, 6.8 (task 5.3): resolve
+    // the username AND the callsign_suffix default together, BEFORE
+    // creating anything in Authentik, via the single Phase-0 choke point.
+    // Under a policy-disabled Organisation this is unchanged from the
+    // Phase-0 behaviour it replaces: `resolveNewUserIdentity` returns
+    // `requestedUsername` (the caller-supplied `username`) verbatim and
+    // runs the same callsign_suffix resolution
+    // `resolveCallsignSuffixForNewUser` used to. Under a
+    // Pseudonymous_Organisation, the caller-supplied `username` is
+    // IGNORED (design decision 8) and a freshly minted
+    // Pseudonymous_Username is returned instead, along with a `claimId`
+    // naming the Claim_Row already inserted under it.
+    //
+    // A CallsignSuffixRequiredError/CallsignSuffixConflictError/
+    // OrganisationPrefixMissingError is a request-validation failure and
+    // is returned as a 400 without ever creating an Authentik user for
+    // it -- the same reasoning that already placed the Phase-0 resolution
+    // ahead of every Authentik call on this route.
+    // ManagedIdentifierExhaustionError is the one 500: it names a defect
+    // in the generator's random source, not something the caller can fix.
+    let identity;
     try {
-      resolvedCallsignSuffix = await UserProvisioningService.resolveCallsignSuffixForNewUser(null, {
+      identity = await UserProvisioningService.resolveNewUserIdentity(null, {
         firstName,
         lastName,
+        email,
         teamId,
+        requestedUsername: username,
         requestedCallsignSuffix: callsignSuffix
       });
     } catch (resolutionError) {
       if (
         resolutionError instanceof UserProvisioningService.CallsignSuffixRequiredError ||
-        resolutionError instanceof CallsignSuffixConflictError
+        resolutionError instanceof CallsignSuffixConflictError ||
+        resolutionError instanceof ManagedIdentifierService.OrganisationPrefixMissingError
       ) {
         return res.status(400).json({ error: resolutionError.message });
+      }
+      if (resolutionError instanceof ManagedIdentifierService.ManagedIdentifierExhaustionError) {
+        getLogger().error({ err: resolutionError }, 'Managed_Identifier mint exhausted while creating user');
+        return res.status(500).json({ error: 'Failed to create user' });
       }
       throw resolutionError;
     }
 
-    // Create user in Authentik
+    const { username: resolvedUsername, callsignSuffix: resolvedCallsignSuffix, claimId } = identity;
+
+    // Create user in Authentik with the RESOLVED username -- the minted
+    // Pseudonymous_Username under a pseudonymous Organisation, or the
+    // caller-supplied `username` verbatim otherwise.
     const authentikUser = await authentikService.createUser({
-      username,
+      username: resolvedUsername,
       name: `${firstName} ${lastName}`,
       email
     });
@@ -357,15 +410,37 @@ router.post('/', authenticateToken, authorize, [
     // Set password
     await authentikService.setUserPassword(authentikUser.pk, password);
 
-    // Create local user record
-    const localUser = await User.create({
-      authentik_user_id: authentikUser.pk,
-      username,
-      email,
-      first_name: firstName,
-      last_name: lastName,
-      callsign_suffix: resolvedCallsignSuffix
-    });
+    let localUser;
+    if (claimId != null) {
+      // takserver-enrollment Requirement 6.4 (task 5.3): this route uses
+      // `User.create`, a DIFFERENT model than
+      // `UserProvisioningService.createAndAddUser` (which already
+      // supports `claimId` adoption per task 5.2). `User.create` does a
+      // plain INSERT, which would insert a SECOND row for the same
+      // Authentik user and leave the Claim_Row `resolveNewUserIdentity`
+      // already inserted behind forever -- invisible to every existing
+      // surface (it has `authentik_user_id IS NULL`, `is_active =
+      // false`) and permanently holding `users_email_key` for this
+      // email. So this route adopts the exact Claim_Row by primary key
+      // instead of calling `User.create`, mirroring the
+      // `UPDATE ... WHERE id = $claimId` `createAndAddUser` already
+      // performs for the same reason.
+      const adoptResult = await pool.query(
+        'UPDATE users SET authentik_user_id = $1, username = $2, email = $3, first_name = $4, last_name = $5, is_active = true, callsign_suffix = $6 WHERE id = $7 RETURNING *',
+        [authentikUser.pk, resolvedUsername, email, firstName, lastName, resolvedCallsignSuffix, claimId]
+      );
+      localUser = adoptResult.rows[0];
+    } else {
+      // Create local user record
+      localUser = await User.create({
+        authentik_user_id: authentikUser.pk,
+        username: resolvedUsername,
+        email,
+        first_name: firstName,
+        last_name: lastName,
+        callsign_suffix: resolvedCallsignSuffix
+      });
+    }
 
     // Add to team
     await Team.addMember(teamId, localUser.id, 'member');
@@ -683,16 +758,44 @@ router.get('/available', authenticateToken, authorize, async (req, res) => {
 // user submits (the affordance `GET /api/requests/pending`'s
 // `effective_callsign_suffix` already gives the approve flow).
 //
-// This is deliberately implemented by calling the exact same
-// `UserProvisioningService.resolveCallsignSuffixForNewUser` the submit
-// path calls, and translating its typed errors into the report -- rather
-// than re-deriving the default or re-running the uniqueness check here.
-// A parallel implementation could disagree with the submit path, which
-// would make the preview worse than no preview at all.
+// takserver-enrollment Requirement 6.6, 9.1, 9.2 (task 5.3): THIS route
+// is NOT the "read-only preview" task 5.8's allow-list exempts --
+// that exemption names only the `effective_callsign_suffix` preview at
+// `server/routes/requests.js:111`, which calls
+// `CallsignService.computeDefaultCallsignSuffix` directly. This route
+// instead delegated to the now-removed `resolveCallsignSuffixForNewUser`,
+// and has to be rewired.
 //
-// Strictly read-only: no INSERT/UPDATE/DELETE, no Authentik call, no
-// transaction. `resolveCallsignSuffixForNewUser` only reads
-// (Team.getAncestorChain / Team.getFullMemberList via the shared pool).
+// It is deliberately NOT rewired to call
+// `UserProvisioningService.resolveNewUserIdentity` unconditionally,
+// though: under a Pseudonymous_Organisation that function mints a
+// Managed_Identifier and INSERTS a Claim_Row as a side effect (Criterion
+// 1.7/1.8 -- the mint's uniqueness guarantee comes from a real
+// `INSERT ... RETURNING id`, not a probe) -- a WRITE this strictly
+// read-only preview must never perform, and one this route has no
+// `email` to supply for besides (the preview body carries only
+// `firstName`/`lastName`/`teamId`/`callsignSuffix`, never `email`, so a
+// human Claim_Row's `email` column would be NULL and would violate the
+// Device_Email_Null_Invariant on the very first keystroke-blur).
+//
+// So this route resolves the Organisation's Pseudonymous_Username_Policy
+// itself (the SAME `Team.getAncestorChain(teamId)[0]` read
+// `resolveNewUserIdentity` performs, so the branch decision cannot
+// disagree with the resolver's own), and:
+//   - WHERE the policy is enabled, applies Callsign_Default_Suppression
+//     directly -- no default is computed, a blank value reports
+//     `required: true` (mirroring `CallsignSuffixRequiredError`), and a
+//     non-blank value is uniqueness-checked via the SAME shared
+//     `checkCallsignSuffixUniqueness` the resolver itself calls, with NO
+//     mint attempt and NO write of any kind.
+//   - WHERE the policy is disabled, delegates to
+//     `resolveNewUserIdentity` exactly as the submit path does --
+//     unchanged from this route's previous behaviour, and still
+//     strictly read-only, since the resolver's policy-disabled branch
+//     never mints or writes anything.
+//
+// Strictly read-only either way: no INSERT/UPDATE/DELETE, no Authentik
+// call, no transaction.
 //
 // Declared alongside `/search` and `/available` (i.e. ahead of any
 // parameterised sibling) so no `/:userId`-style pattern can capture it.
@@ -710,14 +813,41 @@ router.post('/callsign-suffix-preview', authenticateToken, authorize, [
   const { teamId, firstName, lastName, callsignSuffix } = req.body;
 
   try {
-    const suffix = await UserProvisioningService.resolveCallsignSuffixForNewUser(null, {
+    const ancestorChain = await Team.getAncestorChain(teamId);
+    const organisation = ancestorChain[0];
+    const pseudonymous = organisation?.pseudonymous_usernames === true;
+
+    if (pseudonymous) {
+      const trimmedRequested = callsignSuffix ? callsignSuffix.trim() : '';
+      if (!trimmedRequested) {
+        return res.json({ suffix: null, required: true, conflict: null });
+      }
+
+      try {
+        await checkCallsignSuffixUniqueness(teamId, trimmedRequested);
+        return res.json({ suffix: trimmedRequested, required: false, conflict: null });
+      } catch (conflictError) {
+        if (conflictError instanceof CallsignSuffixConflictError) {
+          return res.json({
+            suffix: conflictError.conflictingValue,
+            required: false,
+            conflict: { value: conflictError.conflictingValue, message: conflictError.message }
+          });
+        }
+        throw conflictError;
+      }
+    }
+
+    const identity = await UserProvisioningService.resolveNewUserIdentity(null, {
       firstName,
       lastName,
+      email: undefined,
       teamId,
+      requestedUsername: undefined,
       requestedCallsignSuffix: callsignSuffix
     });
 
-    return res.json({ suffix, required: false, conflict: null });
+    return res.json({ suffix: identity.callsignSuffix, required: false, conflict: null });
   } catch (error) {
     if (error instanceof UserProvisioningService.CallsignSuffixRequiredError) {
       // Organisation's callsign_name_format is 'user_defined' and no
@@ -768,31 +898,55 @@ router.post('/create-and-add', authenticateToken, authorize, [
   }
 
   const { email, firstName, lastName, teamId, callsignSuffix, role } = req.body;
-  const username = email;
   let newUser;
 
-  // --- Phase 0: resolve/default/uniqueness-check callsign_suffix
-  // (Requirement 11.6, 11.7, 11.14, 11.15; task 22.2). This is a
-  // pure-read operation (Team.getAncestorChain/getFullMemberList, via the
-  // shared pool), so it runs BEFORE Phase 1's Authentik user-creation
-  // call: a CallsignSuffixRequiredError/CallsignSuffixConflictError here
-  // is a request-validation failure, not a mid-operation failure, so
-  // returning early avoids ever creating an orphaned Authentik user for
-  // it. ---
+  // --- Phase 0: resolve the username AND the callsign_suffix default
+  // together via the single Phase-0 choke point (takserver-enrollment
+  // Requirements 6.3, 6.6, 6.8; task 5.3). `requestedUsername: email`
+  // is passed IN, matching the existing `const username = email`
+  // derivation this route used before this task -- that derivation
+  // becomes the value passed to the resolver rather than the value used
+  // directly, so a Pseudonymous_Organisation can override it with a
+  // minted Pseudonymous_Username. Under a policy-disabled Organisation
+  // the resolver returns `requestedUsername` verbatim (Criterion 6.8),
+  // so `resolvedUsername` equals `email` exactly as before.
+  //
+  // This is a pure-read operation UNLESS the policy is enabled, in which
+  // case it also inserts a Claim_Row (a single `INSERT ... RETURNING
+  // id` against the shared `pool`, no transaction) -- still strictly
+  // before Phase 1's Authentik user-creation call, so a
+  // CallsignSuffixRequiredError/CallsignSuffixConflictError/
+  // OrganisationPrefixMissingError here is a request-validation failure
+  // returned before any Authentik user (or Claim_Row adoption) is
+  // created. A ManagedIdentifierExhaustionError names a defect in the
+  // generator's random source rather than something the caller can fix,
+  // so it maps to 500 rather than 400. ---
+  let resolvedUsername;
   let resolvedCallsignSuffix;
+  let claimId;
   try {
-    resolvedCallsignSuffix = await UserProvisioningService.resolveCallsignSuffixForNewUser(null, {
+    const identity = await UserProvisioningService.resolveNewUserIdentity(null, {
       firstName,
       lastName,
+      email,
       teamId,
+      requestedUsername: email,
       requestedCallsignSuffix: callsignSuffix
     });
+    resolvedUsername = identity.username;
+    resolvedCallsignSuffix = identity.callsignSuffix;
+    claimId = identity.claimId;
   } catch (resolutionError) {
     if (
       resolutionError instanceof UserProvisioningService.CallsignSuffixRequiredError ||
-      resolutionError instanceof CallsignSuffixConflictError
+      resolutionError instanceof CallsignSuffixConflictError ||
+      resolutionError instanceof ManagedIdentifierService.OrganisationPrefixMissingError
     ) {
       return res.status(400).json({ error: resolutionError.message });
+    }
+    if (resolutionError instanceof ManagedIdentifierService.ManagedIdentifierExhaustionError) {
+      getLogger().error({ err: resolutionError }, 'Managed_Identifier mint exhausted while creating user');
+      return res.status(500).json({ error: 'Failed to create user' });
     }
     getLogger().error({ err: resolutionError }, 'Failed to resolve callsign_suffix for new user');
     return res.status(500).json({ error: 'Failed to create user' });
@@ -816,7 +970,7 @@ router.post('/create-and-add', authenticateToken, authorize, [
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        username,
+        username: resolvedUsername,
         email,
         name: `${firstName} ${lastName}`,
         first_name: firstName,
@@ -844,13 +998,23 @@ router.post('/create-and-add', authenticateToken, authorize, [
 
     const result = await UserProvisioningService.createAndAddUser(client, {
       authentikUserId: newUser.pk,
-      username,
+      username: resolvedUsername,
       email,
       firstName,
       lastName,
       teamId,
       callsign_suffix: resolvedCallsignSuffix,
-      createdBy: req.user?.userId ?? null
+      createdBy: req.user?.userId ?? null,
+      // takserver-enrollment Requirement 6.6 (task 5.3): when the
+      // target Organisation is pseudonymous, `claimId` names the
+      // Claim_Row `resolveNewUserIdentity` already inserted under
+      // `resolvedUsername` above -- `createAndAddUser` adopts that
+      // exact row instead of its generic upsert, which cannot match a
+      // Claim_Row's NULL `authentik_user_id` under `ON CONFLICT`.
+      // `undefined` (the default, per `createAndAddUser`'s own
+      // `claimId = null`) for a policy-disabled Organisation, where no
+      // Claim_Row exists.
+      claimId
     });
     localUserId = result.localUserId;
 
@@ -949,7 +1113,7 @@ router.post('/create-and-add', authenticateToken, authorize, [
   // tak_callsign/tak_color/tak_role dual-write here).
   await pool.query(
     'INSERT INTO user_cache (authentik_id, username, email, first_name, last_name, is_active, tak_callsign, tak_color, tak_role, callsign_suffix) VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8, $9) ON CONFLICT (authentik_id) DO UPDATE SET username = $2, email = $3, first_name = $4, last_name = $5, is_active = true, tak_callsign = $6, tak_color = $7, tak_role = $8, callsign_suffix = $9',
-    [newUser.pk, username, email, firstName, lastName, attributes?.callsign, attributes?.color, attributes?.role, resolvedCallsignSuffix]
+    [newUser.pk, resolvedUsername, email, firstName, lastName, attributes?.callsign, attributes?.color, attributes?.role, resolvedCallsignSuffix]
   );
 
   // Send welcome/approval email to the new user
@@ -984,7 +1148,10 @@ router.post('/create-and-add', authenticateToken, authorize, [
   res.status(201).json({
     user: {
       id: newUser.pk,
-      username,
+      // The RESOLVED username -- the minted Pseudonymous_Username under
+      // a pseudonymous Organisation, or `email` verbatim otherwise --
+      // matching what was actually created in Authentik and locally.
+      username: resolvedUsername,
       email,
       first_name: firstName,
       last_name: lastName,

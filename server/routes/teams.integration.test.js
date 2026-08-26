@@ -158,9 +158,13 @@ describe('POST /api/teams against a real Postgres database (Requirement 12.5, ta
   it('success: a Global_Manager creating a top-level team persists a real teams row', async () => {
     const teamName = `IntegrationTest Team ${crypto.randomUUID()}`;
 
+    // takserver-enrollment Criterion 2.1: an Organisation (no
+    // parentTeamId) now requires a non-empty callsignPrefix -- added
+    // here so this top-level team creation still succeeds. Unrelated to
+    // what this test itself verifies (a real teams row persisting).
     const res = await request(app)
       .post('/api/teams')
-      .send({ name: teamName, description: 'Created by BUG-020 integration test' });
+      .send({ name: teamName, description: 'Created by BUG-020 integration test', callsignPrefix: 'ITT' });
 
     expect(res.status).toBe(201);
     expect(res.body.team).toBeDefined();
@@ -182,9 +186,11 @@ describe('POST /api/teams against a real Postgres database (Requirement 12.5, ta
     // though the test above (which omits parentTeamId entirely) passed.
     const teamName = `IntegrationTest Null Parent ${crypto.randomUUID()}`;
 
+    // takserver-enrollment Criterion 2.1: callsignPrefix is required for
+    // an Organisation.
     const res = await request(app)
       .post('/api/teams')
-      .send({ name: teamName, description: 'Top-level team', parentTeamId: null });
+      .send({ name: teamName, description: 'Top-level team', parentTeamId: null, callsignPrefix: 'INP' });
 
     expect(res.status).toBe(201);
     expect(res.body.team).toBeDefined();

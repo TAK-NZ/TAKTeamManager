@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { formatCallsignLevels, formatCallsignNameFormatExample, computeTeamDepth, getInitialMemberEditForm, isValidMemberCallsignSuffix, isValidSubTeamCallsignPrefix, extractCallsignSuffixServerError, isValidNewUserEmail } from './TeamDetail.jsx';
+import { formatCallsignLevels, formatCallsignNameFormatExample, computeTeamDepth, getInitialMemberEditForm, isValidMemberCallsignSuffix, isValidSubTeamCallsignPrefix, extractCallsignSuffixServerError, isValidNewUserEmail, isPseudonymousOrganisation } from './TeamDetail.jsx';
 
 // Validates: Requirements 1.1, 1.2, 2.4, 2.5
 //
@@ -434,11 +434,17 @@ describe('Callsign Suffix field wiring in the Create New User tab', () => {
     }
   )
 
-  it('associates the Callsign Suffix input with its label, applies the shared character-class pattern, and marks required from the reducer', () => {
+  // takserver-enrollment Requirement 9.7 (task 5.5): the field is ALSO
+  // required, unconditionally, when the target Organisation is
+  // pseudonymous (`pseudonymousTarget`) -- Callsign_Default_Suppression
+  // means the server never computes a name-derived default there, so
+  // this is required regardless of what the reducer's own
+  // `callsign_name_format`-driven `required` reports.
+  it('associates the Callsign Suffix input with its label, applies the shared character-class pattern, and marks required from the reducer or the pseudonymous target', () => {
     const input = inputFor('new-user-callsign-suffix')
     expect(source).toContain('htmlFor="new-user-callsign-suffix"')
     expect(input).toContain('pattern={CALLSIGN_SUFFIX_PATTERN}')
-    expect(input).toContain('required={newUserFormState.required}')
+    expect(input).toContain('required={newUserFormState.required || pseudonymousTarget}')
   })
 
   it('announces the inline Callsign Suffix error as a role="alert" from the reducer field', () => {
@@ -621,5 +627,188 @@ describe('Members list includes admins (Defect 1)', () => {
     for (const m of matches) {
       expect(m).toBe("setAdmins(allMembers.filter(m => m.role === 'admin'))")
     }
+  })
+})
+
+// takserver-enrollment Requirement 6.7/9.7 (task 5.5): whether the
+// CURRENT team's own Organisation (via its Ancestor_Chain root, walked
+// through the already-fetched `allTeams` list -- never a positional
+// read from the tail) has the Pseudonymous_Username_Policy enabled.
+describe('isPseudonymousOrganisation (takserver-enrollment Req 6.7/9.7)', () => {
+  it('returns the Organisation row\'s own value directly', () => {
+    const org = { id: 1, parent_team_id: null, pseudonymous_usernames: true }
+    expect(isPseudonymousOrganisation(org, [org])).toBe(true)
+    const orgOff = { id: 2, parent_team_id: null, pseudonymous_usernames: false }
+    expect(isPseudonymousOrganisation(orgOff, [orgOff])).toBe(false)
+  })
+
+  it('normalises a null/undefined Organisation value to false', () => {
+    const org = { id: 1, parent_team_id: null, pseudonymous_usernames: null }
+    expect(isPseudonymousOrganisation(org, [org])).toBe(false)
+  })
+
+  it('walks up to the Organisation root for a Sub_Team, never reading the Sub_Team\'s own (always-null) value', () => {
+    const org = { id: 1, parent_team_id: null, pseudonymous_usernames: true }
+    const subTeam = { id: 2, parent_team_id: 1, pseudonymous_usernames: null }
+    expect(isPseudonymousOrganisation(subTeam, [org, subTeam])).toBe(true)
+  })
+
+  it('walks multiple levels to reach the root, deliberately disagreeing at each level to prove it does not read the tail or a middle row', () => {
+    const org = { id: 1, parent_team_id: null, pseudonymous_usernames: true }
+    const mid = { id: 2, parent_team_id: 1, pseudonymous_usernames: null }
+    const leaf = { id: 3, parent_team_id: 2, pseudonymous_usernames: null }
+    expect(isPseudonymousOrganisation(leaf, [org, mid, leaf])).toBe(true)
+  })
+
+  it('returns false when a team is null/undefined', () => {
+    expect(isPseudonymousOrganisation(null, [])).toBe(false)
+    expect(isPseudonymousOrganisation(undefined, [])).toBe(false)
+  })
+
+  it('terminates without looping forever when an ancestor is missing from allTeams (e.g. a hidden private ancestor)', () => {
+    const subTeam = { id: 10, parent_team_id: 999, pseudonymous_usernames: null }
+    expect(isPseudonymousOrganisation(subTeam, [subTeam])).toBe(false)
+  })
+})
+
+// takserver-enrollment Requirement 9.7 (task 5.9): additional edge-case
+// coverage on the create-user form's Pseudonymous_Organisation behaviour,
+// beyond what task 5.5's own "associates the Callsign Suffix input..."
+// test above already covers (which pins the `required={...}` attribute
+// wiring). These pin: the explanation is rendered as VISIBLE TEXT (not
+// merely a validation error discovered on submit), and the form does NOT
+// render any username input at all when the target is pseudonymous --
+// read from source, matching this file's existing no-@testing-library
+// convention of testing pure helpers / source contracts.
+describe('Create-user form under a Pseudonymous_Organisation target (takserver-enrollment Req 9.7, task 5.9)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  it('renders the pseudonymous-required explanation as visible <p> text tied to the field via aria-describedby, not only as a validation error', () => {
+    // The help text is rendered unconditionally whenever pseudonymousTarget
+    // is true and there is no error yet -- i.e. before any submit attempt,
+    // as visible text rather than something surfaced only on rejection.
+    const helpIndex = source.indexOf('Required because this Organisation uses pseudonymous usernames')
+    expect(helpIndex).toBeGreaterThan(-1)
+    const helpBlockStart = source.lastIndexOf('<p ', helpIndex)
+    const helpBlock = source.slice(helpBlockStart, source.indexOf('</p>', helpIndex))
+    expect(helpBlock).toContain('id="new-user-callsign-suffix-help"')
+
+    // The Suffix_Field points aria-describedby at this same id whenever
+    // pseudonymousTarget is true (and there's no error), so the text is
+    // actually wired to the field rather than being orphaned prose.
+    const suffixInputIndex = source.indexOf('id="new-user-callsign-suffix"')
+    const suffixInputBlock = source.slice(suffixInputIndex, source.indexOf('/>', suffixInputIndex))
+    expect(suffixInputBlock).toContain("aria-describedby={newUserFormState.error ? 'new-user-callsign-suffix-error' : ((newUserFormState.required || pseudonymousTarget) ? 'new-user-callsign-suffix-help' : undefined)}")
+  })
+
+  it('renders the "generated automatically" statement as visible <p> text, gated on pseudonymousTarget, unconditionally (not behind any error/submit state)', () => {
+    const statementIndex = source.indexOf("This Organisation uses pseudonymous usernames: the new member's TAK username will be generated automatically")
+    expect(statementIndex).toBeGreaterThan(-1)
+    // Gated directly on `{pseudonymousTarget && (` with no additional
+    // condition (e.g. no `&& !newUserFormState.error` clause) between the
+    // gate and the paragraph -- i.e. always visible for a pseudonymous
+    // target, never conditional on a validation error having occurred.
+    const gateMarker = '{pseudonymousTarget && ('
+    const gateIndex = source.lastIndexOf(gateMarker, statementIndex)
+    expect(gateIndex).toBeGreaterThan(-1)
+    const gateToStatement = source.slice(gateIndex + gateMarker.length, statementIndex)
+    expect(gateToStatement).not.toContain('newUserFormState.error')
+    expect(gateToStatement).not.toContain('&&')
+  })
+
+  it('renders no username <input> anywhere in the Create New User tab\'s form, for either policy state', () => {
+    // Scope to the "Create New User" tab's own <form ...> block, not the
+    // whole file (the "Add Existing User" tab's search input carries a
+    // "username" placeholder string but is not a username INPUT field for
+    // the user being created).
+    const formStart = source.indexOf("{addMemberTab === 'new' && (")
+    expect(formStart).toBeGreaterThan(-1)
+    const formEnd = source.indexOf("{addMemberTab === 'existing'", 0) > -1 && source.indexOf("{addMemberTab === 'existing'") < formStart
+      ? source.indexOf('</form>', formStart)
+      : source.indexOf('</form>', formStart)
+    expect(formEnd).toBeGreaterThan(formStart)
+    const createUserFormBlock = source.slice(formStart, formEnd)
+
+    // No <input> in this block has an id/name suggesting it collects a
+    // username value from the admin.
+    expect(createUserFormBlock).not.toMatch(/id="new-user-username"/)
+    expect(createUserFormBlock).not.toMatch(/name="username"/)
+    expect(createUserFormBlock).not.toContain('newUserFormState.username')
+
+    // The only place "username" appears in this block is inside the
+    // explanatory prose stating the username is generated -- never as an
+    // <input>'s id/value/onChange binding.
+    const usernameMentions = [...createUserFormBlock.matchAll(/username/gi)]
+    expect(usernameMentions.length).toBeGreaterThan(0)
+    for (const mention of usernameMentions) {
+      const context = createUserFormBlock.slice(Math.max(0, mention.index - 80), mention.index + 80)
+      expect(context).not.toMatch(/<input[^>]*$/)
+    }
+  })
+
+  it('states plainly that no admin-supplied username is ever discarded, because none is ever offered on this form', () => {
+    const commentIndex = source.indexOf('this tab has no Username input to begin with')
+    expect(commentIndex).toBeGreaterThan(-1)
+    const nearby = source.slice(commentIndex, commentIndex + 900)
+    expect(nearby).toContain('no admin-supplied value is')
+    expect(nearby).toContain('ever silently discarded server-side')
+  })
+})
+
+// takserver-enrollment Criterion 14.6 (task 11.5): the Devices section
+// (task 11.3) is purely additive. It must not reintroduce a
+// Team_Owned_Device into the human Member_List or the human member count
+// -- both of which pre-date this feature and are computed entirely from
+// `setMembers`/`setAdmins`, never from `TeamDeviceList` or its
+// `GET /api/devices/team/:teamId` fetch. Source-contract checks, per this
+// file's existing no-@testing-library convention: `TeamDeviceList` is
+// rendered as its OWN section outside the tabbed Members/Team
+// Admins/Channels/Sub-teams interface (never inside an `activeTab ===
+// 'members'` block), and every `setMembers`/`setAdmins` filter predicate
+// is built exclusively from the three human `role` values, with no
+// reference to a device concept anywhere in either filter.
+describe('The Devices section does not affect the human member list or count (takserver-enrollment Criterion 14.6)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  it('renders <TeamDeviceList> outside every activeTab-gated block, never inside the Members tab\'s table', () => {
+    const tdlIndex = source.indexOf('<TeamDeviceList')
+    expect(tdlIndex).toBeGreaterThan(-1)
+
+    // The nearest `activeTab === '...'` gate opening BEFORE this render
+    // site, if any, must already have been closed before it -- i.e. there
+    // is no unclosed `{activeTab === 'members' && (` (or 'admins'/etc.)
+    // still open at the point <TeamDeviceList> appears. We check this by
+    // counting occurrences of each tab's opening gate and its matching
+    // "Tab Content" boundary comment, which this file places right before
+    // the tabbed <div className="card"> that contains all four tabs.
+    const tabbedCardStart = source.indexOf('{/* Tabbed Interface */}')
+    const tabbedCardEnd = source.indexOf('{/* takserver-enrollment Criteria 14.6, 14.7')
+    expect(tabbedCardStart).toBeGreaterThan(-1)
+    expect(tabbedCardEnd).toBeGreaterThan(tabbedCardStart)
+
+    // <TeamDeviceList> must render AFTER the tabbed interface's own
+    // comment-delimited region ends, i.e. it is a sibling section beneath
+    // the tabs rather than content nested inside one of them.
+    expect(tdlIndex).toBeGreaterThanOrEqual(tabbedCardEnd)
+  })
+
+  it('never reads a device-related field in the setMembers/setAdmins filters that compute the human Member_List and its count', () => {
+    const memberFilters = source.match(/setMembers\(allMembers\.filter\([^)]*\)\)/g) || []
+    const adminFilters = source.match(/setAdmins\(allMembers\.filter\([^)]*\)\)/g) || []
+    expect(memberFilters.length).toBeGreaterThan(0)
+    expect(adminFilters.length).toBeGreaterThan(0)
+
+    for (const filter of [...memberFilters, ...adminFilters]) {
+      expect(filter.toLowerCase()).not.toContain('device')
+      expect(filter).not.toContain('is_team_device')
+    }
+  })
+
+  it('computes the Members tab\'s displayed count (`members.length`) from the same setMembers state, with no device-count addition', () => {
+    const tabDefIndex = source.indexOf("{ id: 'members', label: 'Members', icon: UsersIcon, count: members.length }")
+    expect(tabDefIndex).toBeGreaterThan(-1)
+    // `members.length` alone -- not `members.length + devices.length` or
+    // any other device-derived addend.
+    expect(source.slice(tabDefIndex, tabDefIndex + 100)).not.toContain('device')
   })
 })

@@ -50,6 +50,22 @@ const router = express.Router();
  * `INSERT INTO audit_logs (user_id, action, resource_type, resource_id,
  * details)` column set/shape already used by
  * `VendorChannelService.js`/`ChannelRequestService.js`.
+ *
+ * takserver-enrollment Criterion 11.5 (task 8.3): `POST
+ * /:deviceUserId/qr-code`'s response now carries `#buildEnrollment`'s
+ * full corrected shape (Requirement 4) under the existing `qrCode` key,
+ * which is why that handler sets `Cache-Control: no-store, no-cache,
+ * must-revalidate` and `Pragma: no-cache` unconditionally, at the top of
+ * the handler, before calling the service -- mirroring
+ * `server/routes/enrollment.js`'s `POST /me` exactly, so the directive is
+ * present on every response path including the error paths.
+ *
+ * takserver-enrollment Criteria 3.11, 5.9, 5.10, 13.6, 14.6, 14.7 (task
+ * 8.3): `GET /team/:teamId` surfaces a Team's Team_Owned_Devices via
+ * `DeviceEnrollmentService.listTeamDevices`, so a device excluded from
+ * every human-user list/count (`production-hardening` Criterion 27.9)
+ * stays reachable to the admin who owns it, by its Device_Display_Name
+ * and its Managed_Identifier rather than by an email it does not have.
  */
 
 /**
@@ -70,6 +86,15 @@ const ERROR_STATUS_BY_NAME = {
   // failures are surfaced elsewhere as client-facing 400s.
   TakServerNotConfiguredError: 400
 };
+
+// takserver-enrollment Criterion 3.6 (task 8.3): `GET /team/:teamId`
+// reuses the SAME `assertAuthorized` failure this file's other two
+// routes already map -- `listTeamDevices` calls `assertAuthorized`
+// internally, so a caller who is neither an admin of the team (via
+// `Team.isAdmin`'s Ancestor_Chain resolution) nor a Global_Manager gets
+// the same `DeviceEnrollmentAuthorizationError` -> 403 mapping already
+// present in `ERROR_STATUS_BY_NAME` above. No new entry is needed for
+// that route.
 
 /**
  * Sends the appropriate response for a `DeviceEnrollmentService` error: a
@@ -116,12 +141,24 @@ router.post('/', authenticateToken, authorize, [
 });
 
 // Requirement 27 Criteria 3, 5-8 (task 49.4 + the QR-generation-audit-log
-// half of task 49.5): generate a fresh enrollment QR code for an
-// existing Team_Owned_Device, and record the generation event as an
-// `audit_logs` row (Requirement 27.8) on success, before responding.
+// half of task 49.5); takserver-enrollment Criteria 4.1, 4.3, 11.5 (task
+// 8.3, response-shape correction): generate a fresh enrollment payload
+// for an existing Team_Owned_Device, and record the generation event as
+// an `audit_logs` row (Requirement 27.8) on success, before responding.
 router.post('/:deviceUserId/qr-code', authenticateToken, authorize, [
   param('deviceUserId').isInt().withMessage('deviceUserId must be an integer')
 ], async (req, res) => {
+  // takserver-enrollment Criterion 11.5: `no-store` is the load-bearing
+  // directive -- it forbids a shared or private cache from writing the
+  // response body (which carries a live Enrollment_Token) to disk at
+  // all, where `no-cache` alone only requires revalidation. Set
+  // unconditionally, at the top of the handler, before calling the
+  // service, so it is present on every response path including the
+  // error paths below -- mirroring `server/routes/enrollment.js`'s
+  // `POST /me` exactly.
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.set('Pragma', 'no-cache');
+
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
     return res.status(400).json({ errors: errors.array() });
@@ -130,6 +167,16 @@ router.post('/:deviceUserId/qr-code', authenticateToken, authorize, [
   try {
     const { deviceUserId } = req.params;
 
+    // takserver-enrollment Criteria 4.1, 4.3 (Correction 3): `qrCode` is
+    // now `#buildEnrollment`'s full corrected shape (`principalId`,
+    // `principalKind`, `username`, `host`, `expiresAt`,
+    // `reEnrollmentDate`, `atakEnrollmentUri`, `itakRegistrationPayload`,
+    // `atakQrDataUrl`, `itakQrDataUrl`, `takAttributes`,
+    // `liveCertificateCount`) plus `teamId` -- NOT the old narrow
+    // `{ host, username, token }`-shaped `itakEnrollmentPayload`. The
+    // route's own call to the service is unchanged; only the audit log
+    // below, which used to read the now-removed `qrCode.deviceUserId`,
+    // is updated to read `qrCode.principalId` instead.
     const qrCode = await DeviceEnrollmentService.generateEnrollmentQrCode(deviceUserId, req.user);
 
     // Requirement 27 Criterion 8: log the generating user's identifier,
@@ -139,9 +186,12 @@ router.post('/:deviceUserId/qr-code', authenticateToken, authorize, [
     // resource_id, details)` column set already used elsewhere (e.g.
     // `VendorChannelService.js`). `resource_id` is the device's local
     // `users.id` (`resource_type: 'user'`), since that is the row this
-    // action is about; `deviceUserId` and `expiresAt`/`generatedAt` are
-    // additionally placed into `details`, matching design.md's
-    // `{generatingUserId, deviceUserId, generatedAt}` shape.
+    // action is about. takserver-enrollment task 8.3: `#buildEnrollment`
+    // returns `principalId`, not `deviceUserId` -- that field name is
+    // gone from the response, so this INSERT's column set/shape is
+    // otherwise UNCHANGED (still `device_enrollment_qr_generated`,
+    // still `resource_type: 'user'`, still no token key and no QR data
+    // URL in `details`) and only the field reference is corrected.
     const generatedAt = new Date().toISOString();
     await pool.query(
       `INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details)
@@ -150,9 +200,9 @@ router.post('/:deviceUserId/qr-code', authenticateToken, authorize, [
         req.user.userId,
         'device_enrollment_qr_generated',
         'user',
-        qrCode.deviceUserId,
+        qrCode.principalId,
         JSON.stringify({
-          deviceUserId: qrCode.deviceUserId,
+          deviceUserId: qrCode.principalId,
           generatedAt,
           expiresAt: qrCode.expiresAt
         })
@@ -162,6 +212,36 @@ router.post('/:deviceUserId/qr-code', authenticateToken, authorize, [
     res.json({ qrCode });
   } catch (error) {
     handleServiceError(res, error, 'Failed to generate team-owned device enrollment QR code');
+  }
+});
+
+// takserver-enrollment Criteria 3.11, 5.9, 5.10, 13.6, 14.6, 14.7 (task
+// 8.3): list a Team's Team_Owned_Devices. `express-validator` param
+// validation matches the `POST /:deviceUserId/qr-code` route's
+// `param('deviceUserId').isInt()` pattern above.
+// `DeviceEnrollmentService.listTeamDevices` performs the real
+// authorization check internally (`assertAuthorized`: Global_Manager OR
+// `Team.isAdmin(teamId, actingUser)`), mapped to 403 via
+// `DeviceEnrollmentAuthorizationError` in `ERROR_STATUS_BY_NAME` above --
+// the route layer here only gates general reachability via the
+// `device:read:team_admin` permission identifier's row-scoped resolver
+// (`server/middleware/authorize.js`).
+router.get('/team/:teamId', authenticateToken, authorize, [
+  param('teamId').isInt().withMessage('teamId must be an integer')
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
+  try {
+    const { teamId } = req.params;
+
+    const result = await DeviceEnrollmentService.listTeamDevices(teamId, req.user);
+
+    res.json(result);
+  } catch (error) {
+    handleServiceError(res, error, 'Failed to list team-owned devices');
   }
 });
 

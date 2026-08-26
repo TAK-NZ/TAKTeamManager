@@ -47,14 +47,17 @@ class RetentionCleanupJob {
     // interval, so only a lower bound is enforced here -- guarding
     // against a misconfigured near-zero interval turning this into a
     // tight busy-loop against the database, mirroring the reasoning
-    // behind `ExpiryScheduler`'s MIN_INTERVAL_MS guard.
-    const MIN_INTERVAL_MS = 60000; // 1 minute
-    const DEFAULT_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+    // behind `ExpiryScheduler`'s MIN_INTERVAL_SECONDS guard. Clamped in
+    // seconds and converted to milliseconds once at the end -- the field
+    // stays `intervalMs` because `setInterval` takes milliseconds.
+    const MIN_INTERVAL_SECONDS = 60; // 1 minute
+    const DEFAULT_INTERVAL_SECONDS = 24 * 60 * 60; // 24 hours
 
-    this.intervalMs = Math.max(
-      MIN_INTERVAL_MS,
-      parseInt(process.env.RETENTION_CLEANUP_INTERVAL_MS, 10) || DEFAULT_INTERVAL_MS
+    const intervalSeconds = Math.max(
+      MIN_INTERVAL_SECONDS,
+      parseInt(process.env.RETENTION_CLEANUP_INTERVAL_SECONDS, 10) || DEFAULT_INTERVAL_SECONDS
     );
+    this.intervalMs = intervalSeconds * 1000;
 
     this.timer = null;
   }

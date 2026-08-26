@@ -73,9 +73,28 @@ const logger = require('../config/logger').createLogger('SubscriptionPoller');
  * contributes its `lastEventTime` whatever its status, which is all
  * Requirement 3.2 ever said.
  *
- * `GET /Marti/api/subscriptions/all` was rejected as the source: its
- * `SubscriptionInfo.clientUid` was empty in 14 of 16 live entries, so most rows
- * cannot be joined to a Device (Requirement 13.2).
+ * `GET /Marti/api/subscriptions/all` was rejected as the PRIMARY source: its
+ * `SubscriptionInfo.clientUid` was empty in 14 of 16 live entries (12 of 14 on
+ * a later live check -- the remaining 2 were CloudTAK's own ETL/service
+ * ingest connections, identified by `dn` instead), so most rows cannot be
+ * joined to a Device (Requirement 13.2). It IS used as a SUPPLEMENTARY
+ * freshness signal for the minority of entries that DO carry a `clientUid` --
+ * see `mergeSubscriptionFreshness()` below.
+ *
+ * WHY A SECOND SOURCE AT ALL. `ClientEndpoint.lastEventTime` (the primary
+ * source, above) is not a heartbeat: verified live, a CloudTAK connection's
+ * `lastStatus` stayed `"Connected"` across many consecutive polls while its
+ * `lastEventTime` sat unchanged for over 20 minutes, only advancing when TAK
+ * Server next logged a discrete event for it. `SubscriptionInfo.
+ * lastReportMilliseconds`, from the SAME live-subscription table TAK
+ * Server's own admin UI (`/Marti/clients/index.html`) reads, tracks that same
+ * connection's freshness far more granularly -- observed advancing multiple
+ * times within one minute. `mergeSubscriptionFreshness()` takes the greater
+ * of the two per reported uid, under the same Monotonic_Guard the primary
+ * source already applies, so a currently-live connection's Last_Seen reflects
+ * whichever source most recently observed it, while a Device this endpoint
+ * cannot identify (no `clientUid`, e.g. every ETL connection) is entirely
+ * unaffected -- it keeps relying on `lastEventTime` alone, exactly as before.
  *
  * Last_Seen is derived ONLY from TAK Server's Marti HTTP API -- this feature
  * never queries TAK Server's `cot_router` table or any TAK Server database
@@ -117,14 +136,17 @@ class SubscriptionPoller {
     // only a lower bound is clamped here -- guarding against a misconfigured
     // near-zero interval turning this into a tight loop against TAK Server
     // and the database. Same `parseInt(...) || <default>` + `Math.max` clamp
-    // pattern the sibling schedulers use.
-    const MIN_INTERVAL_MS = 60000; // 1 minute
-    const DEFAULT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+    // pattern the sibling schedulers use, clamped in seconds and converted to
+    // milliseconds once at the end -- the field stays `intervalMs` because
+    // `setInterval` takes milliseconds.
+    const MIN_INTERVAL_SECONDS = 60; // 1 minute
+    const DEFAULT_INTERVAL_SECONDS = 5 * 60; // 5 minutes
 
-    this.intervalMs = Math.max(
-      MIN_INTERVAL_MS,
-      parseInt(process.env.DEVICE_MGMT_POLL_INTERVAL_MS, 10) || DEFAULT_INTERVAL_MS
+    const intervalSeconds = Math.max(
+      MIN_INTERVAL_SECONDS,
+      parseInt(process.env.DEVICE_MGMT_POLL_INTERVAL_SECONDS, 10) || DEFAULT_INTERVAL_SECONDS
     );
+    this.intervalMs = intervalSeconds * 1000;
 
     this.timer = null;
   }
@@ -220,17 +242,22 @@ class SubscriptionPoller {
    * alias would be invisible (Requirement 22.6).
    *
    * @returns {Promise<{entries: number, observed: number, skipped: number,
-   *   updated: number, failed: number, connected: number,
+   *   freshened: number, updated: number, failed: number, connected: number,
    *   disconnected: number, unreported: number}|undefined>} per-run counts --
    *   `ClientEndpoint` entries returned, reported `uid`s carrying a parseable
-   *   `lastEventTime`, entries skipped for the Last_Seen write, DEVICE_TABLE
+   *   `lastEventTime`, entries skipped for the Last_Seen write, reported
+   *   `uid`s the live-subscriptions merge advanced beyond the primary
+   *   source alone (always 0 when that best-effort fetch failed or found
+   *   nothing to advance -- see `mergeSubscriptionFreshness()`), DEVICE_TABLE
    *   ROWS the per-uid writes matched (not reported `uid`s: one entry's
    *   Candidate_Client_Uids may match more than one row -- Requirement 22.8),
    *   writes that errored, reported `uid`s
    *   collapsed to connected and to not connected, and rows set not connected
-   *   for having gone unreported -- or `undefined` when the fetch failed or
-   *   returned a malformed payload -- already logged with `outcome: 'failed'`,
-   *   having touched no `last_seen_at` and no `connected`.
+   *   for having gone unreported -- or `undefined` when the PRIMARY fetch
+   *   failed or returned a malformed payload -- already logged with
+   *   `outcome: 'failed'`, having touched no `last_seen_at` and no
+   *   `connected`. The freshening fetch failing does NOT produce `undefined`
+   *   here; see above.
    */
   async run() {
     let clientEndpoints;
@@ -289,6 +316,37 @@ class SubscriptionPoller {
 
     const { reportedByUid, skipped } = extractLastEventTimes(entries);
 
+    // Requirement 13 freshening follow-up: BEST-EFFORT ONLY. Unlike the fetch
+    // above, a failure here must not abort the run or touch `outcome` -- the
+    // primary source (`getClientEndpoints()`) is already a complete, correct
+    // history on its own, so this second source is additive in the same sense
+    // Requirement 22.2 already established for the Connection_Alias:
+    // candidates are ADDED beside the reported uid, never substituted for it.
+    // A malformed or unreachable freshening source therefore costs this poll
+    // only the extra granularity it would have added, logged at WARN (not
+    // ERROR, and not `outcome: 'failed'`) precisely so it is never confused
+    // with the primary fetch failing.
+    let freshened = 0;
+    try {
+      const liveSubscriptions = await this.takServerService.getAllSubscriptions();
+      if (Array.isArray(liveSubscriptions)) {
+        freshened = mergeSubscriptionFreshness(reportedByUid, liveSubscriptions);
+      } else {
+        logger.warn(
+          {
+            endpoint: LIVE_SUBSCRIPTIONS_PATH,
+            payloadType: describePayloadType(liveSubscriptions)
+          },
+          'Subscription poll received a malformed live-subscriptions payload; skipping last-seen freshening for this poll'
+        );
+      }
+    } catch (error) {
+      logger.warn(
+        { err: error, endpoint: LIVE_SUBSCRIPTIONS_PATH },
+        'Subscription poll failed to reach the live subscriptions API; last-seen freshening skipped for this poll'
+      );
+    }
+
     const counts = {
       entries: entries.length,
       // Reported `uid`s whose Last_Seen this poll can move. Deliberately NOT
@@ -297,6 +355,12 @@ class SubscriptionPoller {
       // but no timestamp (Requirements 13.6, 20.4).
       observed: countWithUsableTime(reportedByUid),
       skipped,
+      // Reported uids whose `lastEventTime` the live-subscriptions merge above
+      // advanced further than the primary source alone would have. Zero on a
+      // poll where the freshening fetch failed or found nothing to advance --
+      // never a sign that something is wrong, since this whole step is
+      // best-effort (see above).
+      freshened,
       updated: 0,
       failed: 0,
       connected: 0,
@@ -530,6 +594,15 @@ class SubscriptionPoller {
 const CLIENT_ENDPOINTS_PATH = '/Marti/api/clientEndPoints';
 
 /**
+ * The freshening source's path (Requirement 13 freshening), named only for
+ * log lines -- unlike `CLIENT_ENDPOINTS_PATH` it does not gate a failed-run
+ * report, because a failure here costs this poll only the freshening step
+ * (Requirement 13.2's rejection of this endpoint as a join-key source is
+ * unaffected: this constant exists for logging, not for a new failure path).
+ */
+const LIVE_SUBSCRIPTIONS_PATH = '/Marti/api/subscriptions/all';
+
+/**
  * Requirement 14.1 ("log the failure as an error ... with the endpoint and the
  * status"): describes a failed documented-endpoint fetch as the two fields the
  * error log carries beyond `err`.
@@ -576,6 +649,78 @@ function describeFetchFailure(error, fallbackEndpoints) {
     typeof url === 'string' && url.length > 0 ? url : fallbackEndpoints.join(', ');
 
   return { endpoint, status };
+}
+
+/**
+ * Advances a reported uid's `lastEventTime` using TAK Server's live
+ * subscription table wherever it reports a MORE RECENT observation for that
+ * SAME uid than the primary source did this poll -- see the file header for
+ * why a second source exists at all (a currently-live connection's
+ * `lastEventTime` can sit unchanged for many minutes while its live
+ * subscription entry advances every few seconds). Mutates `reportedByUid` in
+ * place, matching `extractLastEventTimes`'s own collapse-in-place shape, and
+ * returns the count of uids it actually advanced, for the run summary's
+ * `freshened` field.
+ *
+ * ADDITIVE ONLY, for the same reason Requirement 22.2's Candidate_Client_Uids
+ * rule is additive only: a uid the PRIMARY source already reported THIS poll
+ * is eligible to be freshened; a uid this endpoint names but
+ * `getClientEndpoints()` did not report this poll is left alone entirely --
+ * it is NOT inserted as a new reported uid and does NOT gain a `connected`
+ * value from this source. That keeps `counts.connected`/`counts.disconnected`
+ * derived from exactly one source, unaffected by this merge, and keeps this
+ * change scoped to freshening a timestamp the primary source under-reports
+ * the granularity of -- not to widening which uids a poll can report, and not
+ * to re-deriving Connection_Status from a second source.
+ *
+ * `SubscriptionInfo.clientUid` is EMPTY for the majority of live entries --
+ * verified live, every CloudTAK ETL/service ingest connection, identified by
+ * `dn` instead -- so those entries are silently skipped here rather than
+ * logged as unusable: an empty `clientUid` is the NORMAL shape for a
+ * non-Device connection, not a data defect (contrast
+ * `extractLastEventTimes`'s `logger.warn` for an unusable `lastEventTime` on
+ * an entry that DOES carry a uid).
+ *
+ * Exact string equality against the uid, matching `extractLastEventTimes`'s
+ * own join and the Candidate_Client_Uids discipline elsewhere in this file --
+ * no `LIKE`, no prefix, no wildcard.
+ *
+ * PURE and TOTAL over its `liveSubscriptions` argument: a non-object entry, a
+ * missing/empty/non-string `clientUid`, and a missing/non-finite
+ * `lastReportMilliseconds` are each skipped rather than thrown on, since this
+ * whole step is best-effort (Requirement 13 freshening) and must never be
+ * what turns a poll that reached both endpoints into a failed one.
+ *
+ * @param {Map<string, {lastEventTime: Date|null, connected: boolean}>} reportedByUid
+ *   this poll's reported-uid map, from `extractLastEventTimes()`. Mutated in
+ *   place.
+ * @param {Array<unknown>} liveSubscriptions the `SubscriptionInfo` list from
+ *   `TakServerService.getAllSubscriptions()`.
+ * @returns {number} the number of uids whose `lastEventTime` this call moved
+ *   forward.
+ */
+function mergeSubscriptionFreshness(reportedByUid, liveSubscriptions) {
+  let freshened = 0;
+
+  for (const subscription of liveSubscriptions) {
+    const clientUid = subscription && typeof subscription === 'object' ? subscription.clientUid : null;
+    if (typeof clientUid !== 'string' || clientUid.length === 0) continue;
+
+    // Additive only -- see doc comment: a uid the primary source did not
+    // report this poll is left untouched, never inserted here.
+    const incumbent = reportedByUid.get(clientUid);
+    if (incumbent === undefined) continue;
+
+    const reportMs = subscription.lastReportMilliseconds;
+    if (typeof reportMs !== 'number' || !Number.isFinite(reportMs)) continue;
+
+    if (incumbent.lastEventTime === null || reportMs > incumbent.lastEventTime.getTime()) {
+      incumbent.lastEventTime = new Date(reportMs);
+      freshened += 1;
+    }
+  }
+
+  return freshened;
 }
 
 /**
@@ -761,3 +906,4 @@ function parseLastEventTime(lastEventTime) {
 module.exports = SubscriptionPoller;
 module.exports.extractLastEventTimes = extractLastEventTimes;
 module.exports.parseLastEventTime = parseLastEventTime;
+module.exports.mergeSubscriptionFreshness = mergeSubscriptionFreshness;

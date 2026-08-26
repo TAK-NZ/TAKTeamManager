@@ -62,7 +62,34 @@ const REDACT_PATHS = [
   'payload.last_name',
   'payload.password',
   'payload.service_account_password',
-  'payload.authentik_admin_token'
+  'payload.authentik_admin_token',
+  // takserver-enrollment Requirement 11.5: a net, not the control. These
+  // five paths are a cheap defensive backstop for an ACCIDENTAL
+  // `logger.info({ qrCode })`-style call on a non-debug deployment --
+  // they are NOT what protects a live enrollment credential, and nobody
+  // should read their presence that way. Two verified properties of this
+  // file make redaction unusable as that guarantee: (1) the `redact`
+  // option above is omitted ENTIRELY when `LOG_LEVEL=debug`, so a debug
+  // deployment prints whatever it is handed, unredacted, regardless of
+  // this list; and (2) pino redacts by PATH, not by VALUE, so a token
+  // embedded inside a larger string -- e.g. a token key inside
+  // `atakEnrollmentUri`'s query string, or inside a JSON-stringified
+  // `itakRegistrationPayload` -- matches none of these paths even when
+  // redaction IS active, because the token there is a substring, not its
+  // own top-level field. The REAL control is that no enrollment artifact
+  // (token, QR data URL, payload) is ever passed to a log call at any
+  // level in the first place, enforced/verified by Property 13
+  // (`server/routes/__tests__/enrollment.secretMaterial.property.test.js`),
+  // which scans every captured logger argument for the token substring.
+  // Accepted blast radius: adding `key` affects EVERY log line in the
+  // whole application that happens to carry a field literally named
+  // `key`, not only this feature's token key -- a cheap addition with a
+  // small but real blast radius, for a small but real benefit.
+  'key',
+  'atakEnrollmentUri',
+  'atakQrDataUrl',
+  'itakQrDataUrl',
+  'itakRegistrationPayload'
 ];
 
 const REDACT_CENSOR = '[REDACTED]';

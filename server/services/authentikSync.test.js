@@ -291,7 +291,12 @@ describe('AuthentikSyncService.processBatch concurrency (Requirement 11.2)', () 
 
   it('calls db.query twice per user in the batch (users + user_cache) regardless of concurrency setting', async () => {
     const users = makeUsers(12);
-    db.query.mockResolvedValue({ rows: [] });
+    db.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO users')) {
+        return Promise.resolve({ rows: [{ id: 1, is_team_device: false }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
 
     await authentikSync.processBatch(users, {});
 
@@ -310,7 +315,13 @@ describe('AuthentikSyncService.processBatch concurrency (Requirement 11.2)', () 
     });
   });
 
-  it('skips the INSERT INTO users call (but still writes user_cache) for a user with no email', async () => {
+  // takserver-enrollment Requirement 5.6: this test previously pinned the
+  // BUG this task fixes -- the old `if (user.email)` guard silently
+  // excluded every emailless principal (including every Team_Owned_Device)
+  // from the local `users` table entirely. The guard is removed, so the
+  // INSERT INTO users is now attempted for an emailless principal too, with
+  // `null` (not '') bound to its email parameter via normaliseAuthentikEmail.
+  it('no longer skips the INSERT INTO users call for a user with no email (guard removed; null bound to both upserts)', async () => {
     const serviceAccountUser = {
       pk: 'user-svc-1',
       username: 'etl-adsbx',
@@ -323,21 +334,21 @@ describe('AuthentikSyncService.processBatch concurrency (Requirement 11.2)', () 
 
     await authentikSync.processBatch([serviceAccountUser], {});
 
-    // Only the user_cache upsert should run; the users upsert is skipped
-    // because there's no email to satisfy the UNIQUE NOT NULL constraint.
-    expect(db.query).toHaveBeenCalledTimes(1);
+    // Both upserts run: the users upsert (no local row returned by this
+    // mock, so the push-to-Authentik step below is skipped) and the
+    // user_cache upsert.
+    expect(db.query).toHaveBeenCalledTimes(2);
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO users'),
+      [serviceAccountUser.pk, serviceAccountUser.username, null, serviceAccountUser.username, '', null]
+    );
     expect(db.query).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO user_cache'),
-      expect.arrayContaining([serviceAccountUser.pk, serviceAccountUser.username])
+      expect.arrayContaining([serviceAccountUser.pk, serviceAccountUser.username, null])
     );
-
-    const usersInsertCalls = db.query.mock.calls.filter(([sql]) =>
-      typeof sql === 'string' && sql.includes('INSERT INTO users')
-    );
-    expect(usersInsertCalls).toHaveLength(0);
   });
 
-  it('skips the INSERT INTO users call for a user with an undefined email', async () => {
+  it('no longer skips the INSERT INTO users call for a user with an undefined email (guard removed; null bound to both upserts)', async () => {
     const serviceAccountUser = {
       pk: 'user-svc-2',
       username: 'ak-outpost-1234',
@@ -350,11 +361,11 @@ describe('AuthentikSyncService.processBatch concurrency (Requirement 11.2)', () 
 
     await authentikSync.processBatch([serviceAccountUser], {});
 
-    expect(db.query).toHaveBeenCalledTimes(1);
-    const usersInsertCalls = db.query.mock.calls.filter(([sql]) =>
-      typeof sql === 'string' && sql.includes('INSERT INTO users')
+    expect(db.query).toHaveBeenCalledTimes(2);
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO users'),
+      [serviceAccountUser.pk, serviceAccountUser.username, null, serviceAccountUser.username, '', null]
     );
-    expect(usersInsertCalls).toHaveLength(0);
   });
 
   it('still performs both INSERT INTO users and INSERT INTO user_cache for a user with an email', async () => {
@@ -366,11 +377,17 @@ describe('AuthentikSyncService.processBatch concurrency (Requirement 11.2)', () 
       is_active: true,
       attributes: {}
     };
-    db.query.mockResolvedValue({ rows: [] });
+    db.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO users')) {
+        return Promise.resolve({ rows: [{ id: 42, is_team_device: false }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
 
     await authentikSync.processBatch([humanUser], {});
 
-    // 2 inserts (users + user_cache) + 2 SELECTs for push-to-Authentik check
+    // 2 inserts (users + user_cache) + 2 SELECTs for push-to-Authentik check,
+    // reached because the users upsert's RETURNING id resolved a local row.
     expect(db.query).toHaveBeenCalledTimes(4);
     expect(db.query).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO users'),
@@ -389,6 +406,9 @@ describe('AuthentikSyncService.processBatch concurrency (Requirement 11.2)', () 
     db.query.mockImplementation((sql, params) => {
       if (params && params[0] === failingUser.pk) {
         return Promise.reject(new Error('insert failed'));
+      }
+      if (typeof sql === 'string' && sql.includes('INSERT INTO users')) {
+        return Promise.resolve({ rows: [{ id: 1, is_team_device: false }] });
       }
       return Promise.resolve({ rows: [] });
     });
@@ -666,5 +686,511 @@ describe('AuthentikSyncService.startPeriodicSync fire-and-forget backstop', () =
     );
 
     syncSpy.mockRestore();
+  });
+});
+
+describe('AuthentikSyncService.startPeriodicSync interval configuration', () => {
+  const originalEnv = process.env.SYNC_INTERVAL_MINUTES;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    authentikSync.isRunning = false;
+  });
+
+  afterEach(() => {
+    if (originalEnv === undefined) {
+      delete process.env.SYNC_INTERVAL_MINUTES;
+    } else {
+      process.env.SYNC_INTERVAL_MINUTES = originalEnv;
+    }
+  });
+
+  // Asserts the CLAMPED delay startPeriodicSync() actually hands to
+  // `setInterval`, by spying on the global rather than driving fake timers
+  // across repeated calls on the shared singleton (which has no
+  // stop()/clearInterval counterpart, so leftover intervals from an earlier
+  // case would otherwise keep firing into a later one).
+  //
+  // `0` is deliberately included as its own case, not folded into the
+  // "clamped up" case above: `parseInt('0', 10) || DEFAULT_INTERVAL_MINUTES`
+  // reads `0` as falsy in JS, so it takes the OR's right-hand default before
+  // the clamp ever runs -- landing on the 10-minute default, not the
+  // 1-minute floor. A negative value is not falsy, so it DOES reach the
+  // clamp and IS raised to the floor. Both outcomes are correct; asserting
+  // them separately is what would catch a change that broke either path.
+  it.each([
+    ['unset, defaults to 10 minutes', undefined, 10],
+    ['5 minutes, above the floor, respected as configured', '5', 5],
+    ['0, falsy to parseInt(...) ||, falls back to the 10-minute default', '0', 10],
+    ['a negative value, clamped up to the 1-minute floor', '-5', 1],
+    ['non-numeric, falls back to the 10-minute default', 'often', 10]
+  ])('%s', (_label, configuredValue, expectedMinutes) => {
+    if (configuredValue === undefined) {
+      delete process.env.SYNC_INTERVAL_MINUTES;
+    } else {
+      process.env.SYNC_INTERVAL_MINUTES = configuredValue;
+    }
+
+    // Neither mock invokes its callback or schedules a real timer -- this
+    // test only inspects the arguments startPeriodicSync() passed.
+    const intervalSpy = jest.spyOn(global, 'setInterval').mockImplementation(() => 0);
+    const timeoutSpy = jest.spyOn(global, 'setTimeout').mockImplementation(() => 0);
+
+    authentikSync.startPeriodicSync();
+
+    expect(intervalSpy).toHaveBeenCalledWith(expect.any(Function), expectedMinutes * 60 * 1000);
+
+    intervalSpy.mockRestore();
+    timeoutSpy.mockRestore();
+  });
+});
+
+describe('AuthentikSyncService.syncSingleUser email normalisation (normalise-once, bind-twice) (takserver-enrollment Requirements 5.2, 5.5)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    console.error = jest.fn();
+    console.log = jest.fn();
+  });
+
+  it('binds null to BOTH the users upsert and the user_cache upsert for an empty-string Authentik email', async () => {
+    const user = {
+      pk: 'user-empty-email',
+      username: 'empty-email-user',
+      email: '',
+      groups: [],
+      is_active: true,
+      attributes: {}
+    };
+    db.query.mockResolvedValue({ rows: [{ id: 1, is_team_device: false }] });
+
+    await authentikSync.processBatch([user], {});
+
+    const [, usersParams] = db.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO users'));
+    const [, cacheParams] = db.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO user_cache'));
+
+    // The email parameter sits at index 2 in both upserts' parameter lists.
+    expect(usersParams[2]).toBeNull();
+    expect(cacheParams[2]).toBeNull();
+  });
+
+  it('binds the same trimmed value to both upserts for a real Authentik email', async () => {
+    const user = {
+      pk: 'user-real-email',
+      username: 'real-email-user',
+      email: '  real@example.com  ',
+      groups: [],
+      is_active: true,
+      attributes: {}
+    };
+    db.query.mockResolvedValue({ rows: [{ id: 2, is_team_device: false }] });
+
+    await authentikSync.processBatch([user], {});
+
+    const [, usersParams] = db.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO users'));
+    const [, cacheParams] = db.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO user_cache'));
+
+    expect(usersParams[2]).toBe('real@example.com');
+    expect(cacheParams[2]).toBe('real@example.com');
+  });
+
+  it('binds null to both upserts for a whitespace-only Authentik email', async () => {
+    const user = {
+      pk: 'user-whitespace-email',
+      username: 'whitespace-email-user',
+      email: '   \t\n  ',
+      groups: [],
+      is_active: true,
+      attributes: {}
+    };
+    db.query.mockResolvedValue({ rows: [{ id: 3, is_team_device: false }] });
+
+    await authentikSync.processBatch([user], {});
+
+    const [, usersParams] = db.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO users'));
+    const [, cacheParams] = db.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO user_cache'));
+
+    expect(usersParams[2]).toBeNull();
+    expect(cacheParams[2]).toBeNull();
+  });
+});
+
+describe('AuthentikSyncService.syncSingleUser the users_email_required_unless_device CHECK-constraint catch is exact (takserver-enrollment Requirement 5.6)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    console.error = jest.fn();
+    console.log = jest.fn();
+  });
+
+  it('logs its OWN warn naming the Authentik user id and skips BOTH writes when the users upsert violates users_email_required_unless_device exactly', async () => {
+    const user = {
+      pk: 'user-check-violation',
+      username: 'no-email-no-device',
+      email: '',
+      groups: [],
+      is_active: true,
+      attributes: {}
+    };
+    const checkError = new Error('violates check constraint "users_email_required_unless_device"');
+    checkError.code = '23514';
+    checkError.constraint = 'users_email_required_unless_device';
+
+    db.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO users')) {
+        return Promise.reject(checkError);
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await authentikSync.processBatch([user], {});
+
+    expect(mockLoggerInstance.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ authentikUserId: user.pk }),
+      expect.any(String)
+    );
+
+    const userCacheWrites = db.query.mock.calls.filter(
+      ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO user_cache')
+    );
+    expect(userCacheWrites).toHaveLength(0);
+
+    // This condition is normal by design and must not share the blanket
+    // catch's generic 'Failed to sync user' log line.
+    expect(mockLoggerInstance.error).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'Failed to sync user'
+    );
+  });
+
+  it('propagates a plain network/other error into the outer per-user catch instead of the narrow warn path', async () => {
+    const user = {
+      pk: 'user-network-error',
+      username: 'network-error-user',
+      email: 'x@example.com',
+      groups: [],
+      is_active: true,
+      attributes: {}
+    };
+    const networkError = new Error('ECONNRESET');
+
+    db.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO users')) {
+        return Promise.reject(networkError);
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await authentikSync.processBatch([user], {});
+
+    expect(mockLoggerInstance.warn).not.toHaveBeenCalled();
+    expect(mockLoggerInstance.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: networkError, username: user.username }),
+      'Failed to sync user'
+    );
+  });
+
+  it('propagates a 23514 rejection on a DIFFERENT constraint into the outer per-user catch instead of the narrow warn path', async () => {
+    const user = {
+      pk: 'user-different-constraint',
+      username: 'different-constraint-user',
+      email: 'y@example.com',
+      groups: [],
+      is_active: true,
+      attributes: {}
+    };
+    const differentCheckError = new Error('violates check constraint "user_cache_email_required_unless_device"');
+    differentCheckError.code = '23514';
+    differentCheckError.constraint = 'user_cache_email_required_unless_device';
+
+    db.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO users')) {
+        return Promise.reject(differentCheckError);
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await authentikSync.processBatch([user], {});
+
+    expect(mockLoggerInstance.warn).not.toHaveBeenCalled();
+    expect(mockLoggerInstance.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: differentCheckError, username: user.username }),
+      'Failed to sync user'
+    );
+  });
+
+  it('propagates a 23505 unique-violation into the outer per-user catch instead of the narrow warn path', async () => {
+    const user = {
+      pk: 'user-unique-violation',
+      username: 'unique-violation-user',
+      email: 'z@example.com',
+      groups: [],
+      is_active: true,
+      attributes: {}
+    };
+    const uniqueError = new Error('duplicate key value violates unique constraint "users_username_key"');
+    uniqueError.code = '23505';
+    uniqueError.constraint = 'users_username_key';
+
+    db.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO users')) {
+        return Promise.reject(uniqueError);
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await authentikSync.processBatch([user], {});
+
+    expect(mockLoggerInstance.warn).not.toHaveBeenCalled();
+    expect(mockLoggerInstance.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: uniqueError, username: user.username }),
+      'Failed to sync user'
+    );
+  });
+});
+
+describe('AuthentikSyncService.syncSingleUser push-to-Authentik guard is keyed on localUserId, not email (takserver-enrollment Requirement 5.6)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    console.error = jest.fn();
+    console.log = jest.fn();
+  });
+
+  it('reaches the push-to-Authentik comparison for a device user with no email but a resolved localUserId', async () => {
+    const deviceUser = {
+      pk: 'device-1',
+      username: 'AUK-D7K3QMX',
+      email: '',
+      groups: [],
+      is_active: true,
+      attributes: {}
+    };
+
+    db.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO users')) {
+        return Promise.resolve({ rows: [{ id: 99, is_team_device: true }] });
+      }
+      if (typeof sql === 'string' && sql.includes('SELECT first_name, last_name, tak_role, is_active FROM users')) {
+        return Promise.resolve({ rows: [{ first_name: 'Device', last_name: '', tak_role: 'Team Member', is_active: true }] });
+      }
+      if (typeof sql === 'string' && sql.includes('SELECT tak_callsign, tak_color FROM user_cache')) {
+        return Promise.resolve({ rows: [{ tak_callsign: '', tak_color: '' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await authentikSync.processBatch([deviceUser], {});
+
+    const localSelect = db.query.mock.calls.find(([sql]) =>
+      typeof sql === 'string' && sql.includes('SELECT first_name, last_name, tak_role, is_active FROM users')
+    );
+    const cacheSelect = db.query.mock.calls.find(([sql]) =>
+      typeof sql === 'string' && sql.includes('SELECT tak_callsign, tak_color FROM user_cache')
+    );
+
+    expect(localSelect).toBeDefined();
+    expect(cacheSelect).toBeDefined();
+  });
+
+  it('does NOT reach the push-to-Authentik comparison when the users upsert RETURNING resolved no row (no localUserId)', async () => {
+    const user = {
+      pk: 'user-no-local-row',
+      username: 'no-local-row-user',
+      email: '',
+      groups: [],
+      is_active: true,
+      attributes: {}
+    };
+
+    db.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO users')) {
+        return Promise.resolve({ rows: [] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await authentikSync.processBatch([user], {});
+
+    const localSelect = db.query.mock.calls.find(([sql]) =>
+      typeof sql === 'string' && sql.includes('SELECT first_name, last_name, tak_role, is_active FROM users')
+    );
+    const cacheSelect = db.query.mock.calls.find(([sql]) =>
+      typeof sql === 'string' && sql.includes('SELECT tak_callsign, tak_color FROM user_cache')
+    );
+
+    expect(localSelect).toBeUndefined();
+    expect(cacheSelect).toBeUndefined();
+  });
+});
+
+describe('AuthentikSyncService.syncSingleUser is_team_device threading into user_cache (takserver-enrollment Requirement 5.6)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    console.error = jest.fn();
+    console.log = jest.fn();
+  });
+
+  it('includes is_team_device=true, sourced from the users upsert RETURNING, in the user_cache INSERT for a device row', async () => {
+    const deviceUser = {
+      pk: 'device-2',
+      username: 'AUK-D9Z2XQP',
+      email: '',
+      groups: [],
+      is_active: true,
+      attributes: {}
+    };
+    db.query.mockResolvedValue({ rows: [{ id: 5, is_team_device: true }] });
+
+    await authentikSync.processBatch([deviceUser], {});
+
+    const [cacheSql, cacheParams] = db.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO user_cache'));
+    // is_team_device is the 12th positional parameter (index 11).
+    expect(cacheParams[11]).toBe(true);
+    const updateSetClause = cacheSql.slice(cacheSql.indexOf('DO UPDATE SET'));
+    expect(updateSetClause).not.toContain('is_team_device');
+  });
+
+  it('includes is_team_device=false, sourced from the users upsert RETURNING, in the user_cache INSERT for a human row', async () => {
+    const humanUser = {
+      pk: 'human-1',
+      username: 'human-user',
+      email: 'human@example.com',
+      groups: [],
+      is_active: true,
+      attributes: {}
+    };
+    db.query.mockResolvedValue({ rows: [{ id: 6, is_team_device: false }] });
+
+    await authentikSync.processBatch([humanUser], {});
+
+    const [cacheSql, cacheParams] = db.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO user_cache'));
+    expect(cacheParams[11]).toBe(false);
+    const updateSetClause = cacheSql.slice(cacheSql.indexOf('DO UPDATE SET'));
+    expect(updateSetClause).not.toContain('is_team_device');
+  });
+
+  it('lists is_team_device in the user_cache INSERT column list but NEVER in its ON CONFLICT DO UPDATE SET column list', async () => {
+    const user = {
+      pk: 'human-2',
+      username: 'human-user-2',
+      email: 'human2@example.com',
+      groups: [],
+      is_active: true,
+      attributes: {}
+    };
+    db.query.mockResolvedValue({ rows: [{ id: 7, is_team_device: false }] });
+
+    await authentikSync.processBatch([user], {});
+
+    const [cacheSql] = db.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO user_cache'));
+    const conflictIndex = cacheSql.indexOf('DO UPDATE SET');
+    const insertColumnList = cacheSql.slice(cacheSql.indexOf('INSERT INTO user_cache'), cacheSql.indexOf('VALUES'));
+    const updateSetClause = cacheSql.slice(conflictIndex);
+
+    expect(insertColumnList).toContain('is_team_device');
+    expect(updateSetClause).not.toContain('is_team_device');
+  });
+});
+
+describe('AuthentikSyncService.syncSingleUser reconciles an EXISTING Team_Owned_Device on every sync (bugfix found in takserver-enrollment task 12.2 live verification)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    console.error = jest.fn();
+    console.log = jest.fn();
+  });
+
+  // Regression test. Against the unfixed code, the `users` upsert statement
+  // omitted `is_team_device` from its INSERT column list, so Postgres
+  // checked the tentative INSERT tuple -- which carries `is_team_device` at
+  // its column DEFAULT (false), since the column was never mentioned --
+  // against the `users_email_required_unless_device` CHECK constraint
+  // BEFORE `ON CONFLICT ... DO UPDATE` ever ran (Postgres evaluates
+  // constraints against the proposed row prior to conflict resolution).
+  // For an EXISTING Team_Owned_Device row (email NULL, is_team_device
+  // already true in the ACTUAL stored row), that made the tentative tuple
+  // (email=NULL, is_team_device=false) violate the CHECK constraint on
+  // every single sync run, even though the real stored row already
+  // satisfied it. The narrow 23514 catch then misclassified this as
+  // "genuinely emailless principal with no local row" and silently skipped
+  // both the `users` and `user_cache` writes -- the device kept working
+  // (nothing revoked its certificate) but was never reconciled by sync
+  // again, and the skip was indistinguishable in the logs from the
+  // legitimate emailless-service-account case.
+  it('does NOT violate users_email_required_unless_device for an existing Team_Owned_Device with email=NULL, and reconciles user_cache with is_team_device=true/email=NULL', async () => {
+    const deviceUser = {
+      pk: 'device-existing-1',
+      username: 'AUK-D7K3QMX',
+      email: '', // Authentik's Empty_String_Email for a device account
+      groups: [],
+      is_active: true,
+      attributes: {}
+    };
+
+    // Simulate Postgres's real behaviour for the FIXED statement: the
+    // subquery reads the existing stored is_team_device (true) and the
+    // CHECK constraint is satisfied because is_team_device evaluates to
+    // true in the tentative tuple, so the INSERT ... ON CONFLICT succeeds
+    // and returns the existing row's id and is_team_device.
+    db.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO users')) {
+        // A correct implementation must read the EXISTING is_team_device
+        // value (true) rather than defaulting to false -- assert the SQL
+        // text actually performs that read, so a fix that instead widens
+        // the CHECK constraint or otherwise sidesteps the read would fail
+        // this test rather than passing it by coincidence.
+        expect(sql).toMatch(/is_team_device/);
+        return Promise.resolve({ rows: [{ id: 501, is_team_device: true }] });
+      }
+      if (typeof sql === 'string' && sql.includes('SELECT first_name, last_name, tak_role, is_active FROM users')) {
+        return Promise.resolve({ rows: [{ first_name: 'Device', last_name: '', tak_role: 'Team Member', is_active: true }] });
+      }
+      if (typeof sql === 'string' && sql.includes('SELECT tak_callsign, tak_color FROM user_cache')) {
+        return Promise.resolve({ rows: [{ tak_callsign: '', tak_color: '' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await authentikSync.processBatch([deviceUser], {});
+
+    // The narrow 23514 skip path must NOT have fired: no warn was logged,
+    // and no error was logged either. This is the "no thrown 23514" half
+    // of the criterion.
+    expect(mockLoggerInstance.warn).not.toHaveBeenCalled();
+    expect(mockLoggerInstance.error).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'Failed to sync user'
+    );
+
+    // The users upsert was actually attempted with email=NULL (index 2).
+    const usersCall = db.query.mock.calls.find(([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO users'));
+    expect(usersCall).toBeDefined();
+    expect(usersCall[1][2]).toBeNull();
+
+    // user_cache ends up with is_team_device = true and email = NULL.
+    const cacheCall = db.query.mock.calls.find(([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO user_cache'));
+    expect(cacheCall).toBeDefined();
+    const [, cacheParams] = cacheCall;
+    expect(cacheParams[2]).toBeNull(); // email
+    expect(cacheParams[11]).toBe(true); // is_team_device
+  });
+
+  // The companion case: a genuinely NEW principal (no existing users row)
+  // still defaults to is_team_device = false, so a first-time human sync is
+  // unaffected by the fix.
+  it('still defaults is_team_device to false for a genuinely NEW principal with no existing users row', async () => {
+    const newHumanUser = {
+      pk: 'brand-new-user',
+      username: 'brand-new-user',
+      email: 'brand-new@example.com',
+      groups: [],
+      is_active: true,
+      attributes: {}
+    };
+
+    db.query.mockResolvedValue({ rows: [{ id: 900, is_team_device: false }] });
+
+    await authentikSync.processBatch([newHumanUser], {});
+
+    const [cacheSql, cacheParams] = db.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO user_cache'));
+    expect(cacheParams[11]).toBe(false);
+    void cacheSql;
   });
 });
