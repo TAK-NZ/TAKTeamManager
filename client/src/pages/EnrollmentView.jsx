@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
+import { ClipboardDocumentIcon, ComputerDesktopIcon } from '@heroicons/react/24/outline'
+import toast from 'react-hot-toast'
 import { enrollmentAPI } from '../services/api'
 import EnrollmentCountdown from '../components/EnrollmentCountdown'
 import MultipleCertificateWarning from '../components/MultipleCertificateWarning'
@@ -6,100 +8,82 @@ import FormattedDate, { DATE_PRECISION } from '../components/FormattedDate'
 import { isAndroidClient } from '../utils/platformDetection'
 
 /**
- * Enrollment_View (takserver-enrollment Requirement 10, task 9.5).
+ * Enrollment_View (takserver-enrollment Requirement 10, task 9.5; UX
+ * correction: layout re-aligned to the retired Enrollment_Lambda's
+ * `content.ejs` -- Enrollment Data summary, Device Enrollment
+ * Requirements, a deferred "Generate Enrollment Data" action, and a
+ * three-tab QR/manual-entry surface).
  *
  * ONE component serving BOTH Enrollment_Principals from one API response
  * shape (Criterion 10.10): a signed-in Human_Principal enrolling their OWN
  * account (this page's default, via `enrollmentAPI.generateSelf()`), and a
  * Team_Owned_Device (the team-device surface, task 11.2/11.3, supplies its
- * own `fetchEnrollment` that calls `POST /api/devices/:deviceUserId/qr-code`
- * instead). Both server routes return `DeviceEnrollmentService#buildEnrollment`'s
- * identical object shape, so this component renders one thing regardless of
- * which principal it is showing -- the countdown, the Re_Enrollment_Date and
- * the payload rendering cannot diverge between the self view and the device
- * view, because there is exactly one of each here.
+ * own `fetchEnrollment`/`fetchPreview` pair that call
+ * `POST`/`GET /api/devices/:deviceUserId/qr-code|preview` instead). Both
+ * pairs of server routes return the SAME shapes, so this component renders
+ * one thing regardless of which principal it is showing.
+ *
+ * ## Preview first, mint only on an explicit click
+ *
+ * The "Enrollment Data" section (TAK Server / User or Device / Callsign /
+ * Team Color / Role / live-certificate note) never needs a live
+ * Enrollment_Token to render -- every value in it is either a local
+ * database column or a locally-derived attribute. This component therefore
+ * fetches a NO-MINT preview automatically on mount (`fetchPreview`), and
+ * defers the actual token mint (`fetchEnrollment`, which DOES call
+ * Authentik) to an explicit "Generate Enrollment Data" click.
+ *
+ * This is a deliberate correction to the original, single-phase design,
+ * which minted a fresh 30-minute Authentik `app_password` token on every
+ * page LOAD -- so a user who merely browsed Dashboard -> Enrollment ->
+ * Teams -> back to Enrollment minted a brand new live credential each
+ * time, for no reason. Splitting the fetch this way means the ONLY two
+ * times a token is minted are an explicit "Generate Enrollment Data" click
+ * and an explicit "Generate Enrollment Data" click after expiry -- never a
+ * page load, and never a background timer.
  *
  * ## What this page does NOT do, each a deliberate omission
  *
- * - **No polling, no interval, no background refresh of any kind.**
- *   Generating an enrollment payload mints a live 30-minute Authentik
- *   `app_password` token, so a page that quietly re-minted one on a timer
- *   would mint an unbounded number of live credentials for an idle open
- *   tab. The ONLY two times `fetchEnrollment` is called are on mount and on
- *   an explicit "Generate a new code" click, routed through
- *   `<EnrollmentCountdown onRegenerate={generate}>` (design decision 14).
- *   Because there is no interval, there is nothing here to pause when the
- *   tab is hidden and nothing to restart when it becomes visible again --
- *   unlike the Dashboard's auto-refreshing cards, this page needs none of
- *   that machinery.
+ * - **No polling, no interval, no background refresh of the MINTED
+ *   payload.** The only two times `generate` is called are an explicit
+ *   "Generate Enrollment Data" click and the SAME click again once expired
+ *   (routed through `<EnrollmentCountdown onRegenerate={generate}>`).
  * - **A failed generation never clears a previously rendered payload.**
  *   `generate` sets `error` on a rejection and leaves `enrollment` exactly
- *   as it was -- it is never set to `null` in the catch branch. So a
- *   "Generate a new code" click that fails leaves the EXPIRED code still on
- *   screen (following the client convention that a failed background
- *   refresh must never clear a rendered list, extended here to a page-level
- *   refresh triggered by the user rather than a timer) with the error and a
- *   Retry control rendered alongside it, never in its place.
- * - **No app-store badges.** Those moved to the Downloads_Page (Criteria
- *   10.11, 12.1); this file renders none, and `storeBadgeFidelity.test.jsx`
- *   /the Downloads tests assert the badges live there instead.
- * - **No two-request loading pattern and no branding switch.** The
- *   Enrollment_Lambda's `views/loader.ejs` -> `?load=true` sequence exists
- *   because a Lambda behind an ALB must answer before its own Authentik
- *   calls complete; a single-page application fetches asynchronously by
- *   construction and has no such constraint (Criterion 15.8). Likewise the
- *   Lambda's `BRANDING`/`getBrandingStrings` switch has no counterpart here
- *   -- TAK Team Manager already has its own site branding, and a second
- *   mechanism for it would be a second place to configure the same thing
- *   (Criterion 15.9).
+ *   as it was.
+ * - **No app-store badges.** Those live on the Downloads_Page.
+ * - **No two-request loading pattern and no branding switch.**
  *
  * ## The Re_Enrollment_Date is a future estimate, never a read of a certificate
  *
  * `enrollment.reEnrollmentDate` is computed server-side, at generation
- * time, as `now + 365 days` -- it describes when the certificate this code
- * is ABOUT TO ISSUE will need replacing, never a read of
- * `tak_devices.expires_at` (Criterion 10.3). The label below is worded to
- * say so explicitly (Criterion 10.4), and the date itself renders through
- * `<FormattedDate precision="date">` -- the ONLY non-test client module
- * permitted to import the Date_Format_Helpers
- * (`client/src/utils/dateFormatConsumers.test.js` enforces this as a set
- * equality), so this page imports `FormattedDate` and never
- * `formatDate`/`formatDateTime` directly (Criterion 10.9).
+ * time, as `now + 365 days`. Rendered through `<FormattedDate
+ * precision="date">` -- the ONLY non-test client module permitted to
+ * import the Date_Format_Helpers.
  *
  * ## Android_Only_Suppression removes the deep link, never merely hides it
  *
- * The ATAK deep link (`tak://com.atakmap.app/enroll?...`) resolves to
- * nothing on a client with no ATAK installed, and a link that resolves
- * nowhere is a link that does nothing when a keyboard user tabs to it --
- * so on a non-Android client the `<a>` is removed from the DOM entirely
- * (Criterion 10.6), not hidden with `hidden`/`display:none`/`opacity-0`.
- * Detection runs ONCE, via `isAndroidClient(navigator)` -- the real global,
- * passed explicitly per that function's designed API, which never reaches
- * for `navigator` itself so a property test can hand it hostile shapes.
- * BOTH QR codes keep rendering regardless: they are scanned by a SECOND
- * device and are useful on any platform, and only the deep link, which
- * acts on the CURRENT device, is platform-bound (Criterion 10.7).
+ * On a non-Android client the ATAK deep-link `<a>` is removed from the DOM
+ * entirely (Criterion 10.6), not hidden with CSS. Both QR codes keep
+ * rendering regardless (Criterion 10.7).
  *
- * ## Works for a signed-in user with no team membership at all
+ * ## Manual entry never shows the real enrollment code as text
  *
- * This is the one behavioural gap between the Enrollment_Lambda (which
- * authorizes on session validity alone) and the rest of this application
- * (whose authorization is team-scoped throughout), and closing it is a
- * precondition for switching the Lambda off (Criterion 15.2). The server
- * already renders the explicit string `'None'` for any TAK_Attribute it
- * cannot resolve without a team, following the Lambda's own
- * `extractAttribute` default (Criterion 15.3); `orNone` below is a second,
- * client-side line of the same defence, so this page never renders an
- * empty attribute cell regardless of exactly what the response contains.
+ * The WinTAK/Manual tab shows the username as copyable plain text, but the
+ * enrollment code itself is rendered as a fixed run of `•` characters --
+ * NEVER the real value -- with its own "Copy" button copying the real
+ * value straight to the clipboard. This is a stricter posture than the
+ * previous manual-entry block, which rendered the raw token as visible
+ * text: the value is exactly as secret whether or not it happens to be on
+ * screen, and never displaying it removes the shoulder-surfing/screen-
+ * share exposure that visible text has and a copy button does not need.
  *
  * @param {object} [props]
- * @param {() => Promise<object>} [props.fetchEnrollment] Resolves to
- *   `#buildEnrollment`'s response object. Defaults to the self-service
- *   route, `POST /api/enrollment/me`. The team-device surface passes its
- *   own function calling `POST /api/devices/:deviceUserId/qr-code`
- *   instead, which is what lets this ONE component serve both
- *   Enrollment_Principals (Criterion 10.10) without knowing which one it
- *   is showing.
+ * @param {() => Promise<object>} [props.fetchEnrollment] Resolves to the
+ *   full, secret-carrying enrollment object (mints a token). Defaults to
+ *   the self-service route, `POST /api/enrollment/me`.
+ * @param {() => Promise<object>} [props.fetchPreview] Resolves to the
+ *   no-mint preview object. Defaults to `GET /api/enrollment/me/preview`.
  */
 
 /** takserver-enrollment Criterion 15.3: the explicit fallback text for any TAK_Attribute this view cannot resolve. */
@@ -107,11 +91,7 @@ const UNSET_ATTRIBUTE_LABEL = 'None'
 
 /**
  * The client-side half of Criterion 15.3's "render `None`, never an empty
- * field" rule. The server already sends the literal string `'None'` for an
- * unresolved TAK_Attribute (`DeviceEnrollmentService#buildEnrollment`), so
- * in normal operation this is a no-op pass-through; it exists so this
- * component never renders a blank cell even if a future response shape
- * omits the field entirely rather than naming it `'None'`.
+ * field" rule.
  *
  * @param {*} value
  * @returns {string}
@@ -121,19 +101,41 @@ function orNone(value) {
 }
 
 /**
- * Turns a failed `fetchEnrollment()` call into the message shown inline.
+ * Maps a TAK_Color name to its swatch colour, mirroring the SAME map
+ * `Dashboard.jsx`/`TeamDetail.jsx` already use for the identical purpose
+ * (no shared utility exists for this today; kept local rather than
+ * introducing one for a single new call site).
  *
- * Prefers the server's own message (every named error this feature defines
- * -- `TakServerNotConfiguredError`, `OrganisationPrefixMissingError`,
- * `DeviceSessionCannotSelfEnrollError` -- responds with `{ error: message }`
- * carrying a caller-actionable string), and falls back to a generic message
- * for a network failure or an unnamed 5xx (in particular
- * `ManagedIdentifierExhaustionError`, which is deliberately generic on the
- * wire -- its detail is in the server log, not the response body).
- *
- * Exported for direct unit testing, matching this project's convention of
- * testing extracted pure logic rather than only rendering a component (see
- * `RevokeDeviceDialog.jsx`'s `interpretRevokeError`).
+ * @param {*} colorName
+ * @returns {string} a CSS colour, or a neutral grey for an unknown/'None' name.
+ */
+function colorSwatchValue(colorName) {
+  const colorMap = {
+    Red: '#ef4444',
+    Blue: '#3b82f6',
+    Green: '#22c55e',
+    Yellow: '#eab308',
+    Purple: '#a855f7',
+    Orange: '#f97316',
+    Pink: '#ec4899',
+    Cyan: '#06b6d4',
+    Gray: '#6b7280',
+    Black: '#1f2937',
+    White: '#f9fafb',
+    Magenta: '#ec4899',
+    Maroon: '#7f1d1d',
+    'Dark Blue': '#1e3a8a',
+    Teal: '#14b8a6',
+    'Dark Green': '#166534',
+    Brown: '#92400e'
+  }
+  return colorMap[colorName] || '#6b7280'
+}
+
+/**
+ * Turns a failed `fetchEnrollment()`/`fetchPreview()` call into the
+ * message shown inline. Prefers the server's own message, falls back to a
+ * generic message for a network failure or an unnamed 5xx.
  *
  * @param {{response?: {status?: number, data?: {error?: string}}}} error
  * @returns {string}
@@ -147,250 +149,456 @@ export function interpretEnrollmentError(error) {
 }
 
 /**
- * The default `fetchEnrollment`: self-service enrollment of the caller's OWN
- * account, `POST /api/enrollment/me`. No route parameters and no body --
- * the subject is always resolved server-side from the session (Requirement
- * 3.4), so there is nothing for this call to supply.
+ * Copies `value` to the clipboard, preferring the modern async API (only
+ * available on a secure context) and falling back to the
+ * `execCommand('copy')` shape `SignupCodeManager.jsx` already uses for the
+ * same reason (HTTP/insecure-context support).
  *
- * @returns {Promise<object>} `#buildEnrollment`'s response object.
+ * @param {string} value
+ * @returns {Promise<void>}
  */
+async function copyToClipboard(value) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(value)
+    return
+  }
+  const textArea = document.createElement('textarea')
+  textArea.value = value
+  textArea.style.position = 'fixed'
+  textArea.style.opacity = '0'
+  document.body.appendChild(textArea)
+  textArea.focus()
+  textArea.select()
+  try {
+    document.execCommand('copy')
+  } finally {
+    document.body.removeChild(textArea)
+  }
+}
+
+/** The default no-mint preview: self-service, `GET /api/enrollment/me/preview`. */
+async function fetchSelfPreview() {
+  const response = await enrollmentAPI.previewSelf()
+  return response.data.preview
+}
+
+/** The default mint-generating call: self-service, `POST /api/enrollment/me`. */
 async function fetchSelfEnrollment() {
   const response = await enrollmentAPI.generateSelf()
   return response.data.enrollment
 }
 
-export default function EnrollmentView({ fetchEnrollment = fetchSelfEnrollment }) {
+/** The three tabs this view renders, in display order. */
+const TABS = Object.freeze({
+  ATAK: 'atak',
+  ITAK: 'itak',
+  MANUAL: 'manual'
+})
+
+export default function EnrollmentView({
+  fetchEnrollment = fetchSelfEnrollment,
+  fetchPreview = fetchSelfPreview
+}) {
+  const [preview, setPreview] = useState(null)
+  const [previewError, setPreviewError] = useState(null)
   const [enrollment, setEnrollment] = useState(null)
   const [error, setError] = useState(null)
+  const [generating, setGenerating] = useState(false)
+  const [activeTab, setActiveTab] = useState(TABS.ATAK)
+  const [codeRevealed, setCodeRevealed] = useState(false)
 
-  // Criterion 10.2: the ATAK deep link's text is replaced with an expired
-  // message the moment the countdown reaches its terminal state -- matching
-  // the Enrollment_Lambda's `generateCountdownScript`. `EnrollmentCountdown`
-  // deliberately owns none of this DOM (see its own doc comment): it only
-  // exposes the transition, once per distinct `expiresAt`, through
-  // `onExpired`. This page is the thing that renders the deep link, so this
-  // page is what reacts to it. Reset to `false` on every successful
-  // `generate()` -- including the very regeneration `onExpired`'s own
-  // "Generate a new code" button triggers -- so a freshly minted code's
-  // still-live deep link is never shown carrying the previous code's
-  // expired message.
+  // See the file header's "The ATAK deep link's text" note on
+  // `EnrollmentCountdown` -- this page owns the deep link, so this page
+  // reacts to the countdown's terminal-state transition.
   const [isExpired, setIsExpired] = useState(false)
 
-  // Read ONCE, not on every render: `isAndroidClient` is pure and total over
-  // its argument, but `navigator` itself does not change over a page's
-  // lifetime, so there is nothing to gain by re-reading it. The lazy
-  // initializer form (`useState(() => ...)`) is what makes this a one-time
-  // read rather than a per-render one.
   const [isAndroid] = useState(() =>
     isAndroidClient(typeof navigator === 'undefined' ? null : navigator)
   )
 
-  // The single function behind BOTH triggers this page ever fires:
-  // the initial mount (via the effect below) and an explicit
-  // "Generate a new code" / "Retry" click (both wire directly to this,
-  // never to anything that could re-run on its own). A rejection sets
-  // `error` and deliberately leaves `enrollment` untouched -- see the file
-  // header's "never clears a previously rendered payload" note.
+  // The NO-MINT preview call. Runs automatically on mount (the effect
+  // below) and is the ONLY thing that runs automatically -- it mints
+  // nothing and calls Authentik nowhere on the server.
+  const loadPreview = useCallback(async () => {
+    try {
+      const result = await fetchPreview()
+      setPreview(result)
+      setPreviewError(null)
+    } catch (err) {
+      setPreviewError(interpretEnrollmentError(err))
+    }
+  }, [fetchPreview])
+
+  useEffect(() => {
+    loadPreview()
+  }, [loadPreview])
+
+  // The mint-generating call. Runs ONLY in response to an explicit human
+  // click -- the initial "Generate Enrollment Data" button, or the SAME
+  // action again via <EnrollmentCountdown onRegenerate> once expired.
+  // Never on mount, never on a timer.
   const generate = useCallback(async () => {
+    setGenerating(true)
     try {
       const result = await fetchEnrollment()
       setEnrollment(result)
       setError(null)
-      // A freshly minted code is not expired, whatever the previous one's
-      // state was -- including when this call IS the regeneration a
-      // "Generate a new code" click triggered.
       setIsExpired(false)
+      setCodeRevealed(false)
+      setActiveTab(TABS.ATAK)
     } catch (err) {
       setError(interpretEnrollmentError(err))
+    } finally {
+      setGenerating(false)
     }
   }, [fetchEnrollment])
 
-  // Criterion 10.2: fired exactly once per distinct `expiresAt` by
-  // `EnrollmentCountdown`, never on a re-render and never in response to
-  // anything but that one transition -- see its own doc comment.
   const handleExpired = useCallback(() => {
     setIsExpired(true)
   }, [])
 
-  // Runs exactly once per mount (per distinct `fetchEnrollment` identity):
-  // this is the FIRST of the two calls the file header describes. There is
-  // no second entry in this dependency array and no interval anywhere in
-  // this component -- the only other call site is the button below.
-  useEffect(() => {
-    generate()
-  }, [generate])
+  const handleCopy = useCallback(async (value, label) => {
+    try {
+      await copyToClipboard(value)
+      toast.success(`${label} copied to clipboard`)
+    } catch {
+      toast.error(`Failed to copy ${label.toLowerCase()}`)
+    }
+  }, [])
 
-  const takAttributes = enrollment?.takAttributes ?? {}
+  // Whichever object currently has the richest data to show: the minted
+  // enrollment once generated, the no-mint preview before that.
+  const summary = enrollment || preview
+  const takAttributes = summary?.takAttributes ?? {}
   const itakUserCredentials = enrollment?.itakRegistrationPayload?.userCredentials ?? {}
   const itakServerCredentials = enrollment?.itakRegistrationPayload?.serverCredentials ?? {}
+  const isDevicePrincipal = summary?.principalKind === 'device'
+
+  const tabButtonClass = (tab) =>
+    `flex items-center gap-2 px-4 py-2 text-sm font-medium border-b-2 -mb-px ${
+      activeTab === tab
+        ? 'border-primary-500 text-primary-600 dark:text-primary-400'
+        : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300'
+    }`
 
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Enroll a TAK Client</h1>
         <p className="text-sm text-gray-500 dark:text-gray-400">
-          Scan a code below with ATAK or iTAK, or enter the details manually on the device.
+          Review your enrollment data below, then generate a code to scan with ATAK, iTAK, or enter manually.
         </p>
       </div>
 
-      {error && (
+      {previewError && !summary && (
         <div className="card">
           <p role="alert" className="text-sm text-red-600 dark:text-red-400 mb-3">
-            {error}
+            {previewError}
           </p>
-          <button type="button" onClick={generate} className="btn-secondary text-sm">
+          <button type="button" onClick={loadPreview} className="btn-secondary text-sm">
             Retry
           </button>
         </div>
       )}
 
-      {enrollment ? (
+      {summary && (
         <div className="card space-y-6">
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div>
-              <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">Username</dt>
-              <dd className="text-sm font-mono text-gray-900 dark:text-gray-100 break-all">
-                {enrollment.username}
-              </dd>
-            </div>
-            <div>
-              <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">TAK Server</dt>
-              <dd className="text-sm font-mono text-gray-900 dark:text-gray-100 break-all">
-                {enrollment.host}
-              </dd>
-            </div>
-          </div>
-
-          {/* Requirement 13: information, never an error, never a gate on
-              anything below it -- see `MultipleCertificateWarning.jsx`'s own
-              doc comment. Renders nothing at all for a count of 0 or 1. */}
-          <MultipleCertificateWarning count={enrollment.liveCertificateCount} />
-
+          {/* Enrollment Data -- matches the retired Enrollment_Lambda's
+              "Enrollment data" section: TAK Server, User (or Device for a
+              Team_Owned_Device), Callsign, Team Color (with the swatch),
+              Role. Rendered from the no-mint preview -- nothing here
+              needs a live token. */}
           <div>
-            <dt className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-1">
-              Code expires in
-            </dt>
-            {/* Criterion 10.2: the live MM : SS countdown, and the ONLY
-                affordance in this whole page that ever calls `generate`
-                again on its own initiative -- and even that only in
-                response to a human clicking the button EnrollmentCountdown
-                renders once expired, never automatically (design decision
-                14). */}
-            <EnrollmentCountdown
-              expiresAt={enrollment.expiresAt}
-              onExpired={handleExpired}
-              onRegenerate={generate}
-              regenerateLabel="Generate a new code"
-            />
-          </div>
-
-          {/* Criteria 10.3, 10.4: an ARITHMETIC ESTIMATE of when the
-              certificate this code is about to issue will need replacing --
-              never a read of `tak_devices.expires_at`, and the wording below
-              says so explicitly rather than reading like a report on a
-              certificate that already exists. */}
-          <div>
-            <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">
-              Next re-enrollment
-            </dt>
-            <dd className="text-sm text-gray-900 dark:text-gray-100">
-              The certificate this code issues will need to be replaced by{' '}
-              <FormattedDate value={enrollment.reEnrollmentDate} precision={DATE_PRECISION.DATE} />.
-            </dd>
-          </div>
-
-          {/* Criterion 10.5: local values only. A user with no team
-              membership at all (Criterion 15.2) gets `'None'` for each of
-              these three, never a blank cell (Criterion 15.3). */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div>
-              <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">Callsign</dt>
-              <dd className="text-sm text-gray-900 dark:text-gray-100">{orNone(takAttributes.callsign)}</dd>
-            </div>
-            <div>
-              <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">Color</dt>
-              <dd className="text-sm text-gray-900 dark:text-gray-100">{orNone(takAttributes.color)}</dd>
-            </div>
-            <div>
-              <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">Role</dt>
-              <dd className="text-sm text-gray-900 dark:text-gray-100">{orNone(takAttributes.role)}</dd>
-            </div>
-          </div>
-
-          {/* Criteria 10.1, 10.6, 10.7: both QR_Data_Urls always render --
-              they are `<img src>` values the server already computed, so
-              nothing here decodes, generates or transforms them. Only the
-              ATAK deep link beneath the first image is platform-bound, and
-              it is REMOVED FROM THE DOM (not merely hidden) on a
-              non-Android client. */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="text-center">
-              <h3 className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-2">ATAK</h3>
-              <img
-                src={enrollment.atakQrDataUrl}
-                alt="ATAK enrollment QR code"
-                className="mx-auto border border-gray-200 dark:border-gray-700 rounded-lg"
-              />
-              {isAndroid && (
-                isExpired ? (
-                  // Criterion 10.2: the same transition that ticks the
-                  // countdown to its terminal state replaces this link's
-                  // text with an expired message, matching the
-                  // Enrollment_Lambda's `generateCountdownScript`. Text,
-                  // not colour alone, carries the state, and the element is
-                  // no longer an `<a>` -- an expired token's deep link
-                  // resolves nowhere, so it is not left clickable.
-                  <p className="mt-3 text-sm text-red-600 dark:text-red-400">
-                    Enrollment link expired
-                  </p>
-                ) : (
-                  <a href={enrollment.atakEnrollmentUri} className="btn-primary inline-block mt-3 text-sm">
-                    Open in ATAK
-                  </a>
-                )
-              )}
-            </div>
-            <div className="text-center">
-              <h3 className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-2">iTAK</h3>
-              <img
-                src={enrollment.itakQrDataUrl}
-                alt="iTAK enrollment QR code"
-                className="mx-auto border border-gray-200 dark:border-gray-700 rounded-lg"
-              />
-            </div>
-          </div>
-
-          {/* Criterion 10.8: the Enrollment_Token as TEXT beside the codes,
-              so a device that cannot scan can still be enrolled by manual
-              entry. The connection string and the password/token come from
-              the SAME iTAK_Registration_Payload the QR code above encodes --
-              nothing here is computed independently of it, so the manual
-              values and the scanned values can never disagree. */}
-          <div>
-            <h3 className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-2">Manual entry</h3>
-            <dl className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm font-mono text-gray-900 dark:text-gray-100">
+            <h2 className="text-sm font-semibold text-primary-600 dark:text-primary-400 uppercase tracking-wide mb-3">
+              Enrollment Data
+            </h2>
+            <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <dt className="text-xs text-gray-500 dark:text-gray-400">Username</dt>
-                <dd className="break-all">{enrollment.username}</dd>
+                <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">TAK Server</dt>
+                <dd className="text-sm font-mono text-gray-900 dark:text-gray-100 break-all">{summary.host}</dd>
               </div>
               <div>
-                <dt className="text-xs text-gray-500 dark:text-gray-400">Server</dt>
-                <dd className="break-all">{itakServerCredentials.connectionString}</dd>
+                {/* Client display correction: labelled "User" for a human
+                    Enrollment_Principal and "Device" for a Team_Owned_
+                    Device, always showing the Managed_Identifier
+                    `username` -- never an email, which is not what the
+                    enrollment credentials are keyed on and which a
+                    device does not have at all. */}
+                <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">
+                  {isDevicePrincipal ? 'Device' : 'User'}
+                </dt>
+                <dd className="text-sm font-mono text-gray-900 dark:text-gray-100 break-all">{summary.username}</dd>
               </div>
-              <div className="sm:col-span-2">
-                <dt className="text-xs text-gray-500 dark:text-gray-400">Enrollment code</dt>
-                <dd className="break-all">{itakUserCredentials.password}</dd>
+              <div>
+                <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">Callsign</dt>
+                <dd className="text-sm text-gray-900 dark:text-gray-100">{orNone(takAttributes.callsign)}</dd>
+              </div>
+              <div>
+                <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">Team Color</dt>
+                <dd className="text-sm text-gray-900 dark:text-gray-100 flex items-center gap-2">
+                  {orNone(takAttributes.color)}
+                  {takAttributes.color && takAttributes.color !== UNSET_ATTRIBUTE_LABEL && (
+                    <span
+                      aria-hidden="true"
+                      className="inline-block w-3.5 h-3.5 rounded border border-gray-300 dark:border-gray-600"
+                      style={{ backgroundColor: colorSwatchValue(takAttributes.color) }}
+                    />
+                  )}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">Role</dt>
+                <dd className="text-sm text-gray-900 dark:text-gray-100">{orNone(takAttributes.role)}</dd>
               </div>
             </dl>
+
+            {/* Requirement 13: information, never an error, never a gate
+                on anything below it. Renders nothing at all for a count
+                of 0 or 1 -- this keeps the "N active TAK Server
+                certificates" note as part of the Enrollment Data
+                section. */}
+            <MultipleCertificateWarning count={summary.liveCertificateCount} className="mt-3" />
           </div>
+
+          <hr className="border-gray-200 dark:border-gray-700" />
+
+          {/* Device Enrollment Requirements -- matches the retired
+              Enrollment_Lambda's section of the same name verbatim. */}
+          <div>
+            <h2 className="text-sm font-semibold text-primary-600 dark:text-primary-400 uppercase tracking-wide mb-3">
+              Device Enrollment Requirements
+            </h2>
+            <ul className="list-disc list-inside space-y-1 text-sm text-gray-700 dark:text-gray-300">
+              <li>
+                <span className="font-medium">Device Registration:</span> This device will be linked to your
+                account. Only enroll devices that you are authorized to use and are personally responsible for.
+              </li>
+              <li>
+                <span className="font-medium">Enrollment Duration:</span> Your device enrollment is valid for 1
+                year.
+              </li>
+            </ul>
+          </div>
+
+          <hr className="border-gray-200 dark:border-gray-700" />
+
+          {error && (
+            <div>
+              <p role="alert" className="text-sm text-red-600 dark:text-red-400 mb-3">
+                {error}
+              </p>
+              <button type="button" onClick={generate} className="btn-secondary text-sm">
+                Retry
+              </button>
+            </div>
+          )}
+
+          {!enrollment ? (
+            // No token minted yet: show the deferred-generation action
+            // instead of any QR codes. This is the ONLY control on this
+            // page that mints a live Enrollment_Token on its own
+            // initiative -- and even that only in direct response to this
+            // click.
+            <div className="text-center py-4">
+              <button
+                type="button"
+                onClick={generate}
+                disabled={generating}
+                className="btn-primary px-6 py-2.5"
+              >
+                {generating ? 'Generating…' : 'Generate Enrollment Data'}
+              </button>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
+                This mints a one-time enrollment code valid for 30 minutes.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {/* Criterion 10.2: the live MM : SS countdown, shared across
+                  all three tabs (one token, one expiry, regardless of
+                  which tab is active). "Generate Enrollment Data" is
+                  reused as the regenerate label too -- functionally the
+                  identical action as the first click, so it keeps the
+                  same name rather than a second phrase for the same
+                  thing. */}
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <dt className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-1">Code expires in</dt>
+                  <EnrollmentCountdown
+                    expiresAt={enrollment.expiresAt}
+                    onExpired={handleExpired}
+                    onRegenerate={generate}
+                    regenerateLabel="Generate Enrollment Data"
+                  />
+                </div>
+                <div className="text-sm text-gray-900 dark:text-gray-100">
+                  <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">Next re-enrollment</dt>
+                  <dd>
+                    The certificate this code issues will need to be replaced by{' '}
+                    <FormattedDate value={enrollment.reEnrollmentDate} precision={DATE_PRECISION.DATE} />.
+                  </dd>
+                </div>
+              </div>
+
+              {/* Three tabs, matching the retired Enrollment_Lambda's own
+                  tab shape exactly: ATAK/TAK Aware, iTAK, and a third
+                  WinTAK/Manual tab this application adds. */}
+              <div>
+                <div className="flex border-b border-gray-200 dark:border-gray-700" role="tablist">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={activeTab === TABS.ATAK}
+                    className={tabButtonClass(TABS.ATAK)}
+                    onClick={() => setActiveTab(TABS.ATAK)}
+                  >
+                    ATAK / TAK Aware
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={activeTab === TABS.ITAK}
+                    className={tabButtonClass(TABS.ITAK)}
+                    onClick={() => setActiveTab(TABS.ITAK)}
+                  >
+                    iTAK
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={activeTab === TABS.MANUAL}
+                    className={tabButtonClass(TABS.MANUAL)}
+                    onClick={() => setActiveTab(TABS.MANUAL)}
+                  >
+                    <ComputerDesktopIcon className="h-4 w-4" aria-hidden="true" />
+                    WinTAK / Manual
+                  </button>
+                </div>
+
+                <div className="pt-4">
+                  {activeTab === TABS.ATAK && (
+                    <div className="text-center">
+                      <ul className="text-sm text-gray-700 dark:text-gray-300 text-left list-disc list-inside mb-4 space-y-1 max-w-md mx-auto">
+                        <li>ATAK or TAK Aware must already be installed.</li>
+                        <li>
+                          <span className="font-medium">For ATAK (Android):</span> open your camera app, point at
+                          the QR code below, and tap the link that appears.
+                        </li>
+                        <li>
+                          <span className="font-medium">For TAK Aware (iPhone):</span> open TAK Aware, select
+                          "Connect to a TAK Server", then "Scan Android QR code", and point the camera at the QR
+                          code below.
+                        </li>
+                      </ul>
+                      <img
+                        src={enrollment.atakQrDataUrl}
+                        alt="ATAK enrollment QR code"
+                        className="mx-auto border border-gray-200 dark:border-gray-700 rounded-lg"
+                      />
+                      {isAndroid && (
+                        isExpired ? (
+                          // Criterion 10.2: the same transition that ticks
+                          // the countdown to its terminal state replaces
+                          // this link's text with an expired message. No
+                          // longer a clickable <a> once expired.
+                          <p className="mt-3 text-sm text-red-600 dark:text-red-400">Enrollment link expired</p>
+                        ) : (
+                          <a href={enrollment.atakEnrollmentUri} className="btn-primary inline-block mt-3 text-sm">
+                            Open in ATAK
+                          </a>
+                        )
+                      )}
+                    </div>
+                  )}
+
+                  {activeTab === TABS.ITAK && (
+                    <div className="text-center">
+                      <p className="text-sm text-gray-700 dark:text-gray-300 mb-2">
+                        <span className="font-medium">Note:</span> QR code enrollment requires iTAK version 2.12.3
+                        or later.
+                      </p>
+                      <ul className="text-sm text-gray-700 dark:text-gray-300 text-left list-disc list-inside mb-4 space-y-1 max-w-md mx-auto">
+                        <li>Within iTAK tap "Network", then "Servers".</li>
+                        <li>Select the plus icon (+) in the bottom right.</li>
+                        <li>Tap on "Scan QR" and scan the QR code below.</li>
+                        <li>You will be prompted to enter your username and password.</li>
+                      </ul>
+                      <img
+                        src={enrollment.itakQrDataUrl}
+                        alt="iTAK enrollment QR code"
+                        className="mx-auto border border-gray-200 dark:border-gray-700 rounded-lg"
+                      />
+                    </div>
+                  )}
+
+                  {activeTab === TABS.MANUAL && (
+                    <div className="max-w-md mx-auto space-y-4">
+                      <p className="text-sm text-gray-700 dark:text-gray-300">
+                        Enter these details manually on a WinTAK or other TAK client that cannot scan a QR code.
+                      </p>
+                      <div>
+                        <dt className="text-xs text-gray-500 dark:text-gray-400 mb-1">Server</dt>
+                        <dd className="text-sm font-mono text-gray-900 dark:text-gray-100 break-all">
+                          {itakServerCredentials.connectionString}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt className="text-xs text-gray-500 dark:text-gray-400 mb-1">Username</dt>
+                        <dd className="flex items-center gap-2">
+                          <span className="text-sm font-mono text-gray-900 dark:text-gray-100 break-all">
+                            {enrollment.username}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleCopy(enrollment.username, 'Username')}
+                            className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                            aria-label="Copy username"
+                            title="Copy username"
+                          >
+                            <ClipboardDocumentIcon className="h-4 w-4" aria-hidden="true" />
+                          </button>
+                        </dd>
+                      </div>
+                      <div>
+                        <dt className="text-xs text-gray-500 dark:text-gray-400 mb-1">Enrollment code</dt>
+                        {/* The real enrollment code is NEVER rendered as
+                            text -- only a fixed run of bullet characters,
+                            regardless of the real code's length. Only the
+                            Copy button ever touches the real value, and it
+                            goes straight to the clipboard, never through
+                            component state that could re-render it visibly. */}
+                        <dd className="flex items-center gap-2">
+                          <span
+                            className="text-sm font-mono text-gray-900 dark:text-gray-100 tracking-widest"
+                            aria-label="Enrollment code hidden"
+                          >
+                            {'•'.repeat(12)}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleCopy(itakUserCredentials.password, 'Enrollment code')}
+                            className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                            aria-label="Copy enrollment code"
+                            title="Copy enrollment code"
+                          >
+                            <ClipboardDocumentIcon className="h-4 w-4" aria-hidden="true" />
+                          </button>
+                        </dd>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
-      ) : (
-        !error && (
-          <div className="card text-center py-8">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary-600 mx-auto"></div>
-            <p className="text-gray-500 dark:text-gray-400 mt-2">Generating your enrollment code...</p>
-          </div>
-        )
+      )}
+
+      {!summary && !previewError && (
+        <div className="card text-center py-8">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary-600 mx-auto"></div>
+          <p className="text-gray-500 dark:text-gray-400 mt-2">Loading your enrollment data...</p>
+        </div>
       )}
     </div>
   )

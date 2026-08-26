@@ -572,10 +572,21 @@ export default function Dashboard({ user }) {
               <div>
                 <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">My Organisation</dt>
                 <dd className="flex items-center text-sm text-gray-900 dark:text-gray-100">
-                  <div 
-                    className="w-4 h-4 rounded border border-gray-300 mr-2" 
-                    style={{ backgroundColor: getColorValue(freshUser.takColor) }}
-                  ></div>
+                  {/* Bugfix (Dashboard/Enrollment callsign-and-color
+                      divergence): a user with no team now carries the
+                      explicit string 'None' here (never a real color
+                      name -- see UserAttributesService.clearTeamAttributes),
+                      so no swatch is rendered for it. Rendering one would
+                      fall back to getColorValue's neutral gray, which is
+                      itself a color this deployment could plausibly assign
+                      -- state must be carried in text, never a colour swatch
+                      that could be mistaken for a real value. */}
+                  {freshUser.takColor !== 'None' && (
+                    <div
+                      className="w-4 h-4 rounded border border-gray-300 mr-2"
+                      style={{ backgroundColor: getColorValue(freshUser.takColor) }}
+                    ></div>
+                  )}
                   {getOrganizationName(freshUser.takColor)}
                 </dd>
               </div>

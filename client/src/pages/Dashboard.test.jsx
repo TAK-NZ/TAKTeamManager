@@ -1317,3 +1317,89 @@ describe('Connected_Label and expiry markers in the card (Reqs 20.9, 20.11, 21.2
     expect(farCell.className).not.toContain('font-bold')
   })
 })
+
+/**
+ * Bugfix (Dashboard/Enrollment callsign-and-color divergence): the TAK
+ * Profile card's "My Organisation" row renders NO colour swatch when
+ * `freshUser.takColor` is the explicit string `'None'` (the value
+ * `UserAttributesService.clearTeamAttributes` now writes for a user with
+ * no team), since rendering one would fall back to `getColorValue`'s
+ * neutral gray -- itself a colour this deployment could plausibly assign
+ * -- making "has no team" visually indistinguishable from "was actually
+ * assigned that colour". The row's TEXT ("None") is unaffected either
+ * way; only the swatch is conditional.
+ */
+describe('Dashboard TAK Profile "My Organisation" row -- no swatch for the None sentinel', () => {
+  let container
+  let root
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    vi.clearAllMocks()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    container = document.createElement('div')
+    document.body.appendChild(container)
+
+    channelsAPI.getDescriptions.mockResolvedValue({ data: { channels: [] } })
+    requestsAPI.getPending.mockResolvedValue({ data: { requests: [] } })
+    configAPI.getColorMappings.mockResolvedValue({ data: { colorMappings: {}, roleDescriptions: {} } })
+    configAPI.getPublic.mockResolvedValue({ data: {} })
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false })
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    vi.restoreAllMocks()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  const mountWithTakColor = async (takColor) => {
+    usersAPI.getMe.mockResolvedValue({
+      data: { user: { ...USER, groups: [], takColor, takCallsign: 'FENZ-J.Doe' }, teams: [] }
+    })
+    root = createRoot(container)
+    await act(async () => {
+      root.render(
+        <MemoryRouter>
+          <Dashboard user={USER} />
+        </MemoryRouter>
+      )
+    })
+    // usersAPI.getMe resolves asynchronously (Dashboard's own effect); flush
+    // one more microtask turn so `freshUser` has updated before assertions.
+    await act(async () => {
+      await Promise.resolve()
+    })
+  }
+
+  const organisationRow = () =>
+    Array.from(container.querySelectorAll('dt')).find((dt) => dt.textContent.trim() === 'My Organisation')
+      ?.closest('div')
+
+  it("renders no swatch element for the 'None' sentinel, while still showing the text", async () => {
+    await mountWithTakColor('None')
+
+    const row = organisationRow()
+    expect(row).toBeTruthy()
+    expect(row.querySelector('dd').textContent.trim()).toBe('None')
+    // Named by the classes the swatch itself carries, since it has no
+    // other distinguishing attribute.
+    expect(row.querySelector('.rounded.border.border-gray-300')).toBeNull()
+  })
+
+  it('still renders the swatch for a real, assigned colour value', async () => {
+    await mountWithTakColor('Red')
+
+    const row = organisationRow()
+    expect(row).toBeTruthy()
+    const swatch = row.querySelector('.rounded.border.border-gray-300')
+    expect(swatch).not.toBeNull()
+    expect(swatch.style.backgroundColor).not.toBe('')
+  })
+})

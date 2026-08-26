@@ -49,7 +49,7 @@
  * (rather than a broad string arbitrary) specifically so
  * `new URL('https://' + host).hostname` -- which lower-cases and
  * percent-normalizes an arbitrary hostname -- returns the EXACT input
- * string, so the `host` value threaded through `TAK_SERVER_URL` and the
+ * string, so the `host` value threaded through `TAK_SERVER_ENROLLMENT_URL` and the
  * `host` value used for every later comparison never silently diverge.
  */
 
@@ -150,13 +150,13 @@ function buildApp() {
 
 const app = buildApp();
 
-const ORIGINAL_TAK_SERVER_URL = process.env.TAK_SERVER_URL;
+const ORIGINAL_TAK_SERVER_ENROLLMENT_URL = process.env.TAK_SERVER_ENROLLMENT_URL;
 
 afterAll(() => {
-  if (ORIGINAL_TAK_SERVER_URL === undefined) {
-    delete process.env.TAK_SERVER_URL;
+  if (ORIGINAL_TAK_SERVER_ENROLLMENT_URL === undefined) {
+    delete process.env.TAK_SERVER_ENROLLMENT_URL;
   } else {
-    process.env.TAK_SERVER_URL = ORIGINAL_TAK_SERVER_URL;
+    process.env.TAK_SERVER_ENROLLMENT_URL = ORIGINAL_TAK_SERVER_ENROLLMENT_URL;
   }
 });
 
@@ -171,7 +171,7 @@ const HOST_LABEL_CHARS = 'abcdefghijklmnopqrstuvwxyz0123456789'.split('');
  * Deliberately NOT a broad string arbitrary: `new URL('https://' +
  * host).hostname` lower-cases and normalizes an arbitrary hostname, so a
  * constrained-but-valid alphabet is what keeps the `host` value threaded
- * through `TAK_SERVER_URL` identical to the `host` value used in every
+ * through `TAK_SERVER_ENROLLMENT_URL` identical to the `host` value used in every
  * later comparison.
  */
 const hostArb = fc
@@ -296,7 +296,7 @@ const seen = {
  * @param {{host: string, username: string, tokenKey: string}} triple
  */
 function primeFixtures({ host, username, tokenKey }) {
-  process.env.TAK_SERVER_URL = `https://${host}`;
+  process.env.TAK_SERVER_ENROLLMENT_URL = `https://${host}`;
 
   pool.query.mockReset();
   pool.query.mockImplementation((sql) => {

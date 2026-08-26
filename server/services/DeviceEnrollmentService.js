@@ -81,12 +81,21 @@ class DeviceSessionCannotSelfEnrollError extends Error {
 }
 
 /**
- * Thrown by `generateEnrollmentQrCode` when `TAK_SERVER_URL` is not
- * configured -- the enrollment URI/iTAK payload's `host` value has no
- * source without it (Requirement 27 Criterion 6).
+ * Thrown by `generateEnrollmentQrCode`/`generateSelfEnrollment` when
+ * `TAK_SERVER_ENROLLMENT_URL` is not configured -- the enrollment
+ * URI/iTAK payload's `host` value has no source without it (Requirement
+ * 27 Criterion 6).
+ *
+ * `TAK_SERVER_ENROLLMENT_URL` is DELIBERATELY a separate variable from
+ * `TAK_SERVER_URL`: the latter is the Marti certadmin API's mutual-TLS
+ * endpoint (`TakServerService.js`, typically an internal/admin
+ * address), which is not necessarily the hostname a CLIENT device
+ * should dial for enrollment/streaming (typically a public-facing name
+ * on port 8089). Conflating the two would enroll every device against
+ * the wrong host wherever the two differ.
  */
 class TakServerNotConfiguredError extends Error {
-  constructor(message = 'TAK_SERVER_URL must be configured to generate a Team_Owned_Device enrollment QR code') {
+  constructor(message = 'TAK_SERVER_ENROLLMENT_URL must be configured to generate a TAK Server enrollment QR code') {
     super(message);
     this.name = 'TakServerNotConfiguredError';
   }
@@ -573,6 +582,33 @@ class DeviceEnrollmentService {
   }
 
   /**
+   * The preview counterpart to `generateSelfEnrollment`: resolves and
+   * authorizes the SAME subject (the caller's own session, and nothing
+   * else -- Criterion 3.4), then delegates to `#resolvePrincipalPreview`
+   * instead of `#buildEnrollment`, so calling this NEVER mints an
+   * Enrollment_Token. Intended for the Enrollment_View's initial,
+   * automatic render of its "Enrollment Data" section, before the human
+   * has clicked "Generate Enrollment Data".
+   *
+   * @param {{userId?: number, is_global_manager?: boolean}} actingUser
+   * @returns {Promise<object>} `#resolvePrincipalPreview`'s return shape.
+   * @throws {DeviceSessionCannotSelfEnrollError} when the session
+   *   resolves to a Team_Owned_Device row.
+   * @throws {TakServerNotConfiguredError}
+   */
+  static async previewSelfEnrollment(actingUser) {
+    const subjectRow = await User.findById(actingUser?.userId);
+
+    if (!subjectRow || subjectRow.is_team_device === true) {
+      throw new DeviceSessionCannotSelfEnrollError();
+    }
+
+    return DeviceEnrollmentService.#resolvePrincipalPreview(subjectRow, {
+      principalKind: 'human'
+    });
+  }
+
+  /**
    * Requirement 27 Criteria 3, 5-7; takserver-enrollment Requirement 3
    * (task 7.2, re-pointed through `#buildEnrollment`): generates a fresh
    * enrollment payload for an existing Team_Owned_Device, on demand,
@@ -618,7 +654,7 @@ class DeviceEnrollmentService {
    *   reference an existing Team_Owned_Device.
    * @throws {DeviceEnrollmentAuthorizationError} per Requirement 27
    *   Criterion 3.
-   * @throws {TakServerNotConfiguredError} when `TAK_SERVER_URL` is unset.
+   * @throws {TakServerNotConfiguredError} when `TAK_SERVER_ENROLLMENT_URL` is unset.
    */
   static async generateEnrollmentQrCode(deviceUserId, actingUser) {
     const userResult = await pool.query(
@@ -650,6 +686,55 @@ class DeviceEnrollmentService {
     });
 
     return { ...enrollment, teamId };
+  }
+
+  /**
+   * The preview counterpart to `generateEnrollmentQrCode`: same subject
+   * resolution and the SAME authorization check (Criterion 3.11), but
+   * delegates to `#resolvePrincipalPreview` instead of
+   * `#buildEnrollment`, so calling this NEVER mints an
+   * Enrollment_Token. Intended for the Enrollment_View's initial,
+   * automatic render of its "Enrollment Data" section for a
+   * Team_Owned_Device, before an admin has clicked "Generate Enrollment
+   * Data".
+   *
+   * @param {number|string} deviceUserId - the Team_Owned_Device's local
+   *   `users.id`.
+   * @param {{userId?: number, is_global_manager?: boolean}} actingUser
+   * @returns {Promise<object>} `#resolvePrincipalPreview`'s return
+   *   shape, plus `teamId`.
+   * @throws {NotATeamOwnedDeviceError} when `deviceUserId` doesn't
+   *   reference an existing Team_Owned_Device.
+   * @throws {DeviceEnrollmentAuthorizationError} per Requirement 27
+   *   Criterion 3.
+   * @throws {TakServerNotConfiguredError} when `TAK_SERVER_ENROLLMENT_URL` is unset.
+   */
+  static async previewEnrollmentQrCode(deviceUserId, actingUser) {
+    const userResult = await pool.query(
+      'SELECT id, username, authentik_user_id, is_team_device, tak_role FROM users WHERE id = $1',
+      [deviceUserId]
+    );
+    const deviceUser = userResult.rows[0];
+    if (!deviceUser || !deviceUser.is_team_device) {
+      throw new NotATeamOwnedDeviceError();
+    }
+
+    const membershipResult = await pool.query(
+      'SELECT team_id FROM team_memberships WHERE user_id = $1 AND inherited_from_team_id IS NULL',
+      [deviceUserId]
+    );
+    const teamId = membershipResult.rows[0]?.team_id;
+    if (teamId === undefined) {
+      throw new NotATeamOwnedDeviceError('Team_Owned_Device has no team membership');
+    }
+
+    await DeviceEnrollmentService.assertAuthorized(teamId, actingUser);
+
+    const preview = await DeviceEnrollmentService.#resolvePrincipalPreview(deviceUser, {
+      principalKind: 'device'
+    });
+
+    return { ...preview, teamId };
   }
 
   /**
@@ -745,9 +830,9 @@ class DeviceEnrollmentService {
    * label it is handed and echoes back for logging/auditing.
    *
    * Order of operations, and why:
-   *   1. Resolve `host = new URL(TAK_SERVER_URL).hostname` FIRST, before
-   *      any Authentik call and before any token mint. If
-   *      `TAK_SERVER_URL` is unset (or unparseable), throw
+   *   1. Resolve `host = new URL(TAK_SERVER_ENROLLMENT_URL).hostname` FIRST,
+   *      before any Authentik call and before any token mint. If
+   *      `TAK_SERVER_ENROLLMENT_URL` is unset (or unparseable), throw
    *      `TakServerNotConfiguredError` before anything else has a side
    *      effect -- minting a token first and failing to build a URI
    *      afterwards would leave a live 30-minute credential in
@@ -820,22 +905,8 @@ class DeviceEnrollmentService {
   // their subject ABOVE this line, and converge only here, below the
   // authorization decision -- never above it.
   static async #buildEnrollment(principal, { actingUserId, principalKind }) {
-    const takServerUrl = process.env.TAK_SERVER_URL;
-    if (!takServerUrl) {
-      throw new TakServerNotConfiguredError();
-    }
-    // design.md's Error Handling table documents TakServerNotConfiguredError
-    // as raised when TAK_SERVER_URL "is unset OR unparseable" -- the `new
-    // URL(...)` call below throws a bare TypeError for a set-but-invalid
-    // value (e.g. `TAK_SERVER_URL=not-a-url`), so that case is caught here
-    // and re-raised as the same named, caller-actionable error, still
-    // BEFORE any Authentik call or token mint.
-    let host;
-    try {
-      host = new URL(takServerUrl).hostname;
-    } catch {
-      throw new TakServerNotConfiguredError();
-    }
+    const preview = await DeviceEnrollmentService.#resolvePrincipalPreview(principal, { principalKind });
+    const { host } = preview;
 
     // Requirement 27 Criterion 7 / Criterion 15.4: token identifier must
     // be unique (Authentik's TokenRequest.identifier pattern is
@@ -854,10 +925,84 @@ class DeviceEnrollmentService {
       DeviceEnrollmentService.renderQrDataUrl(JSON.stringify(itakRegistrationPayload))
     ]);
 
-    // Requirement 6.7: the principal's Direct_Membership team, the same
-    // query `generateEnrollmentQrCode` already uses -- there is at most
-    // one such row per user (the partial unique index on
-    // `inherited_from_team_id IS NULL`).
+    // Requirement 10.3: exactly 365 * 24 hours in milliseconds, never a
+    // calendar-year Date manipulation.
+    const reEnrollmentDate = new Date(Date.now() + CERTIFICATE_LIFETIME_DAYS * 86400000).toISOString();
+
+    logger.info(
+      { principalId: principal.id, principalKind, actingUserId, expiresAt: token.expires },
+      'Enrollment generated'
+    );
+
+    return {
+      ...preview,
+      expiresAt: token.expires,
+      reEnrollmentDate,
+      atakEnrollmentUri,
+      itakRegistrationPayload,
+      atakQrDataUrl,
+      itakQrDataUrl
+    };
+  }
+
+  /**
+   * takserver-enrollment (client UX correction): resolves everything the
+   * Enrollment_View's "Enrollment Data" section needs to render BEFORE a
+   * human clicks "Generate Enrollment Data" -- host, username,
+   * Callsign/Color/Role, and the live certificate count -- WITHOUT
+   * minting an Enrollment_Token. Mints nothing and calls Authentik
+   * nowhere: every value here is either the already-resolved local
+   * `principal` row, or read from this application's own database
+   * (`team_memberships`, `tak_devices`) and local services
+   * (`UserAttributesService.generateCallsign`, itself Authentik-free).
+   *
+   * This split exists because the ORIGINAL, single-phase
+   * `#buildEnrollment` used to mint a fresh 30-minute Authentik
+   * `app_password` token on every page LOAD, not just on an explicit
+   * user action -- so a user who merely browsed through Dashboard ->
+   * Enrollment -> Teams -> back to Enrollment minted a new live
+   * credential each time, for no reason. The Enrollment_View now calls
+   * THIS method automatically on mount (cheap, local, side-effect-free)
+   * and defers the actual `#buildEnrollment` token mint to an explicit
+   * "Generate Enrollment Data" click.
+   *
+   * Still throws `TakServerNotConfiguredError` when
+   * `TAK_SERVER_ENROLLMENT_URL` is unset/unparseable, exactly as
+   * `#buildEnrollment` does -- a caller with a broken TAK Server
+   * enrollment host configuration should learn that immediately, before
+   * wasting a click on a button that would fail anyway.
+   *
+   * @param {object} principal - an already-resolved `users` row.
+   * @param {{principalKind: 'human'|'device'}} options
+   * @returns {Promise<{
+   *   principalId: number|string,
+   *   principalKind: 'human'|'device',
+   *   username: string,
+   *   host: string,
+   *   takAttributes: {callsign: string, color: string, role: string},
+   *   liveCertificateCount: number
+   * }>}
+   * @throws {TakServerNotConfiguredError}
+   */
+  static async #resolvePrincipalPreview(principal, { principalKind }) {
+    // Deliberately TAK_SERVER_ENROLLMENT_URL, NOT TAK_SERVER_URL: the
+    // latter is the Marti certadmin API's mutual-TLS endpoint
+    // (TakServerService.js), which is not necessarily the hostname a
+    // client device should dial for enrollment/streaming. See
+    // TakServerNotConfiguredError's own doc comment for the full
+    // reasoning.
+    const takServerEnrollmentUrl = process.env.TAK_SERVER_ENROLLMENT_URL;
+    if (!takServerEnrollmentUrl) {
+      throw new TakServerNotConfiguredError();
+    }
+    let host;
+    try {
+      host = new URL(takServerEnrollmentUrl).hostname;
+    } catch {
+      throw new TakServerNotConfiguredError();
+    }
+
+    // Requirement 6.7: the principal's Direct_Membership team.
     const membershipResult = await pool.query(
       'SELECT team_id FROM team_memberships WHERE user_id = $1 AND inherited_from_team_id IS NULL',
       [principal.id]
@@ -895,26 +1040,17 @@ class DeviceEnrollmentService {
     );
     const liveCertificateCount = parseInt(certResult.rows[0].count, 10);
 
-    // Requirement 10.3: exactly 365 * 24 hours in milliseconds, never a
-    // calendar-year Date manipulation.
-    const reEnrollmentDate = new Date(Date.now() + CERTIFICATE_LIFETIME_DAYS * 86400000).toISOString();
-
-    logger.info(
-      { principalId: principal.id, principalKind, teamId, actingUserId, expiresAt: token.expires },
-      'Enrollment generated'
-    );
-
     return {
       principalId: principal.id,
       principalKind,
+      // Client display note: the Enrollment_View's "User"/"Device" row
+      // shows THIS field, never an email -- Authentik's email is not the
+      // identifier the enrollment token/manual-entry credentials are
+      // keyed on, and a Team_Owned_Device has no email at all
+      // (Requirement 5) so an email-based row would have nothing to show
+      // for one of the two Enrollment_Principal kinds anyway.
       username: principal.username,
       host,
-      expiresAt: token.expires,
-      reEnrollmentDate,
-      atakEnrollmentUri,
-      itakRegistrationPayload,
-      atakQrDataUrl,
-      itakQrDataUrl,
       takAttributes,
       liveCertificateCount
     };

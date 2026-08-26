@@ -267,3 +267,102 @@ describe('The app-store badges live on Downloads.jsx (positive control, Criteria
     }
   })
 })
+
+describe('Downloads_Page badge/label defect fixes', () => {
+  // Four defects reported against the original layout: the Google Play
+  // badge rendered visibly larger than its three neighbours, every badge
+  // carried a redundant "via <store>" sublabel, the Google Play route was
+  // labelled "ATAK Civ" instead of "ATAK", and the two Recommended_Option
+  // markers had no way for a mouse user to learn what the star meant short
+  // of already knowing the sr-only text screen readers get.
+  let container
+  let root
+
+  beforeEach(async () => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+    await act(async () => {
+      root.render(<Downloads />)
+    })
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  it('renders every one of the four badge SVGs at the same visible size', () => {
+    const badgeSvgs = Array.from(container.querySelectorAll('a svg'))
+    expect(badgeSvgs).toHaveLength(4)
+
+    // "Same visible size" is enforced through a shared className rather
+    // than a computed layout measurement (jsdom performs no real layout),
+    // so the guard is that every badge SVG carries the identical sizing
+    // class list -- which is what makes the Google Play badge's larger
+    // intrinsic viewBox (180 x 53.333, against 135 x 40 for the other two)
+    // render no bigger than its neighbours.
+    const classLists = badgeSvgs.map((svg) => svg.getAttribute('class'))
+    expect(new Set(classLists).size).toBe(1)
+    expect(classLists[0]).toBeTruthy()
+  })
+
+  it('renders no "via <store>" sublabel text anywhere on the page', () => {
+    expect(container.textContent).not.toContain('via TAK.gov')
+    expect(container.textContent).not.toContain('via Apple App Store')
+    expect(container.textContent).not.toContain('via Google Play')
+  })
+
+  it('labels the Google Play route "ATAK", never "ATAK Civ"', () => {
+    expect(container.textContent).not.toContain('ATAK Civ')
+
+    const googlePlayCell = Array.from(container.querySelectorAll('.flex.flex-col')).find(
+      (cell) =>
+        cell.querySelector('a')?.getAttribute('href') ===
+        'https://play.google.com/store/apps/details?id=com.atakmap.app.civ'
+    )
+    expect(googlePlayCell).toBeTruthy()
+    expect(
+      googlePlayCell.querySelector('span.text-sm.font-medium')?.textContent.trim()
+    ).toBe('ATAK')
+  })
+
+  it('renders a footnote legend below the grid restating the star and "Recommended option"', () => {
+    // The two per-badge markers already carry this text (asserted
+    // elsewhere); this checks for a THIRD, always-visible occurrence
+    // outside either marker -- the footnote -- so removing the footnote
+    // alone would fail this test without also failing the marker-count
+    // tests.
+    const allOccurrences = Array.from(container.querySelectorAll('*')).filter(
+      (el) => el.textContent.trim() === 'Recommended option' && el.children.length === 0
+    )
+    // Two per-badge sr-only spans, plus the footnote's own visible text.
+    expect(allOccurrences.length).toBeGreaterThanOrEqual(3)
+
+    const footnoteGlyph = container.querySelector('p svg[aria-hidden="true"]')
+    expect(footnoteGlyph).not.toBeNull()
+  })
+
+  it("discloses each Recommended_Option_Marker's tooltip on pointer hover and on keyboard focus", async () => {
+    const markerHosts = Array.from(container.querySelectorAll('span.recommended-marker'))
+    expect(markerHosts).toHaveLength(2)
+
+    for (const host of markerHosts) {
+      expect(host.getAttribute('tabindex')).toBe('0')
+
+      const tooltip = host.querySelector('span[aria-hidden="true"]')
+      expect(tooltip).not.toBeNull()
+      expect(tooltip.textContent.trim()).toBe('Recommended option')
+      expect(tooltip.className).toContain('opacity-0')
+      expect(tooltip.className).toContain('group-hover:opacity-100')
+      expect(tooltip.className).toContain('group-focus-within:opacity-100')
+    }
+  })
+})

@@ -246,6 +246,79 @@ class UserAttributesService {
     }
   }
   
+  /**
+   * Bugfix (Dashboard/Enrollment callsign-and-color divergence): clears a
+   * single user's team-derived attributes -- `callsign`/`color` -- back
+   * to the explicit string `'None'`, both in Authentik (via
+   * `updateUserAttributes`, so `takRole` is left untouched -- it is not
+   * team-derived) and in this application's own `user_cache` mirror.
+   *
+   * `'None'` rather than a blank string or a color like `'White'`: an
+   * empty string reads as "unset" only until the render layer decides
+   * otherwise, and `'White'` is itself a real, assignable
+   * `TAK_Color` in this deployment (see `TeamFormDialog.jsx`'s color
+   * list) -- using it here would make "has no team" indistinguishable
+   * from "was actually assigned White". `'None'` matches the SAME
+   * fallback `DeviceEnrollmentService#resolvePrincipalPreview` and
+   * `EnrollmentView.jsx`'s `orNone()` already use for a principal with
+   * no team, so both surfaces converge on one "no data" convention
+   * instead of two.
+   *
+   * Intended for a user who has just lost their LAST `team_memberships`
+   * row (e.g. `Team.delete` removing the only team they belonged to) --
+   * the caller is responsible for having already established that no
+   * membership row remains, since this method does no such check itself
+   * and would otherwise blindly clear a still-valid callsign/color out
+   * from under a user who is still a member of some OTHER team.
+   *
+   * No-ops (returns `false`, logs, does not throw) when `userId` does not
+   * resolve to a `users` row, mirroring `computeCallsignAttributes`'s own
+   * "not found -> give up quietly" convention rather than
+   * `updateUserAttributes`'s throw-and-catch shape.
+   *
+   * @param {number} userId
+   * @returns {Promise<boolean>}
+   */
+  static async clearTeamAttributes(userId) {
+    try {
+      const userResult = await pool.query(
+        'SELECT authentik_user_id FROM users WHERE id = $1',
+        [userId]
+      );
+
+      if (userResult.rows.length === 0) {
+        logger.warn({ userId }, 'Cannot clear team attributes: no users row found');
+        return false;
+      }
+
+      const { authentik_user_id: authentikUserId } = userResult.rows[0];
+
+      // `updateUserAttributes` catches its own errors and returns
+      // `false` rather than throwing (see its own doc comment), so its
+      // result must be checked explicitly here rather than relying on
+      // this method's own try/catch to notice a failed Authentik call.
+      const authentikUpdated = await this.updateUserAttributes(authentikUserId, {
+        callsign: 'None',
+        color: 'None'
+      });
+
+      if (!authentikUpdated) {
+        logger.error({ userId, authentikUserId }, 'Failed to clear team attributes in Authentik');
+        return false;
+      }
+
+      await pool.query(
+        'UPDATE user_cache SET tak_callsign = $1, tak_color = $2 WHERE authentik_id = $3',
+        ['None', 'None', authentikUserId]
+      );
+
+      return true;
+    } catch (error) {
+      logger.error({ err: error, userId }, 'Error clearing team attributes');
+      return false;
+    }
+  }
+
   static async updateTeamUserAttributes(teamId) {
     try {
       // Get all users in team and sub-teams

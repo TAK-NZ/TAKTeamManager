@@ -18,6 +18,9 @@ jest.mock('../config/database', () => ({
 jest.mock('../services/EventPublisher', () => ({
   publishOperation: jest.fn()
 }));
+jest.mock('../services/userAttributes', () => ({
+  clearTeamAttributes: jest.fn()
+}));
 
 const mockLoggerInstance = { info: jest.fn(), error: jest.fn(), debug: jest.fn(), warn: jest.fn() };
 jest.mock('../config/logger', () => ({
@@ -26,6 +29,7 @@ jest.mock('../config/logger', () => ({
 
 const pool = require('../config/database');
 const EventPublisher = require('../services/EventPublisher');
+const UserAttributesService = require('../services/userAttributes');
 const Team = require('./Team');
 const fc = require('fast-check');
 const { test } = require('@fast-check/jest');
@@ -41,6 +45,14 @@ describe('Team.delete', () => {
     };
     pool.connect.mockResolvedValue(mockClient);
     EventPublisher.publishOperation.mockResolvedValue('op-id');
+    // Default: no remaining team_memberships row for the post-commit
+    // attribute-clearing block's own `pool.query` check (a SEPARATE
+    // connection from the transactional `mockClient` above -- see that
+    // block's own doc comment for why it reads via `pool` rather than
+    // `client`, post-COMMIT). Individual tests override this where the
+    // distinction matters.
+    pool.query.mockResolvedValue({ rows: [] });
+    UserAttributesService.clearTeamAttributes.mockResolvedValue(true);
   });
 
   it('runs all four deletes on the single acquired client, in channel_memberships -> channels -> team_memberships -> teams order, then commits', async () => {
@@ -197,7 +209,7 @@ describe('Team.delete', () => {
         return Promise.resolve({ rows: [] }); // no channels
       }
       if (typeof sql === 'string' && sql.includes('WITH RECURSIVE team_and_subteams')) {
-        return Promise.resolve({ rows: [{ username: 'alice' }, { username: 'bob' }] });
+        return Promise.resolve({ rows: [{ id: 1, username: 'alice' }, { id: 2, username: 'bob' }] });
       }
       if (typeof sql === 'string' && sql.includes('DELETE FROM teams')) {
         return Promise.resolve({ rows: [{ id: 5 }] });
@@ -242,6 +254,118 @@ describe('Team.delete', () => {
       'revoke_tak_certificates',
       expect.anything(),
       expect.anything(),
+      expect.anything()
+    );
+  });
+
+  /**
+   * Bugfix (Dashboard/Enrollment callsign-and-color divergence): a
+   * deleted Team's affected users must have their team-derived
+   * `tak_callsign`/`tak_color` cleared post-commit, but ONLY those who
+   * end up with NO `team_memberships` row left at all -- a user who
+   * belonged to another team too keeps whatever callsign/color that
+   * other membership already gives them.
+   */
+  it('clears team attributes post-commit for an affected user left with no team_memberships row at all', async () => {
+    mockClient.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('SELECT id, authentik_group_id')) {
+        return Promise.resolve({ rows: [] });
+      }
+      if (typeof sql === 'string' && sql.includes('WITH RECURSIVE team_and_subteams')) {
+        return Promise.resolve({ rows: [{ id: 7, username: 'alice' }] });
+      }
+      if (typeof sql === 'string' && sql.includes('DELETE FROM teams')) {
+        return Promise.resolve({ rows: [{ id: 5 }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    // The post-commit `pool.query` check: no team_memberships row remains
+    // for user 7 anywhere.
+    pool.query.mockResolvedValue({ rows: [] });
+
+    await Team.delete(5, 99);
+
+    expect(pool.query).toHaveBeenCalledWith(
+      'SELECT 1 FROM team_memberships WHERE user_id = $1 LIMIT 1',
+      [7]
+    );
+    expect(UserAttributesService.clearTeamAttributes).toHaveBeenCalledTimes(1);
+    expect(UserAttributesService.clearTeamAttributes).toHaveBeenCalledWith(7);
+  });
+
+  it('does NOT clear team attributes for an affected user who still has a team_memberships row from a different team', async () => {
+    mockClient.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('SELECT id, authentik_group_id')) {
+        return Promise.resolve({ rows: [] });
+      }
+      if (typeof sql === 'string' && sql.includes('WITH RECURSIVE team_and_subteams')) {
+        return Promise.resolve({ rows: [{ id: 7, username: 'alice' }] });
+      }
+      if (typeof sql === 'string' && sql.includes('DELETE FROM teams')) {
+        return Promise.resolve({ rows: [{ id: 5 }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    // The post-commit `pool.query` check finds a remaining row (some
+    // OTHER team) for user 7.
+    pool.query.mockResolvedValue({ rows: [{ '?column?': 1 }] });
+
+    await Team.delete(5, 99);
+
+    expect(UserAttributesService.clearTeamAttributes).not.toHaveBeenCalled();
+  });
+
+  it('runs the post-commit attribute clearing strictly AFTER COMMIT, and never rolls back on its own failure', async () => {
+    mockClient.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('SELECT id, authentik_group_id')) {
+        return Promise.resolve({ rows: [] });
+      }
+      if (typeof sql === 'string' && sql.includes('WITH RECURSIVE team_and_subteams')) {
+        return Promise.resolve({ rows: [{ id: 7, username: 'alice' }] });
+      }
+      if (typeof sql === 'string' && sql.includes('DELETE FROM teams')) {
+        return Promise.resolve({ rows: [{ id: 5 }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    pool.query.mockRejectedValue(new Error('post-commit read failed'));
+
+    // Never throws: the whole point is that a post-commit failure must
+    // not surface as a failed team deletion.
+    const result = await Team.delete(5, 99);
+
+    expect(result).toEqual({ id: 5 });
+    const calls = mockClient.query.mock.calls.map(([sql]) => sql);
+    expect(calls).toContain('COMMIT');
+    expect(calls).not.toContain('ROLLBACK');
+    expect(UserAttributesService.clearTeamAttributes).not.toHaveBeenCalled();
+    expect(mockLoggerInstance.error).toHaveBeenCalledWith(
+      expect.objectContaining({ teamId: 5, affectedUserId: 7 }),
+      expect.stringContaining('post-commit')
+    );
+  });
+
+  it('enqueues no post-commit attribute clearing at all when there are no affected users', async () => {
+    mockClient.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('SELECT id, authentik_group_id')) {
+        return Promise.resolve({ rows: [] });
+      }
+      if (typeof sql === 'string' && sql.includes('WITH RECURSIVE team_and_subteams')) {
+        return Promise.resolve({ rows: [] });
+      }
+      if (typeof sql === 'string' && sql.includes('DELETE FROM teams')) {
+        return Promise.resolve({ rows: [{ id: 5 }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await Team.delete(5, 99);
+
+    expect(UserAttributesService.clearTeamAttributes).not.toHaveBeenCalled();
+    // No SELECT 1 FROM team_memberships ... LIMIT 1 check either, since
+    // there is no affected user to check it for.
+    expect(pool.query).not.toHaveBeenCalledWith(
+      'SELECT 1 FROM team_memberships WHERE user_id = $1 LIMIT 1',
       expect.anything()
     );
   });
@@ -2425,6 +2549,11 @@ describe('Team.delete CloudTAK enqueue (Requirement 7.1/9.2, 1.4)', () => {
     };
     pool.connect.mockResolvedValue(mockClient);
     EventPublisher.publishOperation.mockResolvedValue('op-id');
+    // See the top-of-file `Team.delete` describe block's own beforeEach:
+    // the post-commit attribute-clearing block reads via `pool`, not
+    // `client`.
+    pool.query.mockResolvedValue({ rows: [] });
+    UserAttributesService.clearTeamAttributes.mockResolvedValue(true);
   });
 
   afterEach(() => {

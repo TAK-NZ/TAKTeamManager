@@ -464,6 +464,93 @@ describe('UserAttributesService.updateUserAttributes - fetch-merge-PATCH (task 1
 });
 
 /**
+ * Bugfix (Dashboard/Enrollment callsign-and-color divergence):
+ * `clearTeamAttributes` is the post-commit cleanup `Team.delete` calls for
+ * a user left with no `team_memberships` row at all. It must clear BOTH
+ * the Authentik-side attributes (via `updateUserAttributes`, leaving
+ * `takRole` untouched since role is not team-derived) AND the
+ * `user_cache` mirror, using the explicit string `'None'` rather than an
+ * empty string or a real assignable color name -- see the method's own
+ * doc comment for why `'None'` specifically.
+ */
+describe('UserAttributesService.clearTeamAttributes', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.AUTHENTIK_URL = 'https://authentik.example.com';
+    process.env.AUTHENTIK_ADMIN_TOKEN = 'test-token';
+  });
+
+  afterEach(() => {
+    delete global.fetch;
+  });
+
+  it('sets callsign and color to the literal string "None" in both Authentik and user_cache, leaving takRole untouched', async () => {
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('SELECT authentik_user_id FROM users')) {
+        return Promise.resolve({ rows: [{ authentik_user_id: 'authentik-user-7' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ attributes: { takCallsign: 'OLD-CALLSIGN', takColor: 'Red', takRole: 'Team Lead' } })
+      })
+      .mockResolvedValueOnce({ ok: true });
+
+    const result = await UserAttributesService.clearTeamAttributes(42);
+
+    expect(result).toBe(true);
+
+    // Authentik: takRole preserved, callsign/color overwritten to 'None'.
+    const [, patchCall] = global.fetch.mock.calls;
+    const patchedAttributes = JSON.parse(patchCall[1].body).attributes;
+    expect(patchedAttributes).toEqual({
+      takCallsign: 'None',
+      takColor: 'None',
+      takRole: 'Team Lead'
+    });
+
+    // user_cache mirror, keyed by authentik_id (not the local users.id).
+    expect(pool.query).toHaveBeenCalledWith(
+      'UPDATE user_cache SET tak_callsign = $1, tak_color = $2 WHERE authentik_id = $3',
+      ['None', 'None', 'authentik-user-7']
+    );
+  });
+
+  it('returns false and logs, without touching Authentik or user_cache, when the user is not found', async () => {
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('SELECT authentik_user_id FROM users')) {
+        return Promise.resolve({ rows: [] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    global.fetch = jest.fn();
+
+    const result = await UserAttributesService.clearTeamAttributes(999);
+
+    expect(result).toBe(false);
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(mockLoggerInstance.warn).toHaveBeenCalled();
+  });
+
+  it('returns false and logs when the underlying Authentik call fails, without throwing', async () => {
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('SELECT authentik_user_id FROM users')) {
+        return Promise.resolve({ rows: [{ authentik_user_id: 'authentik-user-7' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    global.fetch = jest.fn().mockResolvedValueOnce({ ok: false, statusText: 'Not Found' });
+
+    const result = await UserAttributesService.clearTeamAttributes(42);
+
+    expect(result).toBe(false);
+    expect(mockLoggerInstance.error).toHaveBeenCalled();
+  });
+});
+
+/**
  * Requirement 5.12 (task 11.6): `updateTeamUserAttributes` (triggered by a
  * `PUT /api/teams/:teamId` `callsignLevelSelection` change, wired in
  * `server/routes/teams.js`) must regenerate callsign/color/role for every

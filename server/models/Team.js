@@ -979,19 +979,30 @@ class Team {
       // i.e. "find children of the accumulated set"), scoped here to just
       // the id column since only team_memberships.team_id membership is
       // needed.
+      // Bugfix (Dashboard/Enrollment callsign-and-color divergence): the
+      // SAME query also carries `u.id`, captured as `affectedUserIds`
+      // below -- the set of users whose team-derived callsign/color
+      // attributes need re-checking once this deletion commits, per the
+      // post-commit block at the end of this method. Resolved from the
+      // same single query as `affectedTakUsernames` rather than a second
+      // one, since both need the identical "member of this team or a
+      // sub-team" row set.
       const affectedUsersResult = await client.query(
         `WITH RECURSIVE team_and_subteams AS (
           SELECT id FROM teams WHERE id = $1
           UNION ALL
           SELECT t.id FROM teams t JOIN team_and_subteams ts ON t.parent_team_id = ts.id
         )
-        SELECT DISTINCT u.username
+        SELECT DISTINCT u.id, u.username
         FROM team_memberships tm
         JOIN users u ON u.id = tm.user_id
-        WHERE tm.team_id IN (SELECT id FROM team_and_subteams) AND u.username IS NOT NULL`,
+        WHERE tm.team_id IN (SELECT id FROM team_and_subteams)`,
         [teamId]
       );
-      const affectedTakUsernames = affectedUsersResult.rows.map((row) => row.username);
+      const affectedTakUsernames = affectedUsersResult.rows
+        .map((row) => row.username)
+        .filter((username) => username != null);
+      const affectedUserIds = affectedUsersResult.rows.map((row) => row.id);
 
       // 1. channel_memberships for every channel belonging to this team.
       if (channelIds.length > 0) {
@@ -1067,6 +1078,54 @@ class Team {
       }
 
       await client.query('COMMIT');
+
+      // Bugfix (Dashboard/Enrollment callsign-and-color divergence): a
+      // deleted Team's `team_memberships` rows are removed above (step 3),
+      // but that leaves any affected user's CACHED `tak_callsign`/
+      // `tak_color` (and their Authentik `takCallsign`/`takColor`
+      // attributes) pointing at a Team that no longer exists -- nothing
+      // else in this codebase invalidates them, so the Dashboard goes on
+      // showing a stale callsign/color indefinitely while other surfaces
+      // that read live (e.g. the Enrollment_View's preview) correctly
+      // report 'None'. Run strictly AFTER the COMMIT above, per this
+      // codebase's "no HTTP call inside a transaction" convention
+      // (`TeamTransferService.applyPostCommitEffects` is the existing
+      // precedent for this shape) -- `updateUserAttributes` calls
+      // Authentik. Individually caught and logged per user, never
+      // thrown, so a single failure never turns an already-committed
+      // team deletion into a reported error.
+      //
+      // Deliberately scoped to users who have NO team_memberships row
+      // left at all (not just none in the deleted team/sub-teams): a
+      // user who belonged to two teams and lost only this one still has
+      // a valid callsign/color from their remaining team, and clearing
+      // it here would be wrong. `affectedUserIds` (captured before the
+      // deletes, alongside `affectedTakUsernames` above) is exactly the
+      // set of users whose membership picture could have changed.
+      //
+      // Lazy `require`, matching `server/routes/teams.js`'s existing
+      // pattern for the same module: `userAttributes.js` itself requires
+      // `../models/Team`, so a top-level require here would be circular.
+      if (affectedUserIds.length > 0) {
+        const UserAttributesService = require('../services/userAttributes');
+        for (const affectedUserId of affectedUserIds) {
+          try {
+            const remaining = await pool.query(
+              'SELECT 1 FROM team_memberships WHERE user_id = $1 LIMIT 1',
+              [affectedUserId]
+            );
+            if (remaining.rows.length === 0) {
+              await UserAttributesService.clearTeamAttributes(affectedUserId);
+            }
+          } catch (postCommitError) {
+            logger.error(
+              { err: postCommitError, teamId, affectedUserId },
+              'Team deletion post-commit: failed to clear team-derived attributes for a now-teamless user'
+            );
+          }
+        }
+      }
+
       return result.rows[0];
     } catch (error) {
       await client.query('ROLLBACK');

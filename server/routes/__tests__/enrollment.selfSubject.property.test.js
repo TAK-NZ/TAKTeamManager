@@ -339,8 +339,8 @@ describe('Property 4: Self-enrollment resolves its subject from the session alon
       };
       const res = buildRes();
 
-      const originalTakServerUrl = process.env.TAK_SERVER_URL;
-      process.env.TAK_SERVER_URL = 'https://tak.example.com:8443';
+      const originalTakServerUrl = process.env.TAK_SERVER_ENROLLMENT_URL;
+      process.env.TAK_SERVER_ENROLLMENT_URL = 'https://tak.example.com:8443';
 
       try {
         // No try/catch swallowing a thrown error here: a hostile decoy's
@@ -349,9 +349,9 @@ describe('Property 4: Self-enrollment resolves its subject from the session alon
         await selfEnrollHandler(req, res);
       } finally {
         if (originalTakServerUrl === undefined) {
-          delete process.env.TAK_SERVER_URL;
+          delete process.env.TAK_SERVER_ENROLLMENT_URL;
         } else {
-          process.env.TAK_SERVER_URL = originalTakServerUrl;
+          process.env.TAK_SERVER_ENROLLMENT_URL = originalTakServerUrl;
         }
       }
 

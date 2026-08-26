@@ -329,11 +329,11 @@ describe('DeviceEnrollmentService.generateEnrollmentQrCode', () => {
     is_team_device: false
   };
 
-  const ORIGINAL_TAK_SERVER_URL = process.env.TAK_SERVER_URL;
+  const ORIGINAL_TAK_SERVER_ENROLLMENT_URL = process.env.TAK_SERVER_ENROLLMENT_URL;
 
   beforeEach(() => {
     jest.clearAllMocks();
-    process.env.TAK_SERVER_URL = 'https://tak.example.com:8443';
+    process.env.TAK_SERVER_ENROLLMENT_URL = 'https://tak.example.com:8443';
     authentikService.createAppPasswordToken.mockResolvedValue({
       identifier: 'device-enrollment-xyz',
       expires: '2024-01-01T00:30:00.000Z',
@@ -343,10 +343,10 @@ describe('DeviceEnrollmentService.generateEnrollmentQrCode', () => {
   });
 
   afterAll(() => {
-    if (ORIGINAL_TAK_SERVER_URL === undefined) {
-      delete process.env.TAK_SERVER_URL;
+    if (ORIGINAL_TAK_SERVER_ENROLLMENT_URL === undefined) {
+      delete process.env.TAK_SERVER_ENROLLMENT_URL;
     } else {
-      process.env.TAK_SERVER_URL = ORIGINAL_TAK_SERVER_URL;
+      process.env.TAK_SERVER_ENROLLMENT_URL = ORIGINAL_TAK_SERVER_ENROLLMENT_URL;
     }
   });
 
@@ -468,8 +468,8 @@ describe('DeviceEnrollmentService.generateEnrollmentQrCode', () => {
     ).rejects.toThrow(NotATeamOwnedDeviceError);
   });
 
-  it('rejects with TakServerNotConfiguredError when TAK_SERVER_URL is unset', async () => {
-    delete process.env.TAK_SERVER_URL;
+  it('rejects with TakServerNotConfiguredError when TAK_SERVER_ENROLLMENT_URL is unset', async () => {
+    delete process.env.TAK_SERVER_ENROLLMENT_URL;
     mockUserAndMembershipLookup({ userRow: DEVICE_ROW, teamId: 5 });
 
     await expect(
@@ -495,11 +495,11 @@ describe('DeviceEnrollmentService.generateSelfEnrollment', () => {
     is_team_device: true
   };
 
-  const ORIGINAL_TAK_SERVER_URL = process.env.TAK_SERVER_URL;
+  const ORIGINAL_TAK_SERVER_ENROLLMENT_URL = process.env.TAK_SERVER_ENROLLMENT_URL;
 
   beforeEach(() => {
     jest.clearAllMocks();
-    process.env.TAK_SERVER_URL = 'https://tak.example.com:8443';
+    process.env.TAK_SERVER_ENROLLMENT_URL = 'https://tak.example.com:8443';
     authentikService.createAppPasswordToken.mockResolvedValue({
       identifier: 'device-enrollment-xyz',
       expires: '2024-01-01T00:30:00.000Z',
@@ -518,10 +518,10 @@ describe('DeviceEnrollmentService.generateSelfEnrollment', () => {
   });
 
   afterAll(() => {
-    if (ORIGINAL_TAK_SERVER_URL === undefined) {
-      delete process.env.TAK_SERVER_URL;
+    if (ORIGINAL_TAK_SERVER_ENROLLMENT_URL === undefined) {
+      delete process.env.TAK_SERVER_ENROLLMENT_URL;
     } else {
-      process.env.TAK_SERVER_URL = ORIGINAL_TAK_SERVER_URL;
+      process.env.TAK_SERVER_ENROLLMENT_URL = ORIGINAL_TAK_SERVER_ENROLLMENT_URL;
     }
   });
 

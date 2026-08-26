@@ -148,9 +148,28 @@ describe('TeamFormDialog — Pseudonymous_Username_Policy control (takserver-enr
     expect(controlIndex).toBeGreaterThan(orgOnlyStart)
   })
 
-  it('is disabled when editingTeam is truthy, via FieldLockIndicator locked={!!editingTeam}', () => {
-    expect(dialogSource).toContain('locked={!!editingTeam}')
+  it('the INPUT is disabled when editingTeam is truthy, via disabled={!!editingTeam}', () => {
     expect(dialogSource).toContain('disabled={!!editingTeam}')
+  })
+
+  // Bugfix: the FieldLockIndicator ICON must state a fixed fact about the
+  // field ("can this ever change once the Organisation exists"), the SAME
+  // convention Prefix and TAK Color already follow with `locked={true}`
+  // unconditionally -- never `locked={!!editingTeam}`, which would show a
+  // green OPEN lock while creating (the field is still freely editable at
+  // that point) directly beside/above text stating the value can never be
+  // changed once created. Confirmed by walking forward from THIS specific
+  // control's id to the FIRST FieldLockIndicator after it, rather than a
+  // bare dialogSource.toContain('locked={true}') (true elsewhere in the
+  // file for Prefix/TAK Color already, which would pass vacuously).
+  it('is locked unconditionally (locked={true}), never keyed to editingTeam, on its FieldLockIndicator', () => {
+    const controlIndex = dialogSource.indexOf('id="pseudonymousUsernames"')
+    const labelBlock = dialogSource.slice(Math.max(0, controlIndex - 600), controlIndex)
+    const fieldLockIndicatorIndex = labelBlock.lastIndexOf('<FieldLockIndicator')
+    expect(fieldLockIndicatorIndex).toBeGreaterThan(-1)
+    const indicatorBlock = labelBlock.slice(fieldLockIndicatorIndex, fieldLockIndicatorIndex + 200)
+    expect(indicatorBlock).toContain('locked={true}')
+    expect(indicatorBlock).not.toContain('locked={!!editingTeam}')
   })
 
   it("states the Pseudonymity_Scope: protection is against TAK Server/TAK users, not TAK Team Manager operators, who can always re-identify a member (Criterion 8.2)", () => {
@@ -174,61 +193,22 @@ describe('TeamFormDialog — Pseudonymous_Username_Policy control (takserver-enr
     expect(dialogSource).toContain('TAK Team Manager still stores')
   })
 
-  it('names the CloudTAK/WebTAK limitation explicitly (Criteria 8.4, 16.4)', () => {
-    expect(dialogSource).toContain('CloudTAK/WebTAK')
-    expect(dialogSource).toContain('not pseudonymised at all')
-    expect(dialogSource).toContain('certificate name and CoT ID from the')
+  // The CloudTAK/WebTAK pseudonymity-defeat caveat this control used to
+  // carry has been REMOVED: that defeat was fixed upstream in the
+  // CloudTAK fork, which now builds the certificate Common Name/clientUid
+  // and the CoT uid from the Authentik username rather than the email, so
+  // a CloudTAK/WebTAK member is pseudonymised exactly like a native one.
+  // Pinning the ABSENCE, not just skipping the old assertion, so a stale
+  // caveat could not silently be reintroduced.
+  it('no longer states a CloudTAK/WebTAK pseudonymity limitation -- that defeat has been fixed upstream', () => {
+    expect(dialogSource).not.toContain('not pseudonymised at all')
+    expect(dialogSource).not.toContain('This protection does not apply to members who connect via CloudTAK/WebTAK')
   })
 
   it('carries every stated fact in TEXT, never colour alone', () => {
     // Every copy paragraph is a <p> with visible text content, not merely a
     // colour class on an otherwise-empty element.
     expect(dialogSource).toMatch(/<p className="text-xs text-gray-500[^"]*">\s*\n\s*When enabled/)
-    expect(dialogSource).toMatch(/<p className="text-xs text-amber-600[^"]*">\s*\n\s*This protection does not apply/)
-  })
-})
-
-// takserver-enrollment Requirements 6.1, 6.2, 7.1-7.3, 8.2-8.4, 16.4 (task
-// 5.9): additional edge-case coverage on the Pseudonymous_Username_Policy
-// control's copy, beyond what task 5.5's own tests above already cover.
-// These pin the exact substrings a screen reader would announce for the
-// Pseudonymity_Scope statement and the WebTAK/CloudTAK limitation, and
-// confirm the negative constraints (no "anonym" outside the explicit
-// "not anonymity" framing, no claim of holding no personal data) hold
-// against the RENDERED paragraph text specifically -- not merely
-// somewhere in the file, which the existing "does NOT describe... "
-// test above already isolates to the `<p>` copy blocks.
-describe('TeamFormDialog — Pseudonymous_Username_Policy copy, additional edge cases (task 5.9)', () => {
-  it('names WebTAK explicitly, not only CloudTAK, in the same statement as the CloudTAK limitation', () => {
-    expect(dialogSource).toContain('CloudTAK/WebTAK')
-  })
-
-  it('never claims TAK Team Manager holds no personally identifying information anywhere in the rendered copy', () => {
-    const paragraphMatches = [...dialogSource.matchAll(/<p className="text-xs[^>]*>([\s\S]*?)<\/p>/g)]
-    expect(paragraphMatches.length).toBeGreaterThan(0)
-    const allCopyText = paragraphMatches.map(([, text]) => text).join(' ')
-    // The affirmative claim this control must make instead: TAK Team
-    // Manager DOES still hold identifying information (name/email), so an
-    // operator can always re-identify a member.
-    expect(allCopyText).toContain('TAK Team Manager still stores')
-    expect(allCopyText).not.toMatch(/holds? no (personal|personally identifying)/i)
-    expect(allCopyText).not.toMatch(/no (personal|identifying) information (is|will be) stored/i)
-  })
-
-  it('the Pseudonymity_Scope statement and the CloudTAK/WebTAK limitation are two SEPARATE paragraphs, not one run-on block', () => {
-    // Requirement 8.2 (scope) and Criteria 8.4/16.4 (CloudTAK/WebTAK
-    // limitation) are each their own <p>, matching the "carry every
-    // stated fact in TEXT" rule's existing pin on two distinct
-    // className values (text-xs text-gray-500 vs text-xs text-amber-600)
-    // asserted by the "carries every stated fact in TEXT" test above --
-    // this test additionally confirms the CONTENT of each, not just the
-    // className, is scoped to its own paragraph.
-    const scopeParagraph = dialogSource.match(/<p className="text-xs text-gray-500[^"]*">\s*\n\s*When enabled[\s\S]*?<\/p>/)
-    const cloudTakParagraph = dialogSource.match(/<p className="text-xs text-amber-600[^"]*">\s*\n\s*This protection does not apply[\s\S]*?<\/p>/)
-    expect(scopeParagraph).toBeTruthy()
-    expect(cloudTakParagraph).toBeTruthy()
-    expect(scopeParagraph[0]).not.toContain('CloudTAK')
-    expect(cloudTakParagraph[0]).toContain('CloudTAK/WebTAK')
   })
 
   it('the disabled-on-edit control also states WHY as text, not merely a title attribute', () => {
@@ -239,7 +219,7 @@ describe('TeamFormDialog — Pseudonymous_Username_Policy copy, additional edge 
     // ordinary paragraph text beside the control, not only in the icon's
     // title.
     const controlIndex = dialogSource.indexOf('id="pseudonymousUsernames"')
-    const nearbyText = dialogSource.slice(controlIndex, controlIndex + 3000)
+    const nearbyText = dialogSource.slice(controlIndex, controlIndex + 4000)
     expect(nearbyText).toContain('This cannot be changed once the Organisation is created.')
   })
 })

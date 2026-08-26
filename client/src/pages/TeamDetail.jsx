@@ -2513,6 +2513,10 @@ export default function TeamDetail({ user, refreshUser }) {
                   const response = await devicesAPI.generateQrCode(enrollingDevice.deviceUserId)
                   return response.data.qrCode
                 }}
+                fetchPreview={async () => {
+                  const response = await devicesAPI.previewQrCode(enrollingDevice.deviceUserId)
+                  return response.data.preview
+                }}
               />
             </div>
           </div>

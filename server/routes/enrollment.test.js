@@ -37,7 +37,7 @@ jest.mock('../services/DeviceEnrollmentService', () => {
     }
   }
   class TakServerNotConfiguredError extends Error {
-    constructor(message = 'TAK_SERVER_URL must be configured to generate a Team_Owned_Device enrollment QR code') {
+    constructor(message = 'TAK_SERVER_ENROLLMENT_URL must be configured to generate a TAK Server enrollment QR code') {
       super(message);
       this.name = 'TakServerNotConfiguredError';
     }
@@ -57,6 +57,7 @@ jest.mock('../services/DeviceEnrollmentService', () => {
 
   const MockDeviceEnrollmentService = {
     generateSelfEnrollment: jest.fn(),
+    previewSelfEnrollment: jest.fn(),
     DeviceSessionCannotSelfEnrollError,
     TakServerNotConfiguredError,
     OrganisationPrefixMissingError,
@@ -234,5 +235,73 @@ describe('POST /api/enrollment/me', () => {
 
     expect(res.status).toBe(500);
     expect(pool.query).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /api/enrollment/me/preview', () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    app = buildApp();
+    pool.query.mockResolvedValue({ rows: [] });
+    asUser();
+  });
+
+  it('resolves the preview and writes no audit_logs row', async () => {
+    const preview = {
+      principalId: 7,
+      principalKind: 'human',
+      username: 'AUK-U7K3QMX',
+      host: 'ops.example.com',
+      takAttributes: { callsign: 'None', color: 'None', role: 'None' },
+      liveCertificateCount: 0
+    };
+    DeviceEnrollmentService.previewSelfEnrollment.mockResolvedValue(preview);
+
+    const res = await request(app).get('/api/enrollment/me/preview');
+
+    expect(res.status).toBe(200);
+    expect(res.body.preview).toEqual(preview);
+    expect(DeviceEnrollmentService.previewSelfEnrollment).toHaveBeenCalledWith(mockUser);
+    // No audit_logs write for a preview -- nothing secret was generated.
+    expect(pool.query).not.toHaveBeenCalled();
+  });
+
+  it('sets the no-store cache header on a successful response', async () => {
+    DeviceEnrollmentService.previewSelfEnrollment.mockResolvedValue({ principalId: 7 });
+
+    const res = await request(app).get('/api/enrollment/me/preview');
+
+    expect(res.headers['cache-control']).toContain('no-store');
+    expect(res.headers['pragma']).toBe('no-cache');
+  });
+
+  it('maps DeviceSessionCannotSelfEnrollError to 403', async () => {
+    DeviceEnrollmentService.previewSelfEnrollment.mockRejectedValue(
+      new DeviceEnrollmentService.DeviceSessionCannotSelfEnrollError()
+    );
+
+    const res = await request(app).get('/api/enrollment/me/preview');
+
+    expect(res.status).toBe(403);
+  });
+
+  it('maps TakServerNotConfiguredError to 400', async () => {
+    DeviceEnrollmentService.previewSelfEnrollment.mockRejectedValue(
+      new DeviceEnrollmentService.TakServerNotConfiguredError()
+    );
+
+    const res = await request(app).get('/api/enrollment/me/preview');
+
+    expect(res.status).toBe(400);
+  });
+
+  it('maps an unrecognized error to a generic 500', async () => {
+    DeviceEnrollmentService.previewSelfEnrollment.mockRejectedValue(new Error('boom'));
+
+    const res = await request(app).get('/api/enrollment/me/preview');
+
+    expect(res.status).toBe(500);
   });
 });

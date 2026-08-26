@@ -72,6 +72,28 @@ function handleServiceError(res, error, logMessage) {
   return res.status(500).json({ error: logMessage });
 }
 
+// Client UX correction: resolves the "Enrollment Data" section's fields
+// (host, username, Callsign/Color/Role, live certificate count) WITHOUT
+// minting an Enrollment_Token, so the Enrollment_View can render this
+// section automatically on mount without minting a live 30-minute
+// Authentik credential every time a user merely visits the page. `no-store`
+// is set here too even though the response carries no secret, for the same
+// reason the POST route below sets it unconditionally: a consistent
+// caching contract across every route on this file is simpler to reason
+// about than one that varies by which fields a given response happens to
+// carry.
+router.get('/me/preview', authenticateToken, authorize, async (req, res) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.set('Pragma', 'no-cache');
+
+  try {
+    const preview = await DeviceEnrollmentService.previewSelfEnrollment(req.user);
+    res.json({ preview });
+  } catch (error) {
+    handleServiceError(res, error, 'Failed to preview self-service enrollment');
+  }
+});
+
 // takserver-enrollment Criteria 3.4, 15.1, 15.2: self-service enrollment
 // for a signed-in Human_Principal's OWN account, whether or not they
 // hold any team membership. No route parameters, no body schema, no

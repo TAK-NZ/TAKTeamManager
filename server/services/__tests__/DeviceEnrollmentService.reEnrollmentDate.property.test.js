@@ -238,8 +238,8 @@ describe('Property 5: The Re_Enrollment_Date is exactly 365 days of generation t
       });
       QRCode.toDataURL.mockResolvedValue('data:image/png;base64,FAKE');
 
-      const originalTakServerUrl = process.env.TAK_SERVER_URL;
-      process.env.TAK_SERVER_URL = 'https://tak.example.com:8443';
+      const originalTakServerUrl = process.env.TAK_SERVER_ENROLLMENT_URL;
+      process.env.TAK_SERVER_ENROLLMENT_URL = 'https://tak.example.com:8443';
 
       const dateNowSpy = jest.spyOn(Date, 'now').mockReturnValue(mockedNow);
 
@@ -249,9 +249,9 @@ describe('Property 5: The Re_Enrollment_Date is exactly 365 days of generation t
       } finally {
         dateNowSpy.mockRestore();
         if (originalTakServerUrl === undefined) {
-          delete process.env.TAK_SERVER_URL;
+          delete process.env.TAK_SERVER_ENROLLMENT_URL;
         } else {
-          process.env.TAK_SERVER_URL = originalTakServerUrl;
+          process.env.TAK_SERVER_ENROLLMENT_URL = originalTakServerUrl;
         }
       }
 

@@ -43,7 +43,7 @@ jest.mock('../services/DeviceEnrollmentService', () => {
     }
   }
   class TakServerNotConfiguredError extends Error {
-    constructor(message = 'TAK_SERVER_URL must be configured to generate a Team_Owned_Device enrollment QR code') {
+    constructor(message = 'TAK_SERVER_ENROLLMENT_URL must be configured to generate a TAK Server enrollment QR code') {
       super(message);
       this.name = 'TakServerNotConfiguredError';
     }
@@ -52,6 +52,7 @@ jest.mock('../services/DeviceEnrollmentService', () => {
   const MockDeviceEnrollmentService = {
     createDevice: jest.fn(),
     generateEnrollmentQrCode: jest.fn(),
+    previewEnrollmentQrCode: jest.fn(),
     listTeamDevices: jest.fn(),
     DeviceEnrollmentAuthorizationError,
     NotATeamOwnedDeviceError,
@@ -319,6 +320,83 @@ describe('POST /api/devices/:deviceUserId/qr-code', () => {
 
     expect(res.status).toBe(400);
     expect(pool.query).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /api/devices/:deviceUserId/preview', () => {
+  let app;
+
+  const previewShape = {
+    principalId: 10,
+    principalKind: 'device',
+    teamId: 3,
+    username: 'device-abc',
+    host: 'tak.example.com',
+    takAttributes: { callsign: 'Callsign1', color: 'Blue', role: 'Team Member' },
+    liveCertificateCount: 1
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    app = buildApp();
+    pool.query.mockResolvedValue({ rows: [] });
+  });
+
+  it('resolves the preview shape, writes no audit_logs row, and sets no-store', async () => {
+    asGlobalManager();
+    DeviceEnrollmentService.previewEnrollmentQrCode.mockResolvedValue(previewShape);
+
+    const res = await request(app).get('/api/devices/10/preview');
+
+    expect(res.status).toBe(200);
+    expect(res.body.preview).toEqual(previewShape);
+    expect(DeviceEnrollmentService.previewEnrollmentQrCode).toHaveBeenCalledWith('10', mockUser);
+    expect(res.headers['cache-control']).toBe('no-store, no-cache, must-revalidate');
+    expect(res.headers['pragma']).toBe('no-cache');
+    // No secret was generated, so no audit_logs row.
+    expect(pool.query).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 for a non-integer deviceUserId without calling the service', async () => {
+    asGlobalManager();
+
+    const res = await request(app).get('/api/devices/not-a-number/preview');
+
+    expect(res.status).toBe(400);
+    expect(DeviceEnrollmentService.previewEnrollmentQrCode).not.toHaveBeenCalled();
+  });
+
+  it('maps DeviceEnrollmentAuthorizationError from the service to 403', async () => {
+    asStandardUser(5);
+    DeviceEnrollmentService.previewEnrollmentQrCode.mockRejectedValue(
+      new DeviceEnrollmentService.DeviceEnrollmentAuthorizationError()
+    );
+
+    const res = await request(app).get('/api/devices/10/preview');
+
+    expect(res.status).toBe(403);
+  });
+
+  it('maps NotATeamOwnedDeviceError from the service to 400', async () => {
+    asGlobalManager();
+    DeviceEnrollmentService.previewEnrollmentQrCode.mockRejectedValue(
+      new DeviceEnrollmentService.NotATeamOwnedDeviceError()
+    );
+
+    const res = await request(app).get('/api/devices/10/preview');
+
+    expect(res.status).toBe(400);
+  });
+
+  it('maps TakServerNotConfiguredError from the service to 400', async () => {
+    asGlobalManager();
+    DeviceEnrollmentService.previewEnrollmentQrCode.mockRejectedValue(
+      new DeviceEnrollmentService.TakServerNotConfiguredError()
+    );
+
+    const res = await request(app).get('/api/devices/10/preview');
+
+    expect(res.status).toBe(400);
   });
 });
 

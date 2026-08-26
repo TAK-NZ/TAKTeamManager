@@ -357,6 +357,12 @@ const routes = {
   // Global_Manager from creating/enrolling devices for their own team.
   'POST /api/devices': ['device:manage'],
   'POST /api/devices/:deviceUserId/qr-code': ['device:manage'],
+  // Client UX correction: the preview counterpart of the QR-code route
+  // above, resolving the same subject with the same authorization rule
+  // (DeviceEnrollmentService.assertAuthorized, internally) but minting no
+  // token -- so it shares that route's permission identifier rather than
+  // introducing a new one for what is authorization-identical.
+  'GET /api/devices/:deviceUserId/preview': ['device:manage'],
   // takserver-enrollment Criteria 3.5, 3.7, 3.11 (task 8.4): team-device
   // LISTING route (`DeviceEnrollmentService.listTeamDevices`), a
   // DIFFERENT surface from the two routes above (which create/enroll a
@@ -392,6 +398,10 @@ const routes = {
   // caller-fixed subject there is no row for a resolver to scope and
   // nothing a static grant could give away.
   'POST /api/enrollment/me': ['enrollment:self'],
+  // Client UX correction: the preview counterpart of the self-enrollment
+  // route above, same subject (req.user alone) and same static grant --
+  // it resolves the "Enrollment Data" section without minting a token.
+  'GET /api/enrollment/me/preview': ['enrollment:self'],
 
   // --- /api/device-management (server/routes/deviceManagement.js) ---
   // device-management Requirements 6.2, 6.6, 6.7, 8.5, 8.6, 9.3, 9.4. A

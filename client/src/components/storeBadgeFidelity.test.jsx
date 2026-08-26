@@ -269,25 +269,33 @@ describe('storeBadgeFidelity guard: exactly two Recommended_Option_Markers (Crit
 
   it('places the two markers on ATAK-via-TAK.gov and TAK Aware, and neither other route', () => {
     // Route the marker to the row it sits in by walking up to the shared
-    // grid cell, then read that cell's visible label/sublabel text -- so the
-    // assertion is anchored to CONTENT (which download route) rather than to
-    // position, and would catch the marker migrating to the wrong cell even
-    // if the DOM order happened to stay 1st/2nd.
-    const routeLabelsWithMarker = findMarkers().map((marker) => {
+    // grid cell, then read that cell's anchor `href` -- the four link
+    // targets are pinned exactly by the "link set" describe block above,
+    // and unlike the visible label/sublabel text (both ATAK routes read
+    // "ATAK" once the "via TAK.gov" / "via Google Play" sublabels were
+    // removed per the Downloads defect fixes), the href uniquely
+    // identifies which of the four routes a cell is. This still anchors
+    // the assertion to CONTENT rather than position, and would catch the
+    // marker migrating to the wrong cell even if the DOM order happened to
+    // stay 1st/2nd.
+    const hrefsWithMarker = findMarkers().map((marker) => {
       const cell = marker.closest('.flex.flex-col')
-      return cell ? cell.textContent : null
+      return cell ? cell.querySelector('a')?.getAttribute('href') : null
     })
 
-    expect(routeLabelsWithMarker).toHaveLength(2)
-    expect(routeLabelsWithMarker.some((text) => text && text.includes('ATAK') && text.includes('TAK.gov'))).toBe(
-      true
-    )
-    expect(routeLabelsWithMarker.some((text) => text && text.includes('TAK Aware'))).toBe(true)
+    expect(hrefsWithMarker).toHaveLength(2)
+    expect(hrefsWithMarker).toContain('https://tak.gov/products/atak-civ')
+    expect(hrefsWithMarker).toContain('https://apps.apple.com/in/app/tak-aware/id6738631659')
 
     // And explicitly NOT on the two alternative routes.
     const allCells = Array.from(container.querySelectorAll('.flex.flex-col'))
-    const googlePlayCell = allCells.find((cell) => cell.textContent.includes('Google Play'))
-    const itakCell = allCells.find((cell) => cell.textContent.includes('iTAK'))
+    const googlePlayCell = allCells.find((cell) =>
+      cell.querySelector('a')?.getAttribute('href') ===
+      'https://play.google.com/store/apps/details?id=com.atakmap.app.civ'
+    )
+    const itakCell = allCells.find((cell) =>
+      cell.querySelector('a')?.getAttribute('href') === 'https://apps.apple.com/us/app/itak/id1561656396'
+    )
 
     expect(googlePlayCell?.querySelector('span.sr-only')).toBeNull()
     expect(itakCell?.querySelector('span.sr-only')).toBeNull()

@@ -438,6 +438,13 @@ export const enrollmentAPI = {
   // no body: the subject is always resolved server-side from the session
   // (Requirement 3.4), so there is nothing here for a caller to tamper with.
   generateSelf: () => api.post('/enrollment/me'),
+  // Client UX correction: resolves the "Enrollment Data" section's fields
+  // (host, username, Callsign/Color/Role, live certificate count) WITHOUT
+  // minting an Enrollment_Token, so the Enrollment_View can call this
+  // automatically on mount without minting a live credential just because
+  // the page loaded. Minting only happens from generateSelf(), and only in
+  // response to an explicit "Generate Enrollment Data" click.
+  previewSelf: () => api.get('/enrollment/me/preview'),
 };
 
 export const devicesAPI = {
@@ -451,6 +458,10 @@ export const devicesAPI = {
   // 4.3, 11.5) -- callers must keep it in component state only, per the note
   // above `enrollmentAPI`.
   generateQrCode: (deviceUserId) => api.post(`/devices/${deviceUserId}/qr-code`),
+  // The preview counterpart of generateQrCode: resolves the same
+  // "Enrollment Data" fields for a Team_Owned_Device without minting a
+  // token, matching enrollmentAPI.previewSelf()'s no-mint contract.
+  previewQrCode: (deviceUserId) => api.get(`/devices/${deviceUserId}/preview`),
 };
 
 export default api;

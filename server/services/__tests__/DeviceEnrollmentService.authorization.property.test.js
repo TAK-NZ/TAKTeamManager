@@ -163,17 +163,17 @@ const ACTING_USER_IDS = [201, 202, 203];
 const OTHER_USER_IDS = [301, 302, 303];
 const SIBLING_TEAM_ID = 9999;
 
-const ORIGINAL_TAK_SERVER_URL = process.env.TAK_SERVER_URL;
+const ORIGINAL_TAK_SERVER_ENROLLMENT_URL = process.env.TAK_SERVER_ENROLLMENT_URL;
 
 beforeAll(() => {
-  process.env.TAK_SERVER_URL = 'https://tak.example.com:8443';
+  process.env.TAK_SERVER_ENROLLMENT_URL = 'https://tak.example.com:8443';
 });
 
 afterAll(() => {
-  if (ORIGINAL_TAK_SERVER_URL === undefined) {
-    delete process.env.TAK_SERVER_URL;
+  if (ORIGINAL_TAK_SERVER_ENROLLMENT_URL === undefined) {
+    delete process.env.TAK_SERVER_ENROLLMENT_URL;
   } else {
-    process.env.TAK_SERVER_URL = ORIGINAL_TAK_SERVER_URL;
+    process.env.TAK_SERVER_ENROLLMENT_URL = ORIGINAL_TAK_SERVER_ENROLLMENT_URL;
   }
 });
 

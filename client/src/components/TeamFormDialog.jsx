@@ -437,21 +437,28 @@ export default function TeamFormDialog({
                     same `!formData.parentTeamId` fragment, never for a
                     Sub_Team.
 
-                    DISABLED when editing an EXISTING Organisation
-                    (`editingTeam` truthy), matching the FieldLockIndicator
-                    convention already used for Prefix and TAK Color: a
-                    policy change on an existing Organisation is a
-                    fleet-wide re-enrollment event, not a setting change
-                    (Requirement 7.2/7.3) -- every existing member's
-                    username would have to change, invalidating every
-                    certificate Common Name and every device record in
-                    the Organisation.
+                    The INPUT is disabled only when editing an EXISTING
+                    Organisation (`disabled={!!editingTeam}` below) -- it
+                    stays freely editable while the Organisation is still
+                    being created. The FieldLockIndicator is a SEPARATE
+                    question from that: `locked` states whether the field
+                    can EVER be changed once the Organisation exists, which
+                    is a fixed fact about this field independent of which
+                    mode the dialog is currently in. That is why Prefix and
+                    TAK Color both pass `locked={true}` unconditionally
+                    (see their own FieldLockIndicators above) rather than
+                    keying it to `editingTeam` -- and this control follows
+                    the same convention. Bugfix: it previously passed
+                    `locked={!!editingTeam}`, which showed a GREEN OPEN
+                    lock while creating, directly contradicting the "This
+                    cannot be changed once the Organisation is created"
+                    text rendered a few lines below it.
                   */}
                   <div>
                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                       Pseudonymous Usernames
                       <FieldLockIndicator
-                        locked={!!editingTeam}
+                        locked={true}
                         lockedReason="Cannot be changed after the Organisation is created: switching this policy would require every existing member's username to change, invalidating every certificate Common Name and every device record in the Organisation, and forcing every device to re-enroll"
                       />
                     </label>
@@ -472,24 +479,33 @@ export default function TeamFormDialog({
                       </label>
                     </div>
                     {/*
-                      Requirement 8.2/8.3/8.4/16.4: the Pseudonymity_Scope
-                      statement, in TEXT (never colour alone). Must NOT
-                      describe the policy as "anonymity" and must NOT
-                      claim TAK Team Manager holds no personally
-                      identifying information -- it still stores every
-                      member's first name, last name and email, and an
-                      operator can always re-identify a member from that
-                      record. The pseudonymity is against TAK Server and
-                      other TAK users only. The CloudTAK/WebTAK
-                      limitation is named in the same statement, per
-                      Criterion 16.4, so an operator knows it at the
-                      moment the policy is chosen rather than afterwards.
+                      Requirement 8.2/8.3 (task 5.5, since amended): the
+                      Pseudonymity_Scope statement, in TEXT (never colour
+                      alone). Must NOT describe the policy as "anonymity"
+                      and must NOT claim TAK Team Manager holds no
+                      personally identifying information -- it still
+                      stores every member's first name, last name and
+                      email, and an operator can always re-identify a
+                      member from that record. The pseudonymity is
+                      against TAK Server and other TAK users only.
+
+                      The CloudTAK/WebTAK caveat this paragraph used to
+                      carry (Criterion 16.4 in the original
+                      takserver-enrollment spec: that connection path
+                      built the certificate Common Name/clientUid and the
+                      CoT uid from the member's EMAIL rather than their
+                      username, defeating the pseudonymity entirely for a
+                      CloudTAK/WebTAK member) is REMOVED -- that defeat has
+                      since been fixed upstream in the CloudTAK fork
+                      (`api/stateless/lib/authentik-provider.ts`,
+                      `api/common/connection-config.ts`), which now builds
+                      all three of those from the Authentik username, same
+                      as every other connection path. A pseudonymous
+                      member's CloudTAK/WebTAK session is pseudonymised
+                      exactly like their native ATAK/iTAK/WinTAK one.
                     */}
                     <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                       When enabled, each new member's TAK username (and therefore their certificate name) is a random identifier instead of one derived from their email or name. This is <strong>not anonymity</strong>: TAK Team Manager still stores the member's first name, last name and email address, so an operator can always re-identify them from that record. The protection is only against TAK Server and other TAK users seeing who a member is.
-                    </p>
-                    <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
-                      This protection does not apply to members who connect via CloudTAK/WebTAK: that connection path builds the certificate name and CoT ID from the member's email address rather than their username, so a CloudTAK/WebTAK member is not pseudonymised at all.
                     </p>
                     {!editingTeam && (
                       <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">

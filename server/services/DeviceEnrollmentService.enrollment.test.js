@@ -23,7 +23,7 @@
  *     describe block) -- though NOT the "toDataURL, never toBuffer" call
  *     assertion, which is new here (item 1 below).
  *   - `TakServerNotConfiguredError` raised before any
- *     `createAppPasswordToken` call when `TAK_SERVER_URL` is UNSET, via
+ *     `createAppPasswordToken` call when `TAK_SERVER_ENROLLMENT_URL` is UNSET, via
  *     `generateEnrollmentQrCode` (`DeviceEnrollmentService.test.js`) --
  *     though NOT the UNPARSEABLE case, which is new here (item 3 below).
  *   - `generateSelfEnrollment` refusing an `is_team_device = true` row
@@ -39,7 +39,7 @@
  *   2. The ATAK URI's `encodeURIComponent` applied to all three values,
  *      cross-checked against a hostile host and username carrying `&`,
  *      `=` and a space.
- *   3. `TakServerNotConfiguredError` for an UNPARSEABLE `TAK_SERVER_URL`
+ *   3. `TakServerNotConfiguredError` for an UNPARSEABLE `TAK_SERVER_ENROLLMENT_URL`
  *      (an empty string, and a non-URL string that makes `new URL(...)`
  *      throw), through both entry points, asserting the token-minting
  *      call count is exactly 0.
@@ -105,7 +105,7 @@ const DEVICE_ROW = {
   tak_role: null
 };
 
-const ORIGINAL_TAK_SERVER_URL = process.env.TAK_SERVER_URL;
+const ORIGINAL_TAK_SERVER_ENROLLMENT_URL = process.env.TAK_SERVER_ENROLLMENT_URL;
 
 let pool;
 let Team;
@@ -135,7 +135,7 @@ beforeEach(() => {
   DeviceEnrollmentService = require('./DeviceEnrollmentService');
   ({ TakServerNotConfiguredError } = DeviceEnrollmentService);
 
-  process.env.TAK_SERVER_URL = 'https://tak.example.com:8443';
+  process.env.TAK_SERVER_ENROLLMENT_URL = 'https://tak.example.com:8443';
 
   // Default: no team membership, no live certificates -- individual tests
   // override this where a team/certificate count matters.
@@ -153,10 +153,10 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  if (ORIGINAL_TAK_SERVER_URL === undefined) {
-    delete process.env.TAK_SERVER_URL;
+  if (ORIGINAL_TAK_SERVER_ENROLLMENT_URL === undefined) {
+    delete process.env.TAK_SERVER_ENROLLMENT_URL;
   } else {
-    process.env.TAK_SERVER_URL = ORIGINAL_TAK_SERVER_URL;
+    process.env.TAK_SERVER_ENROLLMENT_URL = ORIGINAL_TAK_SERVER_ENROLLMENT_URL;
   }
 });
 
@@ -190,7 +190,7 @@ describe("the ATAK URI's encodeURIComponent, cross-checked against a hostile hos
     // still carries '&' and '=' in its hostname -- confirmed against the
     // live URL parser rather than assumed.
     const hostileTakServerUrl = 'https://tak&eq=server.example.com:8443';
-    process.env.TAK_SERVER_URL = hostileTakServerUrl;
+    process.env.TAK_SERVER_ENROLLMENT_URL = hostileTakServerUrl;
     const expectedHost = new URL(hostileTakServerUrl).hostname;
     expect(expectedHost).toContain('&');
     expect(expectedHost).toContain('=');
@@ -220,13 +220,13 @@ describe("the ATAK URI's encodeURIComponent, cross-checked against a hostile hos
 });
 
 // ---------------------------------------------------------------------------
-// 3. TakServerNotConfiguredError for an UNPARSEABLE TAK_SERVER_URL (the
+// 3. TakServerNotConfiguredError for an UNPARSEABLE TAK_SERVER_ENROLLMENT_URL (the
 // UNSET case is already covered elsewhere via generateEnrollmentQrCode).
 // ---------------------------------------------------------------------------
 
-describe('TakServerNotConfiguredError is raised before any token mint, for an unset or an unparseable TAK_SERVER_URL', () => {
-  it('raises before any token mint when TAK_SERVER_URL is unset, via generateSelfEnrollment (exact call count, not merely "an error was thrown")', async () => {
-    delete process.env.TAK_SERVER_URL;
+describe('TakServerNotConfiguredError is raised before any token mint, for an unset or an unparseable TAK_SERVER_ENROLLMENT_URL', () => {
+  it('raises before any token mint when TAK_SERVER_ENROLLMENT_URL is unset, via generateSelfEnrollment (exact call count, not merely "an error was thrown")', async () => {
+    delete process.env.TAK_SERVER_ENROLLMENT_URL;
     User.findById.mockResolvedValue(HUMAN_ROW);
 
     await expect(
@@ -237,8 +237,8 @@ describe('TakServerNotConfiguredError is raised before any token mint, for an un
     expect(mockAxiosClient.get).toHaveBeenCalledTimes(0);
   });
 
-  it('raises before any token mint when TAK_SERVER_URL is the empty string, via generateSelfEnrollment', async () => {
-    process.env.TAK_SERVER_URL = '';
+  it('raises before any token mint when TAK_SERVER_ENROLLMENT_URL is the empty string, via generateSelfEnrollment', async () => {
+    process.env.TAK_SERVER_ENROLLMENT_URL = '';
     User.findById.mockResolvedValue(HUMAN_ROW);
 
     await expect(
@@ -248,10 +248,10 @@ describe('TakServerNotConfiguredError is raised before any token mint, for an un
     expect(mockAxiosClient.post).toHaveBeenCalledTimes(0);
   });
 
-  it('raises before any token mint when TAK_SERVER_URL is a non-URL string that makes new URL(...) throw, via generateSelfEnrollment', async () => {
-    process.env.TAK_SERVER_URL = 'not a valid url';
+  it('raises before any token mint when TAK_SERVER_ENROLLMENT_URL is a non-URL string that makes new URL(...) throw, via generateSelfEnrollment', async () => {
+    process.env.TAK_SERVER_ENROLLMENT_URL = 'not a valid url';
     // Confirm the premise: this string really does make the native parser throw.
-    expect(() => new URL(process.env.TAK_SERVER_URL)).toThrow();
+    expect(() => new URL(process.env.TAK_SERVER_ENROLLMENT_URL)).toThrow();
     User.findById.mockResolvedValue(HUMAN_ROW);
 
     await expect(
@@ -261,8 +261,8 @@ describe('TakServerNotConfiguredError is raised before any token mint, for an un
     expect(mockAxiosClient.post).toHaveBeenCalledTimes(0);
   });
 
-  it('raises before any token mint when TAK_SERVER_URL is unparseable, via generateEnrollmentQrCode too (both entry points share #buildEnrollment)', async () => {
-    process.env.TAK_SERVER_URL = 'not a valid url';
+  it('raises before any token mint when TAK_SERVER_ENROLLMENT_URL is unparseable, via generateEnrollmentQrCode too (both entry points share #buildEnrollment)', async () => {
+    process.env.TAK_SERVER_ENROLLMENT_URL = 'not a valid url';
     Team.isAdmin.mockResolvedValue(true);
     pool.query.mockImplementation((sql) => {
       if (typeof sql === 'string' && sql.includes('FROM users WHERE id')) {

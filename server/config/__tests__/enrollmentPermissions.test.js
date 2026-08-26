@@ -198,17 +198,22 @@ describe('no client QR dependency, and no new environment variable for this feat
     expect(qrPackageNames).toEqual([]);
   });
 
-  it('introduces no NEW environment variable across the feature\'s server files -- only TAK_SERVER_URL (new to this path) and the pre-existing AUTHENTIK_URL/AUTHENTIK_ADMIN_TOKEN compensating-delete pair', () => {
+  it('introduces exactly one NEW environment variable across the feature\'s server files -- TAK_SERVER_ENROLLMENT_URL (a dedicated enrollment host, deliberately distinct from the Marti certadmin API\'s TAK_SERVER_URL) -- plus the pre-existing AUTHENTIK_URL/AUTHENTIK_ADMIN_TOKEN compensating-delete pair', () => {
     // Every server module this feature touches or introduces. Scanned for
-    // `process.env.` reads. TAK_SERVER_URL is the one variable this
-    // feature's enrollment-generation path itself reads (Criterion
-    // 15.10). AUTHENTIK_URL/AUTHENTIK_ADMIN_TOKEN also appear, in
-    // `DeviceEnrollmentService.js`'s `#compensateClaimRow` -- but those
-    // are the SAME pair every other Authentik-calling path in this
-    // codebase already reads (`server/services/authentik.js`, `server/
-    // routes/users.js`'s own compensating-delete site), already
-    // documented in `.env.example`, and not new to this feature. No
-    // ENROLLMENT_*/MANAGED_IDENTIFIER_*-shaped variable is introduced.
+    // `process.env.` reads. TAK_SERVER_ENROLLMENT_URL is the one NEW
+    // variable this feature's enrollment-generation path reads (a later
+    // correction to Criterion 15.10's original "reads only the already-
+    // configured TAK_SERVER_URL" -- the enrollment host and the Marti
+    // certadmin API host are not always the same name, so a dedicated
+    // variable is documented in .env.example with a safe default, per
+    // that criterion's own fallback clause). AUTHENTIK_URL/
+    // AUTHENTIK_ADMIN_TOKEN also appear, in `DeviceEnrollmentService.js`'s
+    // `#compensateClaimRow` -- but those are the SAME pair every other
+    // Authentik-calling path in this codebase already reads
+    // (`server/services/authentik.js`, `server/routes/users.js`'s own
+    // compensating-delete site), already documented in `.env.example`,
+    // and not new to this feature. No ENROLLMENT_*/MANAGED_IDENTIFIER_*-
+    // shaped variable is introduced.
     const featureFiles = [
       'server/routes/enrollment.js',
       'server/routes/devices.js',
@@ -232,23 +237,21 @@ describe('no client QR dependency, and no new environment variable for this feat
       }
     }
 
-    // Anti-vacuity: TAK_SERVER_URL must actually have been found by the
-    // scan, so this assertion is measuring something.
-    expect(foundVars.has('TAK_SERVER_URL')).toBe(true);
+    // Anti-vacuity: TAK_SERVER_ENROLLMENT_URL must actually have been
+    // found by the scan, so this assertion is measuring something.
+    expect(foundVars.has('TAK_SERVER_ENROLLMENT_URL')).toBe(true);
 
-    const expectedVars = ['AUTHENTIK_ADMIN_TOKEN', 'AUTHENTIK_URL', 'TAK_SERVER_URL'];
+    const expectedVars = ['AUTHENTIK_ADMIN_TOKEN', 'AUTHENTIK_URL', 'TAK_SERVER_ENROLLMENT_URL'];
     expect(Array.from(foundVars).sort()).toEqual(expectedVars.sort());
 
     // AUTHENTIK_URL/AUTHENTIK_ADMIN_TOKEN are documented as literal keys
-    // in .env.example already (pre-existing). TAK_SERVER_URL is
-    // documented there only in prose (it backs the pre-existing mutual-
-    // TLS integration and Criterion 15.10 does not require adding a
-    // literal `TAK_SERVER_URL=` line for THIS feature) -- confirming this
-    // scan found nothing genuinely new to either file.
+    // in .env.example already (pre-existing). TAK_SERVER_ENROLLMENT_URL
+    // is documented there with a literal `TAK_SERVER_ENROLLMENT_URL=`
+    // line and a safe (empty) default.
     const envExample = fs.readFileSync(path.join(REPO_ROOT, '.env.example'), 'utf8');
     expect(envExample).toMatch(/^AUTHENTIK_URL=/m);
     expect(envExample).toMatch(/^AUTHENTIK_ADMIN_TOKEN=/m);
-    expect(envExample).toContain('TAK_SERVER_URL');
+    expect(envExample).toMatch(/^TAK_SERVER_ENROLLMENT_URL=/m);
   });
 
   it('does not add a new ENROLLMENT_* or MANAGED_IDENTIFIER_* variable to .env.example', () => {

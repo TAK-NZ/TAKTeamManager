@@ -8,41 +8,46 @@ import { isAndroidClient } from '../utils/platformDetection'
 import { setDisplayTimezone, DEFAULT_DISPLAY_TIMEZONE } from '../utils/dateFormat'
 
 // takserver-enrollment task 9.9 -- client example tests for the
-// Enrollment_View (Requirements 10.1, 10.2, 10.4, 10.6, 10.7, 10.8, 10.9,
-// 10.11, 15.3).
+// Enrollment_View, updated for the UX correction: the page now fetches a
+// NO-MINT preview automatically on mount (`enrollmentAPI.previewSelf`) and
+// defers the actual token mint (`enrollmentAPI.generateSelf`) to an
+// explicit "Generate Enrollment Data" click.
 //
-// This project has no `@testing-library/react` (absent from
-// `client/package.json` and from `client/node_modules`) and no dependency is
-// added for this task, so the page is mounted with `react-dom/client`'s
-// `createRoot` plus React 18's own `act`, following the pattern
-// `src/components/TransferMemberDialog.test.jsx` established and
-// `src/components/EnrollmentCountdown.test.jsx` (task 9.3) already uses for
-// this same feature.
+// This project has no `@testing-library/react`, so the page is mounted
+// with `react-dom/client`'s `createRoot` plus React 18's own `act`.
 //
-// `../services/api` and `../utils/platformDetection` are the only mocks: the
-// network boundary and the one piece of client-side platform detection this
-// view depends on. `EnrollmentCountdown`, `MultipleCertificateWarning` and
-// `FormattedDate` are all the REAL components -- in particular `FormattedDate`
-// is real so that Criterion 10.9's "dates render through FormattedDate" is a
-// checked fact (a real yyyy-mm-dd string in the DOM) rather than something a
-// mock invented. `client/src/utils/dateFormatConsumers.test.js` is the
-// structural guard that FormattedDate stays the ONLY consumer of the
-// Date_Format_Helpers; this file does not duplicate that guard -- it only has
-// to import `FormattedDate` (which it does, unconditionally) rather than
-// `formatDate`/`formatDateTime` directly, and that guard's own suite is what
-// is run to confirm the one-entry allow-list is unaffected (see task 9.10).
+// `../services/api` and `../utils/platformDetection` are the only mocks.
+// `EnrollmentCountdown`, `MultipleCertificateWarning` and `FormattedDate`
+// are all the REAL components.
 
 vi.mock('../services/api', () => ({
-  enrollmentAPI: { generateSelf: vi.fn() },
+  enrollmentAPI: { generateSelf: vi.fn(), previewSelf: vi.fn() },
 }))
 
 vi.mock('../utils/platformDetection', () => ({
   isAndroidClient: vi.fn(),
 }))
 
+vi.mock('react-hot-toast', () => ({
+  default: { success: vi.fn(), error: vi.fn() },
+}))
+
 // Vitest compiles this JSX with esbuild's classic transform and the page
 // source carries no React import of its own.
 globalThis.React = React
+
+/** A `#resolvePrincipalPreview`-shaped response (no secret material). */
+function buildPreviewFixture(overrides = {}) {
+  return {
+    principalId: 1,
+    principalKind: 'human',
+    username: 'AUK-U7K3QMX',
+    host: 'tak.example.nz',
+    takAttributes: { callsign: 'Alpha1', color: 'Blue', role: 'Team Member' },
+    liveCertificateCount: 0,
+    ...overrides,
+  }
+}
 
 /**
  * A `#buildEnrollment`-shaped response, with every field a real deployment
@@ -51,10 +56,7 @@ globalThis.React = React
 function buildEnrollmentFixture(overrides = {}) {
   const now = Date.now()
   return {
-    principalId: 1,
-    principalKind: 'human',
-    username: 'AUK-U7K3QMX',
-    host: 'tak.example.nz',
+    ...buildPreviewFixture(),
     expiresAt: new Date(now + 5 * 60 * 1000).toISOString(),
     reEnrollmentDate: new Date(now + 365 * 24 * 60 * 60 * 1000).toISOString(),
     atakEnrollmentUri: 'tak://com.atakmap.app/enroll?host=tak.example.nz&username=AUK-U7K3QMX&token=s3cr3t-t0ken',
@@ -70,8 +72,6 @@ function buildEnrollmentFixture(overrides = {}) {
     },
     atakQrDataUrl: 'data:image/png;base64,AAAAATAKQRCODE',
     itakQrDataUrl: 'data:image/png;base64,BBBBITAKQRCODE',
-    takAttributes: { callsign: 'Alpha1', color: 'Blue', role: 'Team Member' },
-    liveCertificateCount: 0,
     ...overrides,
   }
 }
@@ -94,11 +94,10 @@ describe('EnrollmentView (mounted)', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     container = document.createElement('div')
     document.body.appendChild(container)
-    // Deterministic zone for the Re_Enrollment_Date assertions -- matches the
-    // `Users.test.jsx` convention.
     setDisplayTimezone('UTC')
-    // Default: not Android, so the deep link is absent unless a test opts in.
     isAndroidClient.mockReturnValue(false)
+    // Default: preview resolves cleanly for every test unless overridden.
+    enrollmentAPI.previewSelf.mockResolvedValue({ data: { preview: buildPreviewFixture() } })
   })
 
   afterEach(async () => {
@@ -122,7 +121,6 @@ describe('EnrollmentView (mounted)', () => {
     })
   }
 
-  /** Flushes the mount-time `fetchEnrollment()` call without advancing any clock. */
   const flush = async () => {
     await act(async () => {
       await Promise.resolve()
@@ -130,29 +128,104 @@ describe('EnrollmentView (mounted)', () => {
     })
   }
 
-  // ── Criteria 10.1, 10.8 ────────────────────────────────────────────────
-  it('renders both QR images, the username, the host and the token text', async () => {
+  const findGenerateButton = () =>
+    Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Generate Enrollment Data'
+    )
+
+  // ── Preview on mount, no mint ───────────────────────────────────────
+  it('fetches the no-mint preview on mount and renders the Enrollment Data section without minting anything', async () => {
+    const preview = buildPreviewFixture()
+    await mount()
+    await flush()
+
+    expect(enrollmentAPI.previewSelf).toHaveBeenCalledTimes(1)
+    expect(enrollmentAPI.generateSelf).not.toHaveBeenCalled()
+
+    expect(container.textContent).toContain('Enrollment Data')
+    expect(container.textContent).toContain(preview.host)
+    expect(container.textContent).toContain(preview.username)
+    expect(container.textContent).toContain('Alpha1')
+    expect(container.textContent).toContain('Blue')
+    expect(container.textContent).toContain('Team Member')
+    expect(container.textContent).toContain('Device Enrollment Requirements')
+
+    // No QR codes and no countdown before the button is clicked.
+    expect(container.querySelector('img')).toBeNull()
+    expect(findGenerateButton()).toBeTruthy()
+  })
+
+  it('labels the row "Device" for a Team_Owned_Device principal, and "User" for a human', async () => {
+    enrollmentAPI.previewSelf.mockResolvedValue({
+      data: { preview: buildPreviewFixture({ principalKind: 'device', username: 'AUK-DZP39HRH' }) },
+    })
+    await mount()
+    await flush()
+
+    expect(container.textContent).toContain('Device')
+    expect(container.textContent).toContain('AUK-DZP39HRH')
+  })
+
+  it('shows the live-certificate-count note as part of the Enrollment Data section', async () => {
+    enrollmentAPI.previewSelf.mockResolvedValue({
+      data: { preview: buildPreviewFixture({ liveCertificateCount: 2 }) },
+    })
+    await mount()
+    await flush()
+
+    expect(container.textContent).toContain('2 active TAK Server certificates')
+  })
+
+  it('shows a retry when the preview fails, and issues no mint call', async () => {
+    enrollmentAPI.previewSelf.mockRejectedValue({ response: { status: 500, data: {} } })
+    await mount()
+    await flush()
+
+    expect(container.querySelector('[role="alert"]')).not.toBeNull()
+    expect(enrollmentAPI.generateSelf).not.toHaveBeenCalled()
+
+    const retryButton = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Retry'
+    )
+    expect(retryButton).toBeTruthy()
+
+    enrollmentAPI.previewSelf.mockResolvedValue({ data: { preview: buildPreviewFixture() } })
+    await act(async () => {
+      retryButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flush()
+
+    expect(container.textContent).toContain('Enrollment Data')
+  })
+
+  // ── Deferred generation ──────────────────────────────────────────────
+  it('mints an enrollment ONLY after "Generate Enrollment Data" is clicked, rendering both QR images, the username, the host and the token text', async () => {
     const enrollment = buildEnrollmentFixture()
     enrollmentAPI.generateSelf.mockResolvedValue({ data: { enrollment } })
 
     await mount()
     await flush()
 
+    expect(enrollmentAPI.generateSelf).not.toHaveBeenCalled()
+
+    const button = findGenerateButton()
+    await act(async () => {
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flush()
+
+    expect(enrollmentAPI.generateSelf).toHaveBeenCalledTimes(1)
+
     const atakImg = container.querySelector('img[alt="ATAK enrollment QR code"]')
-    const itakImg = container.querySelector('img[alt="iTAK enrollment QR code"]')
     expect(atakImg).not.toBeNull()
     expect(atakImg.getAttribute('src')).toBe(enrollment.atakQrDataUrl)
-    expect(itakImg).not.toBeNull()
-    expect(itakImg.getAttribute('src')).toBe(enrollment.itakQrDataUrl)
 
-    // The username appears (top summary + manual-entry block); the host
-    // appears in the top summary.
     expect(container.textContent).toContain(enrollment.username)
     expect(container.textContent).toContain(enrollment.host)
 
-    // Criterion 10.8: the Enrollment_Token is rendered as TEXT so a device
-    // that cannot scan can be enrolled manually.
-    expect(container.textContent).toContain(enrollment.itakRegistrationPayload.userCredentials.password)
+    // Criterion 10.8-equivalent: the manual-entry tab shows the code as a
+    // fixed run of bullets, never the real value in text.
+    expect(container.textContent).not.toContain(enrollment.itakRegistrationPayload.userCredentials.password)
   })
 
   // ── Criterion 10.2 ─────────────────────────────────────────────────────
@@ -161,7 +234,7 @@ describe('EnrollmentView (mounted)', () => {
       vi.useFakeTimers()
     })
 
-    it('ticks, reaches EXPIRED, clears its interval, swaps the deep-link text, and issues no fetch on expiry', async () => {
+    it('ticks, reaches EXPIRED, clears its interval, swaps the deep-link text, and issues no further mint on expiry', async () => {
       const now = Date.now()
       vi.setSystemTime(now)
       isAndroidClient.mockReturnValue(true)
@@ -174,9 +247,13 @@ describe('EnrollmentView (mounted)', () => {
         await Promise.resolve()
       })
 
-      // Ticking: the live MM : SS value is present before expiry.
+      const button = findGenerateButton()
+      await act(async () => {
+        button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await Promise.resolve()
+      })
+
       expect(container.textContent).toContain('00 : 02')
-      // Android forced true, not yet expired: the deep link is a live <a>.
       let link = container.querySelector('a[href^="tak://"]')
       expect(link).not.toBeNull()
       expect(link.textContent).toContain('Open in ATAK')
@@ -189,21 +266,15 @@ describe('EnrollmentView (mounted)', () => {
       })
 
       expect(container.textContent).toContain('EXPIRED')
-      // The interval is cleared the moment the terminal state is reached.
       expect(clearIntervalSpy).toHaveBeenCalled()
 
-      // The deep link's TEXT is replaced with the expired message -- and it
-      // is no longer a clickable <a>, since an expired token's deep link
-      // resolves nowhere.
       link = container.querySelector('a[href^="tak://"]')
       expect(link).toBeNull()
       expect(container.textContent).toContain('Enrollment link expired')
 
-      // The load-bearing assertion: an idle open tab past expiry issues NO
-      // further fetch. Only the one mount-time call ever happened.
+      // Load-bearing: only the one explicit click ever minted anything.
       expect(enrollmentAPI.generateSelf).toHaveBeenCalledTimes(1)
 
-      // Advance well past expiry again -- still no additional fetch.
       await act(async () => {
         vi.advanceTimersByTime(5 * 60 * 1000)
       })
@@ -212,8 +283,7 @@ describe('EnrollmentView (mounted)', () => {
       clearIntervalSpy.mockRestore()
     })
 
-    // ── "Generate a new code" (bullet 3) ──────────────────────────────
-    it('shows "Generate a new code" only once EXPIRED, and issues exactly one request per click', async () => {
+    it('shows "Generate Enrollment Data" only once EXPIRED, and issues exactly one mint per click', async () => {
       const now = Date.now()
       vi.setSystemTime(now)
 
@@ -231,41 +301,35 @@ describe('EnrollmentView (mounted)', () => {
         await Promise.resolve()
       })
 
-      const findButton = () =>
-        Array.from(container.querySelectorAll('button')).find(
-          (button) => button.textContent === 'Generate a new code'
-        )
-
-      // Not yet expired: no regenerate button anywhere on the page.
-      expect(findButton()).toBeUndefined()
+      await act(async () => {
+        findGenerateButton().dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await Promise.resolve()
+      })
 
       await act(async () => {
         vi.advanceTimersByTime(1500)
       })
       expect(container.textContent).toContain('EXPIRED')
 
-      const button = findButton()
-      expect(button).toBeTruthy()
+      const regenerateButton = findGenerateButton()
+      expect(regenerateButton).toBeTruthy()
 
       await act(async () => {
-        button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        regenerateButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
         await Promise.resolve()
       })
 
-      // Exactly one additional request for the one click: mount (1) + click (1).
       expect(enrollmentAPI.generateSelf).toHaveBeenCalledTimes(2)
-      // The freshly minted code is rendered and is not itself expired.
       expect(container.textContent).toContain(second.username)
       expect(container.textContent).not.toContain('EXPIRED')
-      expect(findButton()).toBeUndefined()
     })
   })
 
   // ── Criterion 15.3 ─────────────────────────────────────────────────────
   it('renders None three times for a principal with all three TAK_Attributes unset', async () => {
-    const enrollment = buildEnrollmentFixture({ takAttributes: {} })
-    enrollmentAPI.generateSelf.mockResolvedValue({ data: { enrollment } })
-
+    enrollmentAPI.previewSelf.mockResolvedValue({
+      data: { preview: buildPreviewFixture({ takAttributes: {} }) },
+    })
     await mount()
     await flush()
 
@@ -281,16 +345,24 @@ describe('EnrollmentView (mounted)', () => {
 
     await mount()
     await flush()
+    await act(async () => {
+      findGenerateButton().dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flush()
 
-    // Absent from the DOM, not merely hidden: no element carrying the deep
-    // link's href anywhere in the markup.
     expect(container.querySelector('a[href^="tak://"]')).toBeNull()
     expect(container.innerHTML).not.toContain('tak://com.atakmap.app')
 
-    // Both QR codes still render: they are scanned by a second device and
-    // are useful on any platform.
-    expect(container.querySelectorAll('img').length).toBe(2)
+    expect(container.querySelectorAll('img').length).toBe(1)
     expect(container.querySelector('img[alt="ATAK enrollment QR code"]')).not.toBeNull()
+
+    // The iTAK QR renders only on its own tab.
+    const itakTab = Array.from(container.querySelectorAll('button[role="tab"]')).find(
+      (button) => button.textContent === 'iTAK'
+    )
+    await act(async () => {
+      itakTab.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
     expect(container.querySelector('img[alt="iTAK enrollment QR code"]')).not.toBeNull()
   })
 
@@ -301,26 +373,31 @@ describe('EnrollmentView (mounted)', () => {
 
     await mount()
     await flush()
+    await act(async () => {
+      findGenerateButton().dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flush()
 
     for (const href of STORE_LINK_HREFS) {
       expect(container.innerHTML).not.toContain(href)
     }
-    // The TAK_Gov_Badge's signature viewBox, if the badges were ever rendered
-    // on this page by mistake.
     expect(container.innerHTML).not.toContain('0 0 135 40')
   })
 
   // ── Criterion 10.4 ─────────────────────────────────────────────────────
-  it("labels the Re_Enrollment_Date as the date the certificate about to be issued will need replacing, not a read of an existing certificate", async () => {
+  it('labels the Re_Enrollment_Date as the date the certificate about to be issued will need replacing, not a read of an existing certificate', async () => {
     const enrollment = buildEnrollmentFixture()
     enrollmentAPI.generateSelf.mockResolvedValue({ data: { enrollment } })
 
     await mount()
     await flush()
+    await act(async () => {
+      findGenerateButton().dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flush()
 
     expect(container.textContent).toContain('Next re-enrollment')
     expect(container.textContent).toContain('will need to be replaced by')
-    // Never phrased as a report on an existing certificate.
     expect(container.textContent).not.toMatch(/certificate expires|current certificate/i)
   })
 
@@ -331,17 +408,13 @@ describe('EnrollmentView (mounted)', () => {
 
     await mount()
     await flush()
+    await act(async () => {
+      findGenerateButton().dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flush()
 
-    // FormattedDate renders `formatDate`'s yyyy-mm-dd string; this is real
-    // output from the real component and the real date module (installed at
-    // 'UTC' above), not a value a mock invented. The structural guard that
-    // FormattedDate is the ONLY module permitted to import the
-    // Date_Format_Helpers directly (`dateFormatConsumers.test.js`) is
-    // unaffected by this page: it imports `FormattedDate`, never
-    // `formatDate`/`formatDateTime`.
     const expectedDateOnly = enrollment.reEnrollmentDate.slice(0, 10)
     expect(container.textContent).toContain(expectedDateOnly)
-    // The raw ISO instant itself must not leak into the rendered text.
     expect(container.textContent).not.toContain(enrollment.reEnrollmentDate)
   })
 
@@ -358,24 +431,23 @@ describe('EnrollmentView (mounted)', () => {
     await act(async () => {
       await Promise.resolve()
     })
+    await act(async () => {
+      findGenerateButton().dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await Promise.resolve()
+    })
 
     expect(container.textContent).toContain(first.username)
 
-    // Reach EXPIRED so the "Generate a new code" affordance -- the page's
-    // own trigger for a second `generate()` call -- is on screen.
     await act(async () => {
       vi.advanceTimersByTime(1500)
     })
     expect(container.textContent).toContain('EXPIRED')
 
-    // The next generation fails.
     enrollmentAPI.generateSelf.mockRejectedValueOnce({
       response: { status: 500, data: {} },
     })
 
-    const regenerateButton = Array.from(container.querySelectorAll('button')).find(
-      (button) => button.textContent === 'Generate a new code'
-    )
+    const regenerateButton = findGenerateButton()
     expect(regenerateButton).toBeTruthy()
 
     await act(async () => {
@@ -383,21 +455,83 @@ describe('EnrollmentView (mounted)', () => {
       await Promise.resolve()
     })
 
-    // The error and a Retry control appear, ALONGSIDE the previous payload
-    // -- never in its place. `generate`'s catch branch never clears
-    // `enrollment`.
     expect(container.textContent).toContain('Failed to generate an enrollment code. Please try again.')
     const retryButton = Array.from(container.querySelectorAll('button')).find(
       (button) => button.textContent === 'Retry'
     )
     expect(retryButton).toBeTruthy()
 
-    // The previously rendered payload -- QR images, username, manual-entry
-    // token -- is still fully intact.
     expect(container.querySelector('img[alt="ATAK enrollment QR code"]')).not.toBeNull()
-    expect(container.querySelector('img[alt="iTAK enrollment QR code"]')).not.toBeNull()
     expect(container.textContent).toContain(first.username)
-    expect(container.textContent).toContain(first.itakRegistrationPayload.userCredentials.password)
+  })
+
+  // ── Manual entry / WinTAK tab ────────────────────────────────────────
+  describe('the WinTAK / Manual tab', () => {
+    const setUp = async () => {
+      const enrollment = buildEnrollmentFixture()
+      enrollmentAPI.generateSelf.mockResolvedValue({ data: { enrollment } })
+      await mount()
+      await flush()
+      await act(async () => {
+        findGenerateButton().dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+      await flush()
+      const manualTab = Array.from(container.querySelectorAll('button[role="tab"]')).find((button) =>
+        button.textContent.includes('WinTAK')
+      )
+      await act(async () => {
+        manualTab.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+      return enrollment
+    }
+
+    it('shows the username as visible text and the enrollment code only as a fixed run of bullet characters, never the real value', async () => {
+      const enrollment = await setUp()
+
+      expect(container.textContent).toContain(enrollment.username)
+      // The real code must never appear as text anywhere on the page.
+      expect(container.textContent).not.toContain(enrollment.itakRegistrationPayload.userCredentials.password)
+      expect(container.textContent).toContain('••••••••••••')
+    })
+
+    it('copies the real username when its Copy button is clicked', async () => {
+      const enrollment = await setUp()
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+      Object.defineProperty(window, 'isSecureContext', { value: true, configurable: true })
+
+      const copyButtons = Array.from(container.querySelectorAll('button[aria-label]')).filter((button) =>
+        button.getAttribute('aria-label').toLowerCase().includes('copy')
+      )
+      const usernameCopyButton = copyButtons.find((button) => button.getAttribute('aria-label') === 'Copy username')
+      expect(usernameCopyButton).toBeTruthy()
+
+      await act(async () => {
+        usernameCopyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await Promise.resolve()
+      })
+
+      expect(writeText).toHaveBeenCalledWith(enrollment.username)
+    })
+
+    it('copies the REAL enrollment code (not the bullet display) when its Copy button is clicked', async () => {
+      const enrollment = await setUp()
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+      Object.defineProperty(window, 'isSecureContext', { value: true, configurable: true })
+
+      const codeCopyButton = Array.from(container.querySelectorAll('button[aria-label]')).find(
+        (button) => button.getAttribute('aria-label') === 'Copy enrollment code'
+      )
+      expect(codeCopyButton).toBeTruthy()
+
+      await act(async () => {
+        codeCopyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await Promise.resolve()
+      })
+
+      expect(writeText).toHaveBeenCalledWith(enrollment.itakRegistrationPayload.userCredentials.password)
+    })
   })
 })
 

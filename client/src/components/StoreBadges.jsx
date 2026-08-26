@@ -42,7 +42,7 @@
  * (135:40, i.e. 27:8) rather than their raw pixel dimensions -- see
  * `TakGovBadge` below.
  */
-export function GooglePlayBadge() {
+export function GooglePlayBadge({ className = '' } = {}) {
   return (
     <svg
       id="svg51"
@@ -52,6 +52,7 @@ export function GooglePlayBadge() {
       viewBox="0 0 180 53.333"
       xmlSpace="preserve"
       xmlns="http://www.w3.org/2000/svg"
+      className={className}
     >
       <path
         id="path11"
@@ -113,7 +114,7 @@ export function GooglePlayBadge() {
  * component rendered in two positions, not two copies (takserver-enrollment
  * design.md, "The Apple badge SVG is used TWICE").
  */
-export function AppleAppStoreBadge() {
+export function AppleAppStoreBadge({ className = '' } = {}) {
   return (
     <svg
       version="1.1"
@@ -127,6 +128,7 @@ export function AppleAppStoreBadge() {
       viewBox="0 0 135 40"
       enableBackground="new 0 0 135 40"
       xmlSpace="preserve"
+      className={className}
     >
       <g>
         <path
@@ -347,7 +349,7 @@ export function AppleAppStoreBadge() {
  * means RE-OUTLINING the glyphs as new path data, not editing a string --
  * there is no string to edit.
  */
-export function TakGovBadge() {
+export function TakGovBadge({ className = '' } = {}) {
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"
@@ -356,6 +358,7 @@ export function TakGovBadge() {
       viewBox="0 0 135 40"
       role="img"
       aria-label="Get it from TAK.gov"
+      className={className}
     >
       <title>Get it from TAK.gov</title>
       <rect x=".5" y=".5" width="134" height="39" rx="5.5" fill="#100f0d" stroke="#a6a6a1" />
@@ -386,6 +389,32 @@ export function TakGovBadge() {
 }
 
 /**
+ * The Tabler star-filled glyph on its own, `aria-hidden`, with no wrapper
+ * and no accessible name of its own. Shared by `RecommendedOptionMarker`
+ * below (which supplies the accessible name and the hover/focus tooltip)
+ * and the Downloads_Page's footnote legend (which states "Recommended
+ * option" as its own adjacent visible text, so the glyph beside it needs
+ * to stay decorative there too).
+ *
+ * @param {object} [props]
+ * @param {string} [props.className] Sizing classes; defaults to the 14x14
+ *   the marker has always rendered at.
+ */
+export function RecommendedOptionGlyph({ className = 'h-3.5 w-3.5' } = {}) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      aria-hidden="true"
+      className={className}
+    >
+      <path d="M8.243 7.34l-6.38 .925l-.113 .023a1 1 0 0 0 -.44 1.684l4.622 4.499l-1.09 6.355l-.013 .11a1 1 0 0 0 1.464 .944l5.706 -3l5.693 3l.1 .046a1 1 0 0 0 1.352 -1.1l-1.091 -6.355l4.624 -4.5l.078 -.085a1 1 0 0 0 -.633 -1.62l-6.38 -.926l-2.85 -5.78a1 1 0 0 0 -1.794 0l-2.853 5.78z" />
+    </svg>
+  )
+}
+
+/**
  * The Recommended_Option_Marker: the Tabler star-filled glyph, shown beside
  * the preferred install route for each platform (ATAK-via-TAK.gov, TAK
  * Aware -- takserver-enrollment Criterion 12.5).
@@ -399,21 +428,29 @@ export function TakGovBadge() {
  * focus and screen-reader support for it is inconsistent. Real text in the
  * accessibility tree is strictly stronger than `title` and satisfies the
  * "state carried in TEXT, never colour alone" rule at the same time.
+ *
+ * A hover/keyboard-focus tooltip restates that same text visually, using
+ * the SAME `relative group` + sideways-placement pattern `DeviceTypeIcon.jsx`
+ * uses (`tabIndex={0}` on the host, `group-hover:opacity-100
+ * group-focus-within:opacity-100` on the popover, opening from `left-full`
+ * so nothing above it clips). Its popover is `aria-hidden`, not
+ * `aria-describedby`-linked: the fact it states -- "Recommended option" --
+ * is ALREADY in the accessibility tree via the `sr-only` span beside it, so
+ * giving the popover its own accessible link would announce the same fact
+ * twice (client conventions, "Choose ARIA by content").
  */
 export function RecommendedOptionMarker() {
   return (
-    <span className="recommended-marker">
-      <svg
-        xmlns="http://www.w3.org/2000/svg"
-        width="14"
-        height="14"
-        viewBox="0 0 24 24"
-        fill="currentColor"
-        aria-hidden="true"
-      >
-        <path d="M8.243 7.34l-6.38 .925l-.113 .023a1 1 0 0 0 -.44 1.684l4.622 4.499l-1.09 6.355l-.013 .11a1 1 0 0 0 1.464 .944l5.706 -3l5.693 3l.1 .046a1 1 0 0 0 1.352 -1.1l-1.091 -6.355l4.624 -4.5l.078 -.085a1 1 0 0 0 -.633 -1.62l-6.38 -.926l-2.85 -5.78a1 1 0 0 0 -1.794 0l-2.853 5.78z" />
-      </svg>
+    <span className="recommended-marker relative group inline-flex" tabIndex={0}>
+      <RecommendedOptionGlyph className="h-3.5 w-3.5 cursor-help" />
       <span className="sr-only">Recommended option</span>
+      <span
+        aria-hidden="true"
+        className="absolute left-full top-1/2 transform -translate-y-1/2 ml-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10"
+      >
+        Recommended option
+        <span className="absolute right-full top-1/2 transform -translate-y-1/2 border-4 border-transparent border-r-gray-900" />
+      </span>
     </span>
   )
 }

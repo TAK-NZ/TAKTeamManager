@@ -140,6 +140,31 @@ router.post('/', authenticateToken, authorize, [
   }
 });
 
+// Client UX correction: resolves the "Enrollment Data" section's fields
+// for a Team_Owned_Device WITHOUT minting an Enrollment_Token, so the
+// device Enrollment_View can render this section automatically on open
+// without minting a live 30-minute Authentik credential just because the
+// admin opened the dialog.
+router.get('/:deviceUserId/preview', authenticateToken, authorize, [
+  param('deviceUserId').isInt().withMessage('deviceUserId must be an integer')
+], async (req, res) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.set('Pragma', 'no-cache');
+
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
+  try {
+    const { deviceUserId } = req.params;
+    const preview = await DeviceEnrollmentService.previewEnrollmentQrCode(deviceUserId, req.user);
+    res.json({ preview });
+  } catch (error) {
+    handleServiceError(res, error, 'Failed to preview team-owned device enrollment');
+  }
+});
+
 // Requirement 27 Criteria 3, 5-8 (task 49.4 + the QR-generation-audit-log
 // half of task 49.5); takserver-enrollment Criteria 4.1, 4.3, 11.5 (task
 // 8.3, response-shape correction): generate a fresh enrollment payload
