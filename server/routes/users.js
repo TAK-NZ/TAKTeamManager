@@ -279,7 +279,7 @@ router.get('/me', authenticateToken, authorize, async (req, res) => {
   try {
     // Get user's direct team membership only (exclude inherited)
     const teamResult = await pool.query(`
-      SELECT t.id, t.name, t.parent_team_id, t.visibility,
+      SELECT t.id, t.name, t.parent_team_id, t.visibility, rt.name AS organisation_name,
              CASE 
                WHEN t.parent_team_id IS NOT NULL THEN 
                  COALESCE(rt.callsign_prefix, rt.name, '') || ' - ' || t.name
@@ -955,7 +955,7 @@ router.post('/create-and-add', authenticateToken, authorize, [
   // --- Phase 1: Authentik user creation (no open DB transaction). ---
   try {
     const existingUserResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/?email=${encodeURIComponent(email)}`, {
-      headers: { Authorization: `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }
+      headers: { Authorization: `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
     });
     const existingUsers = await existingUserResponse.json();
 
@@ -966,7 +966,7 @@ router.post('/create-and-add', authenticateToken, authorize, [
     const createUserResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+        'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -1063,7 +1063,7 @@ router.post('/create-and-add', authenticateToken, authorize, [
     try {
       const deleteResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${newUser.pk}/`, {
         method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }
+        headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
       });
 
       if (deleteResponse.ok || deleteResponse.status === 404) {
@@ -1367,7 +1367,7 @@ router.delete('/remove-from-team/:userId', authenticateToken, authorize, [
       await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
         method: 'DELETE',
         headers: {
-          'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`
+          'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`
         }
       });
     } catch (deleteErr) {

@@ -43,7 +43,7 @@ const ORIGINAL_ENV = {
   DB_USER: process.env.DB_USER,
   DB_PASSWORD: process.env.DB_PASSWORD,
   AUTHENTIK_URL: process.env.AUTHENTIK_URL,
-  AUTHENTIK_ADMIN_TOKEN: process.env.AUTHENTIK_ADMIN_TOKEN
+  AUTHENTIK_API_TOKEN: process.env.AUTHENTIK_API_TOKEN
 };
 
 process.env.DB_HOST = process.env.DB_HOST || 'localhost';
@@ -52,7 +52,7 @@ process.env.DB_NAME = process.env.DB_NAME || 'tak_team_manager';
 process.env.DB_USER = process.env.DB_USER || 'postgres';
 process.env.DB_PASSWORD = process.env.DB_PASSWORD || 'postgres123';
 process.env.AUTHENTIK_URL = process.env.AUTHENTIK_URL || 'https://authentik.example.com';
-process.env.AUTHENTIK_ADMIN_TOKEN = process.env.AUTHENTIK_ADMIN_TOKEN || 'admin-token-value';
+process.env.AUTHENTIK_API_TOKEN = process.env.AUTHENTIK_API_TOKEN || 'admin-token-value';
 
 const pool = require('../config/database');
 const Channel = require('./Channel');
@@ -109,7 +109,7 @@ describe('Channel.createCustomChannel concurrent creation against a real Postgre
     process.env.DB_USER = ORIGINAL_ENV.DB_USER;
     process.env.DB_PASSWORD = ORIGINAL_ENV.DB_PASSWORD;
     process.env.AUTHENTIK_URL = ORIGINAL_ENV.AUTHENTIK_URL;
-    process.env.AUTHENTIK_ADMIN_TOKEN = ORIGINAL_ENV.AUTHENTIK_ADMIN_TOKEN;
+    process.env.AUTHENTIK_API_TOKEN = ORIGINAL_ENV.AUTHENTIK_API_TOKEN;
   });
 
   beforeEach(async () => {

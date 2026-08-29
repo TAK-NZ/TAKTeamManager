@@ -1252,7 +1252,7 @@ class SyncWorker {
     const response = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${payload.target_group_id}/add_user/`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+        'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({ pk: user.authentik_user_id })
@@ -1272,7 +1272,7 @@ class SyncWorker {
     const response = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${payload.target_group_id}/remove_user/`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+        'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({ pk: user.authentik_user_id })
@@ -1288,7 +1288,7 @@ class SyncWorker {
     const response = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+        'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -1332,7 +1332,7 @@ class SyncWorker {
     const readGroupResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+        'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -1344,7 +1344,7 @@ class SyncWorker {
     const writeGroupResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+        'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -1366,7 +1366,7 @@ class SyncWorker {
     const userResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+        'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -1389,7 +1389,7 @@ class SyncWorker {
     await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${serviceAccount.pk}/set_password/`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+        'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({ password: service_account_password })
@@ -1399,7 +1399,7 @@ class SyncWorker {
     await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${writeGroup.pk}/add_user/`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+        'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({ pk: serviceAccount.pk })
@@ -1439,7 +1439,7 @@ class SyncWorker {
     const groupResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+        'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -1505,7 +1505,7 @@ class SyncWorker {
       const readResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${read_group_id}/`, {
         method: 'PATCH',
         headers: {
-          'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+          'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify(readRequestBody)
@@ -1531,7 +1531,7 @@ class SyncWorker {
       const writeResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${write_group_id}/`, {
         method: 'PATCH',
         headers: {
-          'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+          'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify(writeRequestBody)
@@ -1583,7 +1583,7 @@ class SyncWorker {
       const updateResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${group_id}/`, {
         method: 'PATCH',
         headers: {
-          'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+          'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify(requestBody)
@@ -1636,21 +1636,21 @@ class SyncWorker {
         if (read_group_id) {
           await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${read_group_id}/`, {
             method: 'DELETE',
-            headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }
+            headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
           });
         }
         
         if (write_group_id) {
           await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${write_group_id}/`, {
             method: 'DELETE',
-            headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }
+            headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
           });
         }
         
         if (service_account_id) {
           await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${service_account_id}/`, {
             method: 'DELETE',
-            headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }
+            headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
           });
         }
       }
@@ -1667,7 +1667,7 @@ class SyncWorker {
         if (group_id) {
           await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${group_id}/`, {
             method: 'DELETE',
-            headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }
+            headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
           });
         }
       }
@@ -1694,7 +1694,7 @@ class SyncWorker {
   async cleanupOrphanedAuthentikUser(payload) {
     const response = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${payload.authentik_user_id}/`, {
       method: 'DELETE',
-      headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }
+      headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
     });
 
     if (response.status === 404) {
@@ -1750,7 +1750,7 @@ class SyncWorker {
     for (const groupId of groupIds) {
       const response = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${groupId}/`, {
         method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }
+        headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
       });
 
       if (response.status === 404) {
@@ -1809,7 +1809,7 @@ class SyncWorker {
     const groupResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+        'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -1879,7 +1879,7 @@ class SyncWorker {
     const groupResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+        'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -1951,7 +1951,7 @@ class SyncWorker {
 
     const groupResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${targetGroupId}/`, {
       headers: {
-        'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+        'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
         'Content-Type': 'application/json'
       }
     });
@@ -1981,7 +1981,7 @@ class SyncWorker {
         {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+            'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({ pk: memberPk })
@@ -2091,7 +2091,7 @@ class SyncWorker {
     const createResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+        'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({ name, attributes })
@@ -2106,7 +2106,7 @@ class SyncWorker {
       // (Requirement 10.1).
       const lookupResponse = await fetch(
         `${process.env.AUTHENTIK_URL}/api/v3/core/groups/?name=${encodeURIComponent(name)}`,
-        { headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` } }
+        { headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` } }
       );
       const lookupData = lookupResponse.ok ? await lookupResponse.json() : null;
       group = lookupData?.results?.find((g) => g.name === name);
@@ -2138,7 +2138,7 @@ class SyncWorker {
         {
           method: 'PATCH',
           headers: {
-            'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+            'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({ attributes })
@@ -2193,7 +2193,7 @@ class SyncWorker {
       `${process.env.AUTHENTIK_URL}/api/v3/core/groups/${groupPk}/`,
       {
         headers: {
-          'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+          'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
           'Content-Type': 'application/json'
         }
       }
@@ -2242,7 +2242,7 @@ class SyncWorker {
       {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+          'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({ pk: memberPk })
@@ -2293,7 +2293,7 @@ class SyncWorker {
     // Step 1: resolve the group by exact name.
     const lookupResponse = await fetch(
       `${process.env.AUTHENTIK_URL}/api/v3/core/groups/?name=${encodeURIComponent(name)}`,
-      { headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` } }
+      { headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` } }
     );
 
     if (lookupResponse.status === 404) {
@@ -2329,7 +2329,7 @@ class SyncWorker {
       `${process.env.AUTHENTIK_URL}/api/v3/core/groups/${group.pk}/`,
       {
         method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }
+        headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
       }
     );
 
@@ -3093,7 +3093,7 @@ class SyncWorker {
       while (hasMorePages) {
         const groupsResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/?page_size=1000&page=${currentPage}`, {
           headers: {
-            'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+            'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
             'Content-Type': 'application/json'
           }
         });

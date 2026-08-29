@@ -165,7 +165,7 @@ describe('GET /api/auth/callback cache-miss self-heal', () => {
       AUTHENTIK_CLIENT_SECRET: 'client-secret',
       AUTHENTIK_TOKEN_URL: 'https://authentik.example.com/token',
       AUTHENTIK_USERINFO_URL: 'https://authentik.example.com/userinfo',
-      AUTHENTIK_ADMIN_TOKEN: 'admin-token',
+      AUTHENTIK_API_TOKEN: 'admin-token',
       APP_URL: 'https://app.example.com',
       FRONTEND_URL: 'https://app.example.com',
       JWT_SECRET: 'a'.repeat(32),

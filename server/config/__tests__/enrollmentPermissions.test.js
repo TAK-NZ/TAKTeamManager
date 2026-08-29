@@ -198,7 +198,7 @@ describe('no client QR dependency, and no new environment variable for this feat
     expect(qrPackageNames).toEqual([]);
   });
 
-  it('introduces exactly one NEW environment variable across the feature\'s server files -- TAK_SERVER_ENROLLMENT_URL (a dedicated enrollment host, deliberately distinct from the Marti certadmin API\'s TAK_SERVER_URL) -- plus the pre-existing AUTHENTIK_URL/AUTHENTIK_ADMIN_TOKEN compensating-delete pair', () => {
+  it('introduces exactly one NEW environment variable across the feature\'s server files -- TAK_SERVER_ENROLLMENT_URL (a dedicated enrollment host, deliberately distinct from the Marti certadmin API\'s TAK_SERVER_URL) -- plus the pre-existing AUTHENTIK_URL/AUTHENTIK_API_TOKEN compensating-delete pair', () => {
     // Every server module this feature touches or introduces. Scanned for
     // `process.env.` reads. TAK_SERVER_ENROLLMENT_URL is the one NEW
     // variable this feature's enrollment-generation path reads (a later
@@ -207,7 +207,7 @@ describe('no client QR dependency, and no new environment variable for this feat
     // certadmin API host are not always the same name, so a dedicated
     // variable is documented in .env.example with a safe default, per
     // that criterion's own fallback clause). AUTHENTIK_URL/
-    // AUTHENTIK_ADMIN_TOKEN also appear, in `DeviceEnrollmentService.js`'s
+    // AUTHENTIK_API_TOKEN also appear, in `DeviceEnrollmentService.js`'s
     // `#compensateClaimRow` -- but those are the SAME pair every other
     // Authentik-calling path in this codebase already reads
     // (`server/services/authentik.js`, `server/routes/users.js`'s own
@@ -241,16 +241,16 @@ describe('no client QR dependency, and no new environment variable for this feat
     // found by the scan, so this assertion is measuring something.
     expect(foundVars.has('TAK_SERVER_ENROLLMENT_URL')).toBe(true);
 
-    const expectedVars = ['AUTHENTIK_ADMIN_TOKEN', 'AUTHENTIK_URL', 'TAK_SERVER_ENROLLMENT_URL'];
+    const expectedVars = ['AUTHENTIK_API_TOKEN', 'AUTHENTIK_URL', 'TAK_SERVER_ENROLLMENT_URL'];
     expect(Array.from(foundVars).sort()).toEqual(expectedVars.sort());
 
-    // AUTHENTIK_URL/AUTHENTIK_ADMIN_TOKEN are documented as literal keys
+    // AUTHENTIK_URL/AUTHENTIK_API_TOKEN are documented as literal keys
     // in .env.example already (pre-existing). TAK_SERVER_ENROLLMENT_URL
     // is documented there with a literal `TAK_SERVER_ENROLLMENT_URL=`
     // line and a safe (empty) default.
     const envExample = fs.readFileSync(path.join(REPO_ROOT, '.env.example'), 'utf8');
     expect(envExample).toMatch(/^AUTHENTIK_URL=/m);
-    expect(envExample).toMatch(/^AUTHENTIK_ADMIN_TOKEN=/m);
+    expect(envExample).toMatch(/^AUTHENTIK_API_TOKEN=/m);
     expect(envExample).toMatch(/^TAK_SERVER_ENROLLMENT_URL=/m);
   });
 

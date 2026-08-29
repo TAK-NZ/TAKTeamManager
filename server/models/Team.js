@@ -1357,7 +1357,7 @@ class Team {
         const groupResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+            'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({
@@ -1373,7 +1373,7 @@ class Team {
         } else {
           const lookupResponse = await fetch(
             `${process.env.AUTHENTIK_URL}/api/v3/core/groups/?name=${encodeURIComponent(authentikGroupName)}`,
-            { headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` } }
+            { headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` } }
           );
           const lookupData = lookupResponse.ok ? await lookupResponse.json() : null;
           group = lookupData?.results?.find((g) => g.name === authentikGroupName);

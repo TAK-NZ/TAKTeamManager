@@ -219,7 +219,7 @@ router.get('/callback', authCallbackFailureLimiter, async (req, res) => {
     try {
       const userDetailResponse = await axios.get(
         `${process.env.AUTHENTIK_URL}/api/v3/core/users/?username=${encodeURIComponent(basicUser.preferred_username)}`,
-        { headers: { Authorization: `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }, timeout: 10000 }
+        { headers: { Authorization: `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }, timeout: 10000 }
       );
       const authentikUser = userDetailResponse.data.results && userDetailResponse.data.results[0];
       if (!authentikUser) throw new Error("User not found in Authentik");
@@ -228,7 +228,7 @@ router.get('/callback', authCallbackFailureLimiter, async (req, res) => {
       if (authentikUser.groups && authentikUser.groups.length > 0) {
         const groupResponse = await axios.get(
           `${process.env.AUTHENTIK_URL}/api/v3/core/groups/?page_size=500`,
-          { headers: { Authorization: `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }, timeout: 10000 }
+          { headers: { Authorization: `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }, timeout: 10000 }
         );
         const groupMap = {};
         for (const g of (groupResponse.data.results || [])) {

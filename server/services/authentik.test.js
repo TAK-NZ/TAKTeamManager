@@ -17,6 +17,7 @@ jest.mock('../config/logger', () => ({
 describe('AuthentikService.createAppPasswordToken', () => {
   let mockClient;
   let authentikService;
+  const ORIGINAL_ENV = { ...process.env };
 
   beforeEach(() => {
     jest.resetModules();
@@ -32,8 +33,23 @@ describe('AuthentikService.createAppPasswordToken', () => {
     // axios beforehand at file scope would set `.create` on a now-stale
     // module instance).
     const axios = require('axios');
+    // Both the least-privilege client and the isolated enrollment-admin
+    // client are built via this same `axios.create` mock, so both resolve
+    // to `mockClient` here -- fine for these tests, which only assert on
+    // the calls `createAppPasswordToken` itself makes.
     axios.create = jest.fn(() => mockClient);
+    // Least-privilege-token follow-up: `createAppPasswordToken` now uses
+    // the ISOLATED `enrollmentClient`, built only when
+    // AUTHENTIK_ENROLLMENT_ADMIN_TOKEN is set. Set here so the existing
+    // assertions below (which target `mockClient` directly) keep exercising
+    // the real code path rather than the "not configured" guard, which has
+    // its own dedicated test further down.
+    process.env.AUTHENTIK_ENROLLMENT_ADMIN_TOKEN = 'enrollment-admin-token-value';
     authentikService = require('./authentik');
+  });
+
+  afterEach(() => {
+    process.env = { ...ORIGINAL_ENV };
   });
 
   it('creates an app_password token scoped to the given user, expiring within the given minutes, and returns its key', async () => {
@@ -136,5 +152,53 @@ describe('AuthentikService.createAppPasswordToken', () => {
     const [logFields] = mockLoggerInstance.error.mock.calls[0];
     expect(logFields.identifier).toBe('device-enrollment-abc');
     expect(logFields).not.toHaveProperty('key');
+  });
+
+  // Least-privilege-token follow-up (auth-infra's
+  // TAKTEAMMANAGER-AUTHENTIK-LEAST-PRIVILEGE.md, "Option A"): this method
+  // is the one deliberate exception that still needs a superuser token,
+  // isolated behind its own env var rather than folded into the
+  // least-privilege AUTHENTIK_API_TOKEN client every other method uses.
+  it('throws a clear, named error and makes NO Authentik call when AUTHENTIK_ENROLLMENT_ADMIN_TOKEN is not configured', async () => {
+    // Re-require with the isolated token unset, so `enrollmentClient` is
+    // null -- unlike every other test in this file, which sets it in
+    // `beforeEach`.
+    delete process.env.AUTHENTIK_ENROLLMENT_ADMIN_TOKEN;
+    jest.resetModules();
+    const axios = require('axios');
+    axios.create = jest.fn(() => mockClient);
+    const unconfiguredAuthentikService = require('./authentik');
+
+    await expect(
+      unconfiguredAuthentikService.createAppPasswordToken(987, {
+        identifier: 'device-enrollment-abc',
+        expiresInMinutes: 30
+      })
+    ).rejects.toThrow(/AUTHENTIK_ENROLLMENT_ADMIN_TOKEN is not configured/);
+
+    expect(mockClient.post).not.toHaveBeenCalled();
+    expect(mockClient.get).not.toHaveBeenCalled();
+    expect(mockClient.delete).not.toHaveBeenCalled();
+  });
+
+  // Confirms the isolation itself: the enrollment client is a SEPARATE
+  // axios instance, authenticated with the isolated token, not a reuse of
+  // the least-privilege client `this.client` builds in the constructor.
+  it('builds the enrollment client with its own Authorization header, separate from the least-privilege client', async () => {
+    let capturedConfigs = [];
+    jest.resetModules();
+    const axios = require('axios');
+    axios.create = jest.fn((config) => {
+      capturedConfigs.push(config);
+      return mockClient;
+    });
+    process.env.AUTHENTIK_ENROLLMENT_ADMIN_TOKEN = 'enrollment-admin-token-value';
+    process.env.AUTHENTIK_API_TOKEN = 'least-privilege-token-value';
+    require('./authentik');
+
+    expect(capturedConfigs).toHaveLength(2);
+    const [leastPrivilegeConfig, enrollmentConfig] = capturedConfigs;
+    expect(leastPrivilegeConfig.headers.Authorization).toBe('Bearer least-privilege-token-value');
+    expect(enrollmentConfig.headers.Authorization).toBe('Bearer enrollment-admin-token-value');
   });
 });

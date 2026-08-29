@@ -59,7 +59,7 @@
  * otherwise defaulted to the local Docker-based test container
  * (`tak_migration_test_501`, Postgres 15, host port 15433, database
  * `tak_team_manager`, user `postgres`, password `postgres123`). These,
- * plus `AUTHENTIK_URL`/`AUTHENTIK_ADMIN_TOKEN`, are set on `process.env`
+ * plus `AUTHENTIK_URL`/`AUTHENTIK_API_TOKEN`, are set on `process.env`
  * BEFORE `../config/database` (required transitively by `./teams` and
  * `../middleware/authorize`) is first required anywhere in this file's
  * module graph, and are restored in `afterAll`.
@@ -72,7 +72,7 @@ const ORIGINAL_ENV = {
   DB_USER: process.env.DB_USER,
   DB_PASSWORD: process.env.DB_PASSWORD,
   AUTHENTIK_URL: process.env.AUTHENTIK_URL,
-  AUTHENTIK_ADMIN_TOKEN: process.env.AUTHENTIK_ADMIN_TOKEN
+  AUTHENTIK_API_TOKEN: process.env.AUTHENTIK_API_TOKEN
 };
 
 process.env.DB_HOST = process.env.DB_HOST || 'localhost';
@@ -84,7 +84,7 @@ process.env.DB_PASSWORD = process.env.DB_PASSWORD || 'postgres123';
 // mocked fetch: keeps Team.createTeamChannel's Authentik call fast-failing
 // without depending on a real, reachable Authentik instance.
 process.env.AUTHENTIK_URL = 'http://127.0.0.1:1';
-process.env.AUTHENTIK_ADMIN_TOKEN = 'test-admin-token';
+process.env.AUTHENTIK_API_TOKEN = 'test-admin-token';
 
 let mockUser = { id: 1, userId: 1, is_global_manager: true };
 
@@ -315,7 +315,7 @@ describe('POST /api/teams/:teamId/members against a real Postgres database (Requ
     process.env.DB_USER = ORIGINAL_ENV.DB_USER;
     process.env.DB_PASSWORD = ORIGINAL_ENV.DB_PASSWORD;
     process.env.AUTHENTIK_URL = ORIGINAL_ENV.AUTHENTIK_URL;
-    process.env.AUTHENTIK_ADMIN_TOKEN = ORIGINAL_ENV.AUTHENTIK_ADMIN_TOKEN;
+    process.env.AUTHENTIK_API_TOKEN = ORIGINAL_ENV.AUTHENTIK_API_TOKEN;
   });
 
   it('success: a real team admin adding an existing user to their own team persists a real team_memberships row', async () => {

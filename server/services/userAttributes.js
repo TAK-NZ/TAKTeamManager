@@ -146,7 +146,7 @@ class UserAttributesService {
       // below is a merge, never a wholesale replace.
       const getUserResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
         headers: {
-          'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`
+          'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`
         }
       });
 
@@ -187,7 +187,7 @@ class UserAttributesService {
       const response = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
         method: 'PATCH',
         headers: {
-          'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+          'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify(payload)
@@ -209,7 +209,7 @@ class UserAttributesService {
       // Get current user attributes
       const getUserResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
         headers: {
-          'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`
+          'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`
         }
       });
       
@@ -227,7 +227,7 @@ class UserAttributesService {
       const response = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
         method: 'PATCH',
         headers: {
-          'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+          'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({

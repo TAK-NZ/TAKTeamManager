@@ -4,14 +4,48 @@ const logger = require('../config/logger').createLogger('AuthentikService');
 class AuthentikService {
   constructor() {
     this.baseURL = process.env.AUTHENTIK_URL;
-    this.adminToken = process.env.AUTHENTIK_ADMIN_TOKEN;
+    // Renamed from AUTHENTIK_ADMIN_TOKEN: TAKTeamManager now authenticates
+    // to Authentik with a dedicated, least-privilege service-account token
+    // (see auth-infra's tak-teammanager-setup.yaml), not a superuser admin
+    // token, so the old name was actively misleading.
+    this.apiToken = process.env.AUTHENTIK_API_TOKEN;
     this.client = axios.create({
       baseURL: `${this.baseURL}/api/v3`,
       headers: {
-        'Authorization': `Bearer ${this.adminToken}`,
+        'Authorization': `Bearer ${this.apiToken}`,
         'Content-Type': 'application/json'
       }
     });
+
+    // Least-privilege-token follow-up (auth-infra's
+    // TAKTEAMMANAGER-AUTHENTIK-LEAST-PRIVILEGE.md, "Option A"): Authentik's
+    // `TokenViewSet.perform_create` hard-codes `user=self.request.user` for
+    // any NON-SUPERUSER caller (`authentik/core/api/tokens.py`) -- it is an
+    // unconditional `if not is_superuser` branch, not a permission check,
+    // so no grant to the scoped role can make `POST /core/tokens/` create a
+    // token for a user OTHER than the caller. `createAppPasswordToken`
+    // below needs exactly that (an app-password token scoped to a device's
+    // or a human's own, pre-existing Authentik user, not to this service
+    // account), so it is the one deliberate, isolated exception that still
+    // uses a superuser token -- reusing the ORIGINAL admin secret
+    // (`AuthentikAdminTokenArn`), under its own env var so it is never
+    // confused with the least-privilege `AUTHENTIK_API_TOKEN` above.
+    //
+    // This second client is built ONLY when the env var is set, so a
+    // deployment that has not yet wired the new secret still constructs
+    // (every other method keeps working); `createAppPasswordToken` itself
+    // throws a clear, named error if it is missing when actually called,
+    // rather than silently sending an unauthenticated request.
+    this.enrollmentAdminToken = process.env.AUTHENTIK_ENROLLMENT_ADMIN_TOKEN;
+    this.enrollmentClient = this.enrollmentAdminToken
+      ? axios.create({
+          baseURL: `${this.baseURL}/api/v3`,
+          headers: {
+            'Authorization': `Bearer ${this.enrollmentAdminToken}`,
+            'Content-Type': 'application/json'
+          }
+        })
+      : null;
   }
 
   // Create regular user (not service account)
@@ -72,15 +106,31 @@ class AuthentikService {
   // `error` and leave it to expire naturally within its
   // `expiresInMinutes` cap -- no further compensation attempt.
   //
+  // Least-privilege-token follow-up: uses `this.enrollmentClient` (the
+  // isolated superuser-token client, see the constructor) rather than
+  // `this.client`. This is the ONE method in this file that does -- every
+  // other method above and below keeps using the least-privilege
+  // `AUTHENTIK_API_TOKEN` client. Throws a named, actionable error rather
+  // than sending an unauthenticated request when
+  // `AUTHENTIK_ENROLLMENT_ADMIN_TOKEN` was never configured.
+  //
   // @param {number} userId - the Authentik user's `pk` the token is
   //   scoped to (Requirement 27.5: "scoped to that device's Authentik
   //   user").
   // @param {{identifier: string, expiresInMinutes: number}} options
   // @returns {Promise<{identifier: string, expires: string, key: string}>}
   async createAppPasswordToken(userId, { identifier, expiresInMinutes }) {
+    if (!this.enrollmentClient) {
+      throw new Error(
+        'AUTHENTIK_ENROLLMENT_ADMIN_TOKEN is not configured; device enrollment cannot mint an ' +
+        'app-password token for another user with the least-privilege AUTHENTIK_API_TOKEN alone ' +
+        '(Authentik forces POST /core/tokens/ to be owned by the caller for any non-superuser token).'
+      );
+    }
+
     const expires = new Date(Date.now() + expiresInMinutes * 60 * 1000).toISOString();
 
-    const createResponse = await this.client.post('/core/tokens/', {
+    const createResponse = await this.enrollmentClient.post('/core/tokens/', {
       identifier,
       intent: 'app_password',
       user: userId,
@@ -90,12 +140,12 @@ class AuthentikService {
 
     let keyResponse;
     try {
-      keyResponse = await this.client.get(
+      keyResponse = await this.enrollmentClient.get(
         `/core/tokens/${encodeURIComponent(identifier)}/view_key/`
       );
     } catch (keyFetchError) {
       try {
-        await this.client.delete(`/core/tokens/${encodeURIComponent(identifier)}/`);
+        await this.enrollmentClient.delete(`/core/tokens/${encodeURIComponent(identifier)}/`);
       } catch (deleteError) {
         logger.error(
           { err: deleteError, identifier },

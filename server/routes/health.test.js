@@ -83,7 +83,7 @@ describe('GET /health/ready (Requirements 14.3, 14.4)', () => {
     process.env = {
       ...ORIGINAL_ENV,
       AUTHENTIK_URL: 'https://authentik.example.com',
-      AUTHENTIK_ADMIN_TOKEN: 'admin-token-value'
+      AUTHENTIK_API_TOKEN: 'admin-token-value'
     };
     app = buildApp();
   });

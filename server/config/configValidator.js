@@ -37,7 +37,7 @@ const REQUIRED_VARS = [
   'DB_USER',
   'DB_PASSWORD',
   'AUTHENTIK_URL',
-  'AUTHENTIK_ADMIN_TOKEN',
+  'AUTHENTIK_API_TOKEN',
   'AUTHENTIK_CLIENT_ID',
   'AUTHENTIK_CLIENT_SECRET',
   'JWT_SECRET',
@@ -63,7 +63,7 @@ const MAX_JWT_EXPIRY_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 // actually read by `EmailService.js` (any SMTP-compatible provider, not
 // tied to AWS SES specifically -- see that file's header comment).
 const PRODUCTION_SECRET_VARS = [
-  'AUTHENTIK_ADMIN_TOKEN',
+  'AUTHENTIK_API_TOKEN',
   'JWT_SECRET',
   'DB_PASSWORD',
   'EMAIL_PASSWORD'
@@ -593,7 +593,7 @@ function collectConfigIssues(env) {
 
 /**
  * Requirement 6.4: WHERE the App or Sync_Worker is started with
- * `NODE_ENV=production`, resolves `AUTHENTIK_ADMIN_TOKEN`, `JWT_SECRET`,
+ * `NODE_ENV=production`, resolves `AUTHENTIK_API_TOKEN`, `JWT_SECRET`,
  * `DB_PASSWORD`, and the AWS credential variables through the configured
  * `SecretsProvider` (see `getSecretsProvider` in `secretsProvider.js`)
  * instead of trusting the value already present in `env` from a plain
@@ -653,7 +653,7 @@ async function validateProductionSecrets(env = process.env) {
  *    and `AUDIT_LOGS_RETENTION_DAYS` (default 365) are each positive
  *    integers, with the audit-log threshold strictly greater than the
  *    sync-operations threshold (Criteria 25.1, 25.4)
- *  - WHERE `NODE_ENV=production`, `AUTHENTIK_ADMIN_TOKEN`, `JWT_SECRET`,
+ *  - WHERE `NODE_ENV=production`, `AUTHENTIK_API_TOKEN`, `JWT_SECRET`,
  *    `DB_PASSWORD`, and the AWS credential variables resolve through the
  *    configured secrets provider (Criterion 6.4)
  *  - WHERE `NODE_ENV=production`, logs an informational WARNING (never a

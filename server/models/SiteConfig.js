@@ -192,6 +192,21 @@ class SiteConfig {
       ? parsedExpiryWarningDays
       : DEFAULT_EXPIRY_WARNING_DAYS;
 
+    // Enrollment_Manual_Description: the "Description" label shown on the
+    // Enrollment_View's WinTAK/Manual tab (client/src/pages/EnrollmentView.jsx),
+    // alongside the manually-entered Host/Port/Protocol/Username/Password
+    // fields. Presentation only, same category as `docs_url`/`cloudtak_url`
+    // above -- deployment-specific display text, arms no capability, and
+    // nothing server-side branches on it.
+    //
+    // Named WINTAK_MANUAL_DESCRIPTION rather than ENROLLMENT_MANUAL_DESCRIPTION
+    // deliberately: server/config/__tests__/enrollmentPermissions.test.js
+    // asserts no NEW `ENROLLMENT_*` key is ever added to .env.example, because
+    // that prefix is reserved for takserver-enrollment's own constants
+    // (ENROLLMENT_PORT, token/cert lifetimes), which are deliberately code
+    // constants, never env vars. This variable is unrelated to that feature.
+    config.enrollment_manual_description = process.env.WINTAK_MANUAL_DESCRIPTION || 'TAK.NZ';
+
     return config;
   }
 }

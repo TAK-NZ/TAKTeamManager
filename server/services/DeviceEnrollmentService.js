@@ -441,7 +441,7 @@ class DeviceEnrollmentService {
     try {
       const deleteResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
         method: 'DELETE',
-        headers: { Authorization: `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }
+        headers: { Authorization: `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
       });
 
       if (deleteResponse.ok || deleteResponse.status === 404) {

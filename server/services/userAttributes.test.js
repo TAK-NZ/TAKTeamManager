@@ -317,7 +317,7 @@ describe('UserAttributesService.updateUserAttributes - fetch-merge-PATCH (task 1
   beforeEach(() => {
     jest.clearAllMocks();
     process.env.AUTHENTIK_URL = 'https://authentik.example.com';
-    process.env.AUTHENTIK_ADMIN_TOKEN = 'test-token';
+    process.env.AUTHENTIK_API_TOKEN = 'test-token';
   });
 
   afterEach(() => {
@@ -477,7 +477,7 @@ describe('UserAttributesService.clearTeamAttributes', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     process.env.AUTHENTIK_URL = 'https://authentik.example.com';
-    process.env.AUTHENTIK_ADMIN_TOKEN = 'test-token';
+    process.env.AUTHENTIK_API_TOKEN = 'test-token';
   });
 
   afterEach(() => {
@@ -567,7 +567,7 @@ describe('UserAttributesService.updateTeamUserAttributes - never writes callsign
   beforeEach(() => {
     jest.clearAllMocks();
     process.env.AUTHENTIK_URL = 'https://authentik.example.com';
-    process.env.AUTHENTIK_ADMIN_TOKEN = 'test-token';
+    process.env.AUTHENTIK_API_TOKEN = 'test-token';
 
     global.fetch = jest.fn()
       .mockResolvedValue({ ok: true, json: async () => ({ attributes: {} }) });
@@ -686,7 +686,7 @@ describe('UserAttributesService.updateTeamUserAttributes - inherited-row regress
   beforeEach(() => {
     jest.clearAllMocks();
     process.env.AUTHENTIK_URL = 'https://authentik.example.com';
-    process.env.AUTHENTIK_ADMIN_TOKEN = 'test-token';
+    process.env.AUTHENTIK_API_TOKEN = 'test-token';
 
     global.fetch = jest.fn()
       .mockResolvedValue({ ok: true, json: async () => ({ attributes: {} }) });

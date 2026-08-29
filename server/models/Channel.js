@@ -191,7 +191,7 @@ class Channel {
         fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+            'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({
@@ -205,7 +205,7 @@ class Channel {
         fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+            'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({
@@ -219,7 +219,7 @@ class Channel {
         fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+            'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({

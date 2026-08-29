@@ -120,6 +120,15 @@ beforeEach(() => {
   jest.resetModules();
   jest.clearAllMocks();
 
+  // Least-privilege-token follow-up: the real `./authentik` reads
+  // AUTHENTIK_ENROLLMENT_ADMIN_TOKEN in its CONSTRUCTOR to build its
+  // isolated enrollment client, so this must be set BEFORE
+  // `./DeviceEnrollmentService` (which requires `./authentik`) is
+  // required below -- this file runs the REAL authentik.js (see the file
+  // header), unlike every other DeviceEnrollmentService test file, which
+  // mocks `./authentik` outright.
+  process.env.AUTHENTIK_ENROLLMENT_ADMIN_TOKEN = 'enrollment-admin-token-value';
+
   mockAxiosClient = { post: jest.fn(), get: jest.fn(), delete: jest.fn() };
   // Re-require axios AFTER resetModules so the mocked `.create` lands on
   // the SAME axios module instance the real `./authentik` resolves next
@@ -158,6 +167,7 @@ afterEach(() => {
   } else {
     process.env.TAK_SERVER_ENROLLMENT_URL = ORIGINAL_TAK_SERVER_ENROLLMENT_URL;
   }
+  delete process.env.AUTHENTIK_ENROLLMENT_ADMIN_TOKEN;
 });
 
 // ---------------------------------------------------------------------------

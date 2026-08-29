@@ -3,7 +3,7 @@
  * 3.5-3.6, and Requirement 6.4).
  *
  * Requirement 6.4 focus of this file: when `NODE_ENV=production`,
- * `validateConfig` resolves `AUTHENTIK_ADMIN_TOKEN`, `JWT_SECRET`,
+ * `validateConfig` resolves `AUTHENTIK_API_TOKEN`, `JWT_SECRET`,
  * `DB_PASSWORD`, and `EMAIL_PASSWORD` (the generic SMTP credential read
  * by `EmailService.js`) through the configured `SecretsProvider`
  * (Requirement 6.4) rather than trusting a plain `.env` value, and exits
@@ -59,7 +59,7 @@ function buildValidBaseEnv(overrides = {}) {
     DB_USER: 'app_user',
     DB_PASSWORD: 'super-secret-db-password',
     AUTHENTIK_URL: 'https://authentik.example.com',
-    AUTHENTIK_ADMIN_TOKEN: 'admin-token-value',
+    AUTHENTIK_API_TOKEN: 'admin-token-value',
     AUTHENTIK_CLIENT_ID: 'client-id-value',
     AUTHENTIK_CLIENT_SECRET: 'client-secret-value',
     JWT_SECRET: 'a'.repeat(32),
@@ -430,8 +430,8 @@ describe('validateProductionSecrets', () => {
         issues = await isolatedConfigValidator.validateProductionSecrets(env);
       });
 
-      expect(issues).toHaveLength(4); // AUTHENTIK_ADMIN_TOKEN, JWT_SECRET, DB_PASSWORD, EMAIL_PASSWORD
-      expect(issues.some((issue) => issue.includes('AUTHENTIK_ADMIN_TOKEN'))).toBe(true);
+      expect(issues).toHaveLength(4); // AUTHENTIK_API_TOKEN, JWT_SECRET, DB_PASSWORD, EMAIL_PASSWORD
+      expect(issues.some((issue) => issue.includes('AUTHENTIK_API_TOKEN'))).toBe(true);
       expect(issues.some((issue) => issue.includes('JWT_SECRET'))).toBe(true);
       expect(issues.some((issue) => issue.includes('DB_PASSWORD'))).toBe(true);
       expect(issues.some((issue) => issue.includes('EMAIL_PASSWORD'))).toBe(true);
@@ -507,7 +507,7 @@ describe('validateConfig (Requirement 6.4 production secrets gate integration)',
 
     expect(exitSpy).toHaveBeenCalledWith(1);
     const loggedLines = mockLoggerInstance.error.mock.calls.map((call) => call.join(' ')).join('\n');
-    expect(loggedLines).toMatch(/AUTHENTIK_ADMIN_TOKEN/);
+    expect(loggedLines).toMatch(/AUTHENTIK_API_TOKEN/);
     expect(loggedLines).toMatch(/JWT_SECRET/);
     expect(loggedLines).toMatch(/DB_PASSWORD/);
     expect(loggedLines).toMatch(/EMAIL_PASSWORD/);

@@ -46,7 +46,7 @@ const REDACT_PATHS = [
   'name',
   'password',
   'service_account_password',
-  'authentik_admin_token',
+  'authentik_api_token',
   'token',
   'jwt',
   'req.body.email',
@@ -62,7 +62,7 @@ const REDACT_PATHS = [
   'payload.last_name',
   'payload.password',
   'payload.service_account_password',
-  'payload.authentik_admin_token',
+  'payload.authentik_api_token',
   // takserver-enrollment Requirement 11.5: a net, not the control. These
   // five paths are a cheap defensive backstop for an ACCIDENTAL
   // `logger.info({ qrCode })`-style call on a non-debug deployment --

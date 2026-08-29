@@ -453,7 +453,7 @@ class RequestApprovalService {
         try {
           const deleteResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${newAccountAuthentikUser.pk}/`, {
             method: 'DELETE',
-            headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }
+            headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
           });
 
           if (deleteResponse.ok || deleteResponse.status === 404) {
@@ -621,7 +621,7 @@ class RequestApprovalService {
     const username = resolvedUsername;
 
     const existingUserResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/?email=${encodeURIComponent(email)}`, {
-      headers: { Authorization: `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }
+      headers: { Authorization: `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
     });
     const existingUsers = await existingUserResponse.json();
 
@@ -632,7 +632,7 @@ class RequestApprovalService {
     const createUserResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+        'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -693,7 +693,7 @@ class RequestApprovalService {
     const patchNameResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
       method: 'PATCH',
       headers: {
-        'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+        'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({

@@ -54,7 +54,7 @@ const ORIGINAL_ENV = {
   DB_USER: process.env.DB_USER,
   DB_PASSWORD: process.env.DB_PASSWORD,
   AUTHENTIK_URL: process.env.AUTHENTIK_URL,
-  AUTHENTIK_ADMIN_TOKEN: process.env.AUTHENTIK_ADMIN_TOKEN
+  AUTHENTIK_API_TOKEN: process.env.AUTHENTIK_API_TOKEN
 };
 
 function restoreEnv() {
@@ -64,7 +64,7 @@ function restoreEnv() {
   process.env.DB_USER = ORIGINAL_ENV.DB_USER;
   process.env.DB_PASSWORD = ORIGINAL_ENV.DB_PASSWORD;
   process.env.AUTHENTIK_URL = ORIGINAL_ENV.AUTHENTIK_URL;
-  process.env.AUTHENTIK_ADMIN_TOKEN = ORIGINAL_ENV.AUTHENTIK_ADMIN_TOKEN;
+  process.env.AUTHENTIK_API_TOKEN = ORIGINAL_ENV.AUTHENTIK_API_TOKEN;
 }
 
 function buildApp(healthRouter) {
@@ -87,7 +87,7 @@ describe('Health endpoints against a real, reachable test database (task 34.5)',
     process.env.DB_USER = process.env.DB_USER || 'postgres';
     process.env.DB_PASSWORD = process.env.DB_PASSWORD || 'postgres123';
     process.env.AUTHENTIK_URL = process.env.AUTHENTIK_URL || 'https://authentik.example.com';
-    process.env.AUTHENTIK_ADMIN_TOKEN = process.env.AUTHENTIK_ADMIN_TOKEN || 'admin-token-value';
+    process.env.AUTHENTIK_API_TOKEN = process.env.AUTHENTIK_API_TOKEN || 'admin-token-value';
 
     // Required fresh, AFTER the env vars above are set and AFTER
     // jest.resetModules(), so `../config/database`'s module-level `pool`
@@ -165,7 +165,7 @@ describe('Health endpoints against a real, unreachable database connection (task
     process.env.DB_USER = 'postgres';
     process.env.DB_PASSWORD = 'postgres123';
     process.env.AUTHENTIK_URL = process.env.AUTHENTIK_URL || 'https://authentik.example.com';
-    process.env.AUTHENTIK_ADMIN_TOKEN = process.env.AUTHENTIK_ADMIN_TOKEN || 'admin-token-value';
+    process.env.AUTHENTIK_API_TOKEN = process.env.AUTHENTIK_API_TOKEN || 'admin-token-value';
 
     axiosMock = require('axios'); // eslint-disable-line global-require
     const healthRouter = require('./health'); // eslint-disable-line global-require

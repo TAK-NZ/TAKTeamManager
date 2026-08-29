@@ -60,7 +60,7 @@ class AuthentikSyncService {
         const response = await axios.get(
           `${process.env.AUTHENTIK_URL}/api/v3/core/users/?page=${currentPage}`,
           {
-            headers: { Authorization: `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` },
+            headers: { Authorization: `Bearer ${process.env.AUTHENTIK_API_TOKEN}` },
             timeout: 30000
           }
         );
@@ -149,7 +149,7 @@ class AuthentikSyncService {
 
     while (hasMorePages) {
       const groupsResponse = await axios.get(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/?page=${currentPage}`, {
-        headers: { Authorization: `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` },
+        headers: { Authorization: `Bearer ${process.env.AUTHENTIK_API_TOKEN}` },
         timeout: 30000
       });
 
@@ -423,7 +423,7 @@ class AuthentikSyncService {
                 patchPayload,
                 {
                   headers: {
-                    'Authorization': `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}`,
+                    'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
                     'Content-Type': 'application/json'
                   },
                   timeout: 10000

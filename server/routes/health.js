@@ -110,7 +110,7 @@ function checkDatabaseConnectivity(timeoutMs = DB_CHECK_TIMEOUT_MS) {
  */
 function checkAuthentikReachability(timeoutMs = AUTHENTIK_CHECK_TIMEOUT_MS) {
   const requestPromise = axios.get(`${process.env.AUTHENTIK_URL}/api/v3/core/users/?page_size=1`, {
-    headers: { Authorization: `Bearer ${process.env.AUTHENTIK_ADMIN_TOKEN}` }
+    headers: { Authorization: `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
   });
 
   return withTimeout(
