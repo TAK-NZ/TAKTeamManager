@@ -98,3 +98,47 @@ export function isAndroidClient(nav) {
 
   return false
 }
+
+/**
+ * Detects whether `nav` describes an iOS or iPadOS client -- an iPhone,
+ * iPod touch, or iPad. Same total/never-throwing/pure contract and same
+ * detection order as `isAndroidClient` above: `userAgentData.platform`
+ * first (checked against BOTH `'ios'` and `'ipados'`, since those are the
+ * two distinct platform names Apple's own client hints report -- an iPad
+ * does not report `'ios'`), then a `userAgent` fallback matching
+ * `iphone`/`ipad`/`ipod` anywhere in the string.
+ *
+ * Consumed by `EnrollmentView.jsx`'s pre-generation notice, which needs to
+ * tell an iPhone/iPad user apart from every OTHER non-Android client
+ * (desktop Windows/macOS/Linux) -- only an iOS/iPadOS visitor is the one
+ * actually at risk of trying to scan a QR code with the same device
+ * currently showing it.
+ *
+ * Known limitation, shared with any client-side check of this kind: modern
+ * iPadOS Safari requests the desktop site by default and its `userAgent`
+ * string names "Macintosh" rather than "iPad" (no `userAgentData` client
+ * hints either, since Safari does not implement that API at all), so an
+ * iPad in that default mode is NOT detected here and instead falls through
+ * to the generic non-Android notice. This is a false negative, never a
+ * false positive -- it degrades to the SAME wording a desktop Mac user
+ * already sees, not an incorrect Android-branch answer.
+ *
+ * @param {*} nav A navigator-shaped object, or anything at all. NEVER the
+ *   global `navigator` -- always the caller-supplied value.
+ * @returns {boolean} `true` when iOS/iPadOS is detected, `false` otherwise.
+ *   Never throws.
+ */
+export function isIOSClient(nav) {
+  const platform = readUserAgentDataPlatform(nav)
+  if (platform !== null) {
+    const lowered = platform.toLowerCase()
+    return lowered === 'ios' || lowered === 'ipados'
+  }
+
+  const userAgent = readUserAgent(nav)
+  if (userAgent !== null) {
+    return /iphone|ipad|ipod/i.test(userAgent)
+  }
+
+  return false
+}

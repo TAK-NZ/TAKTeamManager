@@ -5,7 +5,7 @@ import { MemoryRouter } from 'react-router-dom'
 
 import EnrollmentView, { interpretEnrollmentError } from './EnrollmentView.jsx'
 import { enrollmentAPI, configAPI } from '../services/api'
-import { isAndroidClient } from '../utils/platformDetection'
+import { isAndroidClient, isIOSClient } from '../utils/platformDetection'
 import { setDisplayTimezone, DEFAULT_DISPLAY_TIMEZONE } from '../utils/dateFormat'
 
 // takserver-enrollment task 9.9 -- client example tests for the
@@ -27,6 +27,7 @@ vi.mock('../services/api', () => ({
 
 vi.mock('../utils/platformDetection', () => ({
   isAndroidClient: vi.fn(),
+  isIOSClient: vi.fn(),
 }))
 
 vi.mock('react-hot-toast', () => ({
@@ -97,6 +98,7 @@ describe('EnrollmentView (mounted)', () => {
     document.body.appendChild(container)
     setDisplayTimezone('UTC')
     isAndroidClient.mockReturnValue(false)
+    isIOSClient.mockReturnValue(false)
     // Bugfix (screen-wake reload): EnrollmentView now persists a minted
     // enrollment to sessionStorage and restores it on mount. jsdom's
     // sessionStorage otherwise leaks across tests in this same file, so a
@@ -261,6 +263,88 @@ describe('EnrollmentView (mounted)', () => {
       expect(dd.textContent).toBe('None')
       expect(dd.className).not.toContain('text-green-700')
       expect(dd.className).not.toContain('text-amber-700')
+    })
+  })
+
+  it('adds a Client Software requirement bullet linking "installed" to /downloads, alongside Device Registration and Enrollment Duration', async () => {
+    await mount()
+    await flush()
+
+    const requirementsHeading = Array.from(container.querySelectorAll('h2')).find(
+      (heading) => heading.textContent === 'Device Enrollment Requirements'
+    )
+    expect(requirementsHeading).toBeTruthy()
+    const list = requirementsHeading.nextElementSibling
+    expect(list.tagName).toBe('UL')
+
+    expect(list.textContent).toContain('Device Registration')
+    expect(list.textContent).toContain('Enrollment Duration')
+    expect(list.textContent).toContain('Client Software')
+    expect(list.textContent).toContain('ATAK, TAK Aware, iTAK or WinTAK must')
+
+    const installedLink = Array.from(list.querySelectorAll('a')).find((a) => a.textContent === 'installed')
+    expect(installedLink).toBeTruthy()
+    expect(installedLink.getAttribute('href')).toBe('/downloads')
+  })
+
+  // ── Pre-generation device notice, above the "Generate Enrollment Data"
+  // button (one of two mutually exclusive variants by isAndroid) ────────
+  describe('the pre-generation device notice above "Generate Enrollment Data"', () => {
+    const findNotice = () => {
+      const button = findGenerateButton()
+      return Array.from(button.parentElement.querySelectorAll('p')).find(
+        (p) => p.className.includes('bg-green-50') || p.className.includes('bg-blue-50')
+      )
+    }
+
+    it('shows the green, checkmark-led "can be enrolled directly with ATAK" notice on Android, and no blue notice', async () => {
+      isAndroidClient.mockReturnValue(true)
+      isIOSClient.mockReturnValue(false)
+      await mount()
+      await flush()
+
+      const notice = findNotice()
+      expect(notice).toBeTruthy()
+      expect(notice.textContent).toContain('This Android device can be enrolled directly with ATAK.')
+      expect(notice.className).toContain('bg-green-50')
+      expect(notice.className).not.toContain('bg-blue-50')
+    })
+
+    it('shows the blue, "generate from a different device" notice on iOS/iPadOS specifically, and no green notice', async () => {
+      isAndroidClient.mockReturnValue(false)
+      isIOSClient.mockReturnValue(true)
+      await mount()
+      await flush()
+
+      const notice = findNotice()
+      expect(notice).toBeTruthy()
+      expect(notice.textContent).toContain(
+        'To enroll TAK Aware or iTAK on this device, tap "Generate Enrollment Data" from a different device, then scan the QR code it shows using this device\'s camera.'
+      )
+      expect(notice.className).toContain('bg-blue-50')
+      expect(notice.className).not.toContain('bg-green-50')
+    })
+
+    it('shows no notice at all on a client that is neither Android nor iOS/iPadOS (e.g. a desktop browser)', async () => {
+      isAndroidClient.mockReturnValue(false)
+      isIOSClient.mockReturnValue(false)
+      await mount()
+      await flush()
+
+      expect(findNotice()).toBeUndefined()
+    })
+
+    it('renders at most one such notice, never both at once', async () => {
+      isAndroidClient.mockReturnValue(true)
+      isIOSClient.mockReturnValue(false)
+      await mount()
+      await flush()
+
+      const button = findGenerateButton()
+      const notices = Array.from(button.parentElement.querySelectorAll('p')).filter(
+        (p) => p.className.includes('bg-green-50') || p.className.includes('bg-blue-50')
+      )
+      expect(notices).toHaveLength(1)
     })
   })
 

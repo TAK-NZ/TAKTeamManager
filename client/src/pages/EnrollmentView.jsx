@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { CheckIcon, ClipboardDocumentIcon, InformationCircleIcon } from '@heroicons/react/24/outline'
+import { CheckCircleIcon, CheckIcon, ClipboardDocumentIcon, InformationCircleIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import { enrollmentAPI, configAPI } from '../services/api'
 import { AndroidPlatformLogo, ApplePlatformLogo, WindowsPlatformLogo } from '../components/PlatformLogos'
 import EnrollmentCountdown from '../components/EnrollmentCountdown'
 import FormattedDate, { DATE_PRECISION } from '../components/FormattedDate'
-import { isAndroidClient } from '../utils/platformDetection'
+import { isAndroidClient, isIOSClient } from '../utils/platformDetection'
 import { getTakColorHex } from '../utils/takColors'
 
 /**
@@ -292,6 +292,54 @@ function DifferentDeviceNotice() {
   )
 }
 
+/**
+ * The pre-generation callout shown above the "Generate Enrollment Data"
+ * button. At most ONE of two mutually exclusive variants renders,
+ * depending on `isAndroid`/`isIOS` (the same Android platform check that
+ * gates the ATAK direct-enroll shortcut elsewhere on this page, plus the
+ * analogous iOS/iPadOS check):
+ *
+ * - On an Android device: a green, checkmark-led notice confirming THIS
+ *   device can be enrolled directly with ATAK -- the fast path the ATAK
+ *   tab's direct-enroll shortcut goes on to offer once a code is minted.
+ * - On an iOS or iPadOS device specifically (an iPhone or iPad): a blue,
+ *   informational notice targeted at the exact mistake an iPhone/iPad
+ *   visitor is prone to making -- tapping "Generate Enrollment Data" on
+ *   THIS device and then trying to scan the resulting QR code with this
+ *   SAME device's camera, which cannot work (a screen cannot photograph
+ *   itself). It tells them to instead do the generating step on a
+ *   different device and scan from the iPhone/iPad.
+ * - Every other case (a desktop browser, or an iPad in default Safari's
+ *   desktop-site mode that this check cannot distinguish from a Mac --
+ *   see `isIOSClient`'s own doc comment): no notice at all. Neither
+ *   mistake this pair addresses applies to a desktop user generating a
+ *   code to scan with a separate phone, which is the ordinary case there.
+ *
+ * Green/checkmark is a genuine "you're all set" confirmation, never a mere
+ * decoration -- carried by TEXT ("can be enrolled directly with ATAK"),
+ * not colour alone, matching this app's convention that state a user must
+ * perceive is never colour-only.
+ */
+function PreGenerationDeviceNotice({ isAndroid, isIOS }) {
+  if (isAndroid) {
+    return (
+      <p className="flex items-start gap-2 text-left text-sm text-green-800 dark:text-green-300 bg-green-50 dark:bg-green-900/30 border border-green-200 dark:border-green-800 rounded-lg px-3 py-2 mb-4 max-w-md mx-auto">
+        <CheckCircleIcon className="h-5 w-5 flex-shrink-0 mt-0.5" aria-hidden="true" />
+        <span>This Android device can be enrolled directly with ATAK.</span>
+      </p>
+    )
+  }
+  if (isIOS) {
+    return (
+      <p className="flex items-start gap-2 text-left text-sm text-blue-800 dark:text-blue-300 bg-blue-50 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-800 rounded-lg px-3 py-2 mb-4 max-w-md mx-auto">
+        <InformationCircleIcon className="h-5 w-5 flex-shrink-0 mt-0.5" aria-hidden="true" />
+        <span>To enroll TAK Aware or iTAK on this device, tap "Generate Enrollment Data" from a different device, then scan the QR code it shows using this device's camera.</span>
+      </p>
+    )
+  }
+  return null
+}
+
 /** The default no-mint preview: self-service, `GET /api/enrollment/me/preview`. */
 async function fetchSelfPreview() {
   const response = await enrollmentAPI.previewSelf()
@@ -439,6 +487,9 @@ export default function EnrollmentView({
 
   const [isAndroid] = useState(() =>
     isAndroidClient(typeof navigator === 'undefined' ? null : navigator)
+  )
+  const [isIOS] = useState(() =>
+    isIOSClient(typeof navigator === 'undefined' ? null : navigator)
   )
 
   // The WinTAK/Manual tab's configurable "Description" label
@@ -589,7 +640,7 @@ export default function EnrollmentView({
               Role. Rendered from the no-mint preview -- nothing here
               needs a live token. */}
           <div>
-            <h2 className="text-sm font-semibold text-primary-600 dark:text-primary-400 uppercase tracking-wide mb-3">
+            <h2 className="text-sm font-semibold text-gray-900 dark:text-gray-100 uppercase tracking-wide mb-3">
               Enrollment Data
             </h2>
             <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -662,17 +713,25 @@ export default function EnrollmentView({
           {/* Device Enrollment Requirements -- matches the retired
               Enrollment_Lambda's section of the same name verbatim. */}
           <div>
-            <h2 className="text-sm font-semibold text-primary-600 dark:text-primary-400 uppercase tracking-wide mb-3">
+            <h2 className="text-sm font-semibold text-gray-900 dark:text-gray-100 uppercase tracking-wide mb-3">
               Device Enrollment Requirements
             </h2>
             <ul className="list-disc list-inside space-y-1 text-sm text-gray-700 dark:text-gray-300">
               <li>
                 <span className="font-medium">Device Registration:</span> This device will be linked to your
-                account. Only enroll devices that you are authorized to use and are personally responsible for.
+                account. Only enroll devices that you are authorised to use and are personally responsible for.
               </li>
               <li>
                 <span className="font-medium">Enrollment Duration:</span> Your device enrollment is valid for 1
                 year.
+              </li>
+              <li>
+                <span className="font-medium">Client Software:</span> ATAK, TAK Aware, iTAK or WinTAK must
+                already be{' '}
+                <Link to="/downloads" className="text-primary-600 dark:text-primary-400 underline">
+                  installed
+                </Link>
+                .
               </li>
             </ul>
           </div>
@@ -697,6 +756,7 @@ export default function EnrollmentView({
             // initiative -- and even that only in direct response to this
             // click.
             <div className="text-center py-4">
+              <PreGenerationDeviceNotice isAndroid={isAndroid} isIOS={isIOS} />
               <button
                 type="button"
                 onClick={generate}
