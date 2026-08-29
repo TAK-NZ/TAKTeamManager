@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { XMarkIcon } from '@heroicons/react/24/outline'
 import { deviceManagementAPI } from '../services/api'
 import RevokeDeviceDialog from './RevokeDeviceDialog'
-import DeviceListRow, { DeviceListHeader, NEVER_SEEN_LABEL } from './DeviceListRow'
+import DeviceListRow, { DeviceListHeader, DeviceListCard, NEVER_SEEN_LABEL } from './DeviceListRow'
 
 /**
  * Requirement 5.3 / 6.5: what a null `lastSeenAt` renders as, re-exported
@@ -215,30 +215,44 @@ export default function UserDevicesModal({ userId, userName, onClose }) {
                 </p>
               )
             ) : (
-              <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                  {/* Requirements 15.6, 16.1-16.6: header and rows both come from
-                      `DeviceListRow.jsx`, the single definition this modal shares
-                      with the Dashboard "My Devices" card -- including the
-                      Device_Type_Icon, the icon-only Revoke action, the "Revoked"
-                      badge, and the "never seen" Last_Seen fallback (Req 6.5).
-                      `compact` is the only difference between the two surfaces:
-                      this table sits inside a dialog. */}
-                  <thead className="bg-gray-50 dark:bg-gray-700">
-                    <DeviceListHeader compact />
-                  </thead>
-                  <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                    {devices.map((device) => (
-                      <DeviceListRow
-                        key={device.clientUid}
-                        device={device}
-                        onRevoke={setDeviceToRevoke}
-                        compact
-                      />
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              <>
+                {/* Below `sm`: same stacked-card fallback as the Dashboard
+                    "My Devices" card -- see `DeviceListRow.jsx`'s
+                    `DeviceListCard` doc comment. */}
+                <div className="sm:hidden divide-y divide-gray-200 dark:divide-gray-700">
+                  {devices.map((device) => (
+                    <DeviceListCard
+                      key={device.clientUid}
+                      device={device}
+                      onRevoke={setDeviceToRevoke}
+                    />
+                  ))}
+                </div>
+                <div className="hidden sm:block overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                    {/* Requirements 15.6, 16.1-16.6: header and rows both come from
+                        `DeviceListRow.jsx`, the single definition this modal shares
+                        with the Dashboard "My Devices" card -- including the
+                        Device_Type_Icon, the icon-only Revoke action, the "Revoked"
+                        badge, and the "never seen" Last_Seen fallback (Req 6.5).
+                        `compact` is the only difference between the two surfaces:
+                        this table sits inside a dialog. */}
+                    <thead className="bg-gray-50 dark:bg-gray-700">
+                      <DeviceListHeader compact />
+                    </thead>
+                    <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                      {devices.map((device) => (
+                        <DeviceListRow
+                          key={device.clientUid}
+                          device={device}
+                          onRevoke={setDeviceToRevoke}
+                          compact
+                        />
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
             )}
           </div>
 

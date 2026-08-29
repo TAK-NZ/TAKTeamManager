@@ -344,16 +344,24 @@ describe('date-format consumer guard: extraction sanity', () => {
   })
 
   it('found the non-helper imports too, which are not violations', () => {
-    // Decision 2's positive control, and a second anti-vacuity check: these two
-    // real imports are written in a different shape from the one above, so a
-    // extractor that only handled multi-line clauses would fail here.
+    // Decision 2's positive control: a real, non-test, non-helper import
+    // written in a different shape from the allow-listed FormattedDate.jsx
+    // import above, so an extractor that only handled multi-line clauses
+    // would fail here.
+    //
+    // Bugfix (device-management-mobile-usability follow-up: "Currently
+    // Connected" drops the Last_Seen timestamp when connected): this used
+    // to also assert on `components/DeviceListRow.jsx`'s own
+    // `hasRenderableDate` import, which existed ONLY to decide whether to
+    // render a connected Device's timestamp beside its "Connected" label.
+    // Since a connected Device no longer shows that timestamp at all, that
+    // import became dead code and was removed -- `DeviceListRow.jsx` no
+    // longer imports from `dateFormat.js` at all, so it is gone from this
+    // assertion too, rather than kept as a stale fixture.
     const byFile = new Map(dateFormatImports.map((record) => [record.file, record]))
 
     expect(byFile.get('App.jsx')?.names).toEqual(['setDisplayTimezone', 'setDisplayLocale'])
     expect(reachesHelpers(byFile.get('App.jsx'))).toBe(false)
-
-    expect(byFile.get('components/DeviceListRow.jsx')?.names).toEqual(['hasRenderableDate'])
-    expect(reachesHelpers(byFile.get('components/DeviceListRow.jsx'))).toBe(false)
   })
 })
 

@@ -162,9 +162,11 @@ const KNOWN_LAST_SEEN = '2025-06-07T08:09:00Z'
  */
 const CONNECTED_COMBINATIONS = [
   {
+    // Bugfix: a connected Device drops its Last_Seen timestamp entirely --
+    // "Currently Connected" alone -- regardless of whether one is known.
     name: 'connected, Last_Seen known',
     device: { connected: true, lastSeenAt: KNOWN_LAST_SEEN },
-    expected: `${CONNECTED_LABEL} ${formatDateTime(KNOWN_LAST_SEEN, '')}`
+    expected: CONNECTED_LABEL
   },
   {
     name: 'connected, Last_Seen unknown',

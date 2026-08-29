@@ -1,7 +1,6 @@
 import { TrashIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline'
 import DeviceTypeIcon from './DeviceTypeIcon'
 import FormattedDate, { DATE_PRECISION, TOOLTIP_SIDES } from './FormattedDate'
-import { hasRenderableDate } from '../utils/dateFormat'
 import { EXPIRY_STATES, classifyExpiry, getExpiryWarningDays } from '../utils/expiryWarning'
 
 /**
@@ -11,9 +10,9 @@ import { EXPIRY_STATES, classifyExpiry, getExpiryWarningDays } from '../utils/ex
  * user-details modal (`components/UserDevicesModal.jsx`) render the same list
  * of the same Devices, so every cell of that row -- the Device_Type_Icon, the
  * UID with its "Revoked" badge, the dates, the "never seen" fallback, the
- * "Connected" label (Requirement 20.9), the two expiry markers (Requirements
- * 21.3, 21.5, 21.8), and the icon-only Revoke action -- is drawn here and
- * nowhere else. Two copies of
+ * "Currently Connected" label (Requirement 20.9), the two expiry markers
+ * (Requirements 21.3, 21.5, 21.8), and the icon-only Revoke action -- is
+ * drawn here and nowhere else. Two copies of
  * this JSX that happen to match today is exactly what Requirement 16.6
  * forbids: the next change to one surface would silently not reach the other.
  *
@@ -32,8 +31,7 @@ import { EXPIRY_STATES, classifyExpiry, getExpiryWarningDays } from '../utils/ex
  * (date-tooltips-and-folder-contrast Criterion 2.1), so each carries the
  * Date_Tooltip on hover and on keyboard focus. The rendered STRINGS are
  * unchanged character for character (Criterion 2.3): this row no longer calls
- * `formatDate`/`formatDateTime` itself, and `hasRenderableDate` is imported in
- * their place purely as the Last Seen cell's layout predicate.
+ * `formatDate`/`formatDateTime` itself.
  *
  * Issued and Expires share ONE "Certificate" column, stacked on two lines
  * rather than two `whitespace-nowrap` columns side by side. Once
@@ -64,11 +62,18 @@ export const NEVER_SEEN_LABEL = 'never seen'
  * TEXT, not a colour. The state has to reach a screen reader, and a green dot
  * does not, so the dot beside this label is `aria-hidden` decoration and this
  * string is what carries the state -- the convention Requirement 16.5 already
- * established with the "Revoked" badge. Requirement 20.9 also keeps the
- * Last_Seen timestamp beside the label WHERE one is known, so adopting the
- * label costs no information.
+ * established with the "Revoked" badge.
+ *
+ * Bugfix: a connected Device's Last_Seen timestamp is dropped entirely once
+ * connected -- a live connection makes "last seen" a stale, misleading
+ * question to be answering (the device is not merely "last seen" at some
+ * past instant, it is seen RIGHT NOW), and the label is worded
+ * "Currently Connected" rather than the bare "Connected" to make that
+ * immediate. This applies identically on desktop (`DeviceListRow`) and
+ * mobile (`DeviceListCard`) -- there is no case where the timestamp is
+ * shown on one and hidden on the other.
  */
-export const CONNECTED_LABEL = 'Connected'
+export const CONNECTED_LABEL = 'Currently Connected'
 
 /**
  * Requirements 21.2, 21.3: the accessible-name text for an Imminent_Expiry.
@@ -157,6 +162,30 @@ export function revokeActionLabel(clientUid) {
 }
 
 /**
+ * The per-device classification shared by BOTH renderings of a device --
+ * the table row (`DeviceListRow`, `sm:` and up) and the mobile card
+ * (`DeviceListCard`, below `sm`). Kept as one pure function rather than
+ * computed twice so the two surfaces can never classify the same device
+ * differently: `isRevoked`/`tooltip`/`isConnected`/`expiryMarker` are
+ * exactly the values `DeviceListRow` computed inline before this
+ * extraction, unchanged.
+ *
+ * @param {object} device
+ * @returns {{isRevoked: boolean, tooltip: string, isConnected: boolean,
+ *   expiryMarker: string|undefined}}
+ */
+function computeDeviceRowState(device) {
+  const isRevoked = Boolean(device.revoked)
+  const tooltip = isRevoked ? 'Device already revoked' : 'Revoke device'
+  const isConnected = Boolean(device.connected)
+  const expiryMarker = EXPIRY_MARKERS[
+    classifyExpiry(device.expiresAt, getExpiryWarningDays(), Date.now())
+  ]
+
+  return { isRevoked, tooltip, isConnected, expiryMarker }
+}
+
+/**
  * The `<thead>` row for a device table (see the file header for why it lives
  * beside the body row).
  *
@@ -191,8 +220,12 @@ export function DeviceListHeader({ compact = false }) {
  * which of the two dates on the line they are looking at.
  */
 function DateLineLabel({ children }) {
+  // `w-16` (rather than the original `w-12`) accommodates `DeviceListCard`'s
+  // "Last seen" label -- one character wider than "Issued"/"Expires" -- with
+  // the same component, so all three lines share one label-column width
+  // instead of "Last seen" overflowing a narrower box.
   return (
-    <span className="text-xs text-gray-400 dark:text-gray-500 w-12 flex-shrink-0">
+    <span className="text-xs text-gray-400 dark:text-gray-500 w-16 flex-shrink-0">
       {children}
     </span>
   )
@@ -252,29 +285,10 @@ function DateLineLabel({ children }) {
  */
 export default function DeviceListRow({ device, onRevoke, compact = false }) {
   const padding = compact ? 'px-4 py-4' : 'px-6 py-4'
-  const isRevoked = Boolean(device.revoked)
-  const tooltip = isRevoked ? 'Device already revoked' : 'Revoke device'
-
-  // Requirements 20.1, 20.9. A connected Device with no reported timestamp
-  // renders the label ALONE -- "Connected never seen" would be a
-  // contradiction -- so this cell has to know whether there is a timestamp
-  // before it decides whether to render the `ml-2` wrapper and the deliberate
-  // in-string leading space beside the label.
-  //
-  // A PREDICATE rather than a rendered string (date-tooltips-and-folder-
-  // contrast Decision 7): the date itself now renders through
-  // `FormattedDate`, which does not own this cell and therefore cannot make
-  // the layout decision for it. `formatDateTime(device.lastSeenAt, '')` would
-  // still answer the question, and would keep a Date_Format_Helper import
-  // alive in a module the drift guard exists to clear (Criterion 2.12).
-  const isConnected = Boolean(device.connected)
-  const hasLastSeen = hasRenderableDate(device.lastSeenAt)
-
-  // Requirements 21.2-21.5. The threshold is the installed one (see
-  // `setExpiryWarningDays`), so both surfaces classify against the same value.
-  const expiryMarker = EXPIRY_MARKERS[
-    classifyExpiry(device.expiresAt, getExpiryWarningDays(), Date.now())
-  ]
+  // Requirements 20.1, 20.9, 21.2-21.5: see `computeDeviceRowState`'s own
+  // doc comment -- this is the exact classification this row always
+  // computed inline, now shared verbatim with `DeviceListCard` below.
+  const { isRevoked, tooltip, isConnected, expiryMarker } = computeDeviceRowState(device)
 
   return (
     <tr>
@@ -355,40 +369,21 @@ export default function DeviceListRow({ device, onRevoke, compact = false }) {
           )}
         </div>
       </td>
-      {/* Requirements 20.1, 20.9: a connected Device says so in TEXT, with its
-          Last_Seen timestamp retained beside the label where one is known. The
-          dot is `aria-hidden` decoration -- the state is never carried by
-          colour alone.
+      {/* Requirements 20.1, 20.9: a connected Device says so in TEXT ONLY --
+          "Currently Connected", no timestamp beside it, on the theory that a
+          live connection is not a "last seen at" fact at all. The dot is
+          `aria-hidden` decoration -- the state is never carried by colour
+          alone.
 
           Requirements 5.3, 6.5: otherwise, unchanged -- a null Last_Seen
           renders "never seen" in place of that value ONLY, the UID, issued and
           expires cells above still showing their real values. */}
       <td className={`${padding} whitespace-nowrap text-sm text-gray-500 dark:text-gray-400`}>
         {isConnected ? (
-          <>
-            <span className="inline-flex items-center font-medium text-green-700 dark:text-green-400">
-              <span aria-hidden="true" className="mr-1.5 h-2 w-2 rounded-full bg-green-500" />
-              {CONNECTED_LABEL}
-            </span>
-            {/* The separating space is a deliberate text node, not layout: the
-                margin separates the two visually, but anything reading the
-                cell's text -- assistive technology, and the tests -- would
-                otherwise run the label into the timestamp. It stays HERE
-                rather than moving inside `FormattedDate`, which renders the
-                timestamp and nothing else so its rendered string is the
-                helper's character for character (Criterion 2.3). */}
-            {hasLastSeen && (
-              <span className="ml-2">
-                {' '}
-                <FormattedDate
-                  value={device.lastSeenAt}
-                  fallback=""
-                  precision={DATE_PRECISION.DATE_TIME}
-                  side={TOOLTIP_SIDES.LEFT}
-                />
-              </span>
-            )}
-          </>
+          <span className="inline-flex items-center font-medium text-green-700 dark:text-green-400">
+            <span aria-hidden="true" className="mr-1.5 h-2 w-2 rounded-full bg-green-500" />
+            {CONNECTED_LABEL}
+          </span>
         ) : (
           <FormattedDate
             value={device.lastSeenAt}
@@ -426,5 +421,127 @@ export default function DeviceListRow({ device, onRevoke, compact = false }) {
         </span>
       </td>
     </tr>
+  )
+}
+
+/**
+ * The mobile (below `sm`) rendering of one Device -- a stacked card instead
+ * of a table row. Introduced because the shared table (`DeviceListRow`
+ * above) has five columns and no column-hiding fallback: on a phone-width
+ * viewport inside `overflow-x-auto`, every column just makes the table
+ * scroll horizontally, which is exactly the "table wider than the phone"
+ * clutter this exists to fix.
+ *
+ * Deliberately NOT a second implementation of the row's logic: every piece
+ * of per-device state (`isRevoked`, the Connected label, the "never seen"
+ * fallback, the expiry marker) comes from the same `computeDeviceRowState`
+ * helper `DeviceListRow` uses, and every date renders through the same
+ * `FormattedDate`/`DateLineLabel` used there -- so the two renderings can
+ * never classify or format the same Device differently. Only the
+ * PRESENTATION (stacked label/value pairs instead of table cells) differs.
+ *
+ * Callers render this ALONGSIDE `DeviceListRow`/`DeviceListHeader` (hidden
+ * at the opposite breakpoint, `sm:hidden` here vs `hidden sm:table`/`sm:block`
+ * on the table), never as a replacement -- see `Dashboard.jsx` and
+ * `UserDevicesModal.jsx`.
+ *
+ * @param {object} props
+ * @param {object} props.device same shape as `DeviceListRow`'s `device` prop.
+ * @param {(device: object) => void} props.onRevoke same contract as
+ *   `DeviceListRow`'s `onRevoke`.
+ */
+export function DeviceListCard({ device, onRevoke }) {
+  const { isRevoked, tooltip, isConnected, expiryMarker } = computeDeviceRowState(device)
+
+  return (
+    <div className="p-4 space-y-3 text-sm">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-center gap-2 min-w-0">
+          <DeviceTypeIcon clientType={device.clientType} />
+          <span className="font-medium text-gray-900 dark:text-gray-100 break-all">
+            {device.clientUid}
+          </span>
+        </div>
+        <span className="relative group inline-flex flex-shrink-0">
+          <button
+            type="button"
+            onClick={() => onRevoke(device)}
+            disabled={isRevoked}
+            aria-label={revokeActionLabel(device.clientUid)}
+            className="text-red-600 hover:text-red-800 dark:text-red-400 dark:hover:text-red-300 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-red-600 rounded focus:outline-none focus:ring-2 focus:ring-red-500"
+          >
+            <TrashIcon className="h-5 w-5" aria-hidden="true" />
+          </button>
+          <span
+            aria-hidden="true"
+            className="absolute right-full top-1/2 transform -translate-y-1/2 mr-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10"
+          >
+            {tooltip}
+          </span>
+        </span>
+      </div>
+
+      {isRevoked && (
+        <span className="inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800">
+          Revoked
+        </span>
+      )}
+
+      <div className="space-y-1 text-gray-500 dark:text-gray-400">
+        <div className="flex items-center gap-1.5">
+          <DateLineLabel>Issued</DateLineLabel>{' '}
+          <FormattedDate
+            value={device.issuedAt}
+            fallback="Unknown"
+            precision={DATE_PRECISION.DATE_TIME}
+            side={TOOLTIP_SIDES.RIGHT}
+          />
+        </div>
+        <div
+          className={`flex items-center gap-1.5 ${
+            expiryMarker ? 'font-bold text-red-600 dark:text-red-400' : ''
+          }`}
+        >
+          <DateLineLabel>Expires</DateLineLabel>{' '}
+          <FormattedDate
+            value={device.expiresAt}
+            fallback="Unknown"
+            precision={DATE_PRECISION.DATE_TIME}
+            side={TOOLTIP_SIDES.RIGHT}
+          />
+          {expiryMarker && (
+            <span className="relative group inline-flex" tabIndex={0}>
+              <ExclamationTriangleIcon
+                className="h-4 w-4 text-red-600 dark:text-red-400 cursor-help"
+                aria-hidden="true"
+              />
+              <span className="sr-only">{expiryMarker}</span>
+              <span
+                aria-hidden="true"
+                className="absolute left-full top-1/2 transform -translate-y-1/2 ml-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10"
+              >
+                {expiryMarker}
+              </span>
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-1.5">
+          <DateLineLabel>Last seen</DateLineLabel>{' '}
+          {isConnected ? (
+            <span className="inline-flex items-center font-medium text-green-700 dark:text-green-400">
+              <span aria-hidden="true" className="mr-1.5 h-2 w-2 rounded-full bg-green-500" />
+              {CONNECTED_LABEL}
+            </span>
+          ) : (
+            <FormattedDate
+              value={device.lastSeenAt}
+              fallback={NEVER_SEEN_LABEL}
+              precision={DATE_PRECISION.DATE_TIME}
+              side={TOOLTIP_SIDES.LEFT}
+            />
+          )}
+        </div>
+      </div>
+    </div>
   )
 }

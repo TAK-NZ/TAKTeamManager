@@ -2,8 +2,9 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import React, { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { siAndroid, siApple } from 'simple-icons'
+import { faWindows } from '@fortawesome/free-brands-svg-icons'
 
-import { AndroidPlatformLogo, ApplePlatformLogo } from './PlatformLogos.jsx'
+import { AndroidPlatformLogo, ApplePlatformLogo, WindowsPlatformLogo } from './PlatformLogos.jsx'
 
 // Validates: Requirements 6.1, 6.2
 //
@@ -96,5 +97,86 @@ describe.each(PLATFORM_LOGOS)('%s (mounted)', (_name, PlatformLogo, simpleIconEx
     // assertion below while measuring nothing.
     expect(path).not.toBeNull()
     expect(path.getAttribute('d')).toBe(simpleIconExport.path)
+  })
+})
+
+/**
+ * WindowsPlatformLogo, mirroring the fidelity checks above, but against
+ * `@fortawesome/free-brands-svg-icons`' own export shape (`icon: [width,
+ * height, ligatures, unicode, svgPathData]`) and its non-square viewBox
+ * (448 x 512), rather than simple-icons' uniform 24 x 24 -- a separate
+ * describe block rather than folding into `PLATFORM_LOGOS` above, since the
+ * two source libraries' shapes and expected viewBox differ.
+ */
+describe('WindowsPlatformLogo (mounted)', () => {
+  let container
+  let root
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  const mount = async (props) => {
+    root = createRoot(container)
+    await act(async () => {
+      root.render(<WindowsPlatformLogo {...props} />)
+    })
+    return container.querySelector('svg')
+  }
+
+  const [faWidth, faHeight, , , faSvgPathData] = faWindows.icon
+
+  it('renders an <svg> with the FontAwesome icon\'s own (non-square) viewBox', async () => {
+    const svg = await mount({})
+
+    expect(svg).not.toBeNull()
+    expect(svg.getAttribute('viewBox')).toBe(`0 0 ${faWidth} ${faHeight}`)
+  })
+
+  it('forwards a supplied className onto the <svg>', async () => {
+    const svg = await mount({ className: 'h-5 w-5 text-gray-500 dark:text-gray-400' })
+
+    expect(svg.getAttribute('class')).toBe('h-5 w-5 text-gray-500 dark:text-gray-400')
+  })
+
+  it('defaults aria-hidden to "true" when not supplied', async () => {
+    const svg = await mount({})
+
+    expect(svg.getAttribute('aria-hidden')).toBe('true')
+  })
+
+  it('honours an explicitly supplied aria-hidden rather than always defaulting', async () => {
+    const svg = await mount({ 'aria-hidden': 'false' })
+
+    expect(svg.getAttribute('aria-hidden')).toBe('false')
+  })
+
+  it("renders a <path> whose 'd' attribute equals FontAwesome's own path export exactly", async () => {
+    const svg = await mount({})
+    const path = svg.querySelector('path')
+
+    // Anti-vacuity: a scan that silently matched nothing would pass every
+    // assertion below while measuring nothing.
+    expect(path).not.toBeNull()
+    expect(path.getAttribute('d')).toBe(faSvgPathData)
+  })
+
+  it('fills with currentColor, matching the Android/Apple wrapper (Requirement 6.1)', async () => {
+    const svg = await mount({})
+
+    expect(svg.getAttribute('fill')).toBe('currentColor')
   })
 })

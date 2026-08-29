@@ -34,6 +34,83 @@ globalThis.React = React
 const GLOBAL_MANAGER = { userId: 1, isAdmin: true, is_global_manager: true }
 const TEAM_ADMIN = { userId: 7, isAdmin: true, isTeamAdmin: true, is_global_manager: false }
 
+// Bugfix (mobile-usability follow-up, twice regressed): the top bar's
+// desktop-right-alignment depends on the invisible "TAK Team Manager"
+// placeholder `<h1>` actually PARTICIPATING in the `justify-between` flex
+// row at `lg:` and up. Tailwind's `hidden` sets `display: none` and stays
+// in effect at every breakpoint unless a later, more specific responsive
+// class overrides `display` itself -- `lg:invisible` alone does NOT do
+// that (`invisible` only ever sets `visibility`), so `hidden lg:invisible`
+// left the element permanently out of layout, and `justify-between` had
+// only one visible child to position, packing it to the START (left)
+// instead of the end. jsdom applies no real CSS, so this cannot be caught
+// by a rendered-position assertion; it is pinned here as a structural
+// class-list check instead, so a future edit that drops `lg:block` again
+// fails immediately rather than silently reintroducing this exact defect.
+describe('Layout top-bar desktop alignment (bugfix, regressed twice)', () => {
+  let container
+  let root
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    if (typeof window.matchMedia !== 'function') {
+      window.matchMedia = () => ({
+        matches: false,
+        addEventListener() {},
+        removeEventListener() {},
+        addListener() {},
+        removeListener() {}
+      })
+    }
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    delete window.matchMedia
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  it('the invisible app-name placeholder carries both a `hidden` (mobile) AND an `lg:block` (desktop) display class, not `hidden` alone', async () => {
+    // A plain (non-admin) user, so the pending-count effect's `if
+    // (!user?.isAdmin && !user?.is_global_manager) return` bails out
+    // immediately -- no fetch mocking needed for this structural check.
+    const PLAIN_USER = { userId: 99, isAdmin: false, isTeamAdmin: false, is_global_manager: false }
+    root = createRoot(container)
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={['/dashboard']}>
+          <ThemeProvider>
+            <Layout user={PLAIN_USER}>
+              <div />
+            </Layout>
+          </ThemeProvider>
+        </MemoryRouter>
+      )
+    })
+
+    const placeholder = Array.from(container.querySelectorAll('h1')).find(
+      (h1) => h1.textContent === 'TAK Team Manager'
+    )
+    expect(placeholder).toBeTruthy()
+    const classes = placeholder.className.split(/\s+/)
+
+    expect(classes).toContain('hidden')
+    // The exact regression: `hidden` with no responsive `display` override
+    // (a bare `lg:invisible` does not supply one) leaves the element
+    // display:none at every breakpoint, including lg: and up.
+    expect(classes).toContain('lg:block')
+    expect(classes).toContain('lg:invisible')
+  })
+})
+
 describe('Layout "Requests" nav badge (bugfix: pending-requests-badge)', () => {
   let container
   let root

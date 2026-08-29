@@ -13,7 +13,8 @@ import {
   SunIcon,
   MoonIcon,
   QrCodeIcon,
-  ArrowDownTrayIcon
+  ArrowDownTrayIcon,
+  UserCircleIcon
 } from '@heroicons/react/24/outline'
 import { authAPI, requestsAPI, adminAPI } from '../services/api'
 import { useTheme } from '../contexts/ThemeContext'
@@ -88,6 +89,12 @@ function getUserRoleLabel(user) {
 
 export default function Layout({ children, user }) {
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  // Mobile-only (below `lg`): collapses the theme toggle, name/role and
+  // logout button -- three separate controls that otherwise crowd the top
+  // bar on a narrow phone -- behind a single avatar-icon trigger. Desktop
+  // keeps showing all three inline (see the `lg:flex`/`lg:hidden` pair
+  // around the menu below); this state has no effect at `lg:` and up.
+  const [userMenuOpen, setUserMenuOpen] = useState(false)
   const location = useLocation()
   const navigation = getNavigation(user)
   const { theme, toggleTheme } = useTheme()
@@ -265,20 +272,29 @@ export default function Layout({ children, user }) {
             <Bars3Icon className="h-6 w-6" />
           </button>
           <div className="flex flex-1 justify-between items-center px-4">
-            {/* Invisible (not display:none) on lg+: the desktop sidebar
-                already carries the "TAK Team Manager" wordmark next to
-                its logo mark, always visible there, so a second visible
-                copy here would be a plain duplicate. `invisible` (rather
-                than `hidden`) keeps this element's width in the flex
-                layout so the sibling controls block below keeps the same
-                right-hand position `justify-between` gave it before --
-                collapsing the width would shift the theme toggle/user
-                info/logout button left on desktop. On mobile the sidebar
-                is an off-canvas drawer (hidden until the hamburger is
-                tapped), so this stays the only app-name branding a
-                mobile user sees by default. */}
-            <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100 lg:invisible">TAK Team Manager</h1>
-            <div className="flex items-center space-x-4">
+            {/* Desktop sidebar already carries the "TAK Team Manager"
+                wordmark next to its logo mark, always visible there, so a
+                second visible copy here would be a plain duplicate.
+                `hidden` removes it from layout entirely below `lg` (a
+                mobile viewport has no width to spare holding an invisible
+                placeholder); `lg:block lg:invisible` puts it BACK into
+                layout at `lg:` and up (`display: none` from `hidden`
+                would otherwise persist there too -- `hidden` only sets
+                `display`, and nothing at `lg:` overrode that until this
+                fix, which is why the desktop row lost its right-hand
+                alignment: with this element truly absent from the flex
+                layout, `justify-between` had only one visible child left
+                and packed it to the start instead of the end) while
+                keeping it invisible so `justify-between` positions the
+                sibling controls block at the same right-hand spot it
+                always has, without a second visible copy of the
+                wordmark. On mobile the sidebar is an off-canvas drawer
+                (hidden until the hamburger is tapped), so this stays the
+                only app-name branding a mobile user sees by default. */}
+            <h1 className="hidden lg:block lg:invisible text-xl font-bold text-gray-900 dark:text-gray-100">TAK Team Manager</h1>
+            {/* Desktop (`lg:` and up): theme toggle, name/role and logout
+                shown inline, exactly as before. */}
+            <div className="hidden lg:flex items-center space-x-4">
               <button
                 onClick={toggleTheme}
                 className="p-2 text-gray-400 hover:text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 dark:hover:text-gray-300 rounded-md"
@@ -303,6 +319,66 @@ export default function Layout({ children, user }) {
               >
                 Logout
               </button>
+            </div>
+            {/* Mobile (below `lg`): the same three controls collapse
+                behind one avatar-icon trigger, so the top bar carries a
+                single tappable element instead of an icon, two lines of
+                text and a button all in a row. `ml-auto` rather than
+                relying on the row's `justify-between`: below `lg` the `h1`
+                above is `hidden` (out of flow, not just `invisible`) and
+                the desktop cluster is `hidden` too, leaving this trigger
+                as the row's ONLY visible flex child -- `justify-between`
+                has nothing left to distribute between, so it settles at
+                the start (left) instead of the right. `ml-auto` pins it
+                to the right regardless of how many siblings are actually
+                in flow. */}
+            <div className="relative ml-auto lg:hidden">
+              <button
+                onClick={() => setUserMenuOpen((open) => !open)}
+                aria-expanded={userMenuOpen}
+                aria-haspopup="true"
+                aria-label="Open user menu"
+                className="p-1 text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 rounded-full hover:bg-gray-100 dark:hover:bg-gray-700"
+              >
+                <UserCircleIcon className="h-8 w-8" />
+              </button>
+              {userMenuOpen && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setUserMenuOpen(false)} />
+                  <div className="absolute right-0 top-full mt-2 w-48 rounded-md bg-white dark:bg-gray-800 shadow-lg ring-1 ring-black ring-opacity-5 z-50 py-1">
+                    <div className="px-4 py-2 border-b border-gray-200 dark:border-gray-700">
+                      <span className="block text-sm text-gray-700 dark:text-gray-300">
+                        {user?.first_name} {user?.last_name}
+                      </span>
+                      <span className="block text-xs text-gray-500 dark:text-gray-400">
+                        {getUserRoleLabel(user)}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        toggleTheme()
+                        setUserMenuOpen(false)
+                      }}
+                      className="flex w-full items-center gap-2 px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+                    >
+                      {theme === 'dark' ? (
+                        <SunIcon className="h-4 w-4" />
+                      ) : (
+                        <MoonIcon className="h-4 w-4" />
+                      )}
+                      {theme === 'dark' ? 'Light mode' : 'Dark mode'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleLogout}
+                      className="flex w-full items-center px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+                    >
+                      Logout
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         </div>

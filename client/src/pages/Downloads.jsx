@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react'
-import { ComputerDesktopIcon, GlobeAltIcon } from '@heroicons/react/24/outline'
 import { GooglePlayBadge, AppleAppStoreBadge, TakGovBadge, RecommendedOptionMarker, RecommendedOptionGlyph } from '../components/StoreBadges'
-import { AndroidPlatformLogo, ApplePlatformLogo } from '../components/PlatformLogos'
+import { AndroidPlatformLogo, ApplePlatformLogo, WindowsPlatformLogo } from '../components/PlatformLogos'
 import { configAPI } from '../services/api'
 
 /**
@@ -119,8 +118,24 @@ const WINDOWS_ROUTES = [
  * accessible name from the ATAK-via-TAK.gov route's own `TakGovBadge` use.
  */
 function OsSection({ PlatformLogo, osLabel, routes }) {
+  // `sm:pb-0`/`sm:pt-0` still apply once the grid leaves single-column (2
+  // or 3 columns), but the horizontal `px-6`/first-last edge trim only
+  // makes sense once the vertical divider itself exists, which is now
+  // `md:` (see the grid's own `md:divide-x` above) rather than `sm:`.
+  //
+  // Bugfix: below `sm` the grid's own `divide-y` (active only there --
+  // `sm:divide-y-0` turns it off at `sm:` and up) draws a horizontal rule
+  // between stacked sections. `pb-8` alone left a gap BEFORE that rule but
+  // none AFTER it, so the rule sat flush against the next section's own
+  // heading -- reported as the divider "overlapping" the iOS/Windows
+  // text. `pt-8 first:pt-0` mirrors the existing `pb-8` pattern: every
+  // section but the first (which needs no leading gap, matching
+  // `divide-y`'s own "no rule before the first child" behaviour) gets
+  // breathing room below the rule too. `sm:pt-0` keeps desktop's
+  // side-by-side row alignment unaffected, exactly like `sm:pb-0` already
+  // does for the bottom.
   return (
-    <div className="flex flex-col gap-6 pb-8 sm:pb-0 sm:px-6 first:sm:pl-0 last:sm:pr-0">
+    <div className="flex flex-col gap-6 pb-8 pt-8 first:pt-0 sm:pb-0 sm:pt-0 md:px-6 first:md:pl-0 last:md:pr-0">
       <div className="flex items-center gap-2 justify-center">
         <PlatformLogo className="h-5 w-5 text-gray-700 dark:text-gray-300" aria-hidden="true" />
         <h2 className="text-sm font-semibold text-gray-900 dark:text-gray-100">{osLabel}</h2>
@@ -181,10 +196,18 @@ export default function Downloads() {
       </div>
 
       <div className="card">
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-8 divide-y divide-gray-200 dark:divide-gray-700 sm:divide-y-0 sm:divide-x">
+        {/* `sm:grid-cols-2 md:grid-cols-3` (rather than jumping straight
+            from 1 to 3 columns at `sm:`) gives a landscape phone or small
+            tablet (~640-767px) a 2-up layout instead of a cramped 3-up
+            one; a true phone-portrait viewport still gets the 1-column
+            stacked layout below `sm:`, unchanged. The divider classes
+            follow the same two-step promotion: no dividers until 2
+            columns exist (`sm:`), then the vertical divider only once 3
+            columns exist (`md:`). */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-8 divide-y divide-gray-200 dark:divide-gray-700 sm:divide-y-0 md:divide-x">
           <OsSection PlatformLogo={AndroidPlatformLogo} osLabel="Android" routes={ANDROID_ROUTES} />
           <OsSection PlatformLogo={ApplePlatformLogo} osLabel="iOS" routes={IOS_ROUTES} />
-          <OsSection PlatformLogo={ComputerDesktopIcon} osLabel="Windows" routes={WINDOWS_ROUTES} />
+          <OsSection PlatformLogo={WindowsPlatformLogo} osLabel="Windows" routes={WINDOWS_ROUTES} />
         </div>
 
         {/* CloudTAK_Row (Requirement 4): a sibling block below the
@@ -197,7 +220,23 @@ export default function Downloads() {
         {cloudTakUrl && (
           <div className="mt-8 pt-8 border-t border-gray-200 dark:border-gray-700 flex flex-col items-center text-center gap-3">
             <div className="flex items-center gap-2">
-              <GlobeAltIcon className="h-5 w-5 text-gray-700 dark:text-gray-300" aria-hidden="true" />
+              {/* TAK-NZ's own black-and-white CloudTAK mark: an SVG built
+                  from CloudTAK's own real vector
+                  (api/web/public/CloudTAKLogo.svg), gradient fill swapped
+                  for solid black plus a white outline (`paint-order`) --
+                  the vector equivalent of this deployment's actual
+                  install icon (cdk/src/cloudtak-oidc-setup/CloudTAKLogo.png),
+                  legible on any background with no backing shape needed.
+
+                  Bugfix: the mark's native aspect ratio is ~1.59:1 (wider
+                  than tall) -- forcing it into the SAME square `h-5 w-5`
+                  box the other three (near-square) Platform_Logos use
+                  stretched/squashed it vertically. `h-5 w-auto` lets the
+                  browser derive the width from the SVG's own viewBox
+                  instead of a fixed square, exactly like `BADGE_CLASSNAME`
+                  above already does for the store badges for the identical
+                  reason. */}
+              <img src="/assets/cloudtak-logo.svg" alt="" className="h-5 w-auto flex-shrink-0" aria-hidden="true" />
               <span className="text-sm font-medium text-gray-900 dark:text-gray-100">CloudTAK</span>
             </div>
             <a

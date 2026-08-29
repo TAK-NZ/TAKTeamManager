@@ -183,9 +183,11 @@ const KNOWN_LAST_SEEN = '2025-06-07T08:09:00Z'
  */
 const CONNECTED_COMBINATIONS = [
   {
+    // Bugfix: a connected Device drops its Last_Seen timestamp entirely --
+    // "Currently Connected" alone -- regardless of whether one is known.
     name: 'connected, Last_Seen known',
     device: { connected: true, lastSeenAt: KNOWN_LAST_SEEN },
-    expected: `${CONNECTED_LABEL} ${formatDateTime(KNOWN_LAST_SEEN, '')}`
+    expected: CONNECTED_LABEL
   },
   {
     name: 'connected, Last_Seen unknown',
@@ -910,8 +912,11 @@ describe('the Dashboard card and the admin modal render the same row markup (Req
     // is located by its own device rather than by counting rows, so the
     // assertion does not depend on how far away the other fixtures' expiry
     // dates happen to be from today.
+    // Bugfix: a connected Device drops its Last_Seen timestamp entirely, so
+    // both the known- and unknown-Last_Seen connected fixtures render
+    // identically -- CONNECTED_LABEL alone.
     const connectedRow = card.rows[indexOf('ANDROID-connected0007')]
-    expect(connectedRow.lastSeen).toBe(`${CONNECTED_LABEL} ${formatDateTime(KNOWN_LAST_SEEN, '')}`)
+    expect(connectedRow.lastSeen).toBe(CONNECTED_LABEL)
     expect(card.rows[indexOf('ANDROID-connectednoseen0008')].lastSeen).toBe(CONNECTED_LABEL)
 
     // (`certificate` is the merged cell's accessible text, both lines

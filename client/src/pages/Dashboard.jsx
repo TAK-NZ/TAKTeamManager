@@ -5,7 +5,7 @@ import { teamsAPI, requestsAPI, configAPI, usersAPI, channelsAPI, deviceManageme
 import { buildFolderTree } from '../utils/channelTree'
 import { getTakColorHex } from '../utils/takColors'
 import RevokeDeviceDialog from '../components/RevokeDeviceDialog'
-import DeviceListRow, { DeviceListHeader } from '../components/DeviceListRow'
+import DeviceListRow, { DeviceListHeader, DeviceListCard } from '../components/DeviceListRow'
 
 // --- The Visibility_Pause_Pattern (device-management Requirements 19.1-19.3) ---
 //
@@ -234,9 +234,15 @@ export default function Dashboard({ user }) {
       const parentChannel = tree.channels.find(c => c.display_name === folderName)
       
       if (parentChannel) {
-        // Render as expandable channel
+        // Render as expandable channel. `ml-3 sm:ml-6` (rather than a flat
+        // `ml-6`): each nesting level's indentation compounds with its
+        // ancestors' (see the children wrapper below), so on a narrow phone
+        // a few levels deep can push a row's content out of the visible
+        // width entirely. Halving the per-level indent below `sm` keeps
+        // the hierarchy visually distinguishable without costing that much
+        // horizontal room; `sm:` and up is unchanged.
         items.push(
-          <div key={folderPath} className="flex items-center justify-between p-3 bg-gray-100 dark:bg-gray-700 rounded-lg ml-6">
+          <div key={folderPath} className="flex items-center justify-between p-3 bg-gray-100 dark:bg-gray-700 rounded-lg ml-3 sm:ml-6">
             <div className="flex items-center flex-1">
               <button
                 onClick={() => toggleFolder(folderPath)}
@@ -261,9 +267,13 @@ export default function Dashboard({ user }) {
                     <ArrowUpRightIcon className="h-3 w-3 mr-1" />
                     Read
                   </span>
-                  <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
+                  {/* Sideways (`right-full`, this row's badges sit near the
+                      right edge of the card): a `bottom-full` tooltip here
+                      would clip against the card's own edges on a narrow
+                      viewport, the same Tooltip_Clipping_Defect the
+                      Date_Tooltip convention exists to avoid. */}
+                  <div className="absolute right-full top-1/2 transform -translate-y-1/2 mr-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
                     Receive data only - view others' locations and messages
-                    <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
                   </div>
                 </div>
               )}
@@ -273,9 +283,8 @@ export default function Dashboard({ user }) {
                     <ArrowDownLeftIcon className="h-3 w-3 mr-1" />
                     Write
                   </span>
-                  <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
+                  <div className="absolute right-full top-1/2 transform -translate-y-1/2 mr-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
                     Send data only - share your location and messages
-                    <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
                   </div>
                 </div>
               )}
@@ -285,9 +294,8 @@ export default function Dashboard({ user }) {
                     <ArrowsRightLeftIcon className="h-3 w-3 mr-1" />
                     Read/Write
                   </span>
-                  <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
+                  <div className="absolute right-full top-1/2 transform -translate-y-1/2 mr-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
                     Full access - send and receive all data
-                    <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
                   </div>
                 </div>
               )}
@@ -318,7 +326,7 @@ export default function Dashboard({ user }) {
       
       if (isExpanded) {
         items.push(
-          <div key={`${folderPath}-children`} className="ml-6 mt-2 space-y-2">
+          <div key={`${folderPath}-children`} className="ml-3 sm:ml-6 mt-2 space-y-2">
             {renderFolderTree(subtree, folderPath)}
           </div>
         )
@@ -329,7 +337,7 @@ export default function Dashboard({ user }) {
     const parentChannelNames = new Set(Object.keys(tree.folders))
     tree.channels.filter(c => !parentChannelNames.has(c.display_name)).forEach(channel => {
       items.push(
-        <div key={channel.id} className="flex items-center justify-between p-3 bg-gray-100 dark:bg-gray-700 rounded-lg ml-6">
+        <div key={channel.id} className="flex items-center justify-between p-3 bg-gray-100 dark:bg-gray-700 rounded-lg ml-3 sm:ml-6">
           <div className="flex-1">
             <div className="flex items-center">
               <SignalIcon className="h-4 w-4 text-gray-900 dark:text-gray-100 mr-1.5 flex-shrink-0" />
@@ -346,9 +354,8 @@ export default function Dashboard({ user }) {
                   <ArrowUpRightIcon className="h-3 w-3 mr-1" />
                   Read
                 </span>
-                <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
+                <div className="absolute right-full top-1/2 transform -translate-y-1/2 mr-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
                   Receive data only - view others' locations and messages
-                  <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
                 </div>
               </div>
             )}
@@ -358,9 +365,8 @@ export default function Dashboard({ user }) {
                   <ArrowDownLeftIcon className="h-3 w-3 mr-1" />
                   Write
                 </span>
-                <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
+                <div className="absolute right-full top-1/2 transform -translate-y-1/2 mr-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
                   Send data only - share your location and messages
-                  <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
                 </div>
               </div>
             )}
@@ -370,9 +376,8 @@ export default function Dashboard({ user }) {
                   <ArrowsRightLeftIcon className="h-3 w-3 mr-1" />
                   Read/Write
                 </span>
-                <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
+                <div className="absolute right-full top-1/2 transform -translate-y-1/2 mr-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
                   Full access - send and receive all data
-                  <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
                 </div>
               </div>
             )}
@@ -559,7 +564,7 @@ export default function Dashboard({ user }) {
           Welcome back, {user.first_name}!
         </h1>
         <p className="text-gray-600 dark:text-gray-400">
-          View your TAK team assignment and channel access.
+          View your TAK profile, channels and devices.
         </p>
       </div>
 
@@ -567,13 +572,42 @@ export default function Dashboard({ user }) {
       {(freshUser.takRole || freshUser.takColor || freshUser.takCallsign) && (
         <div className="card">
           <h2 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">TAK Profile</h2>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {/* 2x2 layout: top row My Callsign / My TAK Role, bottom row
+              My Organisation / My Organisation's Function -- source order
+              drives grid placement, so the JSX below is ordered to match
+              rather than relying on any explicit grid-column/row utility. */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {freshUser.takCallsign && (
               <div>
                 <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">My Callsign</dt>
                 <dd className="text-sm text-gray-900 dark:text-gray-100">{freshUser.takCallsign}</dd>
               </div>
             )}
+            {freshUser.takRole && (
+              <div>
+                <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">My TAK Role</dt>
+                <dd className="flex items-center text-sm text-gray-900 dark:text-gray-100">
+                  {freshUser.takRole}
+                  {roleDescriptions[freshUser.takRole] && (
+                    <div className="relative group ml-1">
+                      <InformationCircleIcon className="h-4 w-4 text-gray-400 cursor-help" />
+                      <div className="absolute left-full top-1/2 transform -translate-y-1/2 ml-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
+                        {roleDescriptions[freshUser.takRole]}
+                      </div>
+                    </div>
+                  )}
+                </dd>
+              </div>
+            )}
+            <div>
+              <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">My Organisation</dt>
+              {/* Structural Organisation name (teams.name, root of the
+                  Ancestor_Chain -- server/routes/users.js's `rt.name`), not
+                  the colour-derived "function" shown below. A teamless
+                  user carries the literal string 'None', never blank
+                  (see the product rule on the None sentinel). */}
+              <dd className="text-sm text-gray-900 dark:text-gray-100">{userTeam?.organisation_name || 'None'}</dd>
+            </div>
             {freshUser.takColor && (
               <div>
                 <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">My Organisation's Function</dt>
@@ -594,23 +628,6 @@ export default function Dashboard({ user }) {
                     ></div>
                   )}
                   {getOrganizationName(freshUser.takColor)}
-                </dd>
-              </div>
-            )}
-            {freshUser.takRole && (
-              <div>
-                <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">My TAK Role</dt>
-                <dd className="flex items-center text-sm text-gray-900 dark:text-gray-100">
-                  {freshUser.takRole}
-                  {roleDescriptions[freshUser.takRole] && (
-                    <div className="relative group ml-1">
-                      <InformationCircleIcon className="h-4 w-4 text-gray-400 cursor-help" />
-                      <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
-                        {roleDescriptions[freshUser.takRole]}
-                        <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
-                      </div>
-                    </div>
-                  )}
                 </dd>
               </div>
             )}
@@ -636,9 +653,8 @@ export default function Dashboard({ user }) {
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor" className="h-4 w-4 text-red-500 cursor-help">
                       <path strokeLinecap="round" strokeLinejoin="round" d="M3.98 8.223A10.477 10.477 0 0 0 1.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.451 10.451 0 0 1 12 4.5c4.756 0 8.773 3.162 10.065 7.498a10.522 10.522 0 0 1-4.293 5.774M6.228 6.228 3 3m3.228 3.228 3.65 3.65m7.894 7.894L21 21m-3.228-3.228-3.65-3.65m0 0a3 3 0 1 0-4.243-4.243m4.242 4.242L9.88 9.88" />
                     </svg>
-                    <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
+                    <div className="absolute left-full top-1/2 transform -translate-y-1/2 ml-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
                       Private team
-                      <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
                     </div>
                   </div>
                 )}
@@ -664,7 +680,13 @@ export default function Dashboard({ user }) {
           </div>
         </div>
 
-        <div className="card">
+        {/* Hidden below `md`: the "My Channels" card immediately below this
+            stats row already shows "N of M channels" directly under its own
+            heading, so this tile is a duplicate of information already on
+            screen -- worth the space on desktop (three tiles fill the row
+            evenly), not worth it on a phone where every tile is full-width
+            and stacked. */}
+        <div className="hidden md:block card">
           <div className="flex items-center">
             <div className="flex-shrink-0">
               <SignalIcon className="h-8 w-8 text-gray-500 dark:text-gray-400" />
@@ -754,9 +776,14 @@ export default function Dashboard({ user }) {
         <div className="card">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-lg font-medium text-gray-900 dark:text-gray-100">My Devices</h2>
-            <span className="text-sm text-gray-500 dark:text-gray-400">
-              {devices.length} device{devices.length !== 1 ? 's' : ''}
-            </span>
+            <div className="flex items-center space-x-3">
+              <span className="text-sm text-gray-500 dark:text-gray-400">
+                {devices.length} device{devices.length !== 1 ? 's' : ''}
+              </span>
+              <Link to="/enrollment" className="btn-primary text-sm">
+                Add Device
+              </Link>
+            </div>
           </div>
 
           {devicesError && (
@@ -775,27 +802,44 @@ export default function Dashboard({ user }) {
               No devices are enrolled under your name.
             </p>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                {/* Requirements 15.6, 16.1-16.6: header and rows both come from
-                    `components/DeviceListRow.jsx`, the single definition this
-                    card shares with the user-details modal -- including the
-                    Device_Type_Icon, the icon-only Revoke action, the "Revoked"
-                    badge, and the "never seen" Last_Seen fallback (Req 5.3). */}
-                <thead className="bg-gray-50 dark:bg-gray-700">
-                  <DeviceListHeader />
-                </thead>
-                <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                  {devices.map((device) => (
-                    <DeviceListRow
-                      key={device.clientUid}
-                      device={device}
-                      onRevoke={setDeviceToRevoke}
-                    />
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <>
+              {/* Below `sm`: one stacked card per Device instead of a table
+                  row -- five columns inside `overflow-x-auto` just scrolls
+                  horizontally on a phone-width viewport, which is the
+                  "wider than the phone" clutter this replaces. Same
+                  `computeDeviceRowState`/`FormattedDate` classification as
+                  the table below, just presented as label/value pairs. */}
+              <div className="sm:hidden divide-y divide-gray-200 dark:divide-gray-700">
+                {devices.map((device) => (
+                  <DeviceListCard
+                    key={device.clientUid}
+                    device={device}
+                    onRevoke={setDeviceToRevoke}
+                  />
+                ))}
+              </div>
+              <div className="hidden sm:block overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                  {/* Requirements 15.6, 16.1-16.6: header and rows both come from
+                      `components/DeviceListRow.jsx`, the single definition this
+                      card shares with the user-details modal -- including the
+                      Device_Type_Icon, the icon-only Revoke action, the "Revoked"
+                      badge, and the "never seen" Last_Seen fallback (Req 5.3). */}
+                  <thead className="bg-gray-50 dark:bg-gray-700">
+                    <DeviceListHeader />
+                  </thead>
+                  <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                    {devices.map((device) => (
+                      <DeviceListRow
+                        key={device.clientUid}
+                        device={device}
+                        onRevoke={setDeviceToRevoke}
+                      />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
         </div>
       )}
@@ -813,18 +857,27 @@ export default function Dashboard({ user }) {
       {/* Quick Actions */}
       {stats.requests > 0 && (
         <div className="card bg-yellow-50 border-yellow-200">
-          <div className="flex items-center">
-            <ClipboardDocumentListIcon className="h-6 w-6 text-yellow-600" />
-            <div className="ml-3">
-              <h3 className="text-sm font-medium text-yellow-800">
-                You have {stats.requests} pending request{stats.requests !== 1 ? 's' : ''}
-              </h3>
-              <p className="text-sm text-yellow-700">
-                Review team access requests from new users.
-              </p>
+          {/* Below `sm`: the icon + text stay on their own row and the
+              button drops underneath, full-width -- the previous single
+              `flex items-center` row with `ml-auto` squeezed the button
+              into whatever width was left beside the icon and two lines
+              of text, which is what "all messed up" on a phone. `sm:`
+              and up restores the original single-row layout with the
+              button pinned to the right via `sm:ml-auto`. */}
+          <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+            <div className="flex items-center">
+              <ClipboardDocumentListIcon className="h-6 w-6 text-yellow-600 flex-shrink-0" />
+              <div className="ml-3">
+                <h3 className="text-sm font-medium text-yellow-800">
+                  You have {stats.requests} pending request{stats.requests !== 1 ? 's' : ''}
+                </h3>
+                <p className="text-sm text-yellow-700">
+                  Review team access requests from new users.
+                </p>
+              </div>
             </div>
-            <div className="ml-auto">
-              <Link to="/requests" className="btn-primary">
+            <div className="sm:ml-auto">
+              <Link to="/requests" className="btn-primary block text-center sm:inline-block">
                 Review Requests
               </Link>
             </div>

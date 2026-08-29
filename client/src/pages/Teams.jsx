@@ -230,9 +230,13 @@ export default function Teams({ user }) {
         </div>
       ) : (
         <div className="space-y-4">
-          {/* Search Bar */}
-          <div className="flex items-center space-x-4">
-            <div className="flex-1">
+          {/* Search Bar. `flex-wrap` (was a non-wrapping `space-x-4` row)
+              so the search input, Expand/Collapse buttons and the team
+              count can each drop to their own line on a narrow phone
+              instead of forcing this row to scroll horizontally on its
+              own, independent of the table below. */}
+          <div className="flex flex-wrap items-center gap-4">
+            <div className="flex-1 min-w-[10rem]">
               <input
                 type="text"
                 placeholder="Search teams..."
@@ -279,8 +283,14 @@ export default function Teams({ user }) {
                         {getSortIcon('name')}
                       </div>
                     </th>
+                    {/* Prefix and Sub-teams are secondary detail relative to
+                        Name/Members/Role/Actions -- hidden below `md` so the
+                        table's essential columns fit a phone-width viewport
+                        without horizontal scrolling; still available at
+                        `md:` and up, and always reachable via the row's own
+                        "View team details" action regardless of viewport. */}
                     <th 
-                      className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700"
+                      className="hidden md:table-cell px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700"
                       onClick={() => handleSort('callsign_prefix')}
                     >
                       <div className="flex items-center space-x-1">
@@ -298,7 +308,7 @@ export default function Teams({ user }) {
                       </div>
                     </th>
                     <th 
-                      className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700"
+                      className="hidden md:table-cell px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700"
                       onClick={() => handleSort('sub_teams_count')}
                     >
                       <div className="flex items-center space-x-1">
@@ -351,20 +361,26 @@ export default function Teams({ user }) {
                           )}
                         </div>
                         {team.description && (
-                          <div className="absolute bottom-full left-0 mb-2 px-3 py-2 bg-gray-900 text-white text-sm rounded-lg shadow-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-10 whitespace-normal w-64">
+                          // Sideways-opening (`left-full`/`ml-2`), matching
+                          // this codebase's tooltip convention: the table is
+                          // wrapped in `overflow-x-auto` (one overflow axis
+                          // `auto`, the other implicitly `visible`), which
+                          // clips a `bottom-full`/`top-full` tooltip on both
+                          // axes -- the same Tooltip_Clipping_Defect
+                          // `FormattedDate` tooltips are built to avoid.
+                          <div className="absolute left-full top-1/2 transform -translate-y-1/2 ml-2 px-3 py-2 bg-gray-900 text-white text-sm rounded-lg shadow-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-10 whitespace-normal w-64">
                             {team.description}
-                            <div className="absolute top-full left-4 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-gray-900"></div>
                           </div>
                         )}
                       </div>
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+                    <td className="hidden md:table-cell px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                       {team.callsign_prefix || '-'}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                       {team.member_count || 0}
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+                    <td className="hidden md:table-cell px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                       {team.sub_teams_count || 0}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">

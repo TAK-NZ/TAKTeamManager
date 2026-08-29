@@ -1662,9 +1662,13 @@ export default function TeamDetail({ user, refreshUser }) {
                             {subTeam.name}
                           </Link>
                           {subTeam.description && (
-                            <div className="absolute bottom-full left-0 mb-2 px-3 py-2 bg-gray-900 text-white text-sm rounded-lg shadow-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-10 whitespace-normal w-64">
+                            // Sideways, matching this codebase's tooltip
+                            // convention (see Teams.jsx's identical fix):
+                            // this row sits inside an `overflow-x-auto`
+                            // table wrapper, which clips a `bottom-full`
+                            // tooltip on both axes.
+                            <div className="absolute left-full top-1/2 transform -translate-y-1/2 ml-2 px-3 py-2 bg-gray-900 text-white text-sm rounded-lg shadow-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-10 whitespace-normal w-64">
                               {subTeam.description}
-                              <div className="absolute top-full left-4 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-gray-900"></div>
                             </div>
                           )}
                         </div>
@@ -1793,9 +1797,8 @@ export default function TeamDetail({ user, refreshUser }) {
                         {team.name}
                       </span>
                       {team.description && (
-                        <div className="absolute bottom-full left-0 mb-2 px-3 py-2 bg-gray-900 text-white text-sm rounded-lg shadow-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-10 whitespace-normal w-64">
+                        <div className="absolute left-full top-1/2 transform -translate-y-1/2 ml-2 px-3 py-2 bg-gray-900 text-white text-sm rounded-lg shadow-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-10 whitespace-normal w-64">
                           {team.description}
-                          <div className="absolute top-full left-4 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-gray-900"></div>
                         </div>
                       )}
                     </div>

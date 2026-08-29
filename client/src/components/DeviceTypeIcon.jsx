@@ -1,5 +1,5 @@
-import { GlobeAltIcon, QuestionMarkCircleIcon, ComputerDesktopIcon } from '@heroicons/react/24/outline'
-import { AndroidPlatformLogo, ApplePlatformLogo } from './PlatformLogos'
+import { GlobeAltIcon, QuestionMarkCircleIcon } from '@heroicons/react/24/outline'
+import { AndroidPlatformLogo, ApplePlatformLogo, WindowsPlatformLogo } from './PlatformLogos'
 
 /**
  * Requirements 15.6, 15.7: the ONE component that turns a Device's
@@ -13,13 +13,12 @@ import { AndroidPlatformLogo, ApplePlatformLogo } from './PlatformLogos'
  * create exactly the second definition Requirement 15.2 exists to prevent.
  * All this file knows is how to draw each of the five values.
  *
- * Android and iOS glyphs are sourced from the `simple-icons` npm dependency
- * (`client/src/components/PlatformLogos.jsx`), matching the Platform_Logo
- * used in the Downloads page's own Android/iOS section headers, rather than
- * committed inline SVG. Windows uses heroicons' `ComputerDesktopIcon` --
- * `simple-icons` does not currently ship a Windows/Microsoft logo (see
- * downloads-page-os-sections design.md) -- and CloudTAK/Unknown continue to
- * use heroicons' `GlobeAltIcon`/`QuestionMarkCircleIcon` as before.
+ * Android/iOS/Windows glyphs are all sourced from
+ * `client/src/components/PlatformLogos.jsx`, matching the Platform_Logo used
+ * in the Downloads page's own Android/iOS/Windows section headers, rather
+ * than committed inline SVG. CloudTAK/Unknown continue to use heroicons'
+ * `GlobeAltIcon`/`QuestionMarkCircleIcon` as before -- neither is a real
+ * platform with its own brand mark.
  */
 
 /**
@@ -101,7 +100,7 @@ const GLYPHS = Object.freeze({
   [CLIENT_TYPES.CLOUDTAK]: GlobeAltIcon,
   [CLIENT_TYPES.ANDROID]: AndroidPlatformLogo,
   [CLIENT_TYPES.IOS]: ApplePlatformLogo,
-  [CLIENT_TYPES.WINDOWS]: ComputerDesktopIcon,
+  [CLIENT_TYPES.WINDOWS]: WindowsPlatformLogo,
   [CLIENT_TYPES.UNKNOWN]: QuestionMarkCircleIcon,
 })
 
