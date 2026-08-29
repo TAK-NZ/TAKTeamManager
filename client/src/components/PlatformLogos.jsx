@@ -106,3 +106,53 @@ function fontAwesomeIcon(iconDefinition) {
 }
 
 export const WindowsPlatformLogo = fontAwesomeIcon(faWindows)
+
+/**
+ * CloudTAK's mark is not a single-color brand glyph like the three above --
+ * it is inherently two-tone (solid black plus a white outline/cutout), the
+ * same construction as `client/public/assets/cloudtak-logo.svg` (the
+ * Downloads page's own CloudTAK glyph, rendered there via `<img>` since it
+ * is a static asset with fixed colors that must not shift with the current
+ * text color or theme -- see that file's own comment for why: the region
+ * behind the arrow notch is opaque white by design, not a transparent hole,
+ * so `currentColor` would erase the two-tone effect this mark depends on).
+ *
+ * This wrapper duplicates that SAME path data as an inline component
+ * instead of an `<img>`, so it can sit in `DeviceTypeIcon.jsx`'s `GLYPHS`
+ * map next to `AndroidPlatformLogo`/`ApplePlatformLogo`/`WindowsPlatformLogo`
+ * and satisfy that map's "one glyph component per Client_Type" contract
+ * (`className`/`aria-hidden` passthrough, rendered inline rather than
+ * fetched). There is no shared source between the public SVG asset and this
+ * JS module, so the two must be kept in sync by hand if the mark ever
+ * changes.
+ *
+ * Unlike `simpleIcon`/`fontAwesomeIcon` above, this does NOT accept
+ * `fill="currentColor"` on the root -- each path below carries its own
+ * fixed, explicit fill/stroke, by design.
+ */
+export function CloudTakPlatformLogo({ className, 'aria-hidden': ariaHidden = 'true' }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 79.3 51.62"
+      className={className}
+      aria-hidden={ariaHidden}
+    >
+      <g transform="translate(2.5,2.5)">
+        <path
+          d="M72.05,23.55c-1.26-1.88-3.01-3.45-5.21-4.65-1.85-1.01-3.69-1.59-5.06-1.91-.42-1.74-1.23-4.28-2.77-6.85C56.44,5.88,51.37.67,41.7.06c-.59-.04-1.18-.06-1.75-.06-7.82,0-12.04,3.52-14.19,6.47-.91,1.24-1.53,2.48-1.95,3.55-.86-.13-1.86-.22-2.93-.22-3.56,0-6.52,1.08-8.54,3.13-1.91,1.92-3.2,4.26-3.73,6.75-.09.41-.15.8-.19,1.16-.95.47-2.12,1.16-3.29,2.11C1.56,25.83-.2,29.67.02,34.06c.22,4.41,2.27,7.96,5.94,10.29,2.6,1.65,5.1,2.19,5.38,2.23l.22.03h.22s48.86,0,48.86,0h.1s.1,0,.1,0c.34-.02,3.39-.26,6.54-2.13,3.04-1.8,6.7-5.45,6.92-12.56.1-3.18-.66-5.99-2.24-8.36Z"
+          fill="#ffffff"
+        />
+        <path
+          d="M72.05,23.55c-1.26-1.88-3.01-3.45-5.21-4.65-1.85-1.01-3.69-1.59-5.06-1.91-.42-1.74-1.23-4.28-2.77-6.85C56.44,5.88,51.37.67,41.7.06c-.59-.04-1.18-.06-1.75-.06-7.82,0-12.04,3.52-14.19,6.47-.91,1.24-1.53,2.48-1.95,3.55-.86-.13-1.86-.22-2.93-.22-3.56,0-6.52,1.08-8.54,3.13-1.91,1.92-3.2,4.26-3.73,6.75-.09.41-.15.8-.19,1.16-.95.47-2.12,1.16-3.29,2.11C1.56,25.83-.2,29.67.02,34.06c.22,4.41,2.27,7.96,5.94,10.29,2.6,1.65,5.1,2.19,5.38,2.23l.22.03h.22s48.86,0,48.86,0h.1s.1,0,.1,0c.34-.02,3.39-.26,6.54-2.13,3.04-1.8,6.7-5.45,6.92-12.56.1-3.18-.66-5.99-2.24-8.36ZM14.43,15c1.75-1.77,4.24-2.26,6.45-2.26,2.71,0,4.99.73,4.99.73,0,0,1.33-10.53,14.07-10.53.5,0,1.03.02,1.57.05,16.24,1.03,17.74,16.54,17.74,16.54,0,0,4.67.42,8.21,3.31-3.47,3.22-4.95,5.19-12.77,5.75-8.65.61-7.47,3.95-7.47,3.95l-4.05-8.98h5.79c.14-2.85-.87-5.65-5.31-5.65h-8.49l-6.56,14.62s1.96-3.31-6.69-3.95c-7.69-.55-7.58-2.69-10.61-5.88-.06-.58-.26-4.3,3.13-7.72Z"
+          fill="#000000"
+          fillRule="evenodd"
+          stroke="#ffffff"
+          strokeWidth="2.5"
+          strokeLinejoin="round"
+          paintOrder="stroke fill"
+        />
+      </g>
+    </svg>
+  )
+}

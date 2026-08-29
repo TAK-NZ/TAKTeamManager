@@ -4,7 +4,7 @@ import { createRoot } from 'react-dom/client'
 import { siAndroid, siApple } from 'simple-icons'
 import { faWindows } from '@fortawesome/free-brands-svg-icons'
 
-import { AndroidPlatformLogo, ApplePlatformLogo, WindowsPlatformLogo } from './PlatformLogos.jsx'
+import { AndroidPlatformLogo, ApplePlatformLogo, WindowsPlatformLogo, CloudTakPlatformLogo } from './PlatformLogos.jsx'
 
 // Validates: Requirements 6.1, 6.2
 //
@@ -178,5 +178,94 @@ describe('WindowsPlatformLogo (mounted)', () => {
     const svg = await mount({})
 
     expect(svg.getAttribute('fill')).toBe('currentColor')
+  })
+})
+
+/**
+ * CloudTakPlatformLogo, TAK-NZ's own two-tone (black + white outline) mark,
+ * NOT a single-color brand glyph like the three above -- so it carries no
+ * `fill="currentColor"` contract, unlike every other Platform_Logo in this
+ * file. Its own two `<path>` elements carry FIXED, explicit fill/stroke
+ * instead. This test group otherwise matches the shared external contract
+ * (className/aria-hidden passthrough, viewBox) every glyph in
+ * `DeviceTypeIcon.jsx`'s `GLYPHS` map must satisfy.
+ */
+describe('CloudTakPlatformLogo (mounted)', () => {
+  let container
+  let root
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  const mount = async (props) => {
+    root = createRoot(container)
+    await act(async () => {
+      root.render(<CloudTakPlatformLogo {...props} />)
+    })
+    return container.querySelector('svg')
+  }
+
+  it('renders an <svg> with the CloudTAK mark\'s own viewBox, matching the public asset', async () => {
+    const svg = await mount({})
+
+    expect(svg).not.toBeNull()
+    expect(svg.getAttribute('viewBox')).toBe('0 0 79.3 51.62')
+  })
+
+  it('forwards a supplied className onto the <svg>', async () => {
+    const svg = await mount({ className: 'h-5 w-5 cursor-help' })
+
+    expect(svg.getAttribute('class')).toBe('h-5 w-5 cursor-help')
+  })
+
+  it('defaults aria-hidden to "true" when not supplied', async () => {
+    const svg = await mount({})
+
+    expect(svg.getAttribute('aria-hidden')).toBe('true')
+  })
+
+  it('honours an explicitly supplied aria-hidden rather than always defaulting', async () => {
+    const svg = await mount({ 'aria-hidden': 'false' })
+
+    expect(svg.getAttribute('aria-hidden')).toBe('false')
+  })
+
+  it('renders exactly two <path> elements -- the white silhouette layer and the black evenodd-cutout layer -- neither using currentColor', async () => {
+    const svg = await mount({})
+    const paths = svg.querySelectorAll('path')
+
+    expect(paths).toHaveLength(2)
+    expect(paths[0].getAttribute('fill')).toBe('#ffffff')
+    expect(paths[1].getAttribute('fill')).toBe('#000000')
+    expect(paths[1].getAttribute('fill-rule')).toBe('evenodd')
+    expect(paths[1].getAttribute('stroke')).toBe('#ffffff')
+    // Anti-vacuity: this mark's whole point is the white outline BEHIND the
+    // black fill (`paint-order="stroke fill"`) -- confirm the attribute
+    // that produces that effect is actually present, not merely that some
+    // stroke color is set.
+    expect(paths[1].getAttribute('paint-order')).toBe('stroke fill')
+  })
+
+  it('has no fill="currentColor" anywhere, unlike every other Platform_Logo in this file', async () => {
+    const svg = await mount({})
+
+    expect(svg.getAttribute('fill')).not.toBe('currentColor')
+    svg.querySelectorAll('path').forEach((path) => {
+      expect(path.getAttribute('fill')).not.toBe('currentColor')
+    })
   })
 })

@@ -1,5 +1,5 @@
-import { GlobeAltIcon, QuestionMarkCircleIcon } from '@heroicons/react/24/outline'
-import { AndroidPlatformLogo, ApplePlatformLogo, WindowsPlatformLogo } from './PlatformLogos'
+import { QuestionMarkCircleIcon } from '@heroicons/react/24/outline'
+import { AndroidPlatformLogo, ApplePlatformLogo, WindowsPlatformLogo, CloudTakPlatformLogo } from './PlatformLogos'
 
 /**
  * Requirements 15.6, 15.7: the ONE component that turns a Device's
@@ -13,12 +13,14 @@ import { AndroidPlatformLogo, ApplePlatformLogo, WindowsPlatformLogo } from './P
  * create exactly the second definition Requirement 15.2 exists to prevent.
  * All this file knows is how to draw each of the five values.
  *
- * Android/iOS/Windows glyphs are all sourced from
+ * Android/iOS/Windows/CloudTAK glyphs are all sourced from
  * `client/src/components/PlatformLogos.jsx`, matching the Platform_Logo used
- * in the Downloads page's own Android/iOS/Windows section headers, rather
- * than committed inline SVG. CloudTAK/Unknown continue to use heroicons'
- * `GlobeAltIcon`/`QuestionMarkCircleIcon` as before -- neither is a real
- * platform with its own brand mark.
+ * in the Downloads page's own Android/iOS/Windows section headers and
+ * CloudTAK row, rather than committed inline SVG. CloudTAK's own real mark
+ * (`CloudTakPlatformLogo`) replaces the generic heroicons `GlobeAltIcon`
+ * this component used before -- it is a real, brandable platform like the
+ * other three, not a placeholder. Unknown continues to use heroicons'
+ * `QuestionMarkCircleIcon`, since there is no brand mark to show for it.
  */
 
 /**
@@ -97,7 +99,7 @@ export function labelForClientType(clientType) {
  * which is what makes `resolveClientType` enough to guarantee a glyph.
  */
 const GLYPHS = Object.freeze({
-  [CLIENT_TYPES.CLOUDTAK]: GlobeAltIcon,
+  [CLIENT_TYPES.CLOUDTAK]: CloudTakPlatformLogo,
   [CLIENT_TYPES.ANDROID]: AndroidPlatformLogo,
   [CLIENT_TYPES.IOS]: ApplePlatformLogo,
   [CLIENT_TYPES.WINDOWS]: WindowsPlatformLogo,
