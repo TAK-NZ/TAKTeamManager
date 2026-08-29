@@ -1230,23 +1230,70 @@ router.post('/add-to-team', authenticateToken, authorize, [
     
     // Ensure the user has a callsign_suffix before generating the full callsign.
     // If the user already has one (from prior provisioning or Member_List edit),
-    // this is a no-op. If they don't, compute and store a default using the same
-    // logic as POST /create-and-add (resolveCallsignSuffixForNewUser).
+    // this is a no-op. If they don't, compute and store a default.
+    //
+    // Bugfix: this used to call `UserProvisioningService.resolveCallsignSuffixForNewUser`,
+    // a method removed in favor of `resolveNewUserIdentity` (see that
+    // service's doc comment). Every call here therefore threw a
+    // `TypeError`, caught and only logged below -- silently leaving
+    // `callsign_suffix` blank on every existing-user add whose user had
+    // no prior suffix, with no error ever surfaced to the caller. Fixed
+    // by routing through `UserProvisioningService.resolveNewUserIdentity`
+    // itself -- the ONE allowed caller of
+    // `CallsignService.computeDefaultCallsignSuffix`
+    // (`newUserIdentityChokePoint.test.js`'s Assertion 2 allow-list; a
+    // second direct caller here would be exactly the choke-point drift
+    // that guard exists to catch). `requestedUsername`/`email` are passed
+    // `undefined` and its resolved `username` is discarded -- this
+    // existing user's identity is never re-minted -- but its
+    // policy-disabled branch's Callsign_Suffix computation (and its own
+    // `checkCallsignSuffixUniqueness` call) is exactly what's needed
+    // here. Under a Pseudonymous_Organisation with no explicit value
+    // supplied (this route has no such field), Callsign_Default_Suppression
+    // applies and the resolver throws `CallsignSuffixRequiredError`
+    // BEFORE attempting to mint anything -- caught below as non-fatal,
+    // same as a suffix conflict.
     const suffixCheck = await pool.query('SELECT callsign_suffix, first_name, last_name FROM users WHERE id = $1', [localUserId]);
     if (suffixCheck.rows.length > 0 && !suffixCheck.rows[0].callsign_suffix) {
       try {
-        const resolvedSuffix = await UserProvisioningService.resolveCallsignSuffixForNewUser(null, {
+        const identity = await UserProvisioningService.resolveNewUserIdentity(null, {
           firstName: suffixCheck.rows[0].first_name || user.first_name || '',
           lastName: suffixCheck.rows[0].last_name || user.last_name || '',
+          email: undefined,
           teamId,
-          requestedCallsignSuffix: null
+          requestedUsername: undefined,
+          requestedCallsignSuffix: undefined
         });
-        await pool.query('UPDATE users SET callsign_suffix = $1 WHERE id = $2', [resolvedSuffix, localUserId]);
-        // Also mirror to user_cache
-        await pool.query('UPDATE user_cache SET callsign_suffix = $1 WHERE authentik_id = $2', [resolvedSuffix, user.authentik_id]);
+        const resolvedSuffix = identity.callsignSuffix;
+        if (resolvedSuffix) {
+          await pool.query('UPDATE users SET callsign_suffix = $1 WHERE id = $2', [resolvedSuffix, localUserId]);
+          // Also mirror to user_cache
+          await pool.query('UPDATE user_cache SET callsign_suffix = $1 WHERE authentik_id = $2', [resolvedSuffix, user.authentik_id]);
+        }
       } catch (suffixErr) {
-        // Non-fatal: log and proceed — the callsign will just lack a name segment
-        getLogger().error({ err: suffixErr }, 'Failed to compute default callsign_suffix for existing user');
+        if (suffixErr instanceof CallsignSuffixConflictError) {
+          // A computed default happened to collide with an existing
+          // member's suffix in this team -- non-fatal, matching this
+          // route's existing "log and proceed, callsign lacks a name
+          // segment" behavior rather than blocking the membership add
+          // over an auto-computed value the caller never typed.
+          getLogger().warn(
+            { teamId, localUserId, conflictingValue: suffixErr.conflictingValue },
+            'Computed default callsign_suffix conflicts with an existing member; leaving callsign_suffix blank for existing user add'
+          );
+        } else if (suffixErr instanceof UserProvisioningService.CallsignSuffixRequiredError) {
+          // Callsign_Default_Suppression applies (Pseudonymous_Organisation)
+          // and no explicit value can be supplied on this route -- non-fatal,
+          // the callsign lacks a name segment until an admin sets one via
+          // the Member_List edit form.
+          getLogger().warn(
+            { teamId, localUserId },
+            'Callsign_Default_Suppression applies for this Organisation; leaving callsign_suffix blank for existing user add'
+          );
+        } else {
+          // Non-fatal: log and proceed — the callsign will just lack a name segment
+          getLogger().error({ err: suffixErr }, 'Failed to compute default callsign_suffix for existing user');
+        }
       }
     }
 

@@ -199,17 +199,78 @@ describe('SiteConfig.getPublicConfig', () => {
 
   // Requirement 1.3 (cloudtak-agency-groups): CLOUDTAK_ENABLED is a
   // server-side-only flag and must NEVER be surfaced through the
-  // Public_Config_Endpoint. Assert the returned object carries no
-  // cloudtak-related key and does not leak the CLOUDTAK_ENABLED value,
-  // regardless of whether the flag is set.
-  test('never includes a cloudtak/CLOUDTAK key, even when CLOUDTAK_ENABLED=true', async () => {
+  // Public_Config_Endpoint.
+  //
+  // NARROWED for downloads-page-os-sections: this test used to blanket-assert
+  // that NO key matching /cloudtak/i ever appeared anywhere in the public
+  // config response. That premise is now obsolete -- downloads-page-os-sections
+  // Requirement 5.1 REQUIRES a `cloudtak_url` key to appear in every response
+  // (see SiteConfig.js's `config.cloudtak_url = resolveCloudTakUrl(...)` line
+  // and the dedicated coverage below), so a bare /cloudtak/i scan would now
+  // fail on a key this feature is required to add. The guarantee actually
+  // worth keeping is narrower and still fully valid: CLOUDTAK_ENABLED's own
+  // key name and its value must never leak, regardless of the flag's state.
+  // `cloudtak_url` is explicitly allowed and not flagged by either assertion
+  // below.
+  test('never includes a cloudtak_enabled key or leaks the CLOUDTAK_ENABLED value, even when CLOUDTAK_ENABLED=true', async () => {
     process.env.CLOUDTAK_ENABLED = 'true';
 
     const config = await SiteConfig.getPublicConfig();
 
-    const cloudtakKeys = Object.keys(config).filter(key => /cloudtak/i.test(key));
-    expect(cloudtakKeys).toEqual([]);
-    expect(JSON.stringify(config)).not.toMatch(/cloudtak/i);
+    const cloudtakEnabledKeys = Object.keys(config).filter(key => /^cloudtak[_-]?enabled$/i.test(key));
+    expect(cloudtakEnabledKeys).toEqual([]);
+    expect(Object.keys(config)).not.toContain('cloudtak_enabled');
+    expect(Object.keys(config)).not.toContain('CLOUDTAK_ENABLED');
+    expect(config.cloudtak_enabled).toBeUndefined();
+    // The flag's own string value never appears anywhere in the serialized
+    // response -- not just under an innocuous key name.
+    expect(JSON.stringify(config)).not.toContain(process.env.CLOUDTAK_ENABLED);
+    // cloudtak_url is expected and unaffected -- not part of what this test guards.
+    expect(config.cloudtak_url).toBeDefined();
+  });
+
+  // downloads-page-os-sections Requirements 5.1, 5.2, 5.4, 5.6: `cloudtak_url`
+  // is exposed independently of CLOUDTAK_ENABLED, following this file's
+  // existing test.each/ORIGINAL_ENV conventions.
+  describe('cloudtak_url', () => {
+    test.each([
+      ['http://', 'http://cloudtak.example.com'],
+      ['https://', 'https://cloudtak.example.com']
+    ])('equals CLOUDTAK_URL when set to a valid absolute %s URL', async (_label, url) => {
+      process.env.CLOUDTAK_URL = url;
+
+      const config = await SiteConfig.getPublicConfig();
+
+      expect(config.cloudtak_url).toBe(url);
+    });
+
+    test('is null when CLOUDTAK_URL is unset', async () => {
+      delete process.env.CLOUDTAK_URL;
+
+      const config = await SiteConfig.getPublicConfig();
+
+      expect(config.cloudtak_url).toBeNull();
+    });
+
+    // Criterion 5.4: exposure of cloudtak_url is independent of
+    // CLOUDTAK_ENABLED -- a small fixed matrix, not iteration over every
+    // possible flag value.
+    test.each([
+      ["CLOUDTAK_ENABLED='true'", 'true'],
+      ['CLOUDTAK_ENABLED unset', undefined],
+      ["CLOUDTAK_ENABLED='TRUE'", 'TRUE']
+    ])('is unaffected by %s', async (_label, cloudtakEnabledValue) => {
+      process.env.CLOUDTAK_URL = 'https://cloudtak.example.com';
+      if (cloudtakEnabledValue === undefined) {
+        delete process.env.CLOUDTAK_ENABLED;
+      } else {
+        process.env.CLOUDTAK_ENABLED = cloudtakEnabledValue;
+      }
+
+      const config = await SiteConfig.getPublicConfig();
+
+      expect(config.cloudtak_url).toBe('https://cloudtak.example.com');
+    });
   });
 
   // Requirements 1.4, 9.5 (device-management task 1.3): DEVICE_MGMT_ENABLED

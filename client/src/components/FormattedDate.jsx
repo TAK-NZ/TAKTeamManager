@@ -2,7 +2,6 @@ import { useId, useState } from 'react'
 import {
   formatDate,
   formatDateTime,
-  getDisplayTimezone,
   hasRenderableDate,
   zonedDayNumber,
 } from '../utils/dateFormat'
@@ -15,9 +14,14 @@ import { NO_PHRASE, relativeTime } from '../utils/relativeTime'
  *
  * It WRAPS the Date_Format_Helpers rather than replacing them: `formatDate`
  * and `formatDateTime` keep producing the visible string, character for
- * character, and this component adds a disclosure around it carrying the two
- * facts a bare `yyyy-mm-dd` cannot (Criteria 2.3, 2.8) -- the Relative_Time
- * phrase, then the Resolved_Display_Timezone.
+ * character, and this component adds a disclosure around it carrying the
+ * one fact a bare `yyyy-mm-dd` cannot (Criteria 2.3, 2.8) -- the
+ * Relative_Time phrase. The tooltip no longer ALSO names the resolved
+ * timezone: `formatDateTime` inlines a short abbreviation (e.g. "NZST")
+ * into the visible string itself now, so repeating the zone in the
+ * tooltip would be a second, redundant statement of the same fact.
+ * `formatDate`'s date-only rendering carries no time of day and therefore
+ * nothing for a zone abbreviation to qualify, so it is unaffected.
  *
  * ## The application acquires a third tooltip, not a second tooltip LOOK
  *
@@ -104,19 +108,13 @@ export const TOOLTIP_SIDES = Object.freeze({
 })
 
 /**
- * The explicit separator between the Date_Tooltip's two facts (Criterion
- * 2.10).
- *
- * A comma, and it is inside the string rather than in the layout on
- * purpose -- the same reasoning `DeviceListRow.jsx` records for the space
- * beside its Connected_Label. Assistive technology reading the tooltip as
- * one string would otherwise run the phrase into the zone name. A middot
- * was rejected because it is announced inconsistently (sometimes "dot",
- * sometimes silently, depending on the reader and its punctuation level),
- * and prose (`shown in`) reads as a third element in a tooltip Criterion
- * 2.8 fixes at two facts.
- *
- * Exported so tests do not retype it.
+ * The explicit separator the Date_Tooltip used to place between its two
+ * facts (Criterion 2.10), when it carried both the Relative_Time phrase
+ * and the resolved zone. Kept exported -- rather than removed -- purely so
+ * existing tests that import it to prove the tooltip does NOT contain a
+ * zone/separator continue to compile; it is no longer used to build the
+ * tooltip text itself, since the tooltip is phrase-only now that the
+ * visible string carries its own zone abbreviation.
  *
  * @type {string}
  */
@@ -185,31 +183,25 @@ const CARET_FOR_LEFT_TOOLTIP =
   'absolute left-full top-1/2 transform -translate-y-1/2 border-4 border-transparent border-l-gray-900'
 
 /**
- * The Date_Tooltip's text: the Relative_Time phrase, then the
- * Resolved_Display_Timezone, in that order (Criterion 2.8). The phrase
- * leads because it is what the hover was for; the zone qualifies it.
+ * The Date_Tooltip's text: the Relative_Time phrase, and nothing else.
  *
- * WHERE the resolved zone is the empty string -- `getDisplayTimezone()`'s
- * documented outcome when not even `UTC` constructs -- the phrase is
- * rendered ALONE, with no separator and no empty second fact. Criterion
- * 2.8's "exactly two facts" is read as two facts when there are two: a
- * tooltip reading `3 minutes ago, ` would be a rendering defect standing
- * in for a missing one, and the phrase is the half that survives.
+ * This used to also append the Resolved_Display_Timezone (Criterion 2.8's
+ * original "exactly two facts"), separated by `TOOLTIP_SEPARATOR`. That
+ * second fact is now redundant: `formatDateTime` inlines a short zone
+ * abbreviation (e.g. "NZST") directly into the visible string, so a
+ * tooltip that repeated the zone would be stating the same fact twice.
  *
  * Pure, and exported for the tests rather than for the call sites.
  *
  * @param {string} phrase A Relative_Time phrase.
- * @param {string} zone The Resolved_Display_Timezone, possibly empty.
- * @returns {string} The tooltip text.
+ * @returns {string} The tooltip text -- `phrase` unchanged, or `''` when
+ *   there is nothing to say.
  */
-export function buildTooltipText(phrase, zone) {
+export function buildTooltipText(phrase) {
   if (typeof phrase !== 'string' || phrase === '') {
     return ''
   }
-  if (typeof zone !== 'string' || zone.trim() === '') {
-    return phrase
-  }
-  return `${phrase}${TOOLTIP_SEPARATOR}${zone}`
+  return phrase
 }
 
 /**
@@ -311,11 +303,7 @@ function computeTooltipText(value, precision) {
   if (phrase === NO_PHRASE) {
     return ''
   }
-  // The zone comes from `getDisplayTimezone()` -- the zone dates are
-  // REALLY rendered in -- and never from the configured value, so a
-  // mistyped `DISPLAY_TIMEZONE` names the zone in force rather than the
-  // one that was asked for (Criterion 2.9).
-  return buildTooltipText(phrase, getDisplayTimezone())
+  return buildTooltipText(phrase)
 }
 
 /**

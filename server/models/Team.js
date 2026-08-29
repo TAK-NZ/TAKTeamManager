@@ -98,6 +98,47 @@ class PseudonymousUsernamePolicyImmutableError extends Error {
   }
 }
 
+/**
+ * Bugfix (callsign-handling): thrown by `Team.update` when a request
+ * attempts to CHANGE an existing Organisation's `callsign_prefix` (a
+ * resubmission of the current value is accepted as a no-op, mirroring
+ * `PseudonymousUsernamePolicyImmutableError`'s exact shape). An
+ * Organisation's `callsign_prefix` is its Organisation_Prefix
+ * (takserver-enrollment Requirement 2): every already-minted
+ * Managed_Identifier (a Human_Principal's Pseudonymous_Username or a
+ * Team_Owned_Device's identifier) is a fixed string derived from it at
+ * mint time, so changing the Organisation's own row afterward would make
+ * the prefix stored on `teams` disagree with every identifier already
+ * minted from it, with no mechanism to reconcile the two.
+ *
+ * A Sub_Team's `callsign_prefix` carries no such constraint -- it
+ * participates only in Callsign generation, never in a Managed_Identifier
+ * (Requirement 2 Criterion 3) -- so it remains freely editable after
+ * creation; only the Organisation's own row is locked by this guard.
+ */
+class OrganisationCallsignPrefixImmutableError extends Error {
+  constructor(
+    message = "An Organisation's Prefix cannot be changed after creation: every device and user identifier already minted under it is a fixed string derived from this value, and changing it would leave those identifiers unable to be traced back to their Organisation's current prefix. A Sub_Team's Prefix has no such restriction and may be edited freely."
+  ) {
+    super(message);
+    this.name = 'OrganisationCallsignPrefixImmutableError';
+  }
+}
+
+/**
+ * Bugfix (callsign-handling): thrown by `Team.update` when a
+ * `callsign_prefix` edit collides with `idx_teams_callsign_prefix`, the
+ * UNIQUE partial index over every non-null `callsign_prefix` value across
+ * ALL teams (Organisations and Sub_Teams alike).
+ */
+class CallsignPrefixConflictError extends Error {
+  constructor(conflictingValue) {
+    super(`Callsign Prefix "${conflictingValue}" is already in use by another team`);
+    this.name = 'CallsignPrefixConflictError';
+    this.conflictingValue = conflictingValue;
+  }
+}
+
 class Team {
   static async create(teamData) {
     const { name, description, callsign_prefix, visibility, can_join, parent_team_id, created_by } = teamData;
@@ -732,6 +773,16 @@ class Team {
     // rejected for supplying these fields on a Sub_Team -- Requirement
     // 3.3 requires the value be ignored, not an error.
     let { color, callsign_name_format } = updateData;
+    // Bugfix (callsign-handling): `callsign_prefix` is the OPPOSITE shape
+    // from `color`/`callsign_name_format` above -- it is freely editable
+    // on a Sub_Team (never ignored, never rejected) but IMMUTABLE on an
+    // existing Organisation (a resubmission of the current value is
+    // accepted as a no-op; any other value throws
+    // `OrganisationCallsignPrefixImmutableError`, validated below).
+    // Declared with `let` because a no-op resubmission on an Organisation
+    // is normalised to `undefined` below, mirroring
+    // `pseudonymous_usernames`'s own no-op handling exactly.
+    let { callsign_prefix } = updateData;
     // Requirement 5.2/5.6 (task 8.1): `callsign_level_selection` is
     // validated/rejected below, before ever reaching the UPDATE.
     let { callsign_level_selection } = updateData;
@@ -761,7 +812,8 @@ class Team {
       color !== undefined ||
       callsign_name_format !== undefined ||
       callsign_level_selection !== undefined ||
-      pseudonymous_usernames !== undefined
+      pseudonymous_usernames !== undefined ||
+      callsign_prefix !== undefined
     ) {
       existingTeam = await this.findById(teamId);
     }
@@ -831,10 +883,37 @@ class Team {
       pseudonymous_usernames = undefined;
     }
 
+    // Bugfix (callsign-handling): an Organisation's `callsign_prefix` is
+    // its Organisation_Prefix -- immutable after creation, because every
+    // Managed_Identifier already minted under it is a fixed string
+    // derived from this value (see `OrganisationCallsignPrefixImmutableError`'s
+    // doc comment). A request that supplies `callsign_prefix` on an
+    // EXISTING Organisation is accepted ONLY as a no-op resubmission of
+    // the current value; any other value is a typed rejection, mirroring
+    // `pseudonymous_usernames`'s handling immediately above exactly. A
+    // SUB_TEAM's `callsign_prefix` is NOT covered by this guard at all --
+    // it passes straight through to the UPDATE below, unrestricted,
+    // which is the whole point of this fix (a Sub_Team's prefix can now
+    // be corrected after creation, unlike an Organisation's).
+    if (
+      existingTeam &&
+      existingTeam.parent_team_id === null &&
+      callsign_prefix !== undefined
+    ) {
+      const storedPrefix = existingTeam.callsign_prefix || '';
+      const submittedPrefix = typeof callsign_prefix === 'string' ? callsign_prefix.trim() : (callsign_prefix || '');
+      if (submittedPrefix !== storedPrefix) {
+        throw new OrganisationCallsignPrefixImmutableError();
+      }
+      // A no-op resubmission: nothing to change, so the UPDATE's own
+      // COALESCE below simply leaves the column untouched.
+      callsign_prefix = undefined;
+    }
+
     try {
       const result = await pool.query(
-        'UPDATE teams SET name = COALESCE($1, name), description = COALESCE($2, description), visibility = COALESCE($3, visibility), can_join = COALESCE($4, can_join), parent_team_id = $5, callsign_name_format = COALESCE($6, callsign_name_format), color = COALESCE($8, color), callsign_level_selection = COALESCE($9, callsign_level_selection), pseudonymous_usernames = COALESCE($10, pseudonymous_usernames), updated_at = CURRENT_TIMESTAMP WHERE id = $7 RETURNING *',
-        [name, description, visibility, can_join, parent_team_id, callsign_name_format, teamId, color, callsign_level_selection, pseudonymous_usernames]
+        'UPDATE teams SET name = COALESCE($1, name), description = COALESCE($2, description), visibility = COALESCE($3, visibility), can_join = COALESCE($4, can_join), parent_team_id = $5, callsign_name_format = COALESCE($6, callsign_name_format), color = COALESCE($8, color), callsign_level_selection = COALESCE($9, callsign_level_selection), pseudonymous_usernames = COALESCE($10, pseudonymous_usernames), callsign_prefix = COALESCE($11, callsign_prefix), updated_at = CURRENT_TIMESTAMP WHERE id = $7 RETURNING *',
+        [name, description, visibility, can_join, parent_team_id, callsign_name_format, teamId, color, callsign_level_selection, pseudonymous_usernames, callsign_prefix]
       );
       const updatedTeam = result.rows[0];
 
@@ -903,6 +982,16 @@ class Team {
 
       return updatedTeam;
     } catch (error) {
+      // Bugfix (callsign-handling): `idx_teams_callsign_prefix` is UNIQUE
+      // over non-null `callsign_prefix` values across ALL teams
+      // (Organisations and Sub_Teams alike). A Sub_Team prefix edit that
+      // collides with another team's prefix hits this constraint --
+      // translated into a typed, callsign_prefix-specific rejection
+      // rather than the update's own generic 500, mirroring
+      // `MouService`'s `23505` -> typed-error translation.
+      if (error.code === '23505' && error.constraint === 'idx_teams_callsign_prefix') {
+        throw new CallsignPrefixConflictError(callsign_prefix);
+      }
       logger.error({ err: error, teamId }, 'Error updating team');
       throw error;
     }
@@ -1331,5 +1420,7 @@ Team.CallsignLevelSelectionRangeError = CallsignLevelSelectionRangeError;
 Team.CallsignLevelSelectionSubTeamError = CallsignLevelSelectionSubTeamError;
 Team.PseudonymousUsernamePolicySubTeamError = PseudonymousUsernamePolicySubTeamError;
 Team.PseudonymousUsernamePolicyImmutableError = PseudonymousUsernamePolicyImmutableError;
+Team.OrganisationCallsignPrefixImmutableError = OrganisationCallsignPrefixImmutableError;
+Team.CallsignPrefixConflictError = CallsignPrefixConflictError;
 
 module.exports = Team;

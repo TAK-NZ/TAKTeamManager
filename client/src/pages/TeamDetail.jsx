@@ -7,6 +7,7 @@ import { teamsAPI, channelsAPI, usersAPI, configAPI, devicesAPI } from '../servi
 import api from '../services/api'
 import { labelFor } from '../utils/teamLabels'
 import { computeTeamDepth } from '../utils/teamDepth'
+import { getTakColorHex } from '../utils/takColors'
 import TeamFormDialog from '../components/TeamFormDialog'
 import SignupCodeManager from '../components/SignupCodeManager'
 import OrgDomainManager from '../components/OrgDomainManager'
@@ -828,29 +829,6 @@ export default function TeamDetail({ user, refreshUser }) {
     }
   }
 
-  // Map color names to CSS colors (same as Dashboard)
-  const getColorValue = (colorName) => {
-    const colorMap = {
-      'Red': '#ef4444',
-      'Blue': '#3b82f6', 
-      'Green': '#22c55e',
-      'Yellow': '#eab308',
-      'Purple': '#a855f7',
-      'Orange': '#f97316',
-      'Pink': '#ec4899',
-      'Cyan': '#06b6d4',
-      'Gray': '#6b7280',
-      'Black': '#1f2937',
-      'White': '#f9fafb',
-      'Magenta': '#ec4899',
-      'Maroon': '#7f1d1d',
-      'Dark Blue': '#1e3a8a',
-      'Teal': '#14b8a6',
-      'Dark Green': '#166534',
-      'Brown': '#92400e'
-    }
-    return colorMap[colorName] || '#6b7280'
-  }
 
   useEffect(() => {
     let isCancelled = false
@@ -1097,7 +1075,7 @@ export default function TeamDetail({ user, refreshUser }) {
               {team.color && (
                 <div 
                   className="w-4 h-4 rounded border border-gray-300" 
-                  style={{ backgroundColor: getColorValue(team.color) }}
+                  style={{ backgroundColor: getTakColorHex(team.color) }}
                   title={team.color}
                 ></div>
               )}
@@ -1828,7 +1806,7 @@ export default function TeamDetail({ user, refreshUser }) {
                       <div className="flex items-center space-x-1">
                         <div 
                           className="w-3 h-3 rounded border border-gray-300" 
-                          style={{ backgroundColor: getColorValue(team.color) }}
+                          style={{ backgroundColor: getTakColorHex(team.color) }}
                         ></div>
                         <span className="text-xs text-gray-600 dark:text-gray-400">{team.color}</span>
                       </div>

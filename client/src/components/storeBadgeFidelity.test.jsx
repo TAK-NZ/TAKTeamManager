@@ -40,12 +40,19 @@ import Downloads from '../pages/Downloads.jsx'
 // the classic transform needs one in scope.
 globalThis.React = React
 
-/** The four link targets `store_badges.ejs` names, unchanged (Criterion 12.7). */
+/**
+ * The four link targets `store_badges.ejs` names, unchanged (Criterion 12.7),
+ * plus the WinTAK route the downloads-page-os-sections spec (task 7.2)
+ * added as the Windows_Section's sole Download_Route. The original four are
+ * still checked for exact fidelity here -- this list just grows by one
+ * rather than the assertion below becoming a subset check.
+ */
 const EXPECTED_HREFS = [
   'https://tak.gov/products/atak-civ',
   'https://apps.apple.com/in/app/tak-aware/id6738631659',
   'https://play.google.com/store/apps/details?id=com.atakmap.app.civ',
-  'https://apps.apple.com/us/app/itak/id1561656396'
+  'https://apps.apple.com/us/app/itak/id1561656396',
+  'https://tak.gov/products/wintak-civ'
 ]
 
 describe('storeBadgeFidelity guard: extraction sanity', () => {
@@ -198,7 +205,7 @@ describe('storeBadgeFidelity guard: Downloads_Page link set (Criteria 12.7, 12.8
     globalThis.IS_REACT_ACT_ENVIRONMENT = false
   })
 
-  it('renders an anchor href SET equal to the four store_badges.ejs targets, exactly', () => {
+  it('renders an anchor href SET equal to the four store_badges.ejs targets plus WinTAK, exactly', () => {
     const anchors = Array.from(container.querySelectorAll('a'))
     const hrefs = anchors.map((anchor) => anchor.getAttribute('href'))
 

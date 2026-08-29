@@ -349,7 +349,7 @@ describe('date-format consumer guard: extraction sanity', () => {
     // extractor that only handled multi-line clauses would fail here.
     const byFile = new Map(dateFormatImports.map((record) => [record.file, record]))
 
-    expect(byFile.get('App.jsx')?.names).toEqual(['setDisplayTimezone'])
+    expect(byFile.get('App.jsx')?.names).toEqual(['setDisplayTimezone', 'setDisplayLocale'])
     expect(reachesHelpers(byFile.get('App.jsx'))).toBe(false)
 
     expect(byFile.get('components/DeviceListRow.jsx')?.names).toEqual(['hasRenderableDate'])

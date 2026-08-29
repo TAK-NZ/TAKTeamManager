@@ -5,7 +5,9 @@ import {
   formatDateTime,
   setDisplayTimezone,
   getDisplayTimezone,
-  DEFAULT_DISPLAY_TIMEZONE
+  setDisplayLocale,
+  DEFAULT_DISPLAY_TIMEZONE,
+  DEFAULT_DISPLAY_LOCALE
 } from './dateFormat.js'
 
 // Feature: device-management, Property 15: Date rendering is total, correctly zoned, and format-invariant
@@ -15,14 +17,20 @@ import {
 // *For all* instants (pre-epoch through far future, and instants within an
 // hour either side of midnight in the target zone) and *for all* installed
 // zone values (real IANA names including half-hour and 45-minute offsets,
-// plus arbitrary strings, the empty string and `undefined`):
+// plus arbitrary strings, the empty string and `undefined`) and installed
+// locale values (real BCP 47 tags plus arbitrary strings, the empty string
+// and `undefined`):
 //
 //   * `formatDate` returns exactly `yyyy-mm-dd` and `formatDateTime` exactly
-//     `yyyy-mm-dd HH:MM` on a 24-hour clock, every component zero-padded;
-//   * those components equal the instant's wall clock in the zone the
-//     Display_Timezone_Fallback_Chain actually resolved to;
-//   * neither function raises for any input, so no installed zone value can
-//     blank out or crash a rendered date;
+//     `yyyy-mm-dd HH:MM ZZZ` on a 24-hour clock, every numeric component
+//     zero-padded, `ZZZ` a short timezone abbreviation (or omitted, with its
+//     separating space, when nothing constructs for it);
+//   * those numeric components equal the instant's wall clock in the zone
+//     the Display_Timezone_Fallback_Chain actually resolved to, and `ZZZ`
+//     equals that zone's short abbreviation under the locale the
+//     Display_Locale_Fallback_Chain actually resolved to;
+//   * neither function raises for any input, so no installed zone or locale
+//     value can blank out or crash a rendered date;
 //   * null, undefined and unparseable input still return the caller's
 //     `fallback` unchanged.
 //
@@ -38,13 +46,26 @@ import {
 // shares nothing with the implementation except the fact that both consult
 // the IANA database for the same zone.
 //
-// The shape assertion is an anchored, fully numeric regex with the hour
-// bounded to `00`-`23`, so a locale rendering (`3/12/2026`) and an `h24`
-// cycle (`24:00`) both fail rather than slipping through a looser match.
+// The abbreviation IS modelled by calling `Intl.DateTimeFormat` directly
+// (`timeZoneName: 'short'`) rather than re-derived from first principles --
+// unlike the numeric components, "what string does this runtime's ICU data
+// print for this zone under this locale" has no independent arithmetic
+// definition; the runtime's own `Intl` IS the source of truth for it, the
+// same way Property 4 (`FormattedDate.property.test.jsx`) treats the
+// Date_Format_Helpers themselves as the model where a criterion defines
+// correctness as agreement with them.
+//
+// The shape assertion is an anchored, fully numeric regex (with an optional
+// trailing abbreviation) with the hour bounded to `00`-`23`, so a locale
+// rendering of the NUMERIC part (`3/12/2026`) and an `h24` cycle (`24:00`)
+// both fail rather than slipping through a looser match.
 
 /** Requirement 18.3's two shapes, anchored at both ends. */
 const DATE_SHAPE = /^\d{4}-\d{2}-\d{2}$/
-const DATE_TIME_SHAPE = /^\d{4}-\d{2}-\d{2} (?:[01]\d|2[0-3]):[0-5]\d$/
+// The trailing ` <abbreviation>` is optional: `readZoneAbbreviation` omits
+// it, along with its separating space, when nothing constructs for the
+// locale/zone pair.
+const DATE_TIME_SHAPE = /^\d{4}-\d{2}-\d{2} (?:[01]\d|2[0-3]):[0-5]\d(?: \S.*)?$/
 
 /**
  * Real zones chosen for their awkwardness (design.md, Testing Strategy):
@@ -59,6 +80,14 @@ const REAL_ZONES = [
   'America/Los_Angeles',
   'UTC'
 ]
+
+/**
+ * Real locales chosen to make the short-abbreviation axis actually vary
+ * independently of the zone axis: the app default, the generic locale a
+ * misconfiguration would fall back through, and one whose script is not
+ * Latin (to guard against an implementation that assumed ASCII output).
+ */
+const REAL_LOCALES = ['en-NZ', 'en-US', 'en-AU', 'ja-JP']
 
 const MS_PER_DAY = 86_400_000
 
@@ -125,6 +154,35 @@ function modelWallClock(zone, epochMs) {
   const minute = String(shifted.getUTCMinutes()).padStart(2, '0')
   const date = `${year}-${month}-${day}`
   return { date, dateTime: `${date} ${hour}:${minute}` }
+}
+
+/** Abbreviation formatters, keyed by `${locale}\u0000${zone}` -- the model, not the subject. */
+const zoneNameFormatters = new Map()
+
+/**
+ * The short timezone abbreviation the runtime's own `Intl` prints for
+ * `zone` at `epochMs` under `locale` -- the model for `formatDateTime`'s
+ * suffix. See the file header: this is the one place in this property that
+ * calls `Intl.DateTimeFormat` as the model rather than re-deriving from
+ * first principles, because the abbreviation string has no independent
+ * arithmetic definition to re-derive.
+ *
+ * @param {string} locale a locale tag the runtime recognises (or `undefined`).
+ * @param {string} zone an IANA zone name the runtime recognises.
+ * @param {number} epochMs
+ * @returns {string}
+ */
+function modelZoneAbbreviation(locale, zone, epochMs) {
+  const key = `${locale}\u0000${zone}`
+  let formatter = zoneNameFormatters.get(key)
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(locale, { timeZone: zone, timeZoneName: 'short' })
+    zoneNameFormatters.set(key, formatter)
+  }
+  return (
+    formatter.formatToParts(new Date(epochMs)).find((part) => part.type === 'timeZoneName')
+      ?.value ?? ''
+  )
 }
 
 /**
@@ -229,6 +287,62 @@ const zoneArbitrary = fc.oneof(
     .map((value) => ({ installed: value, resolvesTo: DEFAULT_DISPLAY_TIMEZONE }))
 )
 
+/**
+ * Whether the runtime accepts `value` as a locale tag -- the locale-space
+ * equivalent of `isRecognisedZone`, asked on the model side only.
+ *
+ * @param {*} value
+ * @returns {boolean}
+ */
+function isRecognisedLocale(value) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    return false
+  }
+  try {
+    new Intl.DateTimeFormat(value.trim(), { timeZone: 'UTC' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The runtime's canonical spelling of a locale tag -- the locale-space
+ * equivalent of `canonicalZone`.
+ *
+ * @param {string} locale a locale tag the runtime recognises.
+ * @returns {string}
+ */
+function canonicalLocale(locale) {
+  return new Intl.DateTimeFormat(locale, { timeZone: 'UTC' }).resolvedOptions().locale || locale
+}
+
+/**
+ * The two arms of the locale space, mirroring `zoneArbitrary`'s shape. Arm
+ * one installs a real BCP 47 tag; arm two installs a value the runtime will
+ * not recognise. `resolvesTo` is what the Display_Locale_Fallback_Chain
+ * settles on: for arm one the canonical spelling, for arm two `en-NZ`
+ * (`DEFAULT_DISPLAY_LOCALE`) -- EXCEPT that `setDisplayLocale` accepts any
+ * non-empty string outright (it does not itself validate the tag), so the
+ * chain only falls back past an unusable value at FORMATTER-CONSTRUCTION
+ * time, inside `resolveZoneNameFormatter`'s own walk. That walk is not
+ * observable through a getter the way `getDisplayTimezone()` is, so this
+ * arbitrary predicts what the ABBREVIATION will resolve to, not a value
+ * asserted via a parallel getter.
+ */
+const localeArbitrary = fc.oneof(
+  fc
+    .constantFrom(...REAL_LOCALES)
+    .map((locale) => ({ installed: locale, resolvesTo: canonicalLocale(locale) })),
+  fc
+    .oneof(
+      fc.string(),
+      fc.constantFrom('', '   ', 'xx_yy', 'en--US', 'en-', undefined, null, 42)
+    )
+    .filter((value) => !isRecognisedLocale(value))
+    .map((value) => ({ installed: value, resolvesTo: DEFAULT_DISPLAY_LOCALE }))
+)
+
 /** Values that are not instants at all -- Requirement 18.10's input space. */
 const nonInstantArbitrary = fc.oneof(
   fc.constantFrom(null, undefined, '', '   ', 'not-a-date', '2024-13-45', 'NaN'),
@@ -237,28 +351,39 @@ const nonInstantArbitrary = fc.oneof(
 
 afterEach(() => {
   setDisplayTimezone(DEFAULT_DISPLAY_TIMEZONE)
+  setDisplayLocale(DEFAULT_DISPLAY_LOCALE)
 })
 
 describe('Property 15: date rendering is total, correctly zoned, and format-invariant', () => {
-  it('renders every instant in the resolved zone, in exactly the required shape, for every installed zone value', () => {
+  it('renders every instant in the resolved zone/locale, in exactly the required shape, for every installed zone and locale value', () => {
     fc.assert(
       fc.property(
         zoneArbitrary.chain((zone) =>
           fc.tuple(
             fc.constant(zone),
+            localeArbitrary,
             instantArbitrary(zone.resolvesTo),
             nonInstantArbitrary,
             fc.string()
           )
         ),
-        ([zone, epochMs, nonInstant, fallback]) => {
+        ([zone, locale, epochMs, nonInstant, fallback]) => {
           setDisplayTimezone(zone.installed)
+          setDisplayLocale(locale.installed)
 
           // Requirement 18.8: the chain settles on the installed zone when
           // the runtime knows it, and on Pacific/Auckland when it does not.
           expect(getDisplayTimezone()).toBe(zone.resolvesTo)
 
           const expected = modelWallClock(zone.resolvesTo, epochMs)
+          const expectedAbbreviation = modelZoneAbbreviation(
+            locale.resolvesTo,
+            zone.resolvesTo,
+            epochMs
+          )
+          const expectedDateTime = expectedAbbreviation
+            ? `${expected.dateTime} ${expectedAbbreviation}`
+            : expected.dateTime
 
           // Requirement 18.8's never-raise obligation, asserted for both the
           // string and the Date input shapes a caller can hand over.
@@ -277,13 +402,14 @@ describe('Property 15: date rendering is total, correctly zoned, and format-inva
           expect(renderedDateTime).toMatch(DATE_TIME_SHAPE)
 
           // Requirement 18.2: the components are that instant's wall clock in
-          // the resolved zone, per the independent model.
+          // the resolved zone, per the independent model -- now including the
+          // short zone abbreviation, resolved under the installed locale.
           expect(renderedDate).toBe(expected.date)
-          expect(renderedDateTime).toBe(expected.dateTime)
-          expect(renderedFromDate).toBe(expected.dateTime)
+          expect(renderedDateTime).toBe(expectedDateTime)
+          expect(renderedFromDate).toBe(expectedDateTime)
 
           // A parseable instant never yields the caller's fallback, however
-          // unusable the installed zone was (Requirement 18.8).
+          // unusable the installed zone or locale was (Requirement 18.8).
           expect(renderedDateTime.startsWith(renderedDate)).toBe(true)
 
           // Requirement 18.10: an unparseable input still returns the

@@ -1,4 +1,5 @@
-import { GlobeAltIcon, QuestionMarkCircleIcon } from '@heroicons/react/24/outline'
+import { GlobeAltIcon, QuestionMarkCircleIcon, ComputerDesktopIcon } from '@heroicons/react/24/outline'
+import { AndroidPlatformLogo, ApplePlatformLogo } from './PlatformLogos'
 
 /**
  * Requirements 15.6, 15.7: the ONE component that turns a Device's
@@ -12,12 +13,13 @@ import { GlobeAltIcon, QuestionMarkCircleIcon } from '@heroicons/react/24/outlin
  * create exactly the second definition Requirement 15.2 exists to prevent.
  * All this file knows is how to draw each of the five values.
  *
- * Glyphs are committed inline SVG in this one file, with no new client
- * dependency (Requirement 15.7). `@heroicons/react` is already a dependency,
- * so CloudTAK borrows its `GlobeAltIcon` (a browser session, not a device)
- * and Unknown its `QuestionMarkCircleIcon`; Android, iOS and Windows get
- * hand-committed glyphs below, drawn in the same 24x24 / 1.5-stroke style so
- * they sit beside the heroicons without looking imported from elsewhere.
+ * Android and iOS glyphs are sourced from the `simple-icons` npm dependency
+ * (`client/src/components/PlatformLogos.jsx`), matching the Platform_Logo
+ * used in the Downloads page's own Android/iOS section headers, rather than
+ * committed inline SVG. Windows uses heroicons' `ComputerDesktopIcon` --
+ * `simple-icons` does not currently ship a Windows/Microsoft logo (see
+ * downloads-page-os-sections design.md) -- and CloudTAK/Unknown continue to
+ * use heroicons' `GlobeAltIcon`/`QuestionMarkCircleIcon` as before.
  */
 
 /**
@@ -92,86 +94,14 @@ export function labelForClientType(clientType) {
 }
 
 /**
- * Android / ATAK: a robot head. Deliberately not another phone outline -- iOS
- * is the phone here, and two phone silhouettes would be told apart by nothing
- * but a caption.
- */
-function AndroidGlyph({ className }) {
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      className={className}
-      aria-hidden="true"
-    >
-      <path strokeLinecap="round" d="M8 4.5 9.75 7.5M16 4.5 14.25 7.5" />
-      <path
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        d="M5 12a7 7 0 0 1 14 0v5.5a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 17.5V12Z"
-      />
-      <circle cx="9.5" cy="11.5" r="0.85" fill="currentColor" stroke="none" />
-      <circle cx="14.5" cy="11.5" r="0.85" fill="currentColor" stroke="none" />
-    </svg>
-  )
-}
-
-/** iOS / iTAK: a phone body with an earpiece slot and a home indicator. */
-function IosGlyph({ className }) {
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      className={className}
-      aria-hidden="true"
-    >
-      <path
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        d="M8.25 3h7.5a1.5 1.5 0 0 1 1.5 1.5v15a1.5 1.5 0 0 1-1.5 1.5h-7.5a1.5 1.5 0 0 1-1.5-1.5v-15A1.5 1.5 0 0 1 8.25 3Z"
-      />
-      <path strokeLinecap="round" d="M10.5 5.25h3M10.5 18.75h3" />
-    </svg>
-  )
-}
-
-/** Windows / WinTAK: a four-pane window. */
-function WindowsGlyph({ className }) {
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      className={className}
-      aria-hidden="true"
-    >
-      <path
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        d="M5.25 4.5h13.5a.75.75 0 0 1 .75.75v13.5a.75.75 0 0 1-.75.75H5.25a.75.75 0 0 1-.75-.75V5.25a.75.75 0 0 1 .75-.75Z"
-      />
-      <path strokeLinecap="round" d="M12 4.5v15M4.5 12h15" />
-    </svg>
-  )
-}
-
-/**
  * Client_Type to glyph. Every key of `DEVICE_TYPE_LABELS` has an entry here,
  * which is what makes `resolveClientType` enough to guarantee a glyph.
  */
 const GLYPHS = Object.freeze({
   [CLIENT_TYPES.CLOUDTAK]: GlobeAltIcon,
-  [CLIENT_TYPES.ANDROID]: AndroidGlyph,
-  [CLIENT_TYPES.IOS]: IosGlyph,
-  [CLIENT_TYPES.WINDOWS]: WindowsGlyph,
+  [CLIENT_TYPES.ANDROID]: AndroidPlatformLogo,
+  [CLIENT_TYPES.IOS]: ApplePlatformLogo,
+  [CLIENT_TYPES.WINDOWS]: ComputerDesktopIcon,
   [CLIENT_TYPES.UNKNOWN]: QuestionMarkCircleIcon,
 })
 

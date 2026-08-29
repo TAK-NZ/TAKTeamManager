@@ -4,7 +4,6 @@ import { createRoot } from 'react-dom/client'
 
 import AuditLogs from './AuditLogs.jsx'
 import { teamsAPI, auditLogsAPI } from '../services/api'
-import { TOOLTIP_SEPARATOR } from '../components/FormattedDate.jsx'
 import {
   setDisplayTimezone,
   DEFAULT_DISPLAY_TIMEZONE
@@ -117,7 +116,7 @@ describe('AuditLogs renders its dates in the Display_Timezone (Requirement 18.4)
     setDisplayTimezone('Pacific/Auckland')
     await mountPage()
 
-    expect(createdAtCell()).toBe('2026-03-12 13:58')
+    expect(createdAtCell()).toBe('2026-03-12 13:58 NZDT')
     // The raw ISO string the row carries must not be what reaches the page.
     expect(container.textContent).not.toContain(REPORTED_INSTANT)
   })
@@ -128,7 +127,7 @@ describe('AuditLogs renders its dates in the Display_Timezone (Requirement 18.4)
 
     // The exact rendering the defect produced -- correct here, because this
     // is now the configured zone rather than an accident of the browser's.
-    expect(createdAtCell()).toBe('2026-03-11 17:58')
+    expect(createdAtCell()).toBe('2026-03-11 17:58 GMT-7')
   })
 
   it('renders in Pacific/Auckland when no zone was ever installed', async () => {
@@ -136,15 +135,15 @@ describe('AuditLogs renders its dates in the Display_Timezone (Requirement 18.4)
     // read never arrived still renders in the documented default.
     await mountPage()
 
-    expect(createdAtCell()).toBe('2026-03-12 13:58')
+    expect(createdAtCell()).toBe('2026-03-12 13:58 NZDT')
   })
 
   it('keeps the yyyy-mm-dd HH:MM shape rather than a locale rendering', async () => {
     setDisplayTimezone('Asia/Kolkata')
     await mountPage()
 
-    expect(createdAtCell()).toMatch(/^\d{4}-\d{2}-\d{2} (?:[01]\d|2[0-3]):[0-5]\d$/)
-    expect(createdAtCell()).toBe('2026-03-12 06:28')
+    expect(createdAtCell()).toMatch(/^\d{4}-\d{2}-\d{2} (?:[01]\d|2[0-3]):[0-5]\d(?: \S.*)?$/)
+    expect(createdAtCell()).toBe('2026-03-12 06:28 GMT+5:30')
   })
 
   it('falls back to the raw value for an unparseable created_at', async () => {
@@ -209,7 +208,7 @@ describe('AuditLogs renders its dates in the Display_Timezone (Requirement 18.4)
       // The same exact string the timezone tests above assert -- restated
       // here because the claim of this block is that the disclosure costs
       // the cell's text nothing (Criterion 2.3).
-      expect(createdAtCell()).toBe('2026-03-12 13:58')
+      expect(createdAtCell()).toBe('2026-03-12 13:58 NZDT')
 
       const host = hostOf()
       expect(host).not.toBeNull()
@@ -245,17 +244,17 @@ describe('AuditLogs renders its dates in the Display_Timezone (Requirement 18.4)
       expect(container.innerHTML).not.toContain('top-full')
       expect(container.innerHTML).not.toContain('bottom-full')
 
-      // Two facts, separated explicitly, with the RESOLVED zone as the
-      // second (Criteria 2.8, 2.9, 2.10) -- and no ISO instant anywhere in
-      // it (Criterion 2.11).
-      expect(tooltip.textContent).toContain(TOOLTIP_SEPARATOR)
-      expect(tooltip.textContent.endsWith('Pacific/Auckland')).toBe(true)
+      // The tooltip carries the Relative_Time phrase alone -- the visible
+      // cell text already carries its own zone abbreviation (asserted
+      // above), so the tooltip no longer repeats it, and no ISO instant
+      // either way.
+      expect(tooltip.textContent.length).toBeGreaterThan(0)
       expect(tooltip.textContent).not.toContain(REPORTED_INSTANT)
 
       await pointerOut(host)
       expect(tooltipOf()).toBeNull()
       // Dismissal puts the cell back to exactly the string it started as.
-      expect(createdAtCell()).toBe('2026-03-12 13:58')
+      expect(createdAtCell()).toBe('2026-03-12 13:58 NZDT')
     })
 
     it('renders the raw-value fallback with NO disclosure host at all (Criteria 2.4, 2.7)', async () => {

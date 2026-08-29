@@ -19,7 +19,7 @@ import {
 } from './DeviceListRow.jsx'
 import { labelForClientType } from './DeviceTypeIcon.jsx'
 import { deviceManagementAPI } from '../services/api'
-import { formatDate, formatDateTime } from '../utils/dateFormat'
+import { formatDateTime } from '../utils/dateFormat'
 import { DEFAULT_EXPIRY_WARNING_DAYS, setExpiryWarningDays } from '../utils/expiryWarning'
 
 // Validates: Requirements 6.3, 6.4, 6.5, 8.2, 15.6, 16.2, 16.3, 16.5, 16.7,
@@ -144,8 +144,12 @@ const accessibleTextOf = (element) => {
   return clone.textContent.replace(/\s+/g, ' ').trim()
 }
 
-/** Column offsets in the shared row (`DEVICE_LIST_COLUMNS`). */
-const EXPIRES_CELL = DEVICE_LIST_COLUMNS.indexOf('Expires')
+/**
+ * Column offsets in the shared row (`DEVICE_LIST_COLUMNS`). Issued and
+ * Expires now share ONE "Certificate" cell (device-management-cert-table-
+ * layout follow-up), stacked as two lines rather than two columns.
+ */
+const CERT_CELL = DEVICE_LIST_COLUMNS.indexOf('Certificate')
 const LAST_SEEN_CELL = DEVICE_LIST_COLUMNS.indexOf('Last Seen')
 
 const KNOWN_LAST_SEEN = '2025-06-07T08:09:00Z'
@@ -291,27 +295,29 @@ describe('UserDevicesModal (mounted)', () => {
     await mount()
 
     const cells = cellsOf(rowFor(NEVER_SEEN_DEVICE.clientUid))
-    // The first cell is the Device_Type_Icon added by task 22.4.
-    const [, uid, issued, expires, lastSeen] = cells
+    // The first cell is the Device_Type_Icon added by task 22.4. The third is
+    // the merged Certificate cell, whose `.textContent` runs both stacked
+    // lines together -- checked with `toContain`, so this confirms both
+    // dates are still present rather than picking either apart.
+    const [, uid, certificate, lastSeen] = cells
 
     expect(uid).toBe(NEVER_SEEN_DEVICE.clientUid)
-    expect(issued).toBe(formatDate(NEVER_SEEN_DEVICE.issuedAt, 'Unknown'))
-    expect(expires).toBe(formatDate(NEVER_SEEN_DEVICE.expiresAt, 'Unknown'))
+    expect(certificate).toContain(formatDateTime(NEVER_SEEN_DEVICE.issuedAt, 'Unknown'))
+    expect(certificate).toContain(formatDateTime(NEVER_SEEN_DEVICE.expiresAt, 'Unknown'))
     expect(lastSeen).toBe(NEVER_SEEN_LABEL)
     expect(NEVER_SEEN_LABEL).toBe('never seen')
 
-    // The label replaces the Last_Seen value only -- the issued and expires
-    // cells hold real dates, not the fallback.
-    expect(issued).not.toBe('Unknown')
-    expect(expires).not.toBe('Unknown')
+    // The label replaces the Last_Seen value only -- the Certificate cell
+    // holds real dates, not the fallback.
+    expect(certificate).not.toContain('Unknown')
   })
 
   it('renders a real timestamp for a device that has been seen (Req 6.5)', async () => {
     await mount()
 
-    const [, , , , lastSeen] = cellsOf(rowFor(SEEN_DEVICE.clientUid))
+    const [, , , lastSeen] = cellsOf(rowFor(SEEN_DEVICE.clientUid))
     expect(lastSeen).not.toBe(NEVER_SEEN_LABEL)
-    expect(lastSeen).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/)
+    expect(lastSeen).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?: \S.*)?$/)
   })
 
   // ══════════════════════════════════════════════════════════════════════
@@ -328,10 +334,10 @@ describe('UserDevicesModal (mounted)', () => {
   // character what it was before the adoption.
   // ══════════════════════════════════════════════════════════════════════
   describe('the three date cells disclose a Date_Tooltip (task 6.7)', () => {
-    const ISSUED_CELL = DEVICE_LIST_COLUMNS.indexOf('Issued')
-
     const cellsFor = (clientUid) => rowFor(clientUid).querySelectorAll('td')
     const hostIn = (cell) => cell.querySelector('span[tabindex="0"]')
+    // The Certificate cell holds TWO date hosts now (Issued, then Expires).
+    const hostsIn = (cell) => cell.querySelectorAll('span[tabindex="0"]')
 
     const tooltipFor = (host) => {
       const id = host && host.getAttribute('aria-describedby')
@@ -355,26 +361,28 @@ describe('UserDevicesModal (mounted)', () => {
 
       expect(container.querySelector('[aria-describedby]')).toBeNull()
 
-      // One host per date cell, counted PER CELL rather than per row: the
-      // leading Type column's Device_Type_Icon carries a `tabIndex={0}` host
-      // of its own, which is not one of these.
+      // Two hosts in the Certificate cell (Issued, Expires) and one in Last
+      // Seen. The leading Type column's Device_Type_Icon carries a
+      // `tabIndex={0}` host of its own, which is not one of these.
       const cells = cellsFor(SEEN_DEVICE.clientUid)
-      for (const index of [ISSUED_CELL, EXPIRES_CELL, LAST_SEEN_CELL]) {
-        const hosts = cells[index].querySelectorAll('span[tabindex="0"]')
-        expect(hosts).toHaveLength(1)
-        expect(hosts[0].className).toContain('cursor-help')
-        expect(hosts[0].hasAttribute('aria-describedby')).toBe(false)
+      const certHosts = hostsIn(cells[CERT_CELL])
+      expect(certHosts).toHaveLength(2)
+      const lastSeenHosts = hostsIn(cells[LAST_SEEN_CELL])
+      expect(lastSeenHosts).toHaveLength(1)
+      for (const host of [...certHosts, ...lastSeenHosts]) {
+        expect(host.className).toContain('cursor-help')
+        expect(host.hasAttribute('aria-describedby')).toBe(false)
       }
     })
 
     it.each([
-      ['Issued', () => ISSUED_CELL, 'left-full', 'ml-2'],
-      ['Expires', () => EXPIRES_CELL, 'left-full', 'ml-2'],
-      ['Last Seen', () => LAST_SEEN_CELL, 'right-full', 'mr-2']
-    ])('opens the %s tooltip from %s', async (_name, cellIndex, anchor, gap) => {
+      ['Issued', () => hostsIn(cellsFor(SEEN_DEVICE.clientUid)[CERT_CELL])[0], 'left-full', 'ml-2'],
+      ['Expires', () => hostsIn(cellsFor(SEEN_DEVICE.clientUid)[CERT_CELL])[1], 'left-full', 'ml-2'],
+      ['Last Seen', () => hostIn(cellsFor(SEEN_DEVICE.clientUid)[LAST_SEEN_CELL]), 'right-full', 'mr-2']
+    ])('opens the %s tooltip from %s', async (_name, hostOf, anchor, gap) => {
       await mount()
 
-      const host = hostIn(cellsFor(SEEN_DEVICE.clientUid)[cellIndex()])
+      const host = hostOf()
       expect(host).not.toBeNull()
 
       await pointerOver(host)
@@ -418,10 +426,9 @@ describe('UserDevicesModal (mounted)', () => {
       expect(accessibleTextOf(cells[LAST_SEEN_CELL])).toBe(NEVER_SEEN_LABEL)
       expect(hostIn(cells[LAST_SEEN_CELL])).toBeNull()
 
-      // The two cells beside it DO have one -- so the absence is the value's,
-      // not the row's.
-      expect(hostIn(cells[ISSUED_CELL])).not.toBeNull()
-      expect(hostIn(cells[EXPIRES_CELL])).not.toBeNull()
+      // The Certificate cell beside it DOES have hosts -- so the absence is
+      // the value's, not the row's.
+      expect(hostsIn(cells[CERT_CELL])).toHaveLength(2)
     })
   })
 
@@ -630,6 +637,8 @@ describe('UserDevicesModal (mounted)', () => {
       await mount()
     }
     const cellsFor = (clientUid) => rowFor(clientUid).querySelectorAll('td')
+    // The Expires line is the Certificate cell's second child div.
+    const expiresLineFor = (clientUid) => cellsFor(clientUid)[CERT_CELL].children[1]
 
     it('renders the four connected x last-seen-known combinations (Req 20.9)', async () => {
       const devices = CONNECTED_COMBINATIONS.map((combination, index) => ({
@@ -690,60 +699,56 @@ describe('UserDevicesModal (mounted)', () => {
     it('renders an Imminent_Expiry bold, red, and marked "Expires soon" (Reqs 21.2, 21.3)', async () => {
       await mountWith([IMMINENT_DEVICE])
 
-      const cell = cellsFor(IMMINENT_DEVICE.clientUid)[EXPIRES_CELL]
-      expect(cell.className).toContain('font-bold')
-      expect(cell.className).toContain('text-red-600')
+      const expiresLine = expiresLineFor(IMMINENT_DEVICE.clientUid)
+      expect(expiresLine.className).toContain('font-bold')
+      expect(expiresLine.className).toContain('text-red-600')
 
-      // Named by its OWN classes rather than taken as the cell's first span --
-      // see the note on the twin assertion in `src/pages/Dashboard.test.jsx`:
-      // the date beside it now renders through `FormattedDate`, whose
-      // disclosure wrapper is also a span and comes first in document order.
-      const marker = cell.querySelector('span.font-semibold')
-      // Trimmed: the marker's own text begins with the space that separates it
-      // from the date, so trimming leaves exactly the label.
-      expect(marker.textContent.trim()).toBe(EXPIRES_SOON_LABEL)
-      expect(marker.getAttribute('aria-hidden')).toBeNull()
-      expect(marker.className).toContain('text-xs')
-      expect(marker.className).toContain('font-semibold')
+      // The marker is a warning glyph (`aria-hidden`) paired with a real,
+      // visually-hidden `sr-only` span carrying the state as text -- see the
+      // note on the twin assertion in `src/pages/Dashboard.test.jsx`.
+      const marker = expiresLine.querySelector('span.sr-only')
+      expect(marker.textContent).toBe(EXPIRES_SOON_LABEL)
+      const glyph = expiresLine.querySelector('svg')
+      expect(glyph).not.toBeNull()
+      expect(glyph.getAttribute('aria-hidden')).toBe('true')
 
-      // The marker qualifies the date, it does not replace it. Pinned as one
-      // exact string, the marker's own leading space separating it from the
-      // date -- see the note on the twin assertion in
-      // `src/pages/Dashboard.test.jsx`.
+      // The marker qualifies the date, it does not replace it.
+      const cell = cellsFor(IMMINENT_DEVICE.clientUid)[CERT_CELL]
       const text = accessibleTextOf(cell)
-      expect(text).toBe(`${formatDate(IMMINENT_DEVICE.expiresAt, 'Unknown')} ${EXPIRES_SOON_LABEL}`)
+      expect(text).toContain(formatDateTime(IMMINENT_DEVICE.expiresAt, 'Unknown'))
+      expect(text).toContain(EXPIRES_SOON_LABEL)
       expect(text).not.toContain('Unknown')
     })
 
     it('renders an already-expired certificate with the "Expired" marker instead (Req 21.5)', async () => {
       await mountWith([EXPIRED_DEVICE])
 
-      const cell = cellsFor(EXPIRED_DEVICE.clientUid)[EXPIRES_CELL]
-      expect(cell.className).toContain('font-bold')
-      expect(cell.className).toContain('text-red-600')
+      const expiresLine = expiresLineFor(EXPIRED_DEVICE.clientUid)
+      expect(expiresLine.className).toContain('font-bold')
+      expect(expiresLine.className).toContain('text-red-600')
 
+      const cell = cellsFor(EXPIRED_DEVICE.clientUid)[CERT_CELL]
       const text = accessibleTextOf(cell)
-      expect(text).toContain(formatDate(EXPIRED_DEVICE.expiresAt, 'Unknown'))
+      expect(text).toContain(formatDateTime(EXPIRED_DEVICE.expiresAt, 'Unknown'))
       expect(text).toContain(EXPIRED_LABEL)
       expect(text).not.toContain(EXPIRES_SOON_LABEL)
-      expect(cell.querySelector('span.font-semibold').textContent.trim()).toBe(EXPIRED_LABEL)
+      expect(expiresLine.querySelector('span.sr-only').textContent).toBe(EXPIRED_LABEL)
     })
 
     it('leaves a null expiresAt and a far-future expiry unhighlighted and unmarked (Req 21.4)', async () => {
       await mountWith([UNKNOWN_EXPIRY_DEVICE, FAR_FUTURE_DEVICE])
 
-      const nullCell = cellsFor(UNKNOWN_EXPIRY_DEVICE.clientUid)[EXPIRES_CELL]
-      expect(accessibleTextOf(nullCell)).toBe('Unknown')
+      const nullLine = expiresLineFor(UNKNOWN_EXPIRY_DEVICE.clientUid)
+      expect(accessibleTextOf(nullLine)).toBe('Expires Unknown')
       // No MARKER span -- named by its classes, for the reason noted above.
-      expect(nullCell.querySelector('span.font-semibold')).toBeNull()
-      expect(nullCell.className).not.toContain('font-bold')
-      expect(nullCell.className).not.toContain('text-red-600')
-      expect(nullCell.className).toContain('text-gray-500')
+      expect(nullLine.querySelector('span.sr-only')).toBeNull()
+      expect(nullLine.className).not.toContain('font-bold')
+      expect(nullLine.className).not.toContain('text-red-600')
 
-      const farCell = cellsFor(FAR_FUTURE_DEVICE.clientUid)[EXPIRES_CELL]
-      expect(accessibleTextOf(farCell)).toBe(formatDate(FAR_FUTURE_DEVICE.expiresAt, 'Unknown'))
-      expect(farCell.querySelector('span.font-semibold')).toBeNull()
-      expect(farCell.className).not.toContain('font-bold')
+      const farLine = expiresLineFor(FAR_FUTURE_DEVICE.clientUid)
+      expect(accessibleTextOf(farLine)).toBe(`Expires ${formatDateTime(FAR_FUTURE_DEVICE.expiresAt, 'Unknown')}`)
+      expect(farLine.querySelector('span.sr-only')).toBeNull()
+      expect(farLine.className).not.toContain('font-bold')
     })
   })
 

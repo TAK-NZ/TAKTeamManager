@@ -4,7 +4,6 @@ import { createRoot } from 'react-dom/client'
 
 import FormattedDate, {
   DATE_PRECISION,
-  TOOLTIP_SEPARATOR,
   TOOLTIP_SIDES,
   buildTooltipText
 } from './FormattedDate.jsx'
@@ -50,10 +49,10 @@ import {
 //
 // ## Two pieces of module state this file installs and restores
 //
-//  1. The display timezone. `UTC` is installed so the tooltip's second fact
-//     is a fixed string; `DEFAULT_DISPLAY_TIMEZONE` is restored afterwards,
-//     exactly as `dateFormat.test.js` does, or a zone installed here would
-//     decide the wall clock a later test asserts.
+//  1. The display timezone. `UTC` is installed so `formatDateTime`'s visible
+//     string is deterministic; `DEFAULT_DISPLAY_TIMEZONE` is restored
+//     afterwards, exactly as `dateFormat.test.js` does, or a zone installed
+//     here would decide the wall clock a later test asserts.
 //  2. The clock. Only `Date` is faked (`toFake: ['Date']`), deliberately
 //     leaving `setTimeout` and friends real so React's scheduler is
 //     untouched; the clock is then moved with `vi.setSystemTime`. Real
@@ -78,30 +77,17 @@ const THREE_MINUTES_AGO = new Date(FIXED_NOW_MS - 3 * MS_PER_MINUTE).toISOString
 /** Three days before it, for the date-only precision. */
 const THREE_DAYS_AGO = new Date(FIXED_NOW_MS - 3 * MS_PER_DAY).toISOString()
 
-describe('buildTooltipText (Criteria 2.8, 2.10, 2.11)', () => {
-  it('renders the phrase first, then the zone, with the explicit separator', () => {
-    // The phrase leads because it is what the hover was for; the zone
-    // qualifies it. The separator is inside the string rather than in the
-    // layout so a reader announcing the tooltip as one string does not run
-    // the two facts together.
-    expect(buildTooltipText('3 minutes ago', 'Pacific/Auckland')).toBe(
-      `3 minutes ago${TOOLTIP_SEPARATOR}Pacific/Auckland`
-    )
-    expect(TOOLTIP_SEPARATOR).toBe(', ')
-  })
-
-  it('renders the phrase ALONE when the resolved zone is the empty string', () => {
-    // `getDisplayTimezone()`'s documented outcome when not even `UTC`
-    // constructs. A tooltip reading `3 minutes ago, ` would be a rendering
-    // defect standing in for a missing one.
-    expect(buildTooltipText('3 minutes ago', '')).toBe('3 minutes ago')
-    expect(buildTooltipText('3 minutes ago', '   ')).toBe('3 minutes ago')
-    expect(buildTooltipText('3 minutes ago', undefined)).toBe('3 minutes ago')
+describe('buildTooltipText', () => {
+  it('renders the phrase unchanged', () => {
+    // The tooltip no longer also names the resolved zone: `formatDateTime`
+    // inlines a short abbreviation into the visible string now, so a
+    // second, redundant statement of the zone in the tooltip was removed.
+    expect(buildTooltipText('3 minutes ago')).toBe('3 minutes ago')
   })
 
   it('has nothing to say when there is no phrase', () => {
-    expect(buildTooltipText('', 'UTC')).toBe('')
-    expect(buildTooltipText(null, 'UTC')).toBe('')
+    expect(buildTooltipText('')).toBe('')
+    expect(buildTooltipText(null)).toBe('')
   })
 })
 
@@ -324,8 +310,11 @@ describe('FormattedDate (mounted)', () => {
     })
   })
 
-  describe('the tooltip text (Criteria 2.8, 2.10, 2.11)', () => {
-    it('carries the phrase, then the separator, then the resolved zone', async () => {
+  describe('the tooltip text', () => {
+    it('carries the phrase alone, with no zone appended', async () => {
+      // The tooltip used to also name the resolved zone. `formatDateTime`
+      // now inlines a short abbreviation into the visible string itself, so
+      // repeating it in the tooltip would be redundant.
       const host = await mount({
         value: THREE_MINUTES_AGO,
         precision: DATE_PRECISION.DATE_TIME
@@ -333,7 +322,7 @@ describe('FormattedDate (mounted)', () => {
 
       await pointerOver(host)
 
-      expect(describedElement().textContent).toBe(`3 minutes ago${TOOLTIP_SEPARATOR}UTC`)
+      expect(describedElement().textContent).toBe('3 minutes ago')
     })
 
     it('anchors a date-only value at midnight in the display zone', async () => {
@@ -345,7 +334,7 @@ describe('FormattedDate (mounted)', () => {
       await pointerOver(host)
 
       // Both ends anchored, so the distance is a whole number of days.
-      expect(describedElement().textContent).toBe(`3 days ago${TOOLTIP_SEPARATOR}UTC`)
+      expect(describedElement().textContent).toBe('3 days ago')
     })
 
     it('puts no ISO instant in the tooltip', async () => {
@@ -454,7 +443,7 @@ describe('FormattedDate (mounted)', () => {
       })
 
       await pointerOver(host)
-      expect(describedElement().textContent).toBe(`3 minutes ago${TOOLTIP_SEPARATOR}UTC`)
+      expect(describedElement().textContent).toBe('3 minutes ago')
       await pointerOut(host)
 
       // Two hours pass with no re-render and no timer. A phrase computed when
@@ -463,7 +452,7 @@ describe('FormattedDate (mounted)', () => {
       vi.setSystemTime(FIXED_NOW_MS + 2 * MS_PER_HOUR)
 
       await pointerOver(host)
-      expect(describedElement().textContent).toBe(`2 hours ago${TOOLTIP_SEPARATOR}UTC`)
+      expect(describedElement().textContent).toBe('2 hours ago')
     })
 
     it('recomputes on a keyboard disclosure too, not only a pointer one', async () => {
@@ -473,13 +462,13 @@ describe('FormattedDate (mounted)', () => {
       })
 
       await focus(host)
-      expect(describedElement().textContent).toBe(`3 minutes ago${TOOLTIP_SEPARATOR}UTC`)
+      expect(describedElement().textContent).toBe('3 minutes ago')
       await blur(host)
 
       vi.setSystemTime(FIXED_NOW_MS + 3 * MS_PER_DAY)
 
       await focus(host)
-      expect(describedElement().textContent).toBe(`3 days ago${TOOLTIP_SEPARATOR}UTC`)
+      expect(describedElement().textContent).toBe('3 days ago')
     })
 
     it('leaves an open tooltip alone as the clock moves under it', async () => {
@@ -495,7 +484,7 @@ describe('FormattedDate (mounted)', () => {
       await pointerOver(host)
       vi.setSystemTime(FIXED_NOW_MS + 2 * MS_PER_HOUR)
 
-      expect(describedElement().textContent).toBe(`3 minutes ago${TOOLTIP_SEPARATOR}UTC`)
+      expect(describedElement().textContent).toBe('3 minutes ago')
     })
   })
 
@@ -525,40 +514,4 @@ describe('FormattedDate (mounted)', () => {
     })
   })
 
-  describe('when the resolved zone is the empty string (Criterion 2.10)', () => {
-    let realDateTimeFormat
-
-    beforeEach(() => {
-      // `getDisplayTimezone()` returns `''` only when not even `UTC`
-      // constructs and the browser-local reading fails too -- the one state
-      // in which the tooltip has a phrase and no zone. Forced here by making
-      // every `Intl.DateTimeFormat` construction throw, then resetting the
-      // module's memoised resolution so it walks the whole fallback chain
-      // again.
-      realDateTimeFormat = Intl.DateTimeFormat
-      Intl.DateTimeFormat = function ThrowingDateTimeFormat() {
-        throw new RangeError('no zone constructs')
-      }
-      setDisplayTimezone('UTC')
-    })
-
-    afterEach(() => {
-      Intl.DateTimeFormat = realDateTimeFormat
-      setDisplayTimezone(DEFAULT_DISPLAY_TIMEZONE)
-    })
-
-    it('renders the phrase ALONE, with no separator and no empty second fact', async () => {
-      const host = await mount({
-        value: THREE_MINUTES_AGO,
-        precision: DATE_PRECISION.DATE_TIME
-      })
-
-      await pointerOver(host)
-      const text = describedElement().textContent
-
-      expect(text).toBe('3 minutes ago')
-      expect(text).not.toContain(TOOLTIP_SEPARATOR)
-      expect(text.endsWith(',')).toBe(false)
-    })
-  })
 })

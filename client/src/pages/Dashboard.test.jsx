@@ -15,8 +15,8 @@ import {
   revokeActionLabel
 } from '../components/DeviceListRow.jsx'
 import { labelForClientType } from '../components/DeviceTypeIcon.jsx'
-import { usersAPI, channelsAPI, requestsAPI, configAPI, deviceManagementAPI } from '../services/api'
-import { formatDate, formatDateTime } from '../utils/dateFormat'
+import { usersAPI, channelsAPI, requestsAPI, configAPI, deviceManagementAPI, adminAPI } from '../services/api'
+import { formatDateTime } from '../utils/dateFormat'
 import { DEFAULT_EXPIRY_WARNING_DAYS, setExpiryWarningDays } from '../utils/expiryWarning'
 
 // Validates: Requirements 5.1, 5.2, 5.3, 7.2, 15.6, 16.2, 16.3, 16.5, 16.6,
@@ -50,6 +50,13 @@ vi.mock('../services/api', () => ({
   // of a missing export from a mocked ES module is a load-time failure, so it
   // is present.
   teamsAPI: {},
+  // Dashboard.jsx's pending-requests stat additionally calls
+  // adminAPI.getOrgInterest for a Global_Manager user (bugfix:
+  // pending-requests-badge). USER below carries no is_global_manager flag
+  // at all, so that branch never actually fires in this file's tests, but
+  // the export must still exist -- a named import of a missing export from
+  // a mocked ES module is a load-time failure.
+  adminAPI: { getOrgInterest: vi.fn() },
   deviceManagementAPI: {
     probeEnabled: vi.fn(),
     revokeMyDevice: vi.fn(),
@@ -155,8 +162,12 @@ const accessibleTextOf = (element) => {
   return clone.textContent.replace(/\s+/g, ' ').trim()
 }
 
-/** Column offsets in the shared row (`DEVICE_LIST_COLUMNS`). */
-const EXPIRES_CELL = DEVICE_LIST_COLUMNS.indexOf('Expires')
+/**
+ * Column offsets in the shared row (`DEVICE_LIST_COLUMNS`). Issued and
+ * Expires now share ONE "Certificate" cell (device-management-cert-table-
+ * layout follow-up), stacked as two lines rather than two columns.
+ */
+const CERT_CELL = DEVICE_LIST_COLUMNS.indexOf('Certificate')
 const LAST_SEEN_CELL = DEVICE_LIST_COLUMNS.indexOf('Last Seen')
 
 const KNOWN_LAST_SEEN = '2025-06-07T08:09:00Z'
@@ -230,6 +241,107 @@ const FAR_FUTURE_DEVICE = {
   expiresAt: new Date(Date.now() + 400 * DAY_MS).toISOString()
 }
 
+/**
+ * Bugfix (pending-requests-badge): the Dashboard's "Pending Requests" stat
+ * used to count ONLY access_requests-backed requests (requestsAPI.getPending),
+ * mirroring the same gap fixed in Layout.jsx's nav badge. For a
+ * Global_Manager, it now sums that count with pending Org_Interest_Requests
+ * (adminAPI.getOrgInterest({status: 'pending'})); for any other user, it
+ * never calls adminAPI.getOrgInterest at all and reads only the
+ * access_requests count.
+ */
+describe('Dashboard "Pending Requests" stat (bugfix: pending-requests-badge)', () => {
+  let container
+  let root
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    vi.clearAllMocks()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    container = document.createElement('div')
+    document.body.appendChild(container)
+
+    usersAPI.getMe.mockResolvedValue({ data: { user: { ...USER, groups: [] }, teams: [] } })
+    channelsAPI.getDescriptions.mockResolvedValue({ data: { channels: [] } })
+    configAPI.getColorMappings.mockResolvedValue({ data: { colorMappings: {}, roleDescriptions: {} } })
+    configAPI.getPublic.mockResolvedValue({ data: {} })
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false, devices: [] })
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    vi.restoreAllMocks()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  const mount = async (user) => {
+    root = createRoot(container)
+    await act(async () => {
+      root.render(
+        <MemoryRouter>
+          <Dashboard user={user} />
+        </MemoryRouter>
+      )
+    })
+  }
+
+  const pendingRequestsStatText = () => {
+    const label = Array.from(container.querySelectorAll('p')).find(
+      (p) => p.textContent.trim() === 'Pending Requests'
+    )
+    const statCard = label?.closest('.card')
+    // Rendered as a <Link> when > 0, plain text when 0 (Dashboard.jsx).
+    return statCard?.querySelector('a, p.text-2xl')?.textContent.trim() ?? null
+  }
+
+  it('sums access_requests and pending Org_Interest_Requests counts for a Global_Manager', async () => {
+    requestsAPI.getPending.mockResolvedValue({ data: { requests: [{ id: 1 }, { id: 2 }] } })
+    adminAPI.getOrgInterest.mockResolvedValue({ data: { requests: [{ id: 10 }] } })
+
+    await mount({ ...USER, is_global_manager: true })
+
+    expect(adminAPI.getOrgInterest).toHaveBeenCalledWith({ status: 'pending' })
+    expect(pendingRequestsStatText()).toBe('3')
+  })
+
+  it('never calls adminAPI.getOrgInterest for a non-Global_Manager, reading only the access_requests count', async () => {
+    requestsAPI.getPending.mockResolvedValue({ data: { requests: [{ id: 1 }] } })
+
+    await mount({ ...USER, is_global_manager: false })
+
+    expect(adminAPI.getOrgInterest).not.toHaveBeenCalled()
+    expect(pendingRequestsStatText()).toBe('1')
+  })
+
+  it('falls back to the access_requests count alone when the Org_Interest fetch fails', async () => {
+    requestsAPI.getPending.mockResolvedValue({ data: { requests: [{ id: 1 }, { id: 2 }] } })
+    adminAPI.getOrgInterest.mockRejectedValue(new Error('403 Forbidden'))
+
+    await mount({ ...USER, is_global_manager: true })
+
+    expect(pendingRequestsStatText()).toBe('2')
+  })
+
+  it('renders 0 (plain text, no link) when both counts are zero', async () => {
+    requestsAPI.getPending.mockResolvedValue({ data: { requests: [] } })
+    adminAPI.getOrgInterest.mockResolvedValue({ data: { requests: [] } })
+
+    await mount({ ...USER, is_global_manager: true })
+
+    expect(pendingRequestsStatText()).toBe('0')
+    const label = Array.from(container.querySelectorAll('p')).find(
+      (p) => p.textContent.trim() === 'Pending Requests'
+    )
+    expect(label.closest('.card').querySelector('a')).toBeNull()
+  })
+})
+
 describe('Dashboard "My Devices" card', () => {
   let container
   let root
@@ -296,7 +408,9 @@ describe('Dashboard "My Devices" card', () => {
 
     const headers = Array.from(card.querySelectorAll('th')).map((th) => th.textContent.trim())
     // Task 22.4 added the leading Device_Type_Icon column (Requirement 15.6).
-    expect(headers).toEqual(['Type', 'Device UID', 'Issued', 'Expires', 'Last Seen', 'Actions'])
+    // Issued and Expires later merged into one "Certificate" column
+    // (device-management-cert-table-layout follow-up).
+    expect(headers).toEqual(['Type', 'Device UID', 'Certificate', 'Last Seen', 'Actions'])
 
     expect(rowFor(SEEN_DEVICE.clientUid)).not.toBeUndefined()
     expect(rowFor(NEVER_SEEN_DEVICE.clientUid)).not.toBeUndefined()
@@ -306,26 +420,28 @@ describe('Dashboard "My Devices" card', () => {
   it('renders "never seen" for a null lastSeenAt while every other field still shows', async () => {
     await mount()
 
-    // The first cell is the Device_Type_Icon added by task 22.4.
-    const [, uid, issued, expires, lastSeen] = cellsOf(rowFor(NEVER_SEEN_DEVICE.clientUid))
+    // The first cell is the Device_Type_Icon added by task 22.4. The third
+    // is the merged Certificate cell, whose text runs both stacked lines
+    // together -- read with `cellsOf`'s `textContent.trim()`, so this checks
+    // both dates are still present rather than picking either apart.
+    const [, uid, certificate, lastSeen] = cellsOf(rowFor(NEVER_SEEN_DEVICE.clientUid))
 
     expect(uid).toBe(NEVER_SEEN_DEVICE.clientUid)
-    expect(issued).toBe(formatDate(NEVER_SEEN_DEVICE.issuedAt, 'Unknown'))
-    expect(expires).toBe(formatDate(NEVER_SEEN_DEVICE.expiresAt, 'Unknown'))
+    expect(certificate).toContain(formatDateTime(NEVER_SEEN_DEVICE.issuedAt, 'Unknown'))
+    expect(certificate).toContain(formatDateTime(NEVER_SEEN_DEVICE.expiresAt, 'Unknown'))
     expect(lastSeen).toBe('never seen')
 
-    // The label replaces the Last_Seen value only -- the issued and expires
-    // cells hold real dates, not the fallback.
-    expect(issued).not.toBe('Unknown')
-    expect(expires).not.toBe('Unknown')
+    // The label replaces the Last_Seen value only -- the Certificate cell
+    // holds real dates, not the fallback.
+    expect(certificate).not.toContain('Unknown')
   })
 
   it('renders a real timestamp for a device that has been seen (Req 5.2)', async () => {
     await mount()
 
-    const [, , , , lastSeen] = cellsOf(rowFor(SEEN_DEVICE.clientUid))
+    const [, , , lastSeen] = cellsOf(rowFor(SEEN_DEVICE.clientUid))
     expect(lastSeen).not.toBe('never seen')
-    expect(lastSeen).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/)
+    expect(lastSeen).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?: \S.*)?$/)
   })
 
   // ══════════════════════════════════════════════════════════════════════
@@ -343,10 +459,11 @@ describe('Dashboard "My Devices" card', () => {
   // when it should not be.
   // ══════════════════════════════════════════════════════════════════════
   describe('the three date cells disclose a Date_Tooltip (task 6.7)', () => {
-    const ISSUED_CELL = DEVICE_LIST_COLUMNS.indexOf('Issued')
-
     const cellsFor = (clientUid) => rowFor(clientUid).querySelectorAll('td')
     const hostIn = (cell) => cell.querySelector('span[tabindex="0"]')
+    // The Certificate cell holds TWO date hosts now (Issued, then Expires),
+    // so tests that need one or the other pick by index within the cell.
+    const hostsIn = (cell) => cell.querySelectorAll('span[tabindex="0"]')
 
     const tooltipFor = (host) => {
       const id = host && host.getAttribute('aria-describedby')
@@ -371,32 +488,31 @@ describe('Dashboard "My Devices" card', () => {
       const card = devicesCard()
       expect(card.querySelector('[aria-describedby]')).toBeNull()
 
-      // One host per date cell -- Issued, Expires, Last Seen -- each focusable
-      // rather than hover-only (Criterion 3.1). Counted PER CELL rather than
-      // per row: the leading Type column's Device_Type_Icon carries a
-      // `tabIndex={0}` host of its own, which is not one of these.
+      // Two hosts in the Certificate cell (Issued, Expires) and one in Last
+      // Seen, each focusable rather than hover-only (Criterion 3.1).
       const cells = cellsFor(SEEN_DEVICE.clientUid)
-      for (const index of [ISSUED_CELL, EXPIRES_CELL, LAST_SEEN_CELL]) {
-        const hosts = cells[index].querySelectorAll('span[tabindex="0"]')
-        expect(hosts).toHaveLength(1)
-        expect(hosts[0].className).toContain('cursor-help')
-        expect(hosts[0].hasAttribute('aria-describedby')).toBe(false)
+      const certHosts = hostsIn(cells[CERT_CELL])
+      expect(certHosts).toHaveLength(2)
+      const lastSeenHosts = hostsIn(cells[LAST_SEEN_CELL])
+      expect(lastSeenHosts).toHaveLength(1)
+      for (const host of [...certHosts, ...lastSeenHosts]) {
+        expect(host.className).toContain('cursor-help')
+        expect(host.hasAttribute('aria-describedby')).toBe(false)
       }
     })
 
-    // Criterion 3.5, applied mechanically: the two leading date columns open
+    // Criterion 3.5, applied mechanically: the two Certificate-cell dates open
     // rightward, the trailing Last Seen column opens leftward, because a
     // tooltip pushed past a scroll container's left edge is clipped AND
     // unreachable while one past its right edge is merely clipped.
     it.each([
-      ['Issued', () => ISSUED_CELL, 'left-full', 'ml-2'],
-      ['Expires', () => EXPIRES_CELL, 'left-full', 'ml-2'],
-      ['Last Seen', () => LAST_SEEN_CELL, 'right-full', 'mr-2']
-    ])('opens the %s tooltip from %s', async (_name, cellIndex, anchor, gap) => {
+      ['Issued', () => hostsIn(cellsFor(SEEN_DEVICE.clientUid)[CERT_CELL])[0], 'left-full', 'ml-2'],
+      ['Expires', () => hostsIn(cellsFor(SEEN_DEVICE.clientUid)[CERT_CELL])[1], 'left-full', 'ml-2'],
+      ['Last Seen', () => hostIn(cellsFor(SEEN_DEVICE.clientUid)[LAST_SEEN_CELL]), 'right-full', 'mr-2']
+    ])('opens the %s tooltip from %s', async (_name, hostOf, anchor, gap) => {
       await mount()
 
-      const cell = cellsFor(SEEN_DEVICE.clientUid)[cellIndex()]
-      const host = hostIn(cell)
+      const host = hostOf()
       expect(host).not.toBeNull()
 
       await pointerOver(host)
@@ -440,10 +556,9 @@ describe('Dashboard "My Devices" card', () => {
       expect(accessibleTextOf(cell)).toBe(NEVER_SEEN_LABEL)
       expect(hostIn(cell)).toBeNull()
 
-      // The two cells beside it DO have one -- so the absence is the value's,
-      // not the row's.
-      expect(hostIn(cellsFor(NEVER_SEEN_DEVICE.clientUid)[ISSUED_CELL])).not.toBeNull()
-      expect(hostIn(cellsFor(NEVER_SEEN_DEVICE.clientUid)[EXPIRES_CELL])).not.toBeNull()
+      // The Certificate cell beside it DOES have hosts -- so the absence is
+      // the value's, not the row's.
+      expect(hostsIn(cellsFor(NEVER_SEEN_DEVICE.clientUid)[CERT_CELL])).toHaveLength(2)
     })
   })
 
@@ -745,7 +860,10 @@ describe('the Dashboard card and the admin modal render the same row markup (Req
       const button = tr.querySelector('button')
       const wrapper = button.parentElement
       const cells = tr.querySelectorAll('td')
-      const expiryCell = cells[EXPIRES_CELL]
+      const certCell = cells[CERT_CELL]
+      // The Expires line is the cell's SECOND child div (Issued is first),
+      // and it alone carries the bold-red expiry styling.
+      const expiresLine = certCell.children[1]
       return {
         typeLabel: tr.querySelector('[role="img"]').getAttribute('aria-label'),
         revokeLabel: button.getAttribute('aria-label'),
@@ -757,9 +875,9 @@ describe('the Dashboard card and the admin modal render the same row markup (Req
         // Requirement 20.9 / 21.3: what assistive technology would announce,
         // with the decorative dot and glyph removed.
         lastSeen: accessibleTextOf(cells[LAST_SEEN_CELL]),
-        expiry: accessibleTextOf(expiryCell),
-        expiryBold: expiryCell.className.includes('font-bold'),
-        expiryRed: expiryCell.className.includes('text-red-600')
+        certificate: accessibleTextOf(certCell),
+        expiryBold: expiresLine.className.includes('font-bold'),
+        expiryRed: expiresLine.className.includes('text-red-600')
       }
     })
   })
@@ -796,24 +914,25 @@ describe('the Dashboard card and the admin modal render the same row markup (Req
     expect(connectedRow.lastSeen).toBe(`${CONNECTED_LABEL} ${formatDateTime(KNOWN_LAST_SEEN, '')}`)
     expect(card.rows[indexOf('ANDROID-connectednoseen0008')].lastSeen).toBe(CONNECTED_LABEL)
 
-    // (`expiry` is the cell's accessible text. These are `toContain` because
-    // what they check is non-vacuity -- the date is retained AND the marker is
-    // present -- as two independent facts; the cross-surface comparison itself
-    // is the `toEqual` above. The exact full cell text is pinned by the
-    // per-surface blocks.)
+    // (`certificate` is the merged cell's accessible text, both lines
+    // together. These are `toContain` because what they check is non-vacuity
+    // -- the date is retained AND the sr-only marker text is present -- as
+    // two independent facts; the cross-surface comparison itself is the
+    // `toEqual` above. The exact full cell text is pinned by the per-surface
+    // blocks.)
     const imminentRow = card.rows[indexOf(IMMINENT_DEVICE.clientUid)]
-    expect(imminentRow.expiry).toContain(formatDate(IMMINENT_DEVICE.expiresAt, 'Unknown'))
-    expect(imminentRow.expiry).toContain(EXPIRES_SOON_LABEL)
+    expect(imminentRow.certificate).toContain(formatDateTime(IMMINENT_DEVICE.expiresAt, 'Unknown'))
+    expect(imminentRow.certificate).toContain(EXPIRES_SOON_LABEL)
     expect(imminentRow.expiryBold && imminentRow.expiryRed).toBe(true)
 
     const expiredRow = card.rows[indexOf(EXPIRED_DEVICE.clientUid)]
-    expect(expiredRow.expiry).toContain(formatDate(EXPIRED_DEVICE.expiresAt, 'Unknown'))
-    expect(expiredRow.expiry).toContain(EXPIRED_LABEL)
-    expect(expiredRow.expiry).not.toContain(EXPIRES_SOON_LABEL)
+    expect(expiredRow.certificate).toContain(formatDateTime(EXPIRED_DEVICE.expiresAt, 'Unknown'))
+    expect(expiredRow.certificate).toContain(EXPIRED_LABEL)
+    expect(expiredRow.certificate).not.toContain(EXPIRES_SOON_LABEL)
     expect(expiredRow.expiryBold && expiredRow.expiryRed).toBe(true)
 
     const unknownExpiryRow = card.rows[indexOf(UNKNOWN_EXPIRY_DEVICE.clientUid)]
-    expect(unknownExpiryRow.expiry).toBe('Unknown')
+    expect(unknownExpiryRow.certificate).toContain('Unknown')
     expect(unknownExpiryRow.expiryBold || unknownExpiryRow.expiryRed).toBe(false)
   })
 })
@@ -1179,6 +1298,8 @@ describe('Connected_Label and expiry markers in the card (Reqs 20.9, 20.11, 21.2
     Array.from(devicesCard().querySelectorAll('tbody tr'))
       .find((tr) => tr.textContent.includes(clientUid))
       .querySelectorAll('td')
+  // The Expires line is the Certificate cell's second child div.
+  const expiresLineFor = (clientUid) => cellsFor(clientUid)[CERT_CELL].children[1]
 
   // Requirement 20.9: all four combinations, in one mount, so a rule that
   // happens to work for one of them cannot pass by accident.
@@ -1245,38 +1366,35 @@ describe('Connected_Label and expiry markers in the card (Reqs 20.9, 20.11, 21.2
   })
 
   // Requirements 21.2, 21.3: bold AND red AND a text marker. Colour and weight
-  // reach nobody using a screen reader, so the marker is what carries it.
+  // reach nobody using a screen reader, so an `sr-only` span beside the
+  // warning glyph is what carries it (the visible "Expires soon"/"Expired"
+  // string was dropped: it was the second-widest thing in the row and does
+  // not fit beside an already zone-suffixed date -- device-management-
+  // cert-table-layout follow-up).
   it('renders an Imminent_Expiry bold, red, and marked "Expires soon" (Reqs 21.2, 21.3)', async () => {
     await mountWith([IMMINENT_DEVICE])
 
-    const cell = cellsFor(IMMINENT_DEVICE.clientUid)[EXPIRES_CELL]
-    expect(cell.className).toContain('font-bold')
-    expect(cell.className).toContain('text-red-600')
+    const expiresLine = expiresLineFor(IMMINENT_DEVICE.clientUid)
+    expect(expiresLine.className).toContain('font-bold')
+    expect(expiresLine.className).toContain('text-red-600')
 
-    // The marker is named by its OWN classes rather than taken as the cell's
-    // first span: since date-tooltips-and-folder-contrast task 6.1 the date
-    // beside it renders through `FormattedDate`, whose disclosure wrapper is
-    // also a span and comes first in document order. The cell's accessible
-    // TEXT is unchanged either way -- that is the assertion at the end of this
-    // test, and it is untouched.
-    const marker = cell.querySelector('span.font-semibold')
-    // Trimmed: the marker's own text begins with the space that separates it
-    // from the date, so trimming leaves exactly the label.
-    expect(marker.textContent.trim()).toBe(EXPIRES_SOON_LABEL)
-    expect(marker.getAttribute('aria-hidden')).toBeNull()
-    expect(marker.className).toContain('text-xs')
-    expect(marker.className).toContain('font-semibold')
+    // The marker is a warning glyph (`aria-hidden`) paired with a real,
+    // visually-hidden `sr-only` span carrying the state as text -- never the
+    // date's colour alone.
+    const marker = expiresLine.querySelector('span.sr-only')
+    expect(marker.textContent).toBe(EXPIRES_SOON_LABEL)
+    const glyph = expiresLine.querySelector('svg')
+    expect(glyph).not.toBeNull()
+    expect(glyph.getAttribute('aria-hidden')).toBe('true')
 
     // The date itself is still shown -- the marker qualifies it, it does not
-    // replace it.
-    //
-    // Pinned as ONE exact string: the marker carries a leading space inside
-    // the string, like the Connected_Label's timestamp, so the cell's
-    // accessible text is the date and the marker separated by a real space
-    // rather than run together. Asserting the whole cell also pins that
-    // nothing else crept into it.
+    // replace it. The Certificate cell's accessible text carries both the
+    // Issued line and the Expires line plus the marker text, so this checks
+    // containment rather than the whole cell.
+    const cell = cellsFor(IMMINENT_DEVICE.clientUid)[CERT_CELL]
     const text = accessibleTextOf(cell)
-    expect(text).toBe(`${formatDate(IMMINENT_DEVICE.expiresAt, 'Unknown')} ${EXPIRES_SOON_LABEL}`)
+    expect(text).toContain(formatDateTime(IMMINENT_DEVICE.expiresAt, 'Unknown'))
+    expect(text).toContain(EXPIRES_SOON_LABEL)
     expect(text).not.toContain('Unknown')
   })
 
@@ -1285,51 +1403,51 @@ describe('Connected_Label and expiry markers in the card (Reqs 20.9, 20.11, 21.2
   it('renders an already-expired certificate with the "Expired" marker instead (Req 21.5)', async () => {
     await mountWith([EXPIRED_DEVICE])
 
-    const cell = cellsFor(EXPIRED_DEVICE.clientUid)[EXPIRES_CELL]
-    expect(cell.className).toContain('font-bold')
-    expect(cell.className).toContain('text-red-600')
+    const expiresLine = expiresLineFor(EXPIRED_DEVICE.clientUid)
+    expect(expiresLine.className).toContain('font-bold')
+    expect(expiresLine.className).toContain('text-red-600')
 
+    const cell = cellsFor(EXPIRED_DEVICE.clientUid)[CERT_CELL]
     const text = accessibleTextOf(cell)
-    expect(text).toContain(formatDate(EXPIRED_DEVICE.expiresAt, 'Unknown'))
+    expect(text).toContain(formatDateTime(EXPIRED_DEVICE.expiresAt, 'Unknown'))
     expect(text).toContain(EXPIRED_LABEL)
     expect(text).not.toContain(EXPIRES_SOON_LABEL)
     expect(EXPIRED_LABEL).not.toBe(EXPIRES_SOON_LABEL)
-    expect(cell.querySelector('span.font-semibold').textContent.trim()).toBe(EXPIRED_LABEL)
+    expect(expiresLine.querySelector('span.sr-only').textContent).toBe(EXPIRED_LABEL)
   })
 
-  // Requirement 21.4: a null `expires_at` leaves the cell exactly as it was --
-  // no marker, no styling, the existing 'Unknown' fallback.
+  // Requirement 21.4: a null `expires_at` leaves the Expires line exactly as
+  // it was -- no marker, no styling, the existing 'Unknown' fallback.
   it('leaves a null expiresAt and a far-future expiry unhighlighted and unmarked (Req 21.4)', async () => {
     await mountWith([UNKNOWN_EXPIRY_DEVICE, FAR_FUTURE_DEVICE])
 
-    const nullCell = cellsFor(UNKNOWN_EXPIRY_DEVICE.clientUid)[EXPIRES_CELL]
-    expect(accessibleTextOf(nullCell)).toBe('Unknown')
+    const nullLine = expiresLineFor(UNKNOWN_EXPIRY_DEVICE.clientUid)
+    expect(accessibleTextOf(nullLine)).toBe('Expires Unknown')
     // No MARKER span -- named by its classes, for the reason noted on the
     // Imminent_Expiry test above.
-    expect(nullCell.querySelector('span.font-semibold')).toBeNull()
-    expect(nullCell.className).not.toContain('font-bold')
-    expect(nullCell.className).not.toContain('text-red-600')
-    expect(nullCell.className).toContain('text-gray-500')
+    expect(nullLine.querySelector('span.sr-only')).toBeNull()
+    expect(nullLine.className).not.toContain('font-bold')
+    expect(nullLine.className).not.toContain('text-red-600')
 
-    const farCell = cellsFor(FAR_FUTURE_DEVICE.clientUid)[EXPIRES_CELL]
-    expect(accessibleTextOf(farCell)).toBe(formatDate(FAR_FUTURE_DEVICE.expiresAt, 'Unknown'))
-    expect(farCell.querySelector('span.font-semibold')).toBeNull()
-    expect(farCell.className).not.toContain('font-bold')
+    const farLine = expiresLineFor(FAR_FUTURE_DEVICE.clientUid)
+    expect(accessibleTextOf(farLine)).toBe(`Expires ${formatDateTime(FAR_FUTURE_DEVICE.expiresAt, 'Unknown')}`)
+    expect(farLine.querySelector('span.sr-only')).toBeNull()
+    expect(farLine.className).not.toContain('font-bold')
   })
 })
 
 /**
  * Bugfix (Dashboard/Enrollment callsign-and-color divergence): the TAK
- * Profile card's "My Organisation" row renders NO colour swatch when
- * `freshUser.takColor` is the explicit string `'None'` (the value
+ * Profile card's "My Organisation's Function" row renders NO colour swatch
+ * when `freshUser.takColor` is the explicit string `'None'` (the value
  * `UserAttributesService.clearTeamAttributes` now writes for a user with
- * no team), since rendering one would fall back to `getColorValue`'s
+ * no team), since rendering one would fall back to `getTakColorHex`'s
  * neutral gray -- itself a colour this deployment could plausibly assign
  * -- making "has no team" visually indistinguishable from "was actually
  * assigned that colour". The row's TEXT ("None") is unaffected either
  * way; only the swatch is conditional.
  */
-describe('Dashboard TAK Profile "My Organisation" row -- no swatch for the None sentinel', () => {
+describe('Dashboard TAK Profile "My Organisation\'s Function" row -- no swatch for the None sentinel', () => {
   let container
   let root
 
@@ -1379,7 +1497,7 @@ describe('Dashboard TAK Profile "My Organisation" row -- no swatch for the None 
   }
 
   const organisationRow = () =>
-    Array.from(container.querySelectorAll('dt')).find((dt) => dt.textContent.trim() === 'My Organisation')
+    Array.from(container.querySelectorAll('dt')).find((dt) => dt.textContent.trim() === "My Organisation's Function")
       ?.closest('div')
 
   it("renders no swatch element for the 'None' sentinel, while still showing the text", async () => {

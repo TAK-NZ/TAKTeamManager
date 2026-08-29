@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { PlusIcon, KeyIcon, GlobeAltIcon, RadioIcon, PencilIcon, TrashIcon, FolderIcon, FolderOpenIcon, ChevronRightIcon, ChevronDownIcon, ChevronUpIcon } from '@heroicons/react/24/outline';
+import { PlusIcon, KeyIcon, GlobeAltIcon, RadioIcon, SignalIcon, PencilIcon, TrashIcon, FolderIcon, FolderOpenIcon, ChevronRightIcon, ChevronDownIcon, ChevronUpIcon } from '@heroicons/react/24/outline';
 import toast from 'react-hot-toast';
 import { globalChannelsAPI, configAPI } from '../services/api';
 import { buildFolderTree } from '../utils/channelTree';
@@ -203,14 +203,14 @@ export default function GlobalChannels({ user }) {
       items.push(
         <div key={folderPath}>
           <div 
-            className="flex items-center p-3 bg-gray-100 dark:bg-gray-800 rounded-lg cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-700"
+            className="flex items-center p-3 bg-gray-100 dark:bg-gray-700 rounded-lg cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-600"
             onClick={() => toggleFolder(folderPath)}
           >
             <div className="flex items-center flex-1">
               {isExpanded ? (
-                <FolderOpenIcon className="h-5 w-5 text-blue-600 dark:text-blue-400 mr-2" />
+                <FolderOpenIcon className="h-5 w-5 text-gray-900 dark:text-gray-100 mr-2" />
               ) : (
-                <FolderIcon className="h-5 w-5 text-blue-600 dark:text-blue-400 mr-2" />
+                <FolderIcon className="h-5 w-5 text-gray-900 dark:text-gray-100 mr-2" />
               )}
               <span className="font-medium text-gray-900 dark:text-gray-100">{folderName}</span>
             </div>
@@ -231,51 +231,52 @@ export default function GlobalChannels({ user }) {
     // Render channels
     tree.channels.forEach(channel => {
       items.push(
-        <div key={channel.id} className="border border-gray-200 dark:border-gray-700 rounded-lg p-4 ml-6">
-          <div className="flex justify-between items-start">
-            <div>
+        <div key={channel.id} className="flex items-center justify-between p-3 bg-gray-100 dark:bg-gray-700 rounded-lg ml-6">
+          <div className="flex-1">
+            <div className="flex items-center">
+              <SignalIcon className="h-4 w-4 text-gray-900 dark:text-gray-100 mr-1.5 flex-shrink-0" />
               <h3 className="font-medium text-gray-900 dark:text-gray-100">
                 {channel.name}
               </h3>
-              <p className="text-sm text-gray-600 dark:text-gray-400">
-                {channel.description}
-              </p>
-              <p className="text-xs text-gray-500 dark:text-gray-500 mt-1">
-                Created by {channel.created_by_name}
-                {channelType === 'bch' && channel.service_account_username && (
-                  <> • Service Account: {channel.service_account_username}</>
-                )}
-              </p>
             </div>
-            
-            {isGlobalManager && (
-              <div className="flex items-center space-x-3">
-                {channelType === 'bch' && (
-                  <button
-                    onClick={() => handleGetCredentials(channel.id)}
-                    className="text-blue-600 hover:text-blue-500 dark:text-blue-400 dark:hover:text-blue-300"
-                    title="Get credentials"
-                  >
-                    <KeyIcon className="h-4 w-4" />
-                  </button>
-                )}
-                <button
-                  onClick={() => handleEdit(channel, channelType)}
-                  className="text-gray-600 hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300"
-                  title="Edit channel"
-                >
-                  <PencilIcon className="h-4 w-4" />
-                </button>
-                <button
-                  onClick={() => handleDelete(channel.id, channelType, channel.name)}
-                  className="text-red-600 hover:text-red-500 dark:text-red-400 dark:hover:text-red-300"
-                  title="Delete channel"
-                >
-                  <TrashIcon className="h-4 w-4" />
-                </button>
-              </div>
-            )}
+            <p className="text-sm text-gray-600 dark:text-gray-300">
+              {channel.description}
+            </p>
+            <p className="text-xs text-gray-500 dark:text-gray-500 mt-1">
+              Created by {channel.created_by_name}
+              {channelType === 'bch' && channel.service_account_username && (
+                <> • Service Account: {channel.service_account_username}</>
+              )}
+            </p>
           </div>
+
+          {isGlobalManager && (
+            <div className="flex items-center space-x-3">
+              {channelType === 'bch' && (
+                <button
+                  onClick={() => handleGetCredentials(channel.id)}
+                  className="text-blue-600 hover:text-blue-500 dark:text-blue-400 dark:hover:text-blue-300"
+                  title="Get credentials"
+                >
+                  <KeyIcon className="h-4 w-4" />
+                </button>
+              )}
+              <button
+                onClick={() => handleEdit(channel, channelType)}
+                className="text-gray-600 hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300"
+                title="Edit channel"
+              >
+                <PencilIcon className="h-4 w-4" />
+              </button>
+              <button
+                onClick={() => handleDelete(channel.id, channelType, channel.name)}
+                className="text-red-600 hover:text-red-500 dark:text-red-400 dark:hover:text-red-300"
+                title="Delete channel"
+              >
+                <TrashIcon className="h-4 w-4" />
+              </button>
+            </div>
+          )}
         </div>
       );
     });

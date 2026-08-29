@@ -947,6 +947,105 @@ describe('AuthentikSyncService.syncSingleUser the users_email_required_unless_de
   });
 });
 
+describe('AuthentikSyncService.syncSingleUser AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES skip (bugfix: authentik-sync-ignored-prefixes)', () => {
+  const originalEnv = process.env.AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    console.error = jest.fn();
+    console.log = jest.fn();
+  });
+
+  afterEach(() => {
+    if (originalEnv === undefined) {
+      delete process.env.AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES;
+    } else {
+      process.env.AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES = originalEnv;
+    }
+  });
+
+  it('skips a matching-prefix account before attempting the users upsert at all, logging at debug rather than warn', async () => {
+    process.env.AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES = 'etl-';
+
+    const user = {
+      pk: 16,
+      username: 'etl-adsbx',
+      email: '',
+      groups: [],
+      is_active: true,
+      attributes: {}
+    };
+
+    db.query.mockResolvedValue({ rows: [] });
+
+    await authentikSync.processBatch([user], {});
+
+    // No INSERT INTO users was ever attempted for this account -- the
+    // check-constraint violation this feature exists to avoid never has a
+    // chance to occur.
+    const usersUpsertCalls = db.query.mock.calls.filter(
+      ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO users')
+    );
+    expect(usersUpsertCalls).toHaveLength(0);
+
+    const userCacheWrites = db.query.mock.calls.filter(
+      ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO user_cache')
+    );
+    expect(userCacheWrites).toHaveLength(0);
+
+    expect(mockLoggerInstance.debug).toHaveBeenCalledWith(
+      expect.objectContaining({ authentikUserId: user.pk, username: user.username }),
+      expect.any(String)
+    );
+    expect(mockLoggerInstance.warn).not.toHaveBeenCalled();
+    expect(mockLoggerInstance.error).not.toHaveBeenCalled();
+  });
+
+  it('does not skip a non-matching-prefix account, even with the variable configured', async () => {
+    process.env.AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES = 'etl-';
+
+    const user = {
+      pk: 'user-not-ignored',
+      username: 'ada.lovelace',
+      email: 'ada@example.com',
+      groups: [],
+      is_active: true,
+      attributes: {}
+    };
+
+    db.query.mockResolvedValue({ rows: [{ id: 1, is_team_device: false }] });
+
+    await authentikSync.processBatch([user], {});
+
+    const usersUpsertCalls = db.query.mock.calls.filter(
+      ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO users')
+    );
+    expect(usersUpsertCalls).toHaveLength(1);
+  });
+
+  it('does not skip any account when the variable is unset (preserves existing behavior)', async () => {
+    delete process.env.AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES;
+
+    const user = {
+      pk: 'user-unset-var',
+      username: 'etl-adsbx',
+      email: 'x@example.com',
+      groups: [],
+      is_active: true,
+      attributes: {}
+    };
+
+    db.query.mockResolvedValue({ rows: [{ id: 1, is_team_device: false }] });
+
+    await authentikSync.processBatch([user], {});
+
+    const usersUpsertCalls = db.query.mock.calls.filter(
+      ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO users')
+    );
+    expect(usersUpsertCalls).toHaveLength(1);
+  });
+});
+
 describe('AuthentikSyncService.syncSingleUser push-to-Authentik guard is keyed on localUserId, not email (takserver-enrollment Requirement 5.6)', () => {
   beforeEach(() => {
     jest.clearAllMocks();

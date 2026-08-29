@@ -2,7 +2,7 @@ import { Routes, Route, Navigate } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import { authAPI, configAPI } from './services/api'
 import { isPublicOnlyPath } from './utils/publicPaths'
-import { setDisplayTimezone } from './utils/dateFormat'
+import { setDisplayTimezone, setDisplayLocale } from './utils/dateFormat'
 import { setExpiryWarningDays } from './utils/expiryWarning'
 import { ThemeProvider } from './contexts/ThemeContext'
 import Layout from './components/Layout'
@@ -34,8 +34,10 @@ function App() {
 
   useEffect(() => {
     // Install the operator-configured presentation values -- the display
-    // timezone (Requirements 18.7, 18.11) and the certificate-expiry
-    // warning threshold (Requirement 21.7). Both are Presentation_Config
+    // timezone and display locale (Requirements 18.7, 18.11; the locale is
+    // consulted only for the short timezone abbreviation `formatDateTime`
+    // appends) and the certificate-expiry warning threshold (Requirement
+    // 21.7). All are Presentation_Config
     // keys on the same public-config response, both are installed as module
     // state that no React render depends on, and both have to be in force
     // before the first row of any surface renders, so they are installed
@@ -77,6 +79,7 @@ function App() {
     publicConfig
       .then((response) => {
         setDisplayTimezone(response.data?.display_timezone)
+        setDisplayLocale(response.data?.display_locale)
         setExpiryWarningDays(response.data?.device_expiry_warning_days)
       })
       .catch(() => {

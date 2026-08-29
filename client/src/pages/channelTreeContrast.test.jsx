@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest'
 import React, { act } from 'react'
 import { createRoot } from 'react-dom/client'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router-dom'
+import { FolderIcon, FolderOpenIcon } from '@heroicons/react/24/outline'
 
 import Dashboard from './Dashboard.jsx'
 import GlobalChannels from './GlobalChannels.jsx'
@@ -75,6 +77,11 @@ vi.mock('../services/api', () => ({
   // named import of a missing export from a mocked ES module is a load-time
   // failure, so it is present.
   teamsAPI: {},
+  // Dashboard.jsx's pending-requests stat additionally calls
+  // adminAPI.getOrgInterest for a Global_Manager user (bugfix:
+  // pending-requests-badge). USER below carries no is_global_manager flag,
+  // so that branch never fires here, but the export must still exist.
+  adminAPI: { getOrgInterest: vi.fn() },
   deviceManagementAPI: { probeEnabled: vi.fn() },
   globalChannelsAPI: {
     getBchChannels: vi.fn(),
@@ -263,19 +270,64 @@ const measureStep = (background) => ({
 // Locating the rows
 // ===========================================================================
 //
-// Everything below is located by CLASS TOKEN, never by component name. It has
-// to be: the Disclosure_Chevron is a local `ChevronRightSmall` on
-// `Dashboard.jsx` and heroicons' `ChevronRightIcon` on `GlobalChannels.jsx`.
-// Both render an `<svg>` carrying the class string, so the class is the only
-// thing the two have in common.
+// The Disclosure_Chevron is located by CLASS TOKEN, never by component name.
+// It has to be: it is a local `ChevronRightSmall` on `Dashboard.jsx` and
+// heroicons' `ChevronRightIcon` on `GlobalChannels.jsx`. Both render an
+// `<svg>` carrying the class string, so the class is the only thing the two
+// have in common.
+//
+// The Folder_Icon is different: both pages render the SAME heroicons
+// `FolderIcon`/`FolderOpenIcon` component, and -- since the colour bugfix
+// this test file's own history documents (both a Folder_Row and a
+// Expandable_Channel_Row/plain-channel row now share one background AND the
+// folder icon now matches the row's own heading colour rather than a
+// distinct blue) -- colour no longer tells a Folder_Icon apart from the new
+// per-channel `RadioIcon`. So this locator matches the rendered `<path
+// d="...">` SHAPE instead, extracted directly from the real
+// `FolderIcon`/`FolderOpenIcon` components below via `renderToStaticMarkup`
+// (mirroring this project's `PlatformLogos.test.jsx`/`storeBadgeFidelity.test.jsx`
+// direct-dependency-fidelity convention) -- so this locator can never drift
+// from whatever glyph heroicons actually ships, and a future colour change
+// cannot silently make it stop finding rows again.
 
-const BLUE_TEXT = /^(?:[a-z]+:)*text-blue-\d{2,3}$/
+/** The real `d` attribute heroicons' FolderIcon/FolderOpenIcon render, read from the components themselves. */
+function pathDataOf(IconComponent) {
+  const markup = renderToStaticMarkup(React.createElement(IconComponent))
+  const match = markup.match(/<path[^>]*\sd="([^"]+)"/)
+  if (match === null) {
+    throw new Error(`pathDataOf: rendered markup for ${IconComponent.displayName ?? IconComponent} carries no <path d="...">`)
+  }
+  return match[1]
+}
+
+const FOLDER_ICON_PATH_DATA = new Set([pathDataOf(FolderIcon), pathDataOf(FolderOpenIcon)])
+
+const isFolderIconShape = (svg) => {
+  const d = svg.querySelector('path')?.getAttribute('d')
+  return d !== undefined && d !== null && FOLDER_ICON_PATH_DATA.has(d)
+}
+
 const GRAY_TEXT = /^(?:[a-z]+:)*text-gray-\d{2,3}$/
 
 const hasToken = (element, pattern) =>
   classesOf(element).some((className) => pattern.test(className))
 
 const svgsIn = (element) => Array.from(element.querySelectorAll('svg'))
+
+/**
+ * A Disclosure_Chevron among a set of `<svg>`s.
+ *
+ * Gray text alone used to be enough to tell the chevron apart from the
+ * (blue) Folder_Icon, but since the colour bugfix the Folder_Icon and the
+ * new per-channel/section RadioIcon are ALSO gray-token `<svg>`s -- so gray
+ * text alone would match whichever gray icon happens to appear first in DOM
+ * order, not necessarily the chevron. `transition-transform` is the
+ * chevron's own rotation-affordance class (`rotate-90` when expanded) and
+ * nothing else in either row renders it, so it is what actually
+ * distinguishes the chevron now.
+ */
+const findChevron = (svgs) =>
+  svgs.find((svg) => hasToken(svg, GRAY_TEXT) && classesOf(svg).includes('transition-transform'))
 
 /** The nearest ancestor (or the element itself) that paints the row. */
 function nearestRowBox(element, root) {
@@ -295,23 +347,25 @@ const descriptionIn = (row) =>
 /**
  * Every Folder_Row in a container, measured.
  *
- * A Folder_Row is found from its Folder_Icon: an `<svg>` carrying a blue text
- * token whose nearest background box also contains a gray-token `<svg>` (the
- * Disclosure_Chevron). That pair of conditions is what separates a real
- * Folder_Row from `GlobalChannels.jsx`'s `RadioIcon` section header, which is
- * also a blue-token `<svg>` but sits on the page background with no chevron
- * beside it and is outside Requirement 5.
+ * A Folder_Row is found from its Folder_Icon: an `<svg>` whose path data
+ * matches the real heroicons FolderIcon/FolderOpenIcon shape, and whose
+ * nearest background box also contains a Disclosure_Chevron (see
+ * `findChevron` above). That pair of conditions is what separates a real
+ * Folder_Row from `GlobalChannels.jsx`'s `RadioIcon` section header (a
+ * different shape entirely) and from a plain channel row's own `RadioIcon`
+ * (same shape as the section header, no chevron beside it) -- both outside
+ * Requirement 5.
  */
 function findFolderRows(container, page, glyph) {
   const rows = new Map()
 
   for (const icon of svgsIn(container)) {
-    if (!hasToken(icon, BLUE_TEXT)) continue
+    if (!isFolderIconShape(icon)) continue
 
     const row = nearestRowBox(icon, container)
     if (row === null) continue
 
-    const chevron = svgsIn(row).find((svg) => hasToken(svg, GRAY_TEXT))
+    const chevron = findChevron(svgsIn(row))
     if (chevron === undefined) continue
     if (rows.has(row)) continue
 
@@ -365,8 +419,8 @@ function findFolderRows(container, page, glyph) {
 /**
  * Every Expandable_Channel_Row in a container, measured.
  *
- * Found from its TOGGLE BUTTON -- a `<button>` containing a gray-token
- * `<svg>`. That button is where the hover background lives: the row itself
+ * Found from its TOGGLE BUTTON -- a `<button>` containing a Disclosure_Chevron
+ * (see `findChevron` above). That button is where the hover background lives: the row itself
  * carries no `hover:` class at all, and `hover:bg-gray-200
  * dark:hover:bg-gray-600` sits on the button, so the chevron inside it is
  * measured against the button's hover and the row's resting background. That
@@ -377,7 +431,7 @@ function findExpandableRows(container, page, glyph) {
   const rows = []
 
   for (const button of Array.from(container.querySelectorAll('button'))) {
-    const chevron = svgsIn(button).find((svg) => hasToken(svg, GRAY_TEXT))
+    const chevron = findChevron(svgsIn(button))
     if (chevron === undefined) continue
 
     const row = nearestRowBox(button, container)
@@ -777,11 +831,12 @@ describe('Channel_Tree_Row contrast: GlobalChannels.jsx (Reqs 5, 6, 7)', () => {
       expect(labels).toContain('Region')
     })
 
-    it('did not mistake the section-header icons for Folder_Icons', () => {
-      // `RadioIcon` (`text-blue-600`) and `GlobeAltIcon` (`text-green-600`)
-      // head the two sections. They sit on the page background rather than on
-      // a Channel_Tree_Row and are outside Requirement 5, so the locator must
-      // not pick them up -- two folders in the fixture, two rows measured.
+    it('did not mistake the section-header icons or a plain channel row\'s RadioIcon for a Folder_Icon', () => {
+      // `RadioIcon` heads both sections AND now sits on every channel row
+      // too (the channel-icon addition), and none of those are the folder
+      // GLYPH SHAPE the locator matches on -- so despite three RadioIcon
+      // sites in the fixture (two headers, one channel row: 'Ops - Alpha'),
+      // it still finds only the two real folders.
       expect(measured.collapsed.folderRows).toHaveLength(2)
     })
   })

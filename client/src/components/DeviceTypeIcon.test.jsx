@@ -156,6 +156,23 @@ describe('DeviceTypeIcon (mounted)', () => {
     expect(drawings.size).toBe(TYPES_AND_LABELS.length)
   })
 
+  it.each([
+    [CLIENT_TYPES.ANDROID, 'AndroidPlatformLogo'],
+    [CLIENT_TYPES.IOS, 'ApplePlatformLogo']
+  ])(
+    'renders the %s glyph without the old hand-drawn glyph\'s <circle> elements (Requirement 6.2)',
+    async (clientType) => {
+      // Should-not-regress check: the old AndroidGlyph/IosGlyph were hand-drawn
+      // inline SVGs built from <circle> primitives. Now that both are sourced
+      // from `simple-icons` via PlatformLogos.jsx, the rendered <svg> must
+      // contain no <circle> element -- proving the swap actually happened,
+      // not merely that some distinct glyph renders.
+      const icon = await mount({ clientType })
+
+      expect(icon.querySelector('svg').querySelector('circle')).toBeNull()
+    }
+  )
+
   it('is focusable and discloses its tooltip on focus as well as hover (Requirement 16.3)', async () => {
     const icon = await mount({ clientType: CLIENT_TYPES.ANDROID })
 

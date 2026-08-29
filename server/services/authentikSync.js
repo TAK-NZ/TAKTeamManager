@@ -3,6 +3,7 @@ const pLimit = require('p-limit');
 const db = require('../config/database');
 const { createLogger } = require('../config/logger');
 const { normaliseAuthentikEmail } = require('../utils/authentikEmail');
+const { isIgnoredAuthentikUsername } = require('../config/authentikSyncIgnore');
 
 const logger = createLogger('authentikSync');
 
@@ -187,6 +188,22 @@ class AuthentikSyncService {
 
   async syncSingleUser(user, groupMap, adminGroupName) {
     try {
+      // Skip a recognized ignored-prefix account (e.g. an ETL/service
+      // account with no email and no local is_team_device row) BEFORE
+      // attempting the upsert at all, rather than attempting it and
+      // relying on the users_email_required_unless_device catch below to
+      // discover it. That catch remains as a safety net for any
+      // emailless, non-prefixed, non-device account -- this check only
+      // shortcuts the ALREADY-KNOWN, ALREADY-EXPECTED case, so it logs at
+      // `debug` (an expected skip) rather than `warn` (a caught failure).
+      if (isIgnoredAuthentikUsername(user.username)) {
+        logger.debug(
+          { authentikUserId: user.pk, username: user.username },
+          'Skipped users/user_cache sync for a username matching AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES'
+        );
+        return;
+      }
+
       const groupNames = user.groups?.map(groupId => groupMap[groupId]).filter(Boolean) || [];
       const isAdmin = groupNames.includes(adminGroupName);
 
@@ -207,10 +224,12 @@ class AuthentikSyncService {
       // now (Requirement 5.3), guarded instead by the
       // users_email_required_unless_device CHECK constraint -- a Team_Owned_
       // Device satisfies it via its existing is_team_device = true row and
-      // therefore syncs normally. The one remaining reason a sync can still
-      // skip a principal is a genuinely emailless NON-device row with no
-      // local `users` row yet: the CHECK constraint rejects that INSERT, and
-      // the narrow catch below (23514 on
+      // therefore syncs normally. A recognized ignored-prefix account
+      // (AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES) is already skipped above,
+      // before reaching here. The one remaining reason a sync can still skip
+      // a principal is a genuinely emailless, non-prefixed, NON-device row
+      // with no local `users` row yet: the CHECK constraint rejects that
+      // INSERT, and the narrow catch below (23514 on
       // users_email_required_unless_device) is what decides it, logging at
       // warn and skipping that principal's users AND user_cache writes,
       // rather than silently excluding it as the old `if (user.email)` guard

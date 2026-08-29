@@ -604,6 +604,16 @@ describe('UserAttributesService.updateTeamUserAttributes - never writes callsign
     expect(global.fetch).toHaveBeenCalled(); // the Authentik PATCH via updateUserAttributes
   });
 
+  it('filters the roster query to direct memberships only (tm.inherited_from_team_id IS NULL)', async () => {
+    await UserAttributesService.updateTeamUserAttributes(TEAM_ID);
+
+    const rosterCall = pool.query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('FROM users u')
+    );
+    expect(rosterCall).toBeDefined();
+    expect(rosterCall[0]).toMatch(/tm\.inherited_from_team_id IS NULL/);
+  });
+
   it('the user_cache UPDATE call never references callsign_suffix', async () => {
     await UserAttributesService.updateTeamUserAttributes(TEAM_ID);
 
@@ -640,6 +650,109 @@ describe('UserAttributesService.updateTeamUserAttributes - never writes callsign
     for (const [sql] of callsignSuffixCalls) {
       expect(sql.trim().startsWith('SELECT')).toBe(true);
     }
+  });
+});
+
+/**
+ * Regression test for the Dashboard/Orgs & Teams stale-callsign bugfix,
+ * reproducing the exact real-world shape that caused it: an Organisation
+ * (id 3, e.g. "FENZ") edited to change its `callsignLevelSelection`,
+ * triggering `updateTeamUserAttributes(3)`, for a user who is a DIRECT
+ * member of a Sub_Team (id 4, e.g. "STL") within that Organisation's
+ * subtree. `TeamMembershipService.addUserToTeam` gives such a user TWO
+ * `team_memberships` rows: a direct one on the Sub_Team
+ * (`inherited_from_team_id IS NULL`) and an INHERITED one on the
+ * Organisation itself (`inherited_from_team_id = <Sub_Team id>`), and the
+ * Organisation is `teamId` here, so both rows fall inside
+ * `updateTeamUserAttributes`'s own team_tree CTE.
+ *
+ * Before the fix, the roster query returned BOTH rows for this one user,
+ * and the loop called `generateCallsign` once per row -- once (correctly)
+ * with `team_id = 4` (the Sub_Team, whose Ancestor_Chain includes the
+ * Sub_Team's own `callsign_prefix` segment) and once (incorrectly) with
+ * `team_id = 3` (the Organisation itself, whose Ancestor_Chain has no
+ * Sub_Team segment at all) -- leaving `user_cache.tak_callsign` holding
+ * whichever call's result the loop happened to process last, independent
+ * of which one is actually correct for this user's real, direct
+ * membership. This test asserts the CORRECT, single-row, Sub_Team-scoped
+ * outcome.
+ */
+describe('UserAttributesService.updateTeamUserAttributes - inherited-row regression (Dashboard/Orgs & Teams stale-callsign bugfix)', () => {
+  const ORGANISATION_ID = 3;
+  const SUB_TEAM_ID = 4;
+  const USER_ID = 2;
+  const AUTHENTIK_USER_ID = '14';
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.AUTHENTIK_URL = 'https://authentik.example.com';
+    process.env.AUTHENTIK_ADMIN_TOKEN = 'test-token';
+
+    global.fetch = jest.fn()
+      .mockResolvedValue({ ok: true, json: async () => ({ attributes: {} }) });
+
+    // The roster query, WITH the WHERE tm.inherited_from_team_id IS NULL
+    // filter applied, returns exactly ONE row for this user: their direct
+    // Sub_Team membership. Before the fix, an unfiltered version of this
+    // same mock would need to return two rows (team_id: 3 AND team_id: 4)
+    // to reproduce the bug -- this mock instead asserts the fix's
+    // contract directly: the query passed to pool.query must already be
+    // filtered, so simulating the filtered result here is the correct
+    // shape for a passing test against the FIXED implementation.
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('FROM users u')) {
+        expect(sql).toMatch(/tm\.inherited_from_team_id IS NULL/);
+        return Promise.resolve({
+          rows: [{ id: USER_ID, authentik_user_id: AUTHENTIK_USER_ID, team_id: SUB_TEAM_ID }]
+        });
+      }
+      if (typeof sql === 'string' && sql.includes('SELECT callsign_suffix FROM users')) {
+        return Promise.resolve({ rows: [{ callsign_suffix: 'C.Elsen' }] });
+      }
+      if (typeof sql === 'string' && sql.includes('UPDATE user_cache')) {
+        return Promise.resolve({ rows: [] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    // Team.getAncestorChain(4) (the Sub_Team) resolves the FULL chain:
+    // the Organisation (depth 0, callsign_level_selection includes 1) and
+    // the Sub_Team itself (depth 1, callsign_prefix 'STL'). Only this
+    // exact call (with SUB_TEAM_ID) must ever be made -- a call with
+    // ORGANISATION_ID would indicate the bug has regressed.
+    Team.getAncestorChain.mockImplementation((teamId) => {
+      if (teamId === SUB_TEAM_ID) {
+        return Promise.resolve([
+          organisationRow({ id: ORGANISATION_ID, callsignPrefix: 'FENZ', callsignLevelSelection: [1] }),
+          teamRow({ id: SUB_TEAM_ID, parentTeamId: ORGANISATION_ID, name: 'Southland', callsignPrefix: 'STL', depth: 1 })
+        ]);
+      }
+      // Any other teamId (in particular the Organisation's own id) means
+      // the inherited row was NOT filtered out -- fail loudly rather than
+      // silently returning a plausible-looking chain.
+      throw new Error(`Unexpected Team.getAncestorChain call with teamId=${teamId}`);
+    });
+  });
+
+  afterEach(() => {
+    delete global.fetch;
+  });
+
+  it('regenerates the callsign from the user\'s DIRECT Sub_Team membership, including the Sub_Team\'s own prefix segment', async () => {
+    const result = await UserAttributesService.updateTeamUserAttributes(ORGANISATION_ID);
+
+    expect(result).toBe(true);
+    expect(Team.getAncestorChain).toHaveBeenCalledTimes(1);
+    expect(Team.getAncestorChain).toHaveBeenCalledWith(SUB_TEAM_ID);
+
+    const userCacheCall = pool.query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('UPDATE user_cache')
+    );
+    expect(userCacheCall).toBeDefined();
+    const [, params] = userCacheCall;
+    // "FENZ-STL-C.Elsen", not the Organisation-only "FENZ-C.Elsen" the
+    // pre-fix loop could leave cached depending on iteration order.
+    expect(params).toContain('FENZ-STL-C.Elsen');
   });
 });
 

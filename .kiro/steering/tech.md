@@ -23,6 +23,7 @@ Client: React 18, Vite, Tailwind, React Router, Vitest + fast-check, jsdom.
 
 - **`npm run lint` does not lint `client/`.** Its scope is `server scripts database/*.js eslint.config.js`, and `client/` has no lint script. The Vitest suite is the only gate on client code.
 - **There are two independent test runners and two dependency trees.** Root Jest for `server/`, `client/`'s Vitest for `client/`. A client dependency must be added to `client/package.json`.
+- **`TAK_SERVER_ENROLLMENT_URL` and `TAK_SERVER_URL` are deliberately different hosts, not aliases.** `TAK_SERVER_URL` is the Marti certadmin API's mutual-TLS endpoint (`TakServerService.js`), often internal/admin-only. `TAK_SERVER_ENROLLMENT_URL` is the public, client-dialable host `DeviceEnrollmentService` builds enrollment URIs/QR payloads from. They can legitimately point at different hostnames and/or ports — never collapse them to one var.
 
 ## Conventions
 

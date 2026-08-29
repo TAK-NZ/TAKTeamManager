@@ -330,13 +330,17 @@ router.put('/:teamId', authenticateToken, authorize, [
     // (preserving the team's existing stored values, never rejecting the
     // request) when `teamId` is a Sub_Team. An Organisation's own
     // `color`/`callsignNameFormat` remain freely updatable here.
-    // Note: `callsign_prefix` is deliberately NOT passed to Team.update
-    // below -- Team.update's UPDATE statement has never had a column
-    // placeholder for it (the field has always been immutable post
-    // creation, matching TeamFormDialog.jsx's `disabled={!!editingTeam}`
-    // prefix input). The guard above runs BEFORE Team.update either way,
-    // so Criterion 2.2 is enforced regardless of whether the field is
-    // ever wired up to persist a change.
+    //
+    // Bugfix (callsign-handling): `callsign_prefix` is now also passed
+    // through. `Team.update` itself enforces the asymmetric rule: freely
+    // editable on a Sub_Team (there was previously NO supported way to
+    // correct a Sub_Team's prefix after creation at all), but a typed
+    // rejection (`OrganisationCallsignPrefixImmutableError`) for any
+    // actual CHANGE on an existing Organisation -- a no-op resubmission
+    // of the Organisation's current value is still accepted. The guard
+    // above (Criterion 2.2, "cannot be cleared") runs BEFORE Team.update
+    // either way, so an Organisation's prefix can never be blanked
+    // regardless of which layer would otherwise catch it.
     const updatedTeam = await Team.update(req.params.teamId, {
       name,
       description,
@@ -346,7 +350,8 @@ router.put('/:teamId', authenticateToken, authorize, [
       parent_team_id: parentTeamId,
       callsign_name_format: callsignNameFormat,
       callsign_level_selection: callsignLevelSelection,
-      pseudonymous_usernames: pseudonymousUsernames
+      pseudonymous_usernames: pseudonymousUsernames,
+      callsign_prefix: callsignPrefix
     });
 
     // When canJoin is explicitly set to false, revoke any existing
@@ -362,8 +367,25 @@ router.put('/:teamId', authenticateToken, authorize, [
     // `generateCallsign` -> `computeCallsignAttributes` only ever READS
     // the user's stored `callsign_suffix` (never recomputes/writes it,
     // per task 11.1), so this regeneration cannot alter it.
+    //
+    // Bugfix (callsign-handling): a `callsignPrefix` change is now also a
+    // trigger -- a Sub_Team's own prefix segment feeds directly into
+    // every one of its members' assembled callsign, so correcting a
+    // Sub_Team's prefix (previously impossible; see the note at the
+    // Team.update call above) must refresh the cached callsign the
+    // Dashboard/Orgs & Teams views read, exactly as a Callsign_Level_Selection
+    // or Callsign_Name_Format change already does. A no-op resubmission
+    // on an Organisation still reaches here (Team.update accepts it), but
+    // `updateTeamUserAttributes` is idempotent -- re-running it against
+    // an unchanged prefix regenerates the same values, so no extra guard
+    // is needed to distinguish "changed" from "resubmitted unchanged"
+    // here the way `Team.update` itself must.
     const UserAttributesService = require('../services/userAttributes');
-    if (callsignNameFormat !== undefined || callsignLevelSelection !== undefined) {
+    if (
+      callsignNameFormat !== undefined ||
+      callsignLevelSelection !== undefined ||
+      callsignPrefix !== undefined
+    ) {
       await UserAttributesService.updateTeamUserAttributes(req.params.teamId);
     }
 
@@ -402,6 +424,19 @@ router.put('/:teamId', authenticateToken, authorize, [
     // pseudonymousUsernames value. The error's own message states the
     // concrete consequence being prevented.
     if (error instanceof Team.PseudonymousUsernamePolicyImmutableError) {
+      return res.status(400).json({ error: error.message });
+    }
+    // Bugfix (callsign-handling): Team.update throws this BEFORE any
+    // UPDATE is attempted when a request attempts to CHANGE (not
+    // resubmit) an EXISTING Organisation's callsignPrefix -- a Sub_Team's
+    // prefix is unrestricted and never reaches this branch.
+    if (error instanceof Team.OrganisationCallsignPrefixImmutableError) {
+      return res.status(400).json({ error: error.message });
+    }
+    // Bugfix (callsign-handling): Team.update throws this when a
+    // callsignPrefix edit collides with idx_teams_callsign_prefix's
+    // UNIQUE constraint (another team already holds that prefix).
+    if (error instanceof Team.CallsignPrefixConflictError) {
       return res.status(400).json({ error: error.message });
     }
     getLogger().error({ err: error }, 'Failed to update team');

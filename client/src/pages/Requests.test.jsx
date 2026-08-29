@@ -11,7 +11,6 @@ import Layout from '../components/Layout.jsx';
 import { ThemeProvider } from '../contexts/ThemeContext.jsx';
 import FormattedDate, {
   DATE_PRECISION,
-  TOOLTIP_SEPARATOR,
   TOOLTIP_SIDES
 } from '../components/FormattedDate.jsx';
 import { requestsAPI } from '../services/api';
@@ -565,7 +564,9 @@ describe('Requests page team_change card (mounted)', () => {
       // Sideways, on a `<p>` host just as on a `<td>` one (Criterion 3.4).
       expect(card.innerHTML).not.toContain('top-full')
       expect(card.innerHTML).not.toContain('bottom-full')
-      expect(tooltip.textContent).toContain(TOOLTIP_SEPARATOR)
+      // The tooltip carries the Relative_Time phrase alone -- no resolved
+      // zone appended.
+      expect(tooltip.textContent.length).toBeGreaterThan(0)
     })
 
     it('carries the SAME placement classes as a table-cell position (Criterion 3.8)', async () => {

@@ -211,6 +211,14 @@ export default function TeamFormDialog({
   const editingTeam = mode === 'edit' ? team : null
   const teamLabel = editingTeam ? labelFor(editingTeam) : labelForNew(formData.parentTeamId)
 
+  // Bugfix (callsign-handling): the Prefix field is locked ONLY when
+  // editing an EXISTING ORGANISATION (no parentTeamId) -- mirroring the
+  // server's `Team.update` OrganisationCallsignPrefixImmutableError
+  // guard exactly. A Sub_Team's prefix (parentTeamId present) stays
+  // editable on both create AND edit; there was previously no supported
+  // way to correct one after creation at all.
+  const prefixLocked = !!editingTeam && !formData.parentTeamId
+
   const handleSubmit = async (e) => {
     e.preventDefault()
 
@@ -297,16 +305,17 @@ export default function TeamFormDialog({
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                   Prefix{!formData.parentTeamId && ' *'}
                   <FieldLockIndicator
-                    locked={true}
-                    lockedReason="Cannot be changed after the team is created"
+                    locked={prefixLocked}
+                    lockedReason="An Organisation's Prefix cannot be changed after creation: every device and user identifier already minted under it is derived from this value"
+                    editableReason="A Sub-team's Prefix may be corrected at any time -- it participates only in Callsign generation, never in a device/user identifier"
                   />
                 </label>
                 <input
                   type="text"
                   value={formData.callsignPrefix}
-                  onChange={editingTeam ? undefined : (e) => setFormData({...formData, callsignPrefix: e.target.value})}
-                  className={`input w-full ${editingTeam ? 'bg-gray-100 dark:bg-gray-600 text-gray-500' : ''}`}
-                  disabled={!!editingTeam}
+                  onChange={prefixLocked ? undefined : (e) => setFormData({...formData, callsignPrefix: e.target.value})}
+                  className={`input w-full ${prefixLocked ? 'bg-gray-100 dark:bg-gray-600 text-gray-500' : ''}`}
+                  disabled={prefixLocked}
                   // takserver-enrollment Requirement 2.1/2.2 (task 4.2):
                   // required WHEN this dialog represents an Organisation
                   // (no parentTeamId) -- an Organisation cannot mint a
@@ -314,17 +323,18 @@ export default function TeamFormDialog({
                   // a Sub_Team, exactly as today (Criterion 2.3). A
                   // disabled required field is not validated by the
                   // browser at all, which is why doSubmit's own check
-                  // above is the real gate on edit; this attribute is the
-                  // "stated as text rather than discovered on submit"
-                  // half of the requirement for the CREATE form, where
-                  // the field is not yet disabled.
+                  // above is the real gate whenever the field is locked;
+                  // this attribute is the "stated as text rather than
+                  // discovered on submit" half of the requirement for the
+                  // CREATE form and for a Sub_Team edit, where the field
+                  // is not disabled.
                   required={!formData.parentTeamId}
                   pattern={CALLSIGN_PREFIX_PATTERN}
                   title="Only letters and digits are allowed (no -)"
                   placeholder={formData.parentTeamId ? "STL, CHC, etc." : "FENZ, DOC, etc."}
                 />
                 <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                  {editingTeam ? 'Prefix cannot be changed after team creation' :
+                  {prefixLocked ? "An Organisation's Prefix cannot be changed after creation" :
                    formData.parentTeamId ? 'Sub-team prefix for callsigns. Example: FENZ-STL-John Smith' :
                    'Required for an Organisation. Team prefix for callsigns. Example: FENZ-John Smith'}
                 </p>

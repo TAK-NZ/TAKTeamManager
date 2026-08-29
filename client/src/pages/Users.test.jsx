@@ -3,7 +3,6 @@ import React, { act } from 'react'
 import { createRoot } from 'react-dom/client'
 
 import Users from './Users.jsx'
-import { TOOLTIP_SEPARATOR } from '../components/FormattedDate.jsx'
 import { usersAPI, deviceManagementAPI } from '../services/api'
 import { setDisplayTimezone, DEFAULT_DISPLAY_TIMEZONE } from '../utils/dateFormat'
 
@@ -159,11 +158,10 @@ describe('Users Last Login cell renders through FormattedDate (task 6.7)', () =>
     expect(container.innerHTML).not.toContain('top-full')
     expect(container.innerHTML).not.toContain('bottom-full')
 
-    // Two facts, the phrase first and the resolved zone second, separated
-    // explicitly (Criteria 2.8, 2.10), with no ISO instant (Criterion 2.11).
-    const [phrase, ...rest] = tooltip.textContent.split(TOOLTIP_SEPARATOR)
-    expect(phrase.length).toBeGreaterThan(0)
-    expect(rest.join(TOOLTIP_SEPARATOR)).toBe('UTC')
+    // The tooltip carries the Relative_Time phrase alone -- no resolved
+    // zone appended (removed once the visible date-and-time string carried
+    // its own abbreviation) and no ISO instant.
+    expect(tooltip.textContent.length).toBeGreaterThan(0)
     expect(tooltip.textContent).not.toContain(REPORTED_INSTANT)
 
     await act(async () => {

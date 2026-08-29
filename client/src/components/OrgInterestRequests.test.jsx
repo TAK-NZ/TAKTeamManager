@@ -11,7 +11,6 @@ import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 
 import OrgInterestRequests from './OrgInterestRequests.jsx';
-import { TOOLTIP_SEPARATOR } from './FormattedDate.jsx';
 import { adminAPI } from '../services/api';
 import { setDisplayTimezone, DEFAULT_DISPLAY_TIMEZONE } from '../utils/dateFormat';
 
@@ -160,7 +159,7 @@ describe('the Date cell renders through FormattedDate (Criteria 2.3, 2.4)', () =
   it('renders the timestamp in the installed zone, unchanged character for character', async () => {
     await mountWith([requestRow()]);
 
-    expect(dateCell().textContent).toBe('2026-03-12 00:58');
+    expect(dateCell().textContent).toBe('2026-03-12 00:58 UTC');
     // The raw ISO value the row carries must not reach the page.
     expect(container.textContent).not.toContain(REPORTED_INSTANT);
   });
@@ -220,12 +219,10 @@ describe('the Date cell renders through FormattedDate (Criteria 2.3, 2.4)', () =
     expect(tooltip.className).not.toContain('left-full');
     expect(container.innerHTML).not.toContain('top-full');
     expect(container.innerHTML).not.toContain('bottom-full');
-    // Two facts, the phrase first and the zone this block installed second,
-    // separated explicitly (Criteria 2.8, 2.10) -- and no ISO instant
-    // (Criterion 2.11).
-    const [phrase, ...rest] = tooltip.textContent.split(TOOLTIP_SEPARATOR);
-    expect(phrase.length).toBeGreaterThan(0);
-    expect(rest.join(TOOLTIP_SEPARATOR)).toBe('UTC');
+    // The tooltip carries the Relative_Time phrase alone -- the visible
+    // string already carries its own zone abbreviation, so the tooltip no
+    // longer repeats it -- and no ISO instant either way.
+    expect(tooltip.textContent.length).toBeGreaterThan(0);
     expect(tooltip.textContent).not.toContain(REPORTED_INSTANT);
 
     await act(async () => {
@@ -233,7 +230,7 @@ describe('the Date cell renders through FormattedDate (Criteria 2.3, 2.4)', () =
     });
     expect(tooltipOf()).toBeNull();
     // Back to the exact string the first test in this block asserts.
-    expect(dateCell().textContent).toBe('2026-03-12 00:58');
+    expect(dateCell().textContent).toBe('2026-03-12 00:58 UTC');
   });
 
   it.each([

@@ -15,24 +15,27 @@ import {
   QrCodeIcon,
   ArrowDownTrayIcon
 } from '@heroicons/react/24/outline'
-import { authAPI, requestsAPI } from '../services/api'
+import { authAPI, requestsAPI, adminAPI } from '../services/api'
 import { useTheme } from '../contexts/ThemeContext'
 
 const getNavigation = (user) => {
   const baseNavigation = [
     { name: 'Dashboard', href: '/dashboard', icon: HomeIcon },
     { name: 'Orgs & Teams', href: '/teams', icon: UserGroupIcon },
-    // Enrollment carries no permission identifier and no role gate: every
-    // signed-in user must see it regardless of team membership, because a
-    // user with no team membership at all is exactly the user who needs to
-    // self-enroll a device (takserver-enrollment Criterion 15.2). The
-    // authorization decision happens on the API call, not on nav visibility.
-    { name: 'Enrollment', href: '/enrollment', icon: QrCodeIcon },
-    // Downloads carries no permission identifier and no role gate either,
-    // for the same reason as Enrollment above: a user who has not yet been
-    // placed in a Team is exactly the user installing a client for the
-    // first time (takserver-enrollment Criterion 12.9).
+    // Downloads comes before Enrollment: the workflow only runs in one
+    // direction (install the client, then enroll it -- Downloads.jsx's own
+    // subtitle says as much), so the first step belongs first in the nav.
+    // Carries no permission identifier and no role gate: a user who has not
+    // yet been placed in a Team is exactly the user installing a client for
+    // the first time (takserver-enrollment Criterion 12.9).
     { name: 'Downloads', href: '/downloads', icon: ArrowDownTrayIcon },
+    // Enrollment carries no permission identifier and no role gate either,
+    // for the same reason as Downloads above: every signed-in user must see
+    // it regardless of team membership, because a user with no team
+    // membership at all is exactly the user who needs to self-enroll a
+    // device (takserver-enrollment Criterion 15.2). The authorization
+    // decision happens on the API call, not on nav visibility.
+    { name: 'Enrollment', href: '/enrollment', icon: QrCodeIcon },
   ]
   
   if (user?.isAdmin || user?.is_global_manager) {
@@ -95,12 +98,41 @@ export default function Layout({ children, user }) {
     if (!user?.isAdmin && !user?.is_global_manager) return
 
     const fetchPendingCount = async () => {
-      try {
-        const response = await requestsAPI.getPending()
-        setPendingRequestCount(response.data.requests?.length || 0)
-      } catch (e) {
-        // Silent fail — badge just won't show
+      // Two independent request systems feed this one badge: the
+      // access_requests-backed team access/change/role/name requests
+      // (requestsAPI.getPending, visible to any admin) and, for a
+      // Global_Manager only, pending Org_Interest_Requests -- a separate
+      // table (`org_interest_requests`) surfaced today only via its own
+      // `OrgInterestRequests` panel on /requests. Without this, a
+      // Global_Manager could have a pending org interest lead and see no
+      // badge and a Dashboard reading "0 pending requests" at all, even
+      // though /requests visibly shows it.
+      //
+      // Fetched with Promise.allSettled, not Promise.all: an admin:manage
+      // (non-global) caller has no `admin:org_interest:read` permission
+      // and gets a 403 on that call, which must not blank out the
+      // access_requests count they DO have permission for.
+      const promises = [requestsAPI.getPending()]
+      if (user?.is_global_manager) {
+        promises.push(adminAPI.getOrgInterest({ status: 'pending' }))
       }
+
+      const [accessRequestsResult, orgInterestResult] = await Promise.allSettled(promises)
+
+      const accessRequestsCount =
+        accessRequestsResult.status === 'fulfilled'
+          ? accessRequestsResult.value.data.requests?.length || 0
+          : 0
+      const orgInterestCount =
+        orgInterestResult?.status === 'fulfilled'
+          ? orgInterestResult.value.data.requests?.length || 0
+          : 0
+
+      // Silent fail on either individual call — badge just reflects
+      // whichever count(s) succeeded, matching this effect's existing
+      // "silent fail, badge won't show" convention rather than
+      // introducing a new error surface.
+      setPendingRequestCount(accessRequestsCount + orgInterestCount)
     }
 
     fetchPendingCount()
@@ -145,12 +177,15 @@ export default function Layout({ children, user }) {
       <div className={`fixed inset-0 z-50 lg:hidden ${sidebarOpen ? '' : 'hidden'}`}>
         <div className="fixed inset-0 bg-gray-600 bg-opacity-75" onClick={() => setSidebarOpen(false)} />
         <div className="fixed inset-y-0 left-0 flex w-64 flex-col bg-white dark:bg-gray-800">
-          <div className="flex h-16 items-center justify-between py-4">
-            <img 
-              src="/assets/tak-nz-brand-wide.svg" 
-              alt="TAK.NZ" 
-              className="h-10 w-auto"
-            />
+          <div className="flex h-16 items-center justify-between px-2 py-4">
+            <div className="flex items-center gap-x-2">
+              <img 
+                src="/assets/tak-nz-logo.svg" 
+                alt="" 
+                className="h-8 w-8 flex-shrink-0"
+              />
+              <span className="text-lg font-bold text-gray-900 dark:text-gray-100">TAK Team Manager</span>
+            </div>
             <button onClick={() => setSidebarOpen(false)}>
               <XMarkIcon className="h-6 w-6" />
             </button>
@@ -185,12 +220,13 @@ export default function Layout({ children, user }) {
       {/* Desktop sidebar */}
       <div className="hidden lg:fixed lg:inset-y-0 lg:flex lg:w-64 lg:flex-col">
         <div className="flex flex-col flex-grow bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700">
-          <div className="flex h-16 items-center py-4">
+          <div className="flex h-16 items-center gap-x-2 px-2 py-4">
             <img 
-              src="/assets/tak-nz-brand-wide.svg" 
-              alt="TAK.NZ" 
-              className="h-10 w-auto"
+              src="/assets/tak-nz-logo.svg" 
+              alt="" 
+              className="h-8 w-8 flex-shrink-0"
             />
+            <span className="text-lg font-bold text-gray-900 dark:text-gray-100">TAK Team Manager</span>
           </div>
           <nav className="flex-1 space-y-1 px-2 py-4">
             {navigation.map((item) => (
@@ -229,7 +265,19 @@ export default function Layout({ children, user }) {
             <Bars3Icon className="h-6 w-6" />
           </button>
           <div className="flex flex-1 justify-between items-center px-4">
-            <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">TAK Team Manager</h1>
+            {/* Invisible (not display:none) on lg+: the desktop sidebar
+                already carries the "TAK Team Manager" wordmark next to
+                its logo mark, always visible there, so a second visible
+                copy here would be a plain duplicate. `invisible` (rather
+                than `hidden`) keeps this element's width in the flex
+                layout so the sibling controls block below keeps the same
+                right-hand position `justify-between` gave it before --
+                collapsing the width would shift the theme toggle/user
+                info/logout button left on desktop. On mobile the sidebar
+                is an off-canvas drawer (hidden until the hamburger is
+                tapped), so this stays the only app-name branding a
+                mobile user sees by default. */}
+            <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100 lg:invisible">TAK Team Manager</h1>
             <div className="flex items-center space-x-4">
               <button
                 onClick={toggleTheme}

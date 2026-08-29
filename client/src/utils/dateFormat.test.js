@@ -31,7 +31,11 @@ afterEach(() => {
  * `h24` cycle rendering midnight as `24:00` fails too.
  */
 const DATE_SHAPE = /^\d{4}-\d{2}-\d{2}$/
-const DATE_TIME_SHAPE = /^\d{4}-\d{2}-\d{2} (?:[01]\d|2[0-3]):[0-5]\d$/
+// The trailing ` <abbreviation>` is OPTIONAL in this shape: a zone/locale
+// pair the runtime rejects for the abbreviation formatter still renders the
+// numeric part alone (see `readZoneAbbreviation`'s never-throw discipline),
+// so the shape assertions below must accept both.
+const DATE_TIME_SHAPE = /^\d{4}-\d{2}-\d{2} (?:[01]\d|2[0-3]):[0-5]\d(?: \S+)?$/
 
 describe('formatDate', () => {
   it('formats an ISO timestamp as yyyy-mm-dd', () => {
@@ -57,14 +61,14 @@ describe('formatDate', () => {
 })
 
 describe('formatDateTime', () => {
-  it('formats an ISO timestamp as yyyy-mm-dd HH:MM (24-hour)', () => {
-    expect(formatDateTime('2024-03-05T14:30:00.000Z')).toBe('2024-03-06 03:30')
+  it('formats an ISO timestamp as yyyy-mm-dd HH:MM (24-hour), with a short zone abbreviation', () => {
+    expect(formatDateTime('2024-03-05T14:30:00.000Z')).toBe('2024-03-06 03:30 NZDT')
   })
 
   it('pads single-digit hour/minute with a leading zero', () => {
     // 12:05Z is 01:05 the next day in Auckland (+13), so this still
     // exercises a single-digit hour as the test name says.
-    expect(formatDateTime('2024-03-04T12:05:00.000Z')).toBe('2024-03-05 01:05')
+    expect(formatDateTime('2024-03-04T12:05:00.000Z')).toBe('2024-03-05 01:05 NZDT')
   })
 
   it('returns the fallback for null/undefined', () => {
@@ -81,13 +85,13 @@ describe('the measured defect, pinned as a regression test (Requirement 18.2)', 
 
   it('renders the reported instant in the operator zone, not the browser zone', () => {
     setDisplayTimezone('Pacific/Auckland')
-    expect(formatDateTime(REPORTED_INSTANT)).toBe('2026-03-12 13:58')
+    expect(formatDateTime(REPORTED_INSTANT)).toBe('2026-03-12 13:58 NZDT')
     expect(formatDate(REPORTED_INSTANT)).toBe('2026-03-12')
   })
 
   it('renders the same instant a calendar day earlier in America/Los_Angeles', () => {
     setDisplayTimezone('America/Los_Angeles')
-    expect(formatDateTime(REPORTED_INSTANT)).toBe('2026-03-11 17:58')
+    expect(formatDateTime(REPORTED_INSTANT)).toBe('2026-03-11 17:58 GMT-7')
     expect(formatDate(REPORTED_INSTANT)).toBe('2026-03-11')
   })
 
@@ -95,16 +99,16 @@ describe('the measured defect, pinned as a regression test (Requirement 18.2)', 
     // Requirement 18.7: a client that never received the public config
     // behaves exactly like one that received the default.
     expect(getDisplayTimezone()).toBe(DEFAULT_DISPLAY_TIMEZONE)
-    expect(formatDateTime(REPORTED_INSTANT)).toBe('2026-03-12 13:58')
+    expect(formatDateTime(REPORTED_INSTANT)).toBe('2026-03-12 13:58 NZDT')
   })
 
   it('renders it in a half-hour and a 45-minute offset zone', () => {
     // Zones whose offset is not a whole number of hours are where an
     // implementation that shifted by hours would silently be wrong.
     setDisplayTimezone('Asia/Kolkata')
-    expect(formatDateTime(REPORTED_INSTANT)).toBe('2026-03-12 06:28')
+    expect(formatDateTime(REPORTED_INSTANT)).toBe('2026-03-12 06:28 GMT+5:30')
     setDisplayTimezone('Pacific/Chatham')
-    expect(formatDateTime(REPORTED_INSTANT)).toBe('2026-03-12 14:43')
+    expect(formatDateTime(REPORTED_INSTANT)).toBe('2026-03-12 14:43 CHADT')
   })
 })
 
@@ -122,32 +126,33 @@ describe('the emitted format is exactly yyyy-mm-dd / yyyy-mm-dd HH:MM (Requireme
     // (+13, NZDT). `hourCycle: 'h24'` would render this as `24:00` against
     // the PREVIOUS day -- both the hour and the date would be wrong.
     setDisplayTimezone('Pacific/Auckland')
-    expect(formatDateTime('2026-03-11T11:00:00.000Z')).toBe('2026-03-12 00:00')
+    expect(formatDateTime('2026-03-11T11:00:00.000Z')).toBe('2026-03-12 00:00 NZDT')
     expect(formatDate('2026-03-11T11:00:00.000Z')).toBe('2026-03-12')
 
     // And in a zone where midnight is not an offset artefact.
     setDisplayTimezone('UTC')
-    expect(formatDateTime('2026-03-12T00:00:00.000Z')).toBe('2026-03-12 00:00')
+    expect(formatDateTime('2026-03-12T00:00:00.000Z')).toBe('2026-03-12 00:00 UTC')
   })
 
   it('zero-pads every component, including a single-digit month, day and hour', () => {
     setDisplayTimezone('UTC')
     expect(formatDate('2026-01-02T03:04:00.000Z')).toBe('2026-01-02')
-    expect(formatDateTime('2026-01-02T03:04:00.000Z')).toBe('2026-01-02 03:04')
+    expect(formatDateTime('2026-01-02T03:04:00.000Z')).toBe('2026-01-02 03:04 UTC')
   })
 
   it('renders 23:59 as 23:59, the other end of the h23 range', () => {
     setDisplayTimezone('UTC')
-    expect(formatDateTime('2026-12-31T23:59:59.999Z')).toBe('2026-12-31 23:59')
+    expect(formatDateTime('2026-12-31T23:59:59.999Z')).toBe('2026-12-31 23:59 UTC')
   })
 
   it('keeps the shape across a daylight-saving transition in the display zone', () => {
     // NZDT ends at 03:00 NZDT on 2026-04-05, i.e. 14:00Z on 2026-04-04:
     // +13 before, +12 after. Both sides still render the same shape, and
-    // the wall clock moves back an hour rather than forward.
+    // the wall clock moves back an hour rather than forward -- and the
+    // abbreviation itself flips from NZDT to NZST across the transition.
     setDisplayTimezone('Pacific/Auckland')
-    expect(formatDateTime('2026-04-04T13:30:00.000Z')).toBe('2026-04-05 02:30')
-    expect(formatDateTime('2026-04-04T14:30:00.000Z')).toBe('2026-04-05 02:30')
+    expect(formatDateTime('2026-04-04T13:30:00.000Z')).toBe('2026-04-05 02:30 NZDT')
+    expect(formatDateTime('2026-04-04T14:30:00.000Z')).toBe('2026-04-05 02:30 NZST')
   })
 })
 
@@ -194,7 +199,7 @@ describe('an unrecognised display timezone (Requirement 18.8)', () => {
       // A mistyped zone costs the app its configured zone and NOTHING else:
       // the same correctly formatted default-zone date it would have had if
       // the variable had been left unset.
-      expect(formatDateTime('2026-03-12T00:58:04.508Z')).toBe('2026-03-12 13:58')
+      expect(formatDateTime('2026-03-12T00:58:04.508Z')).toBe('2026-03-12 13:58 NZDT')
     }
   })
 
@@ -277,7 +282,12 @@ describe('the zone is resolved once and the formatter reused (Requirement 18.9)'
   it('does not re-walk the fallback chain per formatted value for a bad zone', () => {
     countingConstructions((count) => {
       setDisplayTimezone('Pacific/Aukland')
-      formatDate(INSTANTS[0])
+      // `formatDateTime`, not `formatDate`, so BOTH the numeric formatter's
+      // fallback walk and the zone-abbreviation formatter's own resolution
+      // happen before `afterFirst` is measured -- otherwise the first
+      // `formatDateTime` call inside the loop below would still be paying
+      // for the abbreviation formatter's one-time construction.
+      formatDateTime(INSTANTS[0])
       const afterFirst = count()
       for (const instant of INSTANTS) {
         formatDateTime(instant)
@@ -289,11 +299,11 @@ describe('the zone is resolved once and the formatter reused (Requirement 18.9)'
   it('re-resolves when a new zone is installed, so the memo is not stale', () => {
     countingConstructions((count) => {
       setDisplayTimezone('UTC')
-      expect(formatDateTime('2026-03-12T00:58:04.508Z')).toBe('2026-03-12 00:58')
+      expect(formatDateTime('2026-03-12T00:58:04.508Z')).toBe('2026-03-12 00:58 UTC')
       const afterFirst = count()
 
       setDisplayTimezone('Pacific/Auckland')
-      expect(formatDateTime('2026-03-12T00:58:04.508Z')).toBe('2026-03-12 13:58')
+      expect(formatDateTime('2026-03-12T00:58:04.508Z')).toBe('2026-03-12 13:58 NZDT')
       expect(count()).toBeGreaterThan(afterFirst)
     })
   })

@@ -9,7 +9,23 @@
  * `formatDate` renders the date component only (yyyy-mm-dd); `formatDateTime`
  * additionally appends a 24-hour HH:MM time component (still yyyy-mm-dd
  * for the date part) for timestamps where the time is also meaningful
- * (e.g. "last synced", audit log entries).
+ * (e.g. "last synced", audit log entries), followed by a short timezone
+ * abbreviation (e.g. "NZST", "PDT") so a reader can tell WHICH zone that
+ * wall clock is in without leaving the page.
+ *
+ * ## The display locale (abbreviation only)
+ *
+ * The short abbreviation is resolved through a SEPARATE, configurable
+ * locale (`DISPLAY_LOCALE`, installed via `setDisplayLocale`) -- never
+ * through the numeric formatter above, and never through the browser's
+ * own locale. `Intl.DateTimeFormat`'s `timeZoneName: 'short'` resolves
+ * differently per locale for the SAME IANA zone: `Pacific/Auckland` reads
+ * "NZST"/"NZDT" under `en-NZ` but the less legible "GMT+12" under `en-US`.
+ * The numeric `yyyy-mm-dd HH:MM` components are NOT affected by this
+ * locale and stay assembled by this module itself, exactly as before --
+ * the locale is consulted for the abbreviation suffix alone, which is a
+ * narrower and deliberately separate concern from the "never hand
+ * formatting to a locale-aware formatter" rule below.
  *
  * ## The display timezone (Requirement 18)
  *
@@ -53,6 +69,16 @@
 export const DEFAULT_DISPLAY_TIMEZONE = 'Pacific/Auckland'
 
 /**
+ * The locale used, for the short timezone abbreviation ONLY, when no
+ * display locale has been installed, when the public config is
+ * unreachable, and when it omits `display_locale` -- the same
+ * install/fallback shape `DEFAULT_DISPLAY_TIMEZONE` already has. `en-NZ`
+ * resolves `Pacific/Auckland` to "NZST"/"NZDT" rather than the less
+ * legible "GMT+12" a generic locale like `en-US` would produce.
+ */
+export const DEFAULT_DISPLAY_LOCALE = 'en-NZ'
+
+/**
  * The last link of the fallback chain. `UTC` is last because it is the one
  * zone any runtime with `Intl` support at all is required to accept.
  */
@@ -61,10 +87,17 @@ const LAST_RESORT_TIMEZONE = 'UTC'
 /** The zone asked for, before the fallback chain has had a say. */
 let configuredTimezone = DEFAULT_DISPLAY_TIMEZONE
 
+/** The locale asked for, before its own (shorter) fallback chain has had a say. */
+let configuredLocale = DEFAULT_DISPLAY_LOCALE
+
 /** Memoised resolution state -- see `resolveFormatter`. */
 let resolutionAttempted = false
 let partsFormatter = null
 let resolvedTimezone = ''
+
+/** Memoised resolution state for the abbreviation formatter -- see `resolveZoneNameFormatter`. */
+let zoneNameResolutionAttempted = false
+let zoneNameFormatter = null
 
 /**
  * A single formatter carries every component both functions need, so a
@@ -101,6 +134,88 @@ function localTimezone() {
   } catch {
     return ''
   }
+}
+
+/**
+ * A formatter that reads ONLY the short timezone abbreviation for
+ * `timeZone` under `locale` -- e.g. "NZST" for `Pacific/Auckland` under
+ * `en-NZ`. Separate from `buildFormatter` above because it varies by a
+ * different axis (locale, not zone) and exists to serve one field rather
+ * than five.
+ * @param {string|undefined} locale `undefined` asks for the runtime's own
+ *   default locale, the last link of the fallback chain below.
+ * @param {string} timeZone
+ * @returns {Intl.DateTimeFormat|null} null when the runtime rejects either.
+ */
+function buildZoneNameFormatter(locale, timeZone) {
+  try {
+    const formatter = new Intl.DateTimeFormat(locale, {
+      timeZone,
+      timeZoneName: 'short'
+    })
+    formatter.formatToParts(new Date(0))
+    return formatter
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Walks the LOCALE fallback chain at most once per installed locale/zone
+ * pair and caches the result, mirroring `resolveFormatter`'s discipline.
+ *
+ * The timezone itself is resolved first (via `resolveFormatter`), because
+ * the abbreviation is meaningless without a zone the runtime accepts --
+ * this function never walks the zone's own fallback chain a second time,
+ * it reuses whatever `resolvedTimezone` already settled on.
+ *
+ * @returns {Intl.DateTimeFormat|null} null only when no link constructed.
+ */
+function resolveZoneNameFormatter() {
+  resolveFormatter()
+  if (zoneNameResolutionAttempted) {
+    return zoneNameFormatter
+  }
+  zoneNameResolutionAttempted = true
+  const timeZone = resolvedTimezone || LAST_RESORT_TIMEZONE
+  // `undefined` (the runtime's own default locale) is the last, always-
+  // constructing link -- mirroring `LAST_RESORT_TIMEZONE`'s role above.
+  for (const locale of [configuredLocale, DEFAULT_DISPLAY_LOCALE, undefined]) {
+    if (locale !== undefined && (typeof locale !== 'string' || locale.trim() === '')) {
+      continue
+    }
+    const formatter = buildZoneNameFormatter(locale, timeZone)
+    if (formatter) {
+      zoneNameFormatter = formatter
+      return zoneNameFormatter
+    }
+  }
+  zoneNameFormatter = null
+  return null
+}
+
+/**
+ * The short timezone abbreviation for `date` in the resolved display
+ * timezone and locale -- e.g. "NZST", "PDT", "GMT+12". Never throws.
+ * @param {Date} date
+ * @returns {string} the abbreviation, or `''` when nothing constructed.
+ */
+function readZoneAbbreviation(date) {
+  const formatter = resolveZoneNameFormatter()
+  if (!formatter) {
+    return ''
+  }
+  try {
+    for (const part of formatter.formatToParts(date)) {
+      if (part.type === 'timeZoneName') {
+        return part.value
+      }
+    }
+  } catch {
+    // Fall through to '': a missing abbreviation is a smaller loss than a
+    // thrown render (Requirement 18.8's discipline, applied to the suffix).
+  }
+  return ''
 }
 
 /**
@@ -151,6 +266,10 @@ export function setDisplayTimezone(zone) {
   resolutionAttempted = false
   partsFormatter = null
   resolvedTimezone = ''
+  // The abbreviation formatter is built against the RESOLVED timezone, so a
+  // new zone invalidates it too, even though the locale itself is unchanged.
+  zoneNameResolutionAttempted = false
+  zoneNameFormatter = null
 }
 
 /**
@@ -162,6 +281,25 @@ export function setDisplayTimezone(zone) {
 export function getDisplayTimezone() {
   resolveFormatter()
   return resolvedTimezone
+}
+
+/**
+ * Installs the display locale (typically the `display_locale` key of the
+ * public config), consulted ONLY for the short timezone abbreviation
+ * `formatDateTime` appends. Discards the memoised abbreviation formatter
+ * so the next formatted date resolves the new locale. An unusable value --
+ * null, undefined, a non-string, an empty string -- installs
+ * `DEFAULT_DISPLAY_LOCALE`, mirroring `setDisplayTimezone`'s discipline. A
+ * locale the runtime does not recognise is not rejected here: it is
+ * resolved lazily through the fallback chain.
+ * @param {string|null|undefined} locale
+ * @returns {void}
+ */
+export function setDisplayLocale(locale) {
+  configuredLocale =
+    typeof locale === 'string' && locale.trim() !== '' ? locale.trim() : DEFAULT_DISPLAY_LOCALE
+  zoneNameResolutionAttempted = false
+  zoneNameFormatter = null
 }
 
 /**
@@ -236,8 +374,12 @@ export function formatDate(value, fallback = '') {
 /**
  * @param {string|number|Date|null|undefined} value
  * @param {string} [fallback]
- * @returns {string} `yyyy-mm-dd HH:MM` (24-hour) in the display timezone,
- *   or `fallback`.
+ * @returns {string} `yyyy-mm-dd HH:MM ZZZ` (24-hour, `ZZZ` a short timezone
+ *   abbreviation e.g. "NZST") in the display timezone, or `fallback`. The
+ *   abbreviation is omitted -- along with its separating space -- when
+ *   nothing constructs for it, so a locale/zone the runtime rejects costs
+ *   this function only the suffix, never the fallback (Requirement 18.8's
+ *   discipline, applied to the suffix).
  */
 export function formatDateTime(value, fallback = '') {
   const date = toDate(value)
@@ -248,7 +390,9 @@ export function formatDateTime(value, fallback = '') {
   // delegating the date half to `formatDate` and formatting the same
   // instant twice.
   const { year, month, day, hour, minute } = readWallClock(date)
-  return `${year}-${month}-${day} ${hour}:${minute}`
+  const base = `${year}-${month}-${day} ${hour}:${minute}`
+  const zoneAbbreviation = readZoneAbbreviation(date)
+  return zoneAbbreviation ? `${base} ${zoneAbbreviation}` : base
 }
 /**
  * Milliseconds in a calendar-independent day. Only ever used to scale an

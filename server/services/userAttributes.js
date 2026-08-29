@@ -321,7 +321,29 @@ class UserAttributesService {
 
   static async updateTeamUserAttributes(teamId) {
     try {
-      // Get all users in team and sub-teams
+      // Get all users in team and sub-teams.
+      //
+      // Bugfix (Dashboard/Orgs & Teams stale-callsign defect): filtered to
+      // `tm.inherited_from_team_id IS NULL` -- a DIRECT membership row
+      // only. A user directly in a Sub_Team also holds an INHERITED
+      // membership row in every ancestor up to the Organisation (see
+      // `TeamMembershipService.addUserToTeam`'s parent-team insert loop),
+      // and every one of those ancestor teams is inside this SAME
+      // recursive team_tree whenever `teamId` is the Organisation itself.
+      // Without this filter, that user's callsign/color/role got
+      // regenerated ONCE PER MEMBERSHIP ROW -- once correctly from the
+      // Sub_Team (`generateCallsign(userId, subTeamId)`, which includes
+      // the Sub_Team's own callsign_prefix segment) and once incorrectly
+      // from the inherited Organisation row
+      // (`generateCallsign(userId, organisationId)`, which has no
+      // Sub_Team segment to include at all) -- with `user_cache` left
+      // holding whichever generation ran last in the loop below,
+      // regardless of which one is actually correct for that user's real,
+      // direct membership. `computeCallsignAttributes` already resolves
+      // the FULL Ancestor_Chain from the direct team id via
+      // `Team.getAncestorChain`, so it needs no help finding the
+      // Sub_Team's own segment -- it only needs to be called with the
+      // user's actual direct team, exactly once.
       const usersResult = await pool.query(`
         WITH RECURSIVE team_tree AS (
           SELECT id FROM teams WHERE id = $1
@@ -333,6 +355,7 @@ class UserAttributesService {
         FROM users u
         JOIN team_memberships tm ON u.id = tm.user_id
         JOIN team_tree tt ON tm.team_id = tt.id
+        WHERE tm.inherited_from_team_id IS NULL
       `, [teamId]);
       
       // Update each user's attributes

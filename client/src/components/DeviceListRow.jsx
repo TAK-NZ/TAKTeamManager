@@ -1,4 +1,4 @@
-import { TrashIcon } from '@heroicons/react/24/outline'
+import { TrashIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline'
 import DeviceTypeIcon from './DeviceTypeIcon'
 import FormattedDate, { DATE_PRECISION, TOOLTIP_SIDES } from './FormattedDate'
 import { hasRenderableDate } from '../utils/dateFormat'
@@ -34,6 +34,17 @@ import { EXPIRY_STATES, classifyExpiry, getExpiryWarningDays } from '../utils/ex
  * unchanged character for character (Criterion 2.3): this row no longer calls
  * `formatDate`/`formatDateTime` itself, and `hasRenderableDate` is imported in
  * their place purely as the Last Seen cell's layout predicate.
+ *
+ * Issued and Expires share ONE "Certificate" column, stacked on two lines
+ * rather than two `whitespace-nowrap` columns side by side. Once
+ * `formatDateTime` started appending a short timezone abbreviation
+ * (date-tooltips-and-folder-contrast follow-up), each date's rendered width
+ * grew from `yyyy-mm-dd` to `yyyy-mm-dd HH:MM ZZZ`, and six columns each
+ * demanding that width overflowed both the Dashboard card and, worse, the
+ * `UserDevicesModal` dialog's `max-w-3xl`. Stacking recovers a whole column
+ * of width for free -- Issued and Expires were never meant to be scanned
+ * side by side in the first place -- and keeps each date's own
+ * `FormattedDate` tooltip unchanged.
  */
 
 /**
@@ -60,27 +71,36 @@ export const NEVER_SEEN_LABEL = 'never seen'
 export const CONNECTED_LABEL = 'Connected'
 
 /**
- * Requirements 21.2, 21.3: the text marker on an Imminent_Expiry.
+ * Requirements 21.2, 21.3: the accessible-name text for an Imminent_Expiry.
  *
- * Bold and red is the styling Requirement 21.2 asks for, and neither weight
- * nor colour is perceivable to assistive technology, so this marker is what
- * actually conveys the state (Requirement 21.3, following Requirement 16.5).
+ * No longer rendered as VISIBLE text beside the date (that inline marker was
+ * the second-widest thing in the row, and it is gone now that the Certificate
+ * column is already tight). The date's own bold-red colour is the visible
+ * cue, paired with the warning glyph below; this string instead lives in a
+ * visually-hidden `sr-only` span beside that glyph -- real text in the
+ * accessibility tree, exactly the way `StoreBadges.jsx`'s
+ * `RecommendedOptionMarker` states "Recommended option" -- so the state
+ * still reaches a screen reader without a colour-only or icon-only signal
+ * (client conventions: "carry state in TEXT, never colour alone"). The
+ * warning glyph's `title`-free hover/focus tooltip repeats the same words for
+ * a sighted mouse or keyboard user, matching every other icon tooltip in this
+ * file and in `DeviceTypeIcon.jsx`.
  */
 export const EXPIRES_SOON_LABEL = 'Expires soon'
 
 /**
- * Requirement 21.5: the text marker on an Expired_Certificate_State.
+ * Requirement 21.5: the accessible-name text for an Expired_Certificate_State.
  *
  * DISTINCT from `EXPIRES_SOON_LABEL` rather than sharing it: "expires soon"
  * is a false statement about a date that has already passed, and the two
  * states call for different action -- re-enroll before the deadline versus
  * re-enroll now, the device is already refusing connections. The two share
- * the bold-red styling and nothing else.
+ * the bold-red date colour and the warning glyph, and nothing else.
  */
 export const EXPIRED_LABEL = 'Expired'
 
 /**
- * The text marker each expiry state renders, or nothing for `none`.
+ * The accessible-name text each expiry state carries, or nothing for `none`.
  *
  * A lookup rather than a conditional chain so a fourth state could not
  * silently pick up one of these two markers: an unmapped state yields
@@ -97,17 +117,23 @@ const EXPIRY_MARKERS = Object.freeze({
  * can assert the two tables agree without hard-coding the list twice.
  *
  * "Type" leads, matching the reading order in the design (Device_Type_Icon,
- * UID, issued, expires, Last_Seen, actions): the glyph is a compact
- * at-a-glance qualifier for the row, and putting it in its own cell keeps the
- * UID cell's text exactly the UID.
+ * UID, Certificate, Last_Seen, actions): the glyph is a compact at-a-glance
+ * qualifier for the row, and putting it in its own cell keeps the UID cell's
+ * text exactly the UID.
+ *
+ * "Certificate" replaces the former separate "Issued"/"Expires" columns
+ * (device-management-cert-table-layout follow-up): each date's rendered
+ * width grew once `formatDateTime` started appending a short timezone
+ * abbreviation, and six side-by-side `whitespace-nowrap` columns overflowed
+ * both the Dashboard card and the narrower `UserDevicesModal` dialog. Issued
+ * and Expires now stack as two lines inside ONE column instead.
  *
  * @type {readonly string[]}
  */
 export const DEVICE_LIST_COLUMNS = Object.freeze([
   'Type',
   'Device UID',
-  'Issued',
-  'Expires',
+  'Certificate',
   'Last Seen',
   'Actions',
 ])
@@ -154,6 +180,21 @@ export function DeviceListHeader({ compact = false }) {
         </th>
       ))}
     </tr>
+  )
+}
+
+/**
+ * The inline "Issued"/"Expires" line label inside the merged Certificate
+ * cell. Plain, always-visible text -- NOT decorative and NOT `aria-hidden`:
+ * with Issued and Expires sharing one column and no column header of their
+ * own, this label is what tells a screen-reader user (and a sighted one)
+ * which of the two dates on the line they are looking at.
+ */
+function DateLineLabel({ children }) {
+  return (
+    <span className="text-xs text-gray-400 dark:text-gray-500 w-12 flex-shrink-0">
+      {children}
+    </span>
   )
 }
 
@@ -248,42 +289,71 @@ export default function DeviceListRow({ device, onRevoke, compact = false }) {
           </span>
         )}
       </td>
+      {/* The merged Certificate column: Issued on the first line, Expires on
+          the second, each labelled so the shared "Certificate" header does
+          not lose the distinction a dedicated column caption used to carry.
+          Requirements 21.2-21.5: an Imminent_Expiry and an already-lapsed one
+          are both bold and red on the Expires line ONLY, and each carries
+          its own accessible-name text via the warning glyph below rather
+          than inline visible text -- the inline "Expires soon"/"Expired"
+          marker was the second-widest thing in the row and does not fit
+          beside an already-lengthened, zone-suffixed date. An `expires_at`
+          that is null, unparseable, or further out than the threshold takes
+          the `none` branch, which is this line exactly as it rendered
+          before -- same classes, same 'Unknown' fallback, no glyph
+          (Requirement 21.4). */}
       <td className={`${padding} whitespace-nowrap text-sm text-gray-500 dark:text-gray-400`}>
-        <FormattedDate
-          value={device.issuedAt}
-          fallback="Unknown"
-          precision={DATE_PRECISION.DATE}
-          side={TOOLTIP_SIDES.RIGHT}
-        />
-      </td>
-      {/* Requirements 21.2-21.5: an Imminent_Expiry and an already-lapsed one
-          are both bold and red, and each carries its OWN text marker so the
-          state reaches a screen reader, which neither the colour nor the
-          weight does. An `expires_at` that is null, unparseable, or further
-          out than the threshold takes the `none` branch, which is this cell
-          exactly as it rendered before -- same classes, same 'Unknown'
-          fallback, no marker (Requirement 21.4). */}
-      <td
-        className={`${padding} whitespace-nowrap text-sm ${
-          expiryMarker
-            ? 'font-bold text-red-600 dark:text-red-400'
-            : 'text-gray-500 dark:text-gray-400'
-        }`}
-      >
-        <FormattedDate
-          value={device.expiresAt}
-          fallback="Unknown"
-          precision={DATE_PRECISION.DATE}
-          side={TOOLTIP_SIDES.RIGHT}
-        />
-        {/* The leading space is inside the string on purpose, the same way the
-            Last Seen cell below carries one beside the Connected_Label: the
-            `ml-2` separates the two visually, but anything reading the cell's
-            text -- assistive technology, and the tests -- would otherwise run
-            the date straight into the marker as "2026-08-30Expires soon". */}
-        {expiryMarker && (
-          <span className="ml-2 text-xs font-semibold">{` ${expiryMarker}`}</span>
-        )}
+        {/* The literal `{' '}` between the label and the date is a real text
+            node, not layout: `gap-1.5` alone separates them visually, but
+            anything READING the cell's text -- assistive technology, and the
+            tests -- would otherwise run the label into the date as
+            "Issued2026-08-28...", the same reasoning the Connected_Label and
+            the expiry marker below already follow in this file. */}
+        <div className="flex items-center gap-1.5">
+          <DateLineLabel>Issued</DateLineLabel>{' '}
+          <FormattedDate
+            value={device.issuedAt}
+            fallback="Unknown"
+            precision={DATE_PRECISION.DATE_TIME}
+            side={TOOLTIP_SIDES.RIGHT}
+          />
+        </div>
+        <div
+          className={`flex items-center gap-1.5 ${
+            expiryMarker ? 'font-bold text-red-600 dark:text-red-400' : ''
+          }`}
+        >
+          <DateLineLabel>Expires</DateLineLabel>{' '}
+          <FormattedDate
+            value={device.expiresAt}
+            fallback="Unknown"
+            precision={DATE_PRECISION.DATE_TIME}
+            side={TOOLTIP_SIDES.RIGHT}
+          />
+          {/* Requirement 21.3/21.5's state, carried by TEXT rather than by
+              the date's colour alone (client conventions): the warning
+              glyph is `aria-hidden`, and a visually-hidden `sr-only` span
+              beside it -- unconditionally in the accessibility tree, not
+              only while hovered -- states the same word a sighted user gets
+              from a hover/focus tooltip. Mirrors
+              `StoreBadges.jsx`'s `RecommendedOptionMarker`, this codebase's
+              other icon-plus-`sr-only`-text pairing. */}
+          {expiryMarker && (
+            <span className="relative group inline-flex" tabIndex={0}>
+              <ExclamationTriangleIcon
+                className="h-4 w-4 text-red-600 dark:text-red-400 cursor-help"
+                aria-hidden="true"
+              />
+              <span className="sr-only">{expiryMarker}</span>
+              <span
+                aria-hidden="true"
+                className="absolute left-full top-1/2 transform -translate-y-1/2 ml-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10"
+              >
+                {expiryMarker}
+              </span>
+            </span>
+          )}
+        </div>
       </td>
       {/* Requirements 20.1, 20.9: a connected Device says so in TEXT, with its
           Last_Seen timestamp retained beside the label where one is known. The

@@ -106,6 +106,8 @@ fileMatchPattern: 'server/**/*.js'
 - Audit-log read and CSV export are Global_Manager-only and share one permission identifier.
   - `audit_log:read` covers `GET /api/audit-logs` and `GET /api/audit-logs/export.csv`.
   - Both must apply filters through the shared `buildAuditLogFilters` — divergence means the CSV no longer matches what the operator saw.
+- A user's cached `tak_callsign`/`tak_color` (`user_cache`, and mirrored into Authentik's `takCallsign`/`takColor` attributes) must be cleared to `'None'`/`'None'` — via `UserAttributesService.clearTeamAttributes` — the moment they end up with ZERO `team_memberships` rows.
+  - `Team.delete` is currently the only path that can do this (every other membership-removing path lands the user in some team), and it already calls `clearTeamAttributes` post-commit. A new path that can leave a user teamless (e.g. a future self-service "leave team") must call it too, or the Dashboard (reads the cache) silently diverges from the Enrollment page (reads live via `team_memberships`).
 - A sign-up code must never bypass an Organisation's allowed-domain restriction.
   - In `SignupFlowService` the domain predicate is ANDed after the code predicate. Collapsing to OR opens every restricted Organisation.
 - `POST /api/requests/initiate` (`server/routes/signup.js`) returns 200 with a fixed body for EVERY outcome including internal errors.

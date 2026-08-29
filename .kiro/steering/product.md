@@ -6,6 +6,8 @@ inclusion: always
 
 Manages TAK teams, users and channels via Authentik as the identity provider, with an optional TAK Server device-management integration. Express + Postgres server, React SPA client.
 
+Production hostname: **`team.tak.nz`**. One SPA served from one origin — Team Management, Downloads and Enrollment are all React Router paths in the same bundle, not separable services, and the OAuth2 `redirect_uri`/CORS origin/`tak_session` cookie are each wired to exactly one hostname (`server/index.js`, `server/routes/auth.js`). This sits alongside TAK-NZ's other `*.tak.nz` subdomains — `account` (Authentik SSO), `map` (CloudTAK), `docs` (documentation) — each a single-word noun for what it does; `team` was chosen over the old standalone enrollment Lambda's `devices.tak.nz` because this app's scope is the broader team/user/channel back office, not just device enrollment. CDK-based deployment of this hostname is a follow-up, not yet done.
+
 ## Domain vocabulary
 
 - **Team** — a row in `teams`. Every hierarchy node at every depth is a Team at the data-model level.
@@ -27,3 +29,4 @@ Manages TAK teams, users and channels via Authentik as the identity provider, wi
 - Authorization is deny-by-default. An unmapped route is denied, not permitted.
 - Feature flags are inert by default and true only for the exact string `'true'`.
 - State a user must perceive is carried by TEXT, never colour alone.
+- A teamless user's Callsign/Team_Color is the literal string `'None'`, never blank and never a real assignable colour name. Colours like `'White'` are deployment-configured (see `TeamFormDialog.jsx`'s colour list) and could collide with "no team" if used as the empty-state fallback.

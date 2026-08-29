@@ -6,6 +6,7 @@ import EnrollmentCountdown from '../components/EnrollmentCountdown'
 import MultipleCertificateWarning from '../components/MultipleCertificateWarning'
 import FormattedDate, { DATE_PRECISION } from '../components/FormattedDate'
 import { isAndroidClient } from '../utils/platformDetection'
+import { getTakColorHex } from '../utils/takColors'
 
 /**
  * Enrollment_View (takserver-enrollment Requirement 10, task 9.5; UX
@@ -100,37 +101,6 @@ function orNone(value) {
   return typeof value === 'string' && value.trim() !== '' ? value : UNSET_ATTRIBUTE_LABEL
 }
 
-/**
- * Maps a TAK_Color name to its swatch colour, mirroring the SAME map
- * `Dashboard.jsx`/`TeamDetail.jsx` already use for the identical purpose
- * (no shared utility exists for this today; kept local rather than
- * introducing one for a single new call site).
- *
- * @param {*} colorName
- * @returns {string} a CSS colour, or a neutral grey for an unknown/'None' name.
- */
-function colorSwatchValue(colorName) {
-  const colorMap = {
-    Red: '#ef4444',
-    Blue: '#3b82f6',
-    Green: '#22c55e',
-    Yellow: '#eab308',
-    Purple: '#a855f7',
-    Orange: '#f97316',
-    Pink: '#ec4899',
-    Cyan: '#06b6d4',
-    Gray: '#6b7280',
-    Black: '#1f2937',
-    White: '#f9fafb',
-    Magenta: '#ec4899',
-    Maroon: '#7f1d1d',
-    'Dark Blue': '#1e3a8a',
-    Teal: '#14b8a6',
-    'Dark Green': '#166534',
-    Brown: '#92400e'
-  }
-  return colorMap[colorName] || '#6b7280'
-}
 
 /**
  * Turns a failed `fetchEnrollment()`/`fetchPreview()` call into the
@@ -341,7 +311,7 @@ export default function EnrollmentView({
                     <span
                       aria-hidden="true"
                       className="inline-block w-3.5 h-3.5 rounded border border-gray-300 dark:border-gray-600"
-                      style={{ backgroundColor: colorSwatchValue(takAttributes.color) }}
+                      style={{ backgroundColor: getTakColorHex(takAttributes.color) }}
                     />
                   )}
                 </dd>

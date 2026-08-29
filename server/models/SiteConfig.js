@@ -3,6 +3,7 @@ const sanitizeHtml = require('sanitize-html');
 const { SANITIZE_HTML_OPTIONS } = require('../config/htmlSafeSubset');
 const { MAX_TEAM_DEPTH } = require('../config/constants');
 const { isRecaptchaDisabledForTesting } = require('../middleware/captcha');
+const { resolveCloudTakUrl } = require('../utils/cloudtakUrl');
 
 /**
  * Default Expiry_Warning_Days: how far ahead of a certificate's `expires_at`
@@ -96,6 +97,13 @@ class SiteConfig {
     // Documentation URL — referenced in the approval email for getting started info.
     config.docs_url = process.env.DOCS_URL || null;
 
+    // CloudTAK_URL — shown on the Downloads page as a browser-based option.
+    // Independent of CLOUDTAK_ENABLED (server/config/cloudtak.js), which gates
+    // an unrelated Authentik agency-group sync integration; this line never
+    // reads isCloudTakEnabled() or process.env.CLOUDTAK_ENABLED
+    // (downloads-page-os-sections Requirement 5.4).
+    config.cloudtak_url = resolveCloudTakUrl(process.env.CLOUDTAK_URL);
+
     // Expose the 8 predefined TAK_Role display values (Requirement 13.4,
     // 13.5), so the Client's Member_List inline edit form (task 33.2,
     // `client/src/pages/TeamDetail.jsx`) can render its `TAK_Role` select
@@ -153,6 +161,18 @@ class SiteConfig {
     // (Requirement 18.12). A client that never receives this key falls back
     // to the same `Pacific/Auckland` literal (Requirement 18.7).
     config.display_timezone = process.env.DISPLAY_TIMEZONE || 'Pacific/Auckland';
+
+    // Display_Locale (Requirements 18.1, 18.5's sibling): the locale the
+    // Client's Date_Format_Helpers use ONLY to read a short timezone
+    // abbreviation (e.g. "NZST", "PDT") to append to a rendered
+    // date-and-time value -- `Intl.DateTimeFormat`'s `timeZoneName: 'short'`
+    // resolves that abbreviation differently per locale for the same IANA
+    // zone (e.g. Pacific/Auckland reads "NZST" under 'en-NZ' but "GMT+12"
+    // under 'en-US'). The numeric `yyyy-mm-dd HH:MM` components stay
+    // locale-independent, exactly as documented in `dateFormat.js` -- this
+    // locale is consulted for the abbreviation suffix alone. A client that
+    // never receives this key falls back to the same `en-NZ` literal.
+    config.display_locale = process.env.DISPLAY_LOCALE || 'en-NZ';
 
     // Expiry_Warning_Days (Requirements 21.1, 21.7): how many days ahead of a
     // certificate's `expires_at` the Client starts drawing it as an imminent

@@ -120,6 +120,8 @@ The application is designed to run on AWS ECS Fargate with:
 - RDS PostgreSQL
 - Secrets Manager for credentials
 
+Production hostname: **`team.tak.nz`**. The app is a single-origin SPA + API (one `FRONTEND_URL`/`APP_URL`, one OAuth2 `redirect_uri`, one session cookie), so it is served from exactly one hostname rather than split across several — Team Management, the Downloads page and the device Enrollment flow are all routes within the same bundle, not separate services. This follows the naming pattern of TAK-NZ's other `*.tak.nz` subdomains (`account`, `map`, `docs`) and replaces the standalone enrollment Lambda previously reachable at `devices.tak.nz`. CDK-based deployment of this hostname is a follow-up and not yet implemented.
+
 ## License
 
 GNU Affero General Public License v3.0

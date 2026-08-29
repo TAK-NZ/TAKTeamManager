@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { UserGroupIcon, UsersIcon, ClipboardDocumentListIcon, ArrowUpRightIcon, ArrowDownLeftIcon, ArrowsRightLeftIcon, MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon, InformationCircleIcon, FolderIcon, FolderOpenIcon, ChevronRightIcon as ChevronRightSmall, ChevronDownIcon, ChevronUpIcon, SignalIcon } from '@heroicons/react/24/outline'
-import { teamsAPI, requestsAPI, configAPI, usersAPI, channelsAPI, deviceManagementAPI } from '../services/api'
+import { teamsAPI, requestsAPI, configAPI, usersAPI, channelsAPI, deviceManagementAPI, adminAPI } from '../services/api'
 import { buildFolderTree } from '../utils/channelTree'
+import { getTakColorHex } from '../utils/takColors'
 import RevokeDeviceDialog from '../components/RevokeDeviceDialog'
 import DeviceListRow, { DeviceListHeader } from '../components/DeviceListRow'
 
@@ -134,30 +135,6 @@ export default function Dashboard({ user }) {
   // confirmation dialog is disruption rather than freshness.
   useEffect(() => startVisibilityPausedRefresh(fetchDevices), [fetchDevices])
 
-  // Map color names to CSS colors
-  const getColorValue = (colorName) => {
-    const colorMap = {
-      'Red': '#ef4444',
-      'Blue': '#3b82f6', 
-      'Green': '#22c55e',
-      'Yellow': '#eab308',
-      'Purple': '#a855f7',
-      'Orange': '#f97316',
-      'Pink': '#ec4899',
-      'Cyan': '#06b6d4',
-      'Gray': '#6b7280',
-      'Black': '#1f2937',
-      'White': '#f9fafb',
-      'Magenta': '#ec4899',
-      'Maroon': '#7f1d1d',
-      'Dark Blue': '#1e3a8a',
-      'Teal': '#14b8a6',
-      'Dark Green': '#166534',
-      'Brown': '#92400e'
-    }
-    return colorMap[colorName] || '#6b7280'
-  }
-
   const [colorMappings, setColorMappings] = useState({})
   const [roleDescriptions, setRoleDescriptions] = useState({})
 
@@ -259,7 +236,7 @@ export default function Dashboard({ user }) {
       if (parentChannel) {
         // Render as expandable channel
         items.push(
-          <div key={folderPath} className="flex items-center justify-between p-3 bg-gray-100 dark:bg-gray-800 rounded-lg ml-6">
+          <div key={folderPath} className="flex items-center justify-between p-3 bg-gray-100 dark:bg-gray-700 rounded-lg ml-6">
             <div className="flex items-center flex-1">
               <button
                 onClick={() => toggleFolder(folderPath)}
@@ -268,8 +245,11 @@ export default function Dashboard({ user }) {
                 <ChevronRightSmall className={`h-4 w-4 text-gray-500 dark:text-gray-300 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
               </button>
               <div className="flex-1">
-                <h3 className="font-medium text-gray-900 dark:text-gray-100">{parentChannel.display_name}</h3>
-                <p className="text-sm text-gray-600 dark:text-gray-400">
+                <div className="flex items-center">
+                  <SignalIcon className="h-4 w-4 text-gray-900 dark:text-gray-100 mr-1.5 flex-shrink-0" />
+                  <h3 className="font-medium text-gray-900 dark:text-gray-100">{parentChannel.display_name}</h3>
+                </div>
+                <p className="text-sm text-gray-600 dark:text-gray-300">
                   {parentChannel.description}
                 </p>
               </div>
@@ -319,14 +299,14 @@ export default function Dashboard({ user }) {
         items.push(
           <div key={folderPath}>
             <div 
-              className="flex items-center p-3 bg-gray-100 dark:bg-gray-800 rounded-lg cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-700"
+              className="flex items-center p-3 bg-gray-100 dark:bg-gray-700 rounded-lg cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-600"
               onClick={() => toggleFolder(folderPath)}
             >
               <div className="flex items-center flex-1">
                 {isExpanded ? (
-                  <FolderOpenIcon className="h-5 w-5 text-blue-600 dark:text-blue-400 mr-2" />
+                  <FolderOpenIcon className="h-5 w-5 text-gray-900 dark:text-gray-100 mr-2" />
                 ) : (
-                  <FolderIcon className="h-5 w-5 text-blue-600 dark:text-blue-400 mr-2" />
+                  <FolderIcon className="h-5 w-5 text-gray-900 dark:text-gray-100 mr-2" />
                 )}
                 <span className="font-medium text-gray-900 dark:text-gray-100">{folderName}</span>
               </div>
@@ -349,10 +329,13 @@ export default function Dashboard({ user }) {
     const parentChannelNames = new Set(Object.keys(tree.folders))
     tree.channels.filter(c => !parentChannelNames.has(c.display_name)).forEach(channel => {
       items.push(
-        <div key={channel.id} className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-lg ml-6">
+        <div key={channel.id} className="flex items-center justify-between p-3 bg-gray-100 dark:bg-gray-700 rounded-lg ml-6">
           <div className="flex-1">
-            <h3 className="font-medium text-gray-900 dark:text-gray-100">{channel.display_name}</h3>
-            <p className="text-sm text-gray-500 dark:text-gray-400">
+            <div className="flex items-center">
+              <SignalIcon className="h-4 w-4 text-gray-900 dark:text-gray-100 mr-1.5 flex-shrink-0" />
+              <h3 className="font-medium text-gray-900 dark:text-gray-100">{channel.display_name}</h3>
+            </div>
+            <p className="text-sm text-gray-500 dark:text-gray-300">
               {channel.description}
             </p>
           </div>
@@ -473,10 +456,33 @@ export default function Dashboard({ user }) {
       
       setUserChannels(takChannels)
 
-      // Fetch pending request count for admins
+      // Fetch pending request count for admins. Two independent request
+      // systems feed this one stat, mirroring Layout.jsx's nav badge
+      // exactly: the access_requests-backed requests (any admin) and,
+      // for a Global_Manager only, pending Org_Interest_Requests -- a
+      // separate table surfaced today only via the /requests page's own
+      // OrgInterestRequests panel. Fetched with Promise.allSettled, not
+      // Promise.all: a non-global admin has no admin:org_interest:read
+      // permission and gets a 403 on that call, which must not blank out
+      // the access_requests count they DO have permission for.
       try {
-        const pendingResponse = await requestsAPI.getPending()
-        setStats({ requests: pendingResponse.data.requests?.length || 0 })
+        const promises = [requestsAPI.getPending()]
+        if (user?.is_global_manager) {
+          promises.push(adminAPI.getOrgInterest({ status: 'pending' }))
+        }
+
+        const [accessRequestsResult, orgInterestResult] = await Promise.allSettled(promises)
+
+        const accessRequestsCount =
+          accessRequestsResult.status === 'fulfilled'
+            ? accessRequestsResult.value.data.requests?.length || 0
+            : 0
+        const orgInterestCount =
+          orgInterestResult?.status === 'fulfilled'
+            ? orgInterestResult.value.data.requests?.length || 0
+            : 0
+
+        setStats({ requests: accessRequestsCount + orgInterestCount })
       } catch (e) {
         setStats({ requests: 0 })
       }
@@ -570,21 +576,21 @@ export default function Dashboard({ user }) {
             )}
             {freshUser.takColor && (
               <div>
-                <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">My Organisation</dt>
+                <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">My Organisation's Function</dt>
                 <dd className="flex items-center text-sm text-gray-900 dark:text-gray-100">
                   {/* Bugfix (Dashboard/Enrollment callsign-and-color
                       divergence): a user with no team now carries the
                       explicit string 'None' here (never a real color
                       name -- see UserAttributesService.clearTeamAttributes),
                       so no swatch is rendered for it. Rendering one would
-                      fall back to getColorValue's neutral gray, which is
+                      fall back to getTakColorHex's neutral gray, which is
                       itself a color this deployment could plausibly assign
                       -- state must be carried in text, never a colour swatch
                       that could be mistaken for a real value. */}
                   {freshUser.takColor !== 'None' && (
                     <div
                       className="w-4 h-4 rounded border border-gray-300 mr-2"
-                      style={{ backgroundColor: getColorValue(freshUser.takColor) }}
+                      style={{ backgroundColor: getTakColorHex(freshUser.takColor) }}
                     ></div>
                   )}
                   {getOrganizationName(freshUser.takColor)}

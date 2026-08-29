@@ -1633,6 +1633,122 @@ describe('Team.create / Team.update pseudonymous_usernames (takserver-enrollment
 });
 
 /**
+ * Unit tests for `Team.update`'s `callsign_prefix` accept/reject/
+ * immutability behaviour (bugfix: callsign-handling).
+ *
+ * A Sub_Team's `callsign_prefix` must now be freely editable after
+ * creation (previously impossible via any supported code path) --
+ * `Team.update` neither ignores nor rejects a value supplied for one.
+ * An existing Organisation's `callsign_prefix` remains immutable: a
+ * resubmission of the CURRENT value is accepted as a no-op, and any
+ * actual change is rejected with `OrganisationCallsignPrefixImmutableError`,
+ * mirroring `pseudonymous_usernames`'s own immutability shape exactly. A
+ * collision with `idx_teams_callsign_prefix`'s UNIQUE constraint is
+ * translated into `CallsignPrefixConflictError`.
+ */
+describe('Team.update callsign_prefix (bugfix: callsign-handling)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('updates a Sub_Team\'s callsign_prefix freely, with no rejection', async () => {
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+        // The existing-team lookup fires because callsign_prefix was
+        // supplied at all (needed to determine Organisation vs Sub_Team);
+        // this Sub_Team's non-null parent_team_id is what then exempts it
+        // from the immutability guard below.
+        return Promise.resolve({ rows: [{ id: 4, parent_team_id: 3, callsign_prefix: 'OLD' }] });
+      }
+      if (typeof sql === 'string' && sql.includes('UPDATE teams')) {
+        return Promise.resolve({ rows: [{ id: 4, parent_team_id: 3, callsign_prefix: 'STL' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const updated = await Team.update(4, { callsign_prefix: 'STL' });
+
+    const updateCall = pool.query.mock.calls.find(([sql]) => sql.includes('UPDATE teams'));
+    const [, params] = updateCall;
+    // The supplied value passes straight through, unguarded, since the
+    // immutability check applies only when parent_team_id is null.
+    expect(params).toContain('STL');
+    expect(updated.callsign_prefix).toBe('STL');
+  });
+
+  it('accepts a resubmission of the current value on an existing Organisation as a no-op', async () => {
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+        return Promise.resolve({ rows: [{ id: 3, parent_team_id: null, callsign_prefix: 'FENZ' }] });
+      }
+      if (typeof sql === 'string' && sql.includes('UPDATE teams')) {
+        return Promise.resolve({ rows: [{ id: 3, callsign_prefix: 'FENZ' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const updated = await Team.update(3, { callsign_prefix: 'FENZ' });
+
+    const updateCall = pool.query.mock.calls.find(([sql]) => sql.includes('UPDATE teams'));
+    const [, params] = updateCall;
+    // Normalised to undefined -- nothing to change, so the UPDATE's own
+    // COALESCE leaves the stored value untouched.
+    expect(params).toContain(undefined);
+    expect(updated.callsign_prefix).toBe('FENZ');
+  });
+
+  it('throws OrganisationCallsignPrefixImmutableError when changing an existing Organisation\'s callsign_prefix, without updating', async () => {
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+        return Promise.resolve({ rows: [{ id: 3, parent_team_id: null, callsign_prefix: 'FENZ' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await expect(
+      Team.update(3, { callsign_prefix: 'NEWPFX' })
+    ).rejects.toThrow(Team.OrganisationCallsignPrefixImmutableError);
+
+    const updateCalls = pool.query.mock.calls.filter(([sql]) => sql.includes('UPDATE teams'));
+    expect(updateCalls).toHaveLength(0);
+  });
+
+  it('translates a 23505 on idx_teams_callsign_prefix into CallsignPrefixConflictError', async () => {
+    const conflictError = Object.assign(new Error('duplicate key value violates unique constraint "idx_teams_callsign_prefix"'), {
+      code: '23505',
+      constraint: 'idx_teams_callsign_prefix'
+    });
+
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('UPDATE teams')) {
+        return Promise.reject(conflictError);
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await expect(
+      Team.update(4, { callsign_prefix: 'STL' })
+    ).rejects.toThrow(Team.CallsignPrefixConflictError);
+  });
+
+  it('leaves callsign_prefix unchanged (via COALESCE) when omitted from the update', async () => {
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('UPDATE teams')) {
+        return Promise.resolve({ rows: [{ id: 4, name: 'Renamed' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await Team.update(4, { name: 'Renamed' });
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    const [sql, params] = pool.query.mock.calls[0];
+    expect(sql).toContain('UPDATE teams');
+    expect(params).toContain(undefined);
+  });
+});
+
+/**
  * Unit tests for `Team.getJoinableTeams` (Requirement 7.1/7.2, task 15.1).
  *
  * The public, unauthenticated team-access-request flow's joinable-teams

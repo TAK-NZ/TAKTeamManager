@@ -335,7 +335,7 @@ export const orgDomainsAPI = {
 export const adminAPI = {
   getExcludedDomains: () => api.get('/admin/excluded-domains'),
   updateExcludedDomains: (domains) => api.put('/admin/excluded-domains', { domains }),
-  getOrgInterest: () => api.get('/admin/org-interest'),
+  getOrgInterest: (params) => api.get('/admin/org-interest', { params }),
   updateOrgInterest: (id, status) => api.patch(`/admin/org-interest/${id}`, { status }),
 };
 

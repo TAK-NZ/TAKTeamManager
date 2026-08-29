@@ -6,35 +6,19 @@ import { MemoryRouter } from 'react-router-dom'
 import Downloads from './Downloads.jsx'
 import Layout from '../components/Layout.jsx'
 import { ThemeProvider } from '../contexts/ThemeContext.jsx'
+import { configAPI } from '../services/api'
 
 // takserver-enrollment task 10.5 -- client example tests for the
 // Downloads_Page and its reachability (Requirements 10.11, 12.1, 12.6, 12.9).
+// Extended by downloads-page-os-sections task 7.4 for the per-OS
+// restructuring (Requirements 1, 2, 3, 4, 7) -- three OS_Sections
+// (Android: 2 routes, iOS: 2 routes, Windows: 1 route) plus the
+// data-driven CloudTAK_Row.
 //
-// `client/src/components/storeBadgeFidelity.test.jsx` (task 10.4) already
-// covers the TAK_Gov_Badge's exact geometry/text-free label and the
-// Downloads_Page's exact link SET and Recommended_Option_Marker COUNT and
-// placement. This file deliberately does not repeat any of that. It covers
-// three things that file does not:
-//
-//   1. that the 'Downloads' nav item and the `/downloads` route are reachable
-//      by a signed-in user carrying NEITHER a team membership NOR an admin
-//      role of any kind (Criterion 12.9) -- `Layout.jsx`'s `getNavigation`
-//      places 'Downloads' in `baseNavigation`, before any role gate, so this
-//      is checked directly against a plain user object rather than inferred;
-//   2. that the Recommended_Option_Marker's accessible name is queryable AS
-//      REAL TEXT in the accessibility tree, and specifically that no `title`
-//      attribute carries it anywhere on the page (Criterion 12.6) -- `title`
-//      is not disclosed on keyboard focus and screen-reader support for it
-//      is inconsistent, which is why the client conventions forbid it as a
-//      description mechanism;
-//   3. the "both sides" half of the app-store badges' move off the
-//      Enrollment_View (Criteria 12.1, 10.11): `EnrollmentView.test.jsx`
-//      (task 9.9) already asserts the NEGATIVE side -- that the
-//      Enrollment_View itself renders no badge markup. This file asserts
-//      the POSITIVE control instead of duplicating that assertion: that
-//      `Downloads.jsx` is in fact where the badge markup NOW lives, so the
-//      move is a verified relocation rather than a deletion on one side that
-//      merely looks like a move.
+// `client/src/components/storeBadgeFidelity.test.jsx` (task 10.4, a
+// DIFFERENT, already-completed spec) already covers the TAK_Gov_Badge's
+// exact geometry/text-free label and the Downloads_Page's exact link SET.
+// This file deliberately does not repeat any of that.
 //
 // This project has no `@testing-library/react` (absent from
 // `client/package.json` and from `client/node_modules`), so every subject
@@ -52,6 +36,14 @@ vi.mock('../services/api', () => ({
   // are present regardless.
   authAPI: { logout: vi.fn() },
   requestsAPI: { getPending: vi.fn().mockResolvedValue({ data: { requests: [] } }) },
+  // Downloads.jsx's mount effect calls this directly. Defaulted to
+  // "feature off" (`cloudtak_url: null`) so every test that does not care
+  // about the CloudTAK_Row does not need its own mock setup, and so the
+  // mount effect's `.then()` never rejects/throws for a missing
+  // implementation. Tests that DO care override with
+  // `mockResolvedValueOnce`/`mockRejectedValueOnce` before mounting --
+  // consumed once, so they never leak into a later test.
+  configAPI: { getPublic: vi.fn().mockResolvedValue({ data: { cloudtak_url: null } }) },
 }))
 
 // Vitest compiles this JSX with esbuild's classic transform, and the
@@ -68,6 +60,51 @@ globalThis.React = React
  */
 const PLAIN_USER = { userId: 99, first_name: 'Jamie', last_name: 'Doe' }
 
+/**
+ * Locates one of the three OsSection roots by its visible header label
+ * ('Android', 'iOS', 'Windows'), scoped to the 3-column grid rather than
+ * the whole page -- so a query cannot accidentally match the CloudTAK_Row
+ * or the footnote legend, neither of which carries an `<h2>`.
+ */
+function getOsSection(container, osLabel) {
+  const grid = container.querySelector('.card > div.grid')
+  const sections = Array.from(grid?.children ?? [])
+  return sections.find((section) => section.querySelector('h2')?.textContent.trim() === osLabel)
+}
+
+/**
+ * Each OsSection's routes list is the section's second child; each route's
+ * own cell is one child of that list, containing the label/marker div and
+ * the badge anchor. Returned in render order, matching each OS array's
+ * declared route order.
+ */
+function getRouteCells(section) {
+  return Array.from(section.children[1]?.children ?? [])
+}
+
+function cellHref(cell) {
+  return cell.querySelector('a')?.getAttribute('href')
+}
+
+function cellHasMarker(cell) {
+  return cell.querySelector('.recommended-marker') !== null
+}
+
+/**
+ * Await one extra microtask turn inside `act` so `configAPI.getPublic()`'s
+ * `.then()`/`.catch()` resolves and its state update (and the resulting
+ * re-render) lands before assertions run -- `root.render()` itself does not
+ * await the mount effect's own fetch promise. Mirrors the two-`Promise
+ * .resolve()` flush `EnrollmentView.test.jsx` already uses for its own
+ * mount-effect fetches.
+ */
+async function flushEffects() {
+  await act(async () => {
+    await Promise.resolve()
+    await Promise.resolve()
+  })
+}
+
 describe('Downloads reachability for a user with no team membership and no admin role (Criterion 12.9)', () => {
   let container
   let root
@@ -76,6 +113,7 @@ describe('Downloads reachability for a user with no team membership and no admin
   beforeEach(() => {
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     vi.clearAllMocks()
+    configAPI.getPublic.mockResolvedValue({ data: { cloudtak_url: null } })
     vi.spyOn(console, 'error').mockImplementation(() => {})
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -154,6 +192,7 @@ describe('Downloads reachability for a user with no team membership and no admin
     // all, is therefore a faithful check of what the `/downloads` route
     // renders for the plain user above.
     await mount(<Downloads />)
+    await flushEffects()
 
     expect(container.textContent).toContain('Download a TAK Client')
     // Anti-vacuity: the page actually rendered download links, not an empty
@@ -168,12 +207,14 @@ describe("Recommended_Option_Marker's accessible name is queryable as text, not 
 
   beforeEach(async () => {
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    configAPI.getPublic.mockResolvedValue({ data: { cloudtak_url: null } })
     container = document.createElement('div')
     document.body.appendChild(container)
     root = createRoot(container)
     await act(async () => {
       root.render(<Downloads />)
     })
+    await flushEffects()
   })
 
   afterEach(async () => {
@@ -232,12 +273,14 @@ describe('The app-store badges live on Downloads.jsx (positive control, Criteria
 
   beforeEach(async () => {
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    configAPI.getPublic.mockResolvedValue({ data: { cloudtak_url: null } })
     container = document.createElement('div')
     document.body.appendChild(container)
     root = createRoot(container)
     await act(async () => {
       root.render(<Downloads />)
     })
+    await flushEffects()
   })
 
   afterEach(async () => {
@@ -255,37 +298,34 @@ describe('The app-store badges live on Downloads.jsx (positive control, Criteria
     expect(container.innerHTML).toContain('0 0 135 40')
   })
 
-  it('renders all four Store_Badge link targets on the Downloads_Page', () => {
+  it('renders all four original Store_Badge link targets plus the new WinTAK route on the Downloads_Page', () => {
     const hrefs = Array.from(container.querySelectorAll('a')).map((a) => a.getAttribute('href'))
     for (const href of [
       'https://tak.gov/products/atak-civ',
       'https://apps.apple.com/in/app/tak-aware/id6738631659',
       'https://play.google.com/store/apps/details?id=com.atakmap.app.civ',
       'https://apps.apple.com/us/app/itak/id1561656396',
+      'https://tak.gov/products/wintak-civ',
     ]) {
       expect(hrefs).toContain(href)
     }
   })
 })
 
-describe('Downloads_Page badge/label defect fixes', () => {
-  // Four defects reported against the original layout: the Google Play
-  // badge rendered visibly larger than its three neighbours, every badge
-  // carried a redundant "via <store>" sublabel, the Google Play route was
-  // labelled "ATAK Civ" instead of "ATAK", and the two Recommended_Option
-  // markers had no way for a mouse user to learn what the star meant short
-  // of already knowing the sr-only text screen readers get.
+describe('Downloads_Page OS_Section content and structure (downloads-page-os-sections Requirements 1, 2, 3)', () => {
   let container
   let root
 
   beforeEach(async () => {
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    configAPI.getPublic.mockResolvedValue({ data: { cloudtak_url: null } })
     container = document.createElement('div')
     document.body.appendChild(container)
     root = createRoot(container)
     await act(async () => {
       root.render(<Downloads />)
     })
+    await flushEffects()
   })
 
   afterEach(async () => {
@@ -299,34 +339,290 @@ describe('Downloads_Page badge/label defect fixes', () => {
     globalThis.IS_REACT_ACT_ENVIRONMENT = false
   })
 
-  it('renders every one of the four badge SVGs at the same visible size', () => {
+  it('renders exactly three OS_Sections: Android, iOS, Windows', () => {
+    const grid = container.querySelector('.card > div.grid')
+    expect(grid).not.toBeNull()
+    const labels = Array.from(grid.children)
+      .map((section) => section.querySelector('h2')?.textContent.trim())
+      .filter(Boolean)
+    expect(labels).toEqual(['Android', 'iOS', 'Windows'])
+  })
+
+  it('Android_Section contains exactly its two routes, with the Recommended_Option_Marker only on ATAK-via-TAK.gov (Criteria 1.1, 1.2, 1.3)', () => {
+    const section = getOsSection(container, 'Android')
+    expect(section).toBeTruthy()
+    const cells = getRouteCells(section)
+    expect(cells).toHaveLength(2)
+
+    const takGovCell = cells.find((c) => cellHref(c) === 'https://tak.gov/products/atak-civ')
+    const googlePlayCell = cells.find(
+      (c) =>
+        cellHref(c) === 'https://play.google.com/store/apps/details?id=com.atakmap.app.civ'
+    )
+    expect(takGovCell).toBeTruthy()
+    expect(googlePlayCell).toBeTruthy()
+    expect(cellHasMarker(takGovCell)).toBe(true)
+    expect(cellHasMarker(googlePlayCell)).toBe(false)
+  })
+
+  it('iOS_Section contains exactly its two routes, with the Recommended_Option_Marker only on TAK Aware (Criteria 2.1, 2.2, 2.3)', () => {
+    const section = getOsSection(container, 'iOS')
+    expect(section).toBeTruthy()
+    const cells = getRouteCells(section)
+    expect(cells).toHaveLength(2)
+
+    const takAwareCell = cells.find(
+      (c) => cellHref(c) === 'https://apps.apple.com/in/app/tak-aware/id6738631659'
+    )
+    const iTakCell = cells.find(
+      (c) => cellHref(c) === 'https://apps.apple.com/us/app/itak/id1561656396'
+    )
+    expect(takAwareCell).toBeTruthy()
+    expect(iTakCell).toBeTruthy()
+    expect(cellHasMarker(takAwareCell)).toBe(true)
+    expect(cellHasMarker(iTakCell)).toBe(false)
+  })
+
+  it('Windows_Section contains exactly one route (WinTAK), with no Recommended_Option_Marker (Criteria 3.1, 3.4)', () => {
+    const section = getOsSection(container, 'Windows')
+    expect(section).toBeTruthy()
+    const cells = getRouteCells(section)
+    expect(cells).toHaveLength(1)
+    expect(cellHref(cells[0])).toBe('https://tak.gov/products/wintak-civ')
+    expect(cellHasMarker(cells[0])).toBe(false)
+  })
+
+  it("the WinTAK anchor carries a distinct aria-label from the ATAK-via-TAK.gov anchor (Criteria 3.6, 3.7)", () => {
+    const winTakAnchor = Array.from(container.querySelectorAll('a')).find(
+      (a) => a.getAttribute('href') === 'https://tak.gov/products/wintak-civ'
+    )
+    const atakTakGovAnchor = Array.from(container.querySelectorAll('a')).find(
+      (a) => a.getAttribute('href') === 'https://tak.gov/products/atak-civ'
+    )
+
+    expect(winTakAnchor).toBeTruthy()
+    expect(atakTakGovAnchor).toBeTruthy()
+
+    // The WinTAK anchor carries its own accessible-name override, read
+    // directly via getAttribute (jsdom does not compute full
+    // accessible-name resolution).
+    expect(winTakAnchor.getAttribute('aria-label')).toBe('Get it from TAK.gov — WinTAK')
+
+    // The ATAK-via-TAK.gov anchor carries NO aria-label of its own -- its
+    // accessible name comes from its child SVG's own role="img"/aria-label,
+    // which this anchor must not shadow. Asserted by absence, so the two
+    // anchors are shown distinguishable rather than merely both present.
+    expect(atakTakGovAnchor.getAttribute('aria-label')).toBeNull()
+  })
+})
+
+describe('Downloads_Page CloudTAK_Row (downloads-page-os-sections Requirement 4)', () => {
+  let container
+  let root
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    vi.restoreAllMocks()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  const mountDownloads = async () => {
+    root = createRoot(container)
+    await act(async () => {
+      root.render(<Downloads />)
+    })
+    await flushEffects()
+  }
+
+  it('renders exactly one CloudTAK_Row with the resolved href and visible text naming Android, iOS, Windows, and other operating systems when cloudtak_url resolves non-null (Criterion 4.1-4.3, 4.5)', async () => {
+    configAPI.getPublic.mockResolvedValueOnce({
+      data: { cloudtak_url: 'https://cloudtak.example.com' },
+    })
+
+    await mountDownloads()
+
+    const cloudTakAnchors = Array.from(container.querySelectorAll('a')).filter(
+      (a) => a.getAttribute('href') === 'https://cloudtak.example.com'
+    )
+    expect(cloudTakAnchors).toHaveLength(1)
+
+    // Exactly one CloudTAK_Row, not duplicated within any OS_Section: only
+    // one "CloudTAK" heading-style label on the whole page.
+    const cloudTakLabels = Array.from(container.querySelectorAll('span')).filter(
+      (el) => el.textContent.trim() === 'CloudTAK'
+    )
+    expect(cloudTakLabels).toHaveLength(1)
+
+    // rel="noopener" (Criterion 7.1) and no Recommended_Option_Marker
+    // (Criterion 4.4) on the CloudTAK_Row's own anchor.
+    expect(cloudTakAnchors[0].getAttribute('rel')).toBe('noopener')
+    const row = cloudTakAnchors[0].closest('div')
+    expect(row.querySelector('.recommended-marker')).toBeNull()
+
+    // Visible (non-sr-only) text naming all three OS_Sections plus other
+    // browser-capable operating systems.
+    const rowText = row.parentElement.textContent
+    expect(rowText).toContain('Android')
+    expect(rowText).toContain('iOS')
+    expect(rowText).toContain('Windows')
+    expect(rowText.toLowerCase()).toMatch(/other operating system/)
+  })
+
+  it('renders NO CloudTAK_Row when cloudtak_url resolves null (Criterion 4.6)', async () => {
+    configAPI.getPublic.mockResolvedValueOnce({ data: { cloudtak_url: null } })
+
+    await mountDownloads()
+
+    const cloudTakLabels = Array.from(container.querySelectorAll('span')).filter(
+      (el) => el.textContent.trim() === 'CloudTAK'
+    )
+    expect(cloudTakLabels).toHaveLength(0)
+    // Only the five OS_Section route anchors are present -- no sixth,
+    // CloudTAK-only anchor.
+    expect(container.querySelectorAll('a')).toHaveLength(5)
+  })
+
+  it('renders NO CloudTAK_Row when configAPI.getPublic rejects (fail-closed on network failure)', async () => {
+    configAPI.getPublic.mockRejectedValueOnce(new Error('network down'))
+
+    await mountDownloads()
+
+    const cloudTakLabels = Array.from(container.querySelectorAll('span')).filter(
+      (el) => el.textContent.trim() === 'CloudTAK'
+    )
+    expect(cloudTakLabels).toHaveLength(0)
+    expect(container.querySelectorAll('a')).toHaveLength(5)
+  })
+})
+
+describe('Downloads_Page cross-cutting behavior preserved after restructuring (Requirement 7)', () => {
+  let container
+  let root
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  const mountDownloads = async () => {
+    root = createRoot(container)
+    await act(async () => {
+      root.render(<Downloads />)
+    })
+    await flushEffects()
+  }
+
+  it('sets rel="noopener" on every external anchor, across all three sections and the CloudTAK_Row, when the CloudTAK_Row is present (Criterion 7.1)', async () => {
+    configAPI.getPublic.mockResolvedValueOnce({
+      data: { cloudtak_url: 'https://cloudtak.example.com' },
+    })
+    await mountDownloads()
+
+    const anchors = Array.from(container.querySelectorAll('a'))
+    expect(anchors.length).toBeGreaterThan(0)
+    for (const anchor of anchors) {
+      expect(anchor.getAttribute('rel')).toBe('noopener')
+    }
+  })
+
+  it('sets rel="noopener" on every external anchor when the CloudTAK_Row is absent (Criterion 7.1)', async () => {
+    configAPI.getPublic.mockResolvedValueOnce({ data: { cloudtak_url: null } })
+    await mountDownloads()
+
+    const anchors = Array.from(container.querySelectorAll('a'))
+    expect(anchors.length).toBeGreaterThan(0)
+    for (const anchor of anchors) {
+      expect(anchor.getAttribute('rel')).toBe('noopener')
+    }
+  })
+
+  it.each([
+    ['with the CloudTAK_Row present', { cloudtak_url: 'https://cloudtak.example.com' }],
+    ['with the CloudTAK_Row absent', { cloudtak_url: null }],
+  ])(
+    'renders the footnote legend exactly once, at the page level, %s (Criterion 7.2)',
+    async (_label, data) => {
+      configAPI.getPublic.mockResolvedValueOnce({ data })
+      await mountDownloads()
+
+      // Two per-badge sr-only "Recommended option" spans (Android + iOS),
+      // plus the footnote's own always-visible occurrence -- exactly
+      // three total, regardless of the CloudTAK_Row's presence, and the
+      // footnote itself renders exactly once (not duplicated per
+      // OS_Section).
+      const allOccurrences = Array.from(container.querySelectorAll('*')).filter(
+        (el) => el.textContent.trim() === 'Recommended option' && el.children.length === 0
+      )
+      expect(allOccurrences).toHaveLength(3)
+
+      const footnoteGlyphs = container.querySelectorAll('p > svg[aria-hidden="true"]')
+      expect(footnoteGlyphs).toHaveLength(1)
+    }
+  )
+
+  it('renders every one of the five badge SVGs at the same visible size (Criterion 7.3)', async () => {
+    configAPI.getPublic.mockResolvedValueOnce({ data: { cloudtak_url: null } })
+    await mountDownloads()
+
     const badgeSvgs = Array.from(container.querySelectorAll('a svg'))
-    expect(badgeSvgs).toHaveLength(4)
+    expect(badgeSvgs).toHaveLength(5)
 
     // "Same visible size" is enforced through a shared className rather
     // than a computed layout measurement (jsdom performs no real layout),
     // so the guard is that every badge SVG carries the identical sizing
     // class list -- which is what makes the Google Play badge's larger
-    // intrinsic viewBox (180 x 53.333, against 135 x 40 for the other two)
+    // intrinsic viewBox (180 x 53.333, against 135 x 40 for the others)
     // render no bigger than its neighbours.
     const classLists = badgeSvgs.map((svg) => svg.getAttribute('class'))
     expect(new Set(classLists).size).toBe(1)
     expect(classLists[0]).toBeTruthy()
   })
 
-  it('renders no "via <store>" sublabel text anywhere on the page', () => {
+  it('renders no "via <store>" sublabel text anywhere on the page', async () => {
+    configAPI.getPublic.mockResolvedValueOnce({ data: { cloudtak_url: null } })
+    await mountDownloads()
+
     expect(container.textContent).not.toContain('via TAK.gov')
     expect(container.textContent).not.toContain('via Apple App Store')
     expect(container.textContent).not.toContain('via Google Play')
   })
 
-  it('labels the Google Play route "ATAK", never "ATAK Civ"', () => {
+  it('labels the Google Play route "ATAK", never "ATAK Civ", within the Android_Section', async () => {
+    configAPI.getPublic.mockResolvedValueOnce({ data: { cloudtak_url: null } })
+    await mountDownloads()
+
     expect(container.textContent).not.toContain('ATAK Civ')
 
-    const googlePlayCell = Array.from(container.querySelectorAll('.flex.flex-col')).find(
-      (cell) =>
-        cell.querySelector('a')?.getAttribute('href') ===
-        'https://play.google.com/store/apps/details?id=com.atakmap.app.civ'
+    const section = getOsSection(container, 'Android')
+    const cells = getRouteCells(section)
+    const googlePlayCell = cells.find(
+      (c) =>
+        cellHref(c) === 'https://play.google.com/store/apps/details?id=com.atakmap.app.civ'
     )
     expect(googlePlayCell).toBeTruthy()
     expect(
@@ -334,23 +630,10 @@ describe('Downloads_Page badge/label defect fixes', () => {
     ).toBe('ATAK')
   })
 
-  it('renders a footnote legend below the grid restating the star and "Recommended option"', () => {
-    // The two per-badge markers already carry this text (asserted
-    // elsewhere); this checks for a THIRD, always-visible occurrence
-    // outside either marker -- the footnote -- so removing the footnote
-    // alone would fail this test without also failing the marker-count
-    // tests.
-    const allOccurrences = Array.from(container.querySelectorAll('*')).filter(
-      (el) => el.textContent.trim() === 'Recommended option' && el.children.length === 0
-    )
-    // Two per-badge sr-only spans, plus the footnote's own visible text.
-    expect(allOccurrences.length).toBeGreaterThanOrEqual(3)
-
-    const footnoteGlyph = container.querySelector('p svg[aria-hidden="true"]')
-    expect(footnoteGlyph).not.toBeNull()
-  })
-
   it("discloses each Recommended_Option_Marker's tooltip on pointer hover and on keyboard focus", async () => {
+    configAPI.getPublic.mockResolvedValueOnce({ data: { cloudtak_url: null } })
+    await mountDownloads()
+
     const markerHosts = Array.from(container.querySelectorAll('span.recommended-marker'))
     expect(markerHosts).toHaveLength(2)
 
