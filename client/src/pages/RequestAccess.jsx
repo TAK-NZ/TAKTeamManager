@@ -242,7 +242,7 @@ export default function RequestAccess() {
                   maxLength={9}
                 />
                 {codeError && (
-                  <p className="text-red-600 text-sm mt-1">{codeError}</p>
+                  <p role="alert" className="text-red-600 dark:text-red-400 text-sm mt-1">{codeError}</p>
                 )}
                 <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                   If you have a sign-up code from a team, enter it here to go directly to that team.

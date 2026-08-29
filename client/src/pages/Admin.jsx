@@ -653,7 +653,7 @@ export default function Admin({ user }) {
                   : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:border-gray-300'
               }`}
             >
-              Color Mappings
+              Colour Mappings
             </button>
             <button
               onClick={() => setActiveTab('roles')}
@@ -722,7 +722,7 @@ export default function Admin({ user }) {
           {activeTab === 'colors' && (
             <div>
               <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
-                Configure how TAK color names map to organization names.
+                Configure how TAK colour names map to organisation names.
               </p>
               <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                 <thead className="bg-gray-50 dark:bg-gray-700">
@@ -731,7 +731,7 @@ export default function Admin({ user }) {
                       Color
                     </th>
                     <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
-                      Organization
+                      Organisation
                     </th>
                     <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
                       Actions

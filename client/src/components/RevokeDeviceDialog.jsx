@@ -262,7 +262,7 @@ export default function RevokeDeviceDialog({ device, userId, userName, onClose, 
             <button
               type="submit"
               disabled={!confirmed || submitting}
-              className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="btn-danger disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {submitting ? 'Revoking...' : 'Revoke Device'}
             </button>

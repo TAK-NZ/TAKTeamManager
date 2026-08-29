@@ -335,7 +335,7 @@ export default function Requests({ user }) {
                             onChange={(e) => handleCallsignSuffixChange(request.id, e.target.value)}
                           />
                           {callsignSuffixErrorByRequestId[request.id] && (
-                            <p className="text-red-600 text-sm mt-1">
+                            <p role="alert" className="text-red-600 dark:text-red-400 text-sm mt-1">
                               {callsignSuffixErrorByRequestId[request.id]}
                             </p>
                           )}
@@ -376,10 +376,15 @@ export default function Requests({ user }) {
       {/* Denial reason modal */}
       {denyingRequestId && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full p-6">
-            <h4 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="deny-request-title"
+            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full p-6"
+          >
+            <h3 id="deny-request-title" className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
               Deny Request
-            </h4>
+            </h3>
             <div className="mb-4">
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                 Reason for denial
@@ -403,7 +408,7 @@ export default function Requests({ user }) {
               <button
                 onClick={confirmDeny}
                 disabled={!denialReason.trim()}
-                className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50 text-sm"
+                className="btn-danger text-sm disabled:opacity-50"
               >
                 Deny Request
               </button>

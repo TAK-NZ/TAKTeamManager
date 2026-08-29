@@ -439,8 +439,13 @@ export default function GlobalChannels({ user }) {
       {/* Create Modal */}
       {showCreateModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white dark:bg-gray-800 rounded-lg p-6 w-full max-w-md">
-            <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="create-global-channel-title"
+            className="bg-white dark:bg-gray-800 rounded-lg p-6 w-full max-w-md"
+          >
+            <h3 id="create-global-channel-title" className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
               Create {createType === 'bch' ? 'BCH' : 'Region'} Channel
             </h3>
             
@@ -491,8 +496,13 @@ export default function GlobalChannels({ user }) {
       {/* Edit Modal */}
       {showEditModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white dark:bg-gray-800 rounded-lg p-6 w-full max-w-md">
-            <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="edit-global-channel-title"
+            className="bg-white dark:bg-gray-800 rounded-lg p-6 w-full max-w-md"
+          >
+            <h3 id="edit-global-channel-title" className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
               Edit {editChannel?.type === 'bch' ? 'BCH' : 'Region'} Channel
             </h3>
             
@@ -546,9 +556,14 @@ export default function GlobalChannels({ user }) {
       {/* Assign All Users Confirmation Dialog */}
       {showAssignDialog && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="assign-all-users-title"
+            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full"
+          >
             <div className="p-6">
-              <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
+              <h3 id="assign-all-users-title" className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
                 Assign All Users to Global Channels
               </h3>
               <p className="text-gray-600 dark:text-gray-400 mb-6">
@@ -578,9 +593,14 @@ export default function GlobalChannels({ user }) {
       {/* Delete Confirmation Dialog */}
       {deleteChannel && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-global-channel-title"
+            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full"
+          >
             <div className="p-6">
-              <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
+              <h3 id="delete-global-channel-title" className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
                 Delete {deleteChannel.type === 'bch' ? 'BCH' : 'Region'} Channel
               </h3>
               <p className="text-gray-600 dark:text-gray-400 mb-6">
@@ -597,7 +617,7 @@ export default function GlobalChannels({ user }) {
                 <button
                   onClick={confirmDelete}
                   disabled={deletingChannel}
-                  className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50"
+                  className="btn-danger disabled:opacity-50"
                 >
                   {deletingChannel ? 'Deleting...' : 'Delete Channel'}
                 </button>

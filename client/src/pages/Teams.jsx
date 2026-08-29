@@ -493,9 +493,14 @@ export default function Teams({ user }) {
         const deleteLabel = labelFor(teams.find(t => t.id === deleteTeamId))
         return (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-team-title"
+            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full"
+          >
             <div className="p-6">
-              <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
+              <h3 id="delete-team-title" className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
                 Delete {deleteLabel}
               </h3>
               <p className="text-gray-600 dark:text-gray-400 mb-6">
@@ -512,7 +517,7 @@ export default function Teams({ user }) {
                 <button
                   onClick={handleDeleteTeam}
                   disabled={deleting}
-                  className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50"
+                  className="btn-danger disabled:opacity-50"
                 >
                   {deleting ? 'Deleting...' : `Delete ${deleteLabel}`}
                 </button>

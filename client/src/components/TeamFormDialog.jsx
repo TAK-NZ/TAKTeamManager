@@ -559,10 +559,10 @@ export default function TeamFormDialog({
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                  TAK Color
+                  TAK Colour
                   <FieldLockIndicator
                     locked={true}
-                    lockedReason={formData.parentTeamId ? 'Sub-teams always inherit TAK color from their parent team' : 'Cannot be changed after the team is created'}
+                    lockedReason={formData.parentTeamId ? 'Sub-teams always inherit TAK colour from their parent team' : 'Cannot be changed after the team is created'}
                   />
                 </label>
                 <select
@@ -599,9 +599,9 @@ export default function TeamFormDialog({
                   )}
                 </select>
                 <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                  {editingTeam ? 'TAK color cannot be changed after team creation' :
-                   formData.parentTeamId ? 'Sub-teams inherit TAK color from parent team' :
-                   'TAK color designation for team members.'}
+                  {editingTeam ? 'TAK colour cannot be changed after team creation' :
+                   formData.parentTeamId ? 'Sub-teams inherit TAK colour from parent team' :
+                   'TAK colour designation for team members.'}
                 </p>
               </div>
             </div>
@@ -697,10 +697,15 @@ export default function TeamFormDialog({
         {/* Disable join requests confirmation modal */}
         {showCanJoinConfirm && (
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-[60]">
-            <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-sm w-full p-6">
-              <h4 className="text-lg font-medium text-amber-600 dark:text-amber-400 mb-2">
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="disable-join-requests-title"
+              className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-sm w-full p-6"
+            >
+              <h3 id="disable-join-requests-title" className="text-lg font-medium text-amber-600 dark:text-amber-400 mb-2">
                 Disable Join Requests?
-              </h4>
+              </h3>
               <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
                 This team has an active sign-up code. Disabling join requests will permanently delete the code and invalidate all distributed links and QR codes.
               </p>

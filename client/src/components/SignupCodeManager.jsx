@@ -201,10 +201,15 @@ export default function SignupCodeManager({ teamId, teamName, isAdmin }) {
       {/* Generate confirmation dialog */}
       {showConfirm && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-sm w-full p-6">
-            <h4 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-2">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="generate-signup-code-title"
+            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-sm w-full p-6"
+          >
+            <h3 id="generate-signup-code-title" className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-2">
               {code ? 'Regenerate Code?' : 'Generate Sign-up Code?'}
-            </h4>
+            </h3>
             <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
               Generating a code will hide this team from the general sign-up list.
               Only users with the code will be able to request access to this team.
@@ -232,10 +237,15 @@ export default function SignupCodeManager({ teamId, teamName, isAdmin }) {
       {/* Revoke confirmation dialog */}
       {showRevokeConfirm && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-sm w-full p-6">
-            <h4 className="text-lg font-medium text-red-600 dark:text-red-400 mb-2">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="revoke-signup-code-title"
+            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-sm w-full p-6"
+          >
+            <h3 id="revoke-signup-code-title" className="text-lg font-medium text-red-600 dark:text-red-400 mb-2">
               Revoke Sign-up Code?
-            </h4>
+            </h3>
             <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
               Are you sure you want to revoke this code? All distributed links and QR codes will stop working immediately.
             </p>
@@ -250,7 +260,7 @@ export default function SignupCodeManager({ teamId, teamName, isAdmin }) {
               <button
                 onClick={handleRevoke}
                 disabled={revoking}
-                className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50 text-sm"
+                className="btn-danger text-sm disabled:opacity-50"
               >
                 {revoking ? 'Revoking...' : 'Revoke Code'}
               </button>

@@ -561,7 +561,7 @@ export default function Dashboard({ user }) {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
-          Welcome back, {user.first_name}!
+          Welcome back, {user.first_name}
         </h1>
         <p className="text-gray-600 dark:text-gray-400">
           View your TAK profile, channels and devices.
@@ -856,7 +856,7 @@ export default function Dashboard({ user }) {
 
       {/* Quick Actions */}
       {stats.requests > 0 && (
-        <div className="card bg-yellow-50 border-yellow-200">
+        <div className="card bg-yellow-50 dark:bg-yellow-900/20 border-yellow-200 dark:border-yellow-800">
           {/* Below `sm`: the icon + text stay on their own row and the
               button drops underneath, full-width -- the previous single
               `flex items-center` row with `ml-auto` squeezed the button
@@ -866,12 +866,12 @@ export default function Dashboard({ user }) {
               button pinned to the right via `sm:ml-auto`. */}
           <div className="flex flex-col sm:flex-row sm:items-center gap-3">
             <div className="flex items-center">
-              <ClipboardDocumentListIcon className="h-6 w-6 text-yellow-600 flex-shrink-0" />
+              <ClipboardDocumentListIcon className="h-6 w-6 text-yellow-600 dark:text-yellow-400 flex-shrink-0" />
               <div className="ml-3">
-                <h3 className="text-sm font-medium text-yellow-800">
+                <h3 className="text-sm font-medium text-yellow-800 dark:text-yellow-200">
                   You have {stats.requests} pending request{stats.requests !== 1 ? 's' : ''}
                 </h3>
-                <p className="text-sm text-yellow-700">
+                <p className="text-sm text-yellow-700 dark:text-yellow-300">
                   Review team access requests from new users.
                 </p>
               </div>

@@ -269,7 +269,7 @@ function MemberEditRow({ colSpan, form, setForm, takRoleValues, saving, error, o
           </div>
         </div>
         {error && (
-          <p className="text-red-600 text-sm mt-2">{error}</p>
+          <p role="alert" className="text-red-600 dark:text-red-400 text-sm mt-2">{error}</p>
         )}
       </td>
     </tr>
@@ -939,8 +939,8 @@ export default function TeamDetail({ user, refreshUser }) {
   if (error) {
     return (
       <div className="card text-center py-12">
-        <h3 className="text-lg font-medium text-gray-900 mb-2">Error loading team</h3>
-        <p className="text-gray-500">{error}</p>
+        <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-2">Error loading team</h3>
+        <p className="text-gray-500 dark:text-gray-400">{error}</p>
       </div>
     )
   }
@@ -950,8 +950,8 @@ export default function TeamDetail({ user, refreshUser }) {
   if (!team && !loading) {
     return (
       <div className="card text-center py-12">
-        <h3 className="text-lg font-medium text-gray-900 mb-2">Team not found</h3>
-        <p className="text-gray-500">The team you're looking for doesn't exist or you don't have access.</p>
+        <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-2">Team not found</h3>
+        <p className="text-gray-500 dark:text-gray-400">The team you're looking for doesn't exist or you don't have access.</p>
       </div>
     )
   }
@@ -1775,9 +1775,14 @@ export default function TeamDetail({ user, refreshUser }) {
       {/* Create Sub-Team Dialog */}
       {showSubTeamDialog && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="create-sub-team-title"
+            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto"
+          >
             <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
-              <h3 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Create Team</h3>
+              <h3 id="create-sub-team-title" className="text-xl font-semibold text-gray-900 dark:text-gray-100">Create Team</h3>
               <button
                 onClick={() => setShowSubTeamDialog(false)}
                 className="text-gray-400 hover:text-gray-500 dark:hover:text-gray-300"
@@ -1804,7 +1809,7 @@ export default function TeamDetail({ user, refreshUser }) {
                     </div>
                   </div>
                   <div className="flex items-center space-x-2">
-                    <span className="text-xs text-gray-500 dark:text-gray-400">Inherited TAK Color:</span>
+                    <span className="text-xs text-gray-500 dark:text-gray-400">Inherited TAK Colour:</span>
                     {team.color && (
                       <div className="flex items-center space-x-1">
                         <div 
@@ -1861,7 +1866,7 @@ export default function TeamDetail({ user, refreshUser }) {
                     Used to build callsigns. Example: FENZ-STL-John Smith
                   </p>
                   {!isValidSubTeamCallsignPrefix(subTeamFormData.callsignPrefix) && (
-                    <p className="text-red-600 text-sm mt-1">Prefix may only contain letters and digits (no "-")</p>
+                    <p role="alert" className="text-red-600 dark:text-red-400 text-sm mt-1">Prefix may only contain letters and digits (no "-")</p>
                   )}
                 </div>
                 
@@ -1935,9 +1940,14 @@ export default function TeamDetail({ user, refreshUser }) {
       {/* Delete Sub-Team Confirmation Dialog */}
       {deleteSubTeamId && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-sub-team-title"
+            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full"
+          >
             <div className="p-6">
-              <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
+              <h3 id="delete-sub-team-title" className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
                 Delete Sub-Team
               </h3>
               <p className="text-gray-600 dark:text-gray-400 mb-6">
@@ -1954,7 +1964,7 @@ export default function TeamDetail({ user, refreshUser }) {
                 <button
                   onClick={handleDeleteSubTeam}
                   disabled={deletingSubTeam}
-                  className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50"
+                  className="btn-danger disabled:opacity-50"
                 >
                   {deletingSubTeam ? 'Deleting...' : 'Delete Sub-Team'}
                 </button>
@@ -1967,9 +1977,14 @@ export default function TeamDetail({ user, refreshUser }) {
       {/* Add Member Dialog */}
       {showAddMemberDialog && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="add-member-title"
+            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto"
+          >
             <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
-              <h3 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
+              <h3 id="add-member-title" className="text-xl font-semibold text-gray-900 dark:text-gray-100">
                 Add {addMemberRole === 'admin' ? 'Admin' : 'Member'} to Team
               </h3>
               <button
@@ -2272,9 +2287,14 @@ export default function TeamDetail({ user, refreshUser }) {
       {/* Create Channel Dialog */}
       {showChannelDialog && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="create-channel-title"
+            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto"
+          >
             <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
-              <h3 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Create Custom Channel</h3>
+              <h3 id="create-channel-title" className="text-xl font-semibold text-gray-900 dark:text-gray-100">Create Custom Channel</h3>
               <button
                 onClick={() => setShowChannelDialog(false)}
                 className="text-gray-400 hover:text-gray-500 dark:hover:text-gray-300"
@@ -2385,9 +2405,14 @@ export default function TeamDetail({ user, refreshUser }) {
         const removeTargetEmail = removeTarget?.email || ''
         return (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-user-title"
+            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full"
+          >
             <div className="p-6">
-              <h3 className="text-lg font-medium text-red-600 dark:text-red-400 mb-4">
+              <h3 id="delete-user-title" className="text-lg font-medium text-red-600 dark:text-red-400 mb-4">
                 Permanently Delete User
               </h3>
               <p className="text-gray-600 dark:text-gray-400 mb-4">
@@ -2424,7 +2449,7 @@ export default function TeamDetail({ user, refreshUser }) {
                 <button
                   onClick={confirmRemoveUser}
                   disabled={removingUser || removeConfirmInput !== removeTargetEmail}
-                  className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="btn-danger disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {removingUser ? 'Deleting...' : 'Delete User Permanently'}
                 </button>
@@ -2475,9 +2500,14 @@ export default function TeamDetail({ user, refreshUser }) {
           auto-refreshes (see its own doc comment). */}
       {enrollingDevice && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-3xl w-full max-h-[90vh] overflow-y-auto">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="enroll-device-title"
+            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-3xl w-full max-h-[90vh] overflow-y-auto"
+          >
             <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
-              <h3 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
+              <h3 id="enroll-device-title" className="text-xl font-semibold text-gray-900 dark:text-gray-100">
                 Enroll {deviceDisplayName(enrollingDevice)}
               </h3>
               <button

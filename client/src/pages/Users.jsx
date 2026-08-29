@@ -79,7 +79,7 @@ export default function Users() {
           </div>
         ) : error ? (
           <div className="text-center py-12">
-            <p className="text-red-500">{error}</p>
+            <p role="alert" className="text-red-600 dark:text-red-400">{error}</p>
           </div>
         ) : filteredUsers.length === 0 ? (
           <div className="text-center py-12">
