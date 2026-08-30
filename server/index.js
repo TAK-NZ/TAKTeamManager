@@ -14,9 +14,23 @@ const pool = require('./config/database');
 const { createGracefulShutdown } = require('./utils/gracefulShutdown');
 const { validateConfig, assertAuthRouteMounted } = require('./config/configValidator');
 const { isDeviceMgmtEnabled } = require('./config/deviceMgmt');
+const { getTrustProxyHops } = require('./config/trustProxy');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// BUGS.md NOTE-001: tells Express how many `X-Forwarded-For` hops to
+// trust when resolving `req.ip`/`req.ips` (and how it detects HTTPS via
+// `X-Forwarded-Proto`, consulted by helmet's HSTS logic). Defaults to 0
+// (trust nothing) via `getTrustProxyHops`, which is correct for local/
+// dev/test; set `TRUSTED_PROXY_HOPS=1` once deployed behind the
+// production ALB (see README.md's Deployment section and
+// `server/config/trustProxy.js`'s header comment for why this must be a
+// hop COUNT, never `true`, and why it must be paired with an ALB-only
+// ECS security group rule). Set before any middleware or route mount
+// below, since `express-rate-limit`'s `req.ip`-keyed limiters and
+// `helmet` both read this setting off `app`.
+app.set('trust proxy', getTrustProxyHops());
 
 // Requirement 15.2/6.4: validate required configuration -- including,
 // when NODE_ENV=production, resolving secrets through the configured

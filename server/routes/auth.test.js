@@ -6,10 +6,16 @@
  * `server/middleware/rateLimiters.js` in isolation, so they verify the
  * limiters are wired up on the real routes with the right thresholds:
  *
- *  - `authLimiter`: the 21st request from a given IP within a 15-minute
- *    window to ANY `/api/auth/*` route (exercised here via
+ *  - `authLimiter` (mounted per-route as `authFlowLimiter`, not
+ *    router-wide): the 21st request from a given IP within a 15-minute
+ *    window to an OAuth2-flow route (exercised here via
  *    `GET /api/auth/login`, a route with no other side effects) receives
  *    HTTP 429.
+ *  - `GET /api/auth/me` is deliberately NOT covered by that same 20-per-
+ *    15-min bucket -- it's re-fetched on every SPA page load by an
+ *    already-authenticated session and talks to no Authentik endpoint,
+ *    so it must not be exhausted by ordinary reload traffic (see the
+ *    regression test below).
  *  - `authCallbackFailureLimiter`: after 10 FAILED `GET /api/auth/callback`
  *    attempts from a given IP, the 11th attempt receives HTTP 429 without
  *    ever reaching the token-exchange (`axios.post`) call. A successful
@@ -84,6 +90,27 @@ describe('Auth rate limiters (Requirements 7.1, 7.5, 7.6)', () => {
         expect(res.status).toBe(302); // redirect to Authentik, not rate-limited
       }
 
+      const limitedRes = await request(app).get('/api/auth/login');
+      expect(limitedRes.status).toBe(429);
+    });
+
+    it('does not apply authFlowLimiter to GET /api/auth/me, so ordinary session-refresh traffic is never 429d', async () => {
+      const app = buildApp();
+
+      // More than AUTH_LIMITER_MAX requests to /me (no session cookie, so
+      // each individually 401s via authenticateToken) -- none of them may
+      // ever draw from the same bucket as the OAuth2-flow routes above.
+      for (let i = 0; i < AUTH_LIMITER_MAX + 5; i++) {
+        const res = await request(app).get('/api/auth/me');
+        expect(res.status).not.toBe(429);
+      }
+
+      // The OAuth2-flow bucket is untouched by the /me traffic above: a
+      // fresh IP-scoped run against /login still has its full budget.
+      for (let i = 0; i < AUTH_LIMITER_MAX; i++) {
+        const res = await request(app).get('/api/auth/login');
+        expect(res.status).toBe(302);
+      }
       const limitedRes = await request(app).get('/api/auth/login');
       expect(limitedRes.status).toBe(429);
     });

@@ -93,7 +93,16 @@ export default function OrgDomainManager({ orgId, isAdmin }) {
         Leave empty to allow any email domain.
       </p>
 
-      {/* Domain list */}
+      {/* Domain list. Bugfix (mobile tap target too small): the remove
+          button's hit area is enlarged via `-m-2 p-2` (negative margin
+          cancelling the padding's own layout footprint, same technique
+          InfoTooltip.jsx uses) rather than a plain `p-2`, which would
+          have inflated every pill's own rendered height/width -- this
+          way the chip's visual size is unchanged, only the invisible
+          tap/hover area around the X icon grows to ~32px. `gap-2` on
+          the wrapping row (8px) leaves enough clearance that the
+          enlarged area of one chip's remove button doesn't visually
+          overlap its neighbour. */}
       {domains.length > 0 && (
         <div className="flex flex-wrap gap-2 mb-4">
           {domains.map((domain) => (
@@ -104,8 +113,9 @@ export default function OrgDomainManager({ orgId, isAdmin }) {
               {domain}
               <button
                 onClick={() => handleRemove(domain)}
-                className="text-gray-400 hover:text-red-500"
+                className="-m-2 p-2 rounded-full text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/40"
                 title="Remove domain"
+                aria-label={`Remove domain ${domain}`}
               >
                 <XMarkIcon className="h-4 w-4" />
               </button>

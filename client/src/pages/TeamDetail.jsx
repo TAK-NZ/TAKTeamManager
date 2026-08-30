@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import React from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { PlusIcon, UsersIcon, UserPlusIcon, ShieldCheckIcon, BuildingOfficeIcon, FolderPlusIcon, HashtagIcon, XMarkIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, TrashIcon, PencilIcon, CheckIcon, ArrowLeftOnRectangleIcon, EnvelopeIcon, ArrowRightCircleIcon, ArrowPathIcon, DevicePhoneMobileIcon } from '@heroicons/react/24/outline'
+import { PlusIcon, UsersIcon, UserPlusIcon, ShieldCheckIcon, BuildingOfficeIcon, FolderPlusIcon, SignalIcon, XMarkIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, TrashIcon, PencilIcon, CheckIcon, ArrowLeftOnRectangleIcon, ArrowPathIcon, DevicePhoneMobileIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import { teamsAPI, channelsAPI, usersAPI, configAPI, devicesAPI } from '../services/api'
 import api from '../services/api'
@@ -10,10 +10,19 @@ import { computeTeamDepth } from '../utils/teamDepth'
 import { getTakColorHex } from '../utils/takColors'
 import TeamFormDialog from '../components/TeamFormDialog'
 import SignupCodeManager from '../components/SignupCodeManager'
-import OrgDomainManager from '../components/OrgDomainManager'
 import TransferMemberDialog from '../components/TransferMemberDialog'
 import UserDevicesModal, { useDeviceManagementEnabled } from '../components/UserDevicesModal'
 import TeamDeviceList, { deviceDisplayName } from '../components/TeamDeviceList'
+import AddTeamDeviceDialog from '../components/AddTeamDeviceDialog'
+import MoreOptionsMenu from '../components/MoreOptionsMenu'
+import { tabAria } from '../components/Tabs'
+import MemberEditRow, {
+  getInitialMemberEditForm,
+  isValidMemberCallsignSuffix,
+  DEFAULT_TAK_ROLE_VALUES,
+  CALLSIGN_SUFFIX_PATTERN
+} from '../components/MemberEditRow'
+import MemberActions from '../components/MemberActions'
 import EnrollmentView from './EnrollmentView'
 import {
   newUserFormReducer,
@@ -23,6 +32,7 @@ import {
   buildCreateAndAddSuffixArgument
 } from '../utils/callsignSuffixPreview'
 import { describeEmptyAvailableUsers } from '../utils/directoryScopeMessage'
+import { isValidNewUserEmail, extractCallsignSuffixServerError } from '../utils/newUserForm'
 
 // Requirement 5's two new `callsign_name_format` values need example
 // strings alongside the three existing ones, matching the "J Doe"/"John D"
@@ -46,6 +56,24 @@ export function formatCallsignNameFormatExample(callsignNameFormat) {
 // read from the Organisation's `callsign_level_selection`, replacing the
 // old single-depth "Depth N" badge (which assumed only a contiguous
 // prefix of levels could ever be selected).
+// The team header's summary row (Visibility, Callsign Structure, Join
+// Requests, Join Limited). `TEAM_SUMMARY_BADGE_CLASS` is the neutral
+// (gray) style, used for a value with no positive/negative state of its
+// own (Callsign Structure) and for the "off"/"none" half of a state pair
+// that isn't itself a warning (Join Requests Disabled, Join Limited
+// None). `TEAM_SUMMARY_BADGE_POSITIVE_CLASS`/`_NEGATIVE_CLASS` carry an
+// actual state in colour ALONGSIDE text (never colour alone -- each
+// badge's own text already says "Public"/"Private",
+// "Allowed"/"Disabled", "By Email Domain"/"None"): green for the
+// affirmative/open state (Public, Allowed, By Email Domain), red only
+// for Visibility's Private state specifically (a team hidden from the
+// public directory is the one state here worth flagging, unlike a
+// disabled join request or an unrestricted join, which are both
+// unremarkable defaults).
+const TEAM_SUMMARY_BADGE_CLASS = 'px-2 py-1 text-xs font-medium rounded-full bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200'
+const TEAM_SUMMARY_BADGE_POSITIVE_CLASS = 'px-2 py-1 text-xs font-medium rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
+const TEAM_SUMMARY_BADGE_NEGATIVE_CLASS = 'px-2 py-1 text-xs font-medium rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200'
+
 export function formatCallsignLevels(callsignLevelSelection) {
   if (!Array.isArray(callsignLevelSelection) || callsignLevelSelection.length === 0) {
     return 'All'
@@ -59,13 +87,13 @@ export function formatCallsignLevels(callsignLevelSelection) {
 // keep working unchanged.
 export { computeTeamDepth }
 
-// Requirement 11.3/11.13 (task 33.2): mirrors
-// server/utils/callsignValidation.js's `isValidCallsignSuffix` character
-// class (letters, digits, `-`, `.`) as an HTML `pattern`, matching the
-// same convention already used by RequestAccess.jsx's "Preferred
-// Callsign Suffix" input (task 34.1).
-const CALLSIGN_SUFFIX_PATTERN = '[A-Za-z0-9.-]*'
-const CALLSIGN_SUFFIX_REGEX = /^[A-Za-z0-9.-]*$/
+// Users-page-action-parity: the Member_List edit row's own pattern/regex,
+// pre-fill helper, validator and TAK_Role fallback list now live in
+// `components/MemberEditRow.jsx` (shared with `Users.jsx`) and are
+// imported above; re-exported here under their ORIGINAL names so this
+// file's own `TeamDetail.test.jsx` (and any other existing importer of
+// `./TeamDetail.jsx`) keeps working unchanged.
+export { getInitialMemberEditForm, isValidMemberCallsignSuffix }
 
 // Requirement 3.10 (task 33.3): mirrors server/utils/callsignValidation.js's
 // `isValidCallsignPrefix` character class (letters and digits only, no `-`
@@ -84,40 +112,6 @@ export function isValidSubTeamCallsignPrefix(value) {
     return true
   }
   return CALLSIGN_PREFIX_REGEX.test(value)
-}
-
-// The 8 predefined TAK_Role values (Requirement 13.4/13.5), used as a
-// fallback default for the Member_List edit form's `<select>` before
-// `GET /api/config/public`'s `takRoleValues` field (added alongside this
-// task) has loaded, so the select is never empty on first render.
-const DEFAULT_TAK_ROLE_VALUES = ['Team Member', 'Team Lead', 'Sniper', 'Medic', 'Forward Observer', 'RTO', 'K9', 'HQ']
-
-// Requirements 13.1, 13.2, 13.5 (task 33.2): the initial per-row edit-form
-// values seeded from a Member_List row when its "Edit" pencil icon is
-// clicked. Extracted as a standalone pure function (rather than inlined
-// in the click handler) so the pre-fill rule can be unit tested without
-// rendering the component, matching this file's own
-// `formatCallsignLevels`/`formatCallsignNameFormatExample` convention.
-// Deliberately excludes `email` (Requirement 13.3 -- there is no input
-// control for it anywhere in this form).
-export function getInitialMemberEditForm(member) {
-  return {
-    firstName: member?.first_name || '',
-    lastName: member?.last_name || '',
-    takRole: member?.tak_role || 'Team Member',
-    callsignSuffix: member?.callsign_suffix || ''
-  }
-}
-
-// Requirement 11.3 (task 33.2): pure validation helper for the Member_List
-// edit form's `callsign_suffix` input, mirroring
-// server/utils/callsignValidation.js's `isValidCallsignSuffix` -- an
-// empty value is valid (the field is optional).
-export function isValidMemberCallsignSuffix(value) {
-  if (!value) {
-    return true
-  }
-  return CALLSIGN_SUFFIX_REGEX.test(value)
 }
 
 // takserver-enrollment Requirement 6.7/9.7 (task 5.5): resolves whether
@@ -169,112 +163,18 @@ export function isPseudonymousOrganisation(team, allTeams) {
   return false
 }
 
-// Pure email-format validator for the Create New User form's Email
-// Address input. Mirrors the callsign validators' convention. An empty
-// value is treated as invalid here because the field is required.
-export function isValidNewUserEmail(value) {
-  if (typeof value !== 'string') return false
-  const trimmed = value.trim()
-  if (!trimmed) return false
-  // Pragmatic single-@ check with non-empty local part and a dotted domain.
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)
-}
+// Users-page-action-parity: `isValidNewUserEmail` and
+// `extractCallsignSuffixServerError` now live in `utils/newUserForm.js`
+// (shared with `Users.jsx`'s Create User dialog) and are imported above;
+// re-exported here under their ORIGINAL names so this file's own
+// `TeamDetail.test.jsx` keeps working unchanged.
+export { isValidNewUserEmail, extractCallsignSuffixServerError }
 
-// Pure helper extracting an inline Callsign Suffix error message from a
-// rejected `usersAPI.createAndAdd` call, or `null` when the failure is not a
-// shaped 400 (the server returns `{ error: <message> }` with status 400 for
-// both the `user_defined`-suffix-required and the per-team collision cases;
-// every other failure keeps the existing generic-toast behavior). Mirrors
-// Requests.jsx's `extractCallsignSuffixConflictError` convention.
-export function extractCallsignSuffixServerError(error) {
-  const status = error?.response?.status
-  const serverError = error?.response?.data?.error
-  if (status === 400 && typeof serverError === 'string') {
-    return serverError
-  }
-  return null
-}
-
-// Requirements 11.13, 13.1, 13.2, 13.3, 13.5 (task 33.2): the per-row
-// inline Member_List edit form, rendered as a single wide table row in
-// place of the member/admin's normal row when its "Edit" pencil icon has
-// been clicked. Shared between the Members and Team Admins tabs (both
-// call it identically) since the editable field set is the same
-// regardless of which tab the row came from. Email is intentionally NOT
-// rendered as an input anywhere in this form (Requirement 13.3).
-function MemberEditRow({ colSpan, form, setForm, takRoleValues, saving, error, onSave, onCancel }) {
-  return (
-    <tr className="bg-gray-50 dark:bg-gray-800">
-      <td colSpan={colSpan} className="px-6 py-4">
-        <div className="flex flex-wrap items-start gap-4">
-          <div>
-            <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">First Name</label>
-            <input
-              type="text"
-              value={form.firstName}
-              onChange={(e) => setForm({ ...form, firstName: e.target.value })}
-              className="input"
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Last Name</label>
-            <input
-              type="text"
-              value={form.lastName}
-              onChange={(e) => setForm({ ...form, lastName: e.target.value })}
-              className="input"
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">TAK Role</label>
-            <select
-              value={form.takRole}
-              onChange={(e) => setForm({ ...form, takRole: e.target.value })}
-              className="input"
-            >
-              {takRoleValues.map((role) => (
-                <option key={role} value={role}>{role}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Callsign Suffix</label>
-            <input
-              type="text"
-              value={form.callsignSuffix}
-              onChange={(e) => setForm({ ...form, callsignSuffix: e.target.value })}
-              className="input"
-              pattern={CALLSIGN_SUFFIX_PATTERN}
-              title="Only letters, digits, - and . are allowed"
-              placeholder="J.Bloggs"
-            />
-          </div>
-          <div className="flex items-end space-x-2 pb-0.5">
-            <button
-              type="button"
-              onClick={onSave}
-              disabled={saving}
-              className="btn-primary px-4 py-2 text-sm"
-            >
-              {saving ? 'Saving...' : 'Save'}
-            </button>
-            <button
-              type="button"
-              onClick={onCancel}
-              disabled={saving}
-              className="btn-secondary px-4 py-2 text-sm"
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-        {error && (
-          <p role="alert" className="text-red-600 dark:text-red-400 text-sm mt-2">{error}</p>
-        )}
-      </td>
-    </tr>
-  )
-}
+// Users-page-action-parity: `MemberEditRow` and `MemberActions` (the
+// Edit/Resend welcome/Transfer/View devices/Delete action-icon group,
+// shared between the Members and Team Admins tabs) now live in
+// `components/MemberEditRow.jsx`/`components/MemberActions.jsx`
+// (imported above), shared with `Users.jsx`.
 
 export default function TeamDetail({ user, refreshUser }) {
   const { teamId } = useParams()
@@ -344,6 +244,29 @@ export default function TeamDetail({ user, refreshUser }) {
     memberPermissions: []
   })
   const [creatingChannel, setCreatingChannel] = useState(false)
+  // Header toolbar's "Add Team Device" action -- opens
+  // `AddTeamDeviceDialog`, which creates a brand-new Team_Owned_Device
+  // (distinct from the Team Devices tab's "Enroll" action on an
+  // ALREADY-EXISTING one).
+  const [showAddDeviceDialog, setShowAddDeviceDialog] = useState(false)
+  // Bumped after a successful AddTeamDeviceDialog creation and used as
+  // `TeamDeviceList`'s `key`, forcing a remount (and therefore a fresh
+  // `GET /api/devices/team/:teamId` fetch) so the newly created device
+  // appears in the Team Devices tab without a full page reload.
+  // `TeamDeviceList` itself exposes no imperative refresh method.
+  const [deviceListVersion, setDeviceListVersion] = useState(0)
+  // Bugfix: the Team Devices tab is the only tab with no count badge --
+  // `TeamDeviceList` owns its own fetch entirely (this page never sees
+  // the device list itself), so its count has to be reported UP via a
+  // callback rather than read off a local array the way
+  // members.length/admins.length/etc. are. `null` until the first
+  // fetch resolves, matching every OTHER tab's own null-until-loaded
+  // state (`members`/`admins`/`channels`/`subTeams` all start as `[]`,
+  // giving a `0` badge before their own fetch resolves too -- the one
+  // difference here is `TeamDeviceList` doesn't even mount until this
+  // tab is selected, so `null` avoids a misleading "0 devices" flash
+  // before the tab has ever been opened).
+  const [deviceCount, setDeviceCount] = useState(null)
   const [showAddMemberDialog, setShowAddMemberDialog] = useState(false)
   const [addMemberTab, setAddMemberTab] = useState('new')
   // Bugfix: the "Add Admin" button reuses this same Add Member Dialog
@@ -928,6 +851,40 @@ export default function TeamDetail({ user, refreshUser }) {
     }
   }, [teamId])
 
+  // Bugfix: the Team Devices tab's count badge never appeared, because
+  // `TeamDeviceList` (the only thing that knows the count, via its own
+  // `onCountChange`) does not MOUNT until the devices tab is actually
+  // selected -- `activeTab` defaults to 'members' -- while every other
+  // tab's count is read directly off state (`members.length` etc.) that's
+  // already fetched on page load regardless of which tab is showing.
+  // This effect closes that gap with its OWN independent fetch, run
+  // whenever this page loads (or `teamId` changes) and again whenever
+  // `deviceListVersion` bumps (a device was just created via
+  // AddTeamDeviceDialog), exactly mirroring `TeamDeviceList`'s own fetch
+  // but decoupled from that component's mount state. While the devices
+  // tab IS open, `TeamDeviceList`'s `onCountChange` (passed to it below)
+  // keeps `deviceCount` live-updated for actions that happen entirely
+  // inside that component (edit/delete/transfer), which this effect has
+  // no visibility into.
+  useEffect(() => {
+    if (!devicesEnabled || !teamId) {
+      return
+    }
+    let isCancelled = false
+    devicesAPI.getTeamDevices(teamId)
+      .then((response) => {
+        if (!isCancelled) {
+          setDeviceCount(response.data?.devices?.length ?? 0)
+        }
+      })
+      .catch((err) => {
+        console.error('Failed to fetch team device count:', err)
+      })
+    return () => {
+      isCancelled = true
+    }
+  }, [devicesEnabled, teamId, deviceListVersion])
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -992,8 +949,12 @@ export default function TeamDetail({ user, refreshUser }) {
     subteams: filterAndSort(subTeams, searchTerms.subteams, sortFields.subteams, sortDirections.subteams)
   }
 
-  // Pagination for current tab
-  const currentData = processedData[activeTab]
+  // Pagination for current tab. The Team Devices tab is not one of the
+  // four keys above (it owns its own list/fetch entirely, via
+  // `TeamDeviceList` -- see that tab's own render branch), so it falls
+  // back to an empty array here rather than `processedData['devices']`
+  // being `undefined` and every `.length`/`.slice()` call below throwing.
+  const currentData = processedData[activeTab] || []
   const totalPages = Math.ceil(currentData.length / itemsPerPage)
   const startIndex = (currentPages[activeTab] - 1) * itemsPerPage
   const paginatedData = currentData.slice(startIndex, startIndex + itemsPerPage)
@@ -1068,19 +1029,25 @@ export default function TeamDetail({ user, refreshUser }) {
       <div className="card">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <div className="flex-1">
-            <div className="flex items-center space-x-2 mb-2">
-              <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
+            {/* Bugfix: `flex-wrap` + `break-words` on the title itself
+                (was a non-wrapping row with no break behaviour at all)
+                -- `team.name` can be a concatenated
+                "{parentPrefix} - {teamName}" string with no length
+                cap, and neither the row nor the `h1` had any wrap/break
+                behaviour to fall back on at narrow widths. */}
+            <div className="flex items-center flex-wrap gap-2 mb-2">
+              <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100 break-words">
                 {team.parent_team_id ? `${parentTeam?.callsign_prefix || parentTeam?.name || 'Organisation'} - ${team.name}` : team.name}
               </h1>
               {team.color && (
                 <div 
-                  className="w-4 h-4 rounded border border-gray-300" 
+                  className="w-4 h-4 rounded border border-gray-300 flex-shrink-0" 
                   style={{ backgroundColor: getTakColorHex(team.color) }}
                   title={team.color}
                 ></div>
               )}
               {team.can_join && (
-                <ArrowLeftOnRectangleIcon className="h-4 w-4 text-green-500" title="Joinable team" />
+                <ArrowLeftOnRectangleIcon className="h-4 w-4 text-green-500 flex-shrink-0" title="Joinable team" />
               )}
             </div>
             {team.parent_team_id && (
@@ -1114,93 +1081,175 @@ export default function TeamDetail({ user, refreshUser }) {
                   </Link>
                 )}
               </div>
-              
-              <div className="flex items-center flex-wrap gap-x-4 gap-y-2 text-sm text-gray-500 dark:text-gray-400">
-                <div className="flex items-center">
-                  <span>Visibility: </span>
-                  <span className={`ml-1 px-2 py-1 text-xs font-medium rounded-full ${
-                    team.visibility === 'public' 
-                      ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
-                      : 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200'
-                  }`}>
-                    {team.visibility === 'public' ? 'Public' : 'Private'}
-                  </span>
-                </div>
-                
-                <div className="flex items-center">
-                  <span>Join Requests: </span>
-                  <span className={`ml-1 px-2 py-1 text-xs font-medium rounded-full ${
-                    team.can_join 
-                      ? 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200'
-                      : 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200'
-                  }`}>
-                    {team.can_join ? 'Allowed' : 'Disabled'}
-                  </span>
-                </div>
-                
-                {!team.parent_team_id && (
-                  <div className="flex items-center">
-                    <span>Callsign: </span>
-                    <span
-                      className="ml-1 px-2 py-1 text-xs font-medium rounded-full bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200"
-                      title="Team-Depth positions included in generated callsigns for this Organisation"
-                    >
-                      Levels: {formatCallsignLevels(team.callsign_level_selection)}
-                    </span>
-                    <span className="ml-1 px-2 py-1 text-xs font-medium rounded-full bg-indigo-100 text-indigo-800 dark:bg-indigo-900 dark:text-indigo-200">
-                      {formatCallsignNameFormatExample(team.callsign_name_format)}
-                    </span>
-                  </div>
-                )}
-              </div>
             </div>
           </div>
           {canManageTeam && (
           <div className="flex flex-col gap-2 lg:items-end">
+            {/* Only the two most-used actions stay directly visible --
+                Add Member and Add Team Device -- with every other action
+                (Edit, Add Admin, Add Sub-team, Create Channel) moved
+                behind the "More options" dropdown below, each still
+                carrying its own icon so the items stay visually
+                distinguishable from one another once they are no longer
+                spread across separate labelled buttons. Add Team Device
+                is gated on `devicesEnabled` exactly like the Team
+                Devices tab it creates devices for -- both surfaces exist
+                only while DEVICE_MGMT_ENABLED is on. */}
+            {/* Bugfix: icon-only BELOW `sm:` only (was icon-only on
+                EVERY viewport, including desktop -- a regression: the
+                mobile fix should never have dropped the text label at
+                `sm:` and up). Below `sm:`, Add Member/Add Team
+                Device/More options are icon-only so all three fit on
+                one row on a narrow phone instead of wrapping onto
+                two/three lines; at `sm:` and up, the label text returns
+                exactly as it always has. Each button's name stays on
+                `aria-label`/`title` at every width (harmless once the
+                text is visible too) so it's always announced correctly
+                regardless of viewport. `flex-wrap` stays as a
+                defensive fallback for the `sm:`-and-up, text-visible
+                case. */}
             <div className="flex flex-wrap gap-2">
-              <button 
-                onClick={() => setShowEditDialog(true)}
-                className="btn-secondary flex items-center"
-              >
-                <PencilIcon className="h-4 w-4 mr-2" />
-                Edit {teamLabel}
-              </button>
               <button 
                 onClick={() => { dispatchNewUserForm({ type: 'reset' }); setNewUserEmailError(null); setAddMemberRole('member'); setAddMemberTab('new'); setShowAddMemberDialog(true) }}
-                className="btn-secondary flex items-center"
+                className="btn-primary flex items-center justify-center sm:justify-start p-2 sm:px-4 sm:py-2"
+                aria-label="Add Member"
+                title="Add Member"
               >
-                <UserPlusIcon className="h-4 w-4 mr-2" />
-                Add Member
+                <UserPlusIcon className="h-5 w-5 sm:h-4 sm:w-4 sm:mr-2" aria-hidden="true" />
+                <span className="hidden sm:inline">Add Member</span>
               </button>
-              <button
-                onClick={() => { dispatchNewUserForm({ type: 'reset' }); setNewUserEmailError(null); setAddMemberRole('admin'); setAddMemberTab('existing'); setShowAddMemberDialog(true) }}
-                className="btn-secondary flex items-center"
-              >
-                <ShieldCheckIcon className="h-4 w-4 mr-2" />
-                Add Admin
-              </button>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <button 
-                onClick={() => setShowSubTeamDialog(true)}
-                disabled={atMaxTeamDepth}
-                className={`btn-secondary flex items-center ${atMaxTeamDepth ? 'opacity-50 cursor-not-allowed' : ''}`}
-                title={atMaxTeamDepth ? `Maximum team depth (${maxTeamDepth}) reached` : undefined}
-              >
-                <FolderPlusIcon className="h-4 w-4 mr-2" />
-                Add Sub-team
-              </button>
-              <button 
-                onClick={() => setShowChannelDialog(true)}
-                disabled={channels.length >= 3}
-                className={`btn-primary flex items-center ${channels.length >= 3 ? 'opacity-50 cursor-not-allowed' : ''}`}
-                title={channels.length >= 3 ? 'Maximum 3 channels allowed' : 'Create custom channel'}
-              >
-                <HashtagIcon className="h-4 w-4 mr-2" />
-                Create Channel ({channels.length}/3)
-              </button>
+              {devicesEnabled && (
+                <button
+                  onClick={() => setShowAddDeviceDialog(true)}
+                  className="btn-primary flex items-center justify-center sm:justify-start p-2 sm:px-4 sm:py-2"
+                  aria-label="Add Team Device"
+                  title="Add Team Device"
+                >
+                  <DevicePhoneMobileIcon className="h-5 w-5 sm:h-4 sm:w-4 sm:mr-2" aria-hidden="true" />
+                  <span className="hidden sm:inline">Add Team Device</span>
+                </button>
+              )}
+              <MoreOptionsMenu
+                iconOnly="below-sm"
+                // Bugfix: this toolbar is left-aligned below `lg:` and
+                // only becomes right-aligned AT `lg:` (`lg:items-end` on
+                // its containing column, above). The panel's default
+                // anchor (`right-0`, opening leftward) pushed it off the
+                // left edge of the screen on a phone, where the trigger
+                // sits near the LEFT edge instead. Opening rightward
+                // below `lg:` and switching to leftward only where the
+                // toolbar itself does keeps the panel on-screen at every
+                // width.
+                panelClassName="left-0 lg:left-auto lg:right-0"
+                items={[
+                  {
+                    key: 'edit',
+                    label: `Edit ${teamLabel}`,
+                    icon: PencilIcon,
+                    onClick: () => setShowEditDialog(true)
+                  },
+                  {
+                    key: 'add-admin',
+                    label: 'Add Admin',
+                    icon: ShieldCheckIcon,
+                    onClick: () => { dispatchNewUserForm({ type: 'reset' }); setNewUserEmailError(null); setAddMemberRole('admin'); setAddMemberTab('existing'); setShowAddMemberDialog(true) }
+                  },
+                  {
+                    key: 'add-sub-team',
+                    label: 'Add Sub-team',
+                    icon: FolderPlusIcon,
+                    onClick: () => setShowSubTeamDialog(true),
+                    disabled: atMaxTeamDepth,
+                    title: atMaxTeamDepth ? `Maximum team depth (${maxTeamDepth}) reached` : undefined
+                  },
+                  {
+                    key: 'create-channel',
+                    label: `Create Channel (${channels.length}/3)`,
+                    icon: SignalIcon,
+                    onClick: () => setShowChannelDialog(true),
+                    disabled: channels.length >= 3,
+                    title: channels.length >= 3 ? 'Maximum 3 channels allowed' : 'Create custom channel'
+                  }
+                ]}
+              />
             </div>
           </div>
+          )}
+        </div>
+
+        {/* Divider + summary row span the FULL card width (both grid
+            columns above), rather than living inside the left column
+            alone -- placed as a sibling of the 2-column grid rather than
+            inside it. Colour now carries actual state, alongside the
+            text that already states it (never colour alone): green for
+            an affirmative/open state (Public, Allowed, By Email Domain),
+            red for Visibility's Private state specifically -- a team
+            hidden from the public directory is the one state here worth
+            flagging. "Join Limited" is shown only while Join Requests is
+            Allowed; a disabled join request already means no one can
+            join by any means, so a domain restriction underneath it has
+            nothing left to qualify. */}
+        <hr className="border-gray-200 dark:border-gray-700 my-3" />
+
+        <div className="flex items-center flex-wrap gap-x-4 gap-y-2 text-sm text-gray-500 dark:text-gray-400">
+          <div className="flex items-center">
+            <span>Visibility: </span>
+            <span className={`ml-1 ${team.visibility === 'public' ? TEAM_SUMMARY_BADGE_POSITIVE_CLASS : TEAM_SUMMARY_BADGE_NEGATIVE_CLASS}`}>
+              {team.visibility === 'public' ? 'Public' : 'Private'}
+            </span>
+          </div>
+
+          {!team.parent_team_id && (
+            <div className="flex items-center">
+              <span>Callsign Structure: </span>
+              <span
+                className={`ml-1 ${TEAM_SUMMARY_BADGE_CLASS}`}
+                title="Team-Depth positions included in generated callsigns for this Organisation, and the name format applied to each member"
+              >
+                Levels: {formatCallsignLevels(team.callsign_level_selection)} &middot; {formatCallsignNameFormatExample(team.callsign_name_format)}
+              </span>
+            </div>
+          )}
+
+          <div className="flex items-center">
+            <span>Join Requests: </span>
+            <span className={`ml-1 ${team.can_join ? TEAM_SUMMARY_BADGE_POSITIVE_CLASS : TEAM_SUMMARY_BADGE_CLASS}`}>
+              {team.can_join ? 'Allowed' : 'Disabled'}
+            </span>
+          </div>
+
+          {/* Organisation-only, matching where Allowed Email Domains
+              editing itself now lives (the Edit Organisation modal --
+              see TeamFormDialog.jsx). `team.allowed_domains` is `null`
+              for a Sub_Team (nothing to summarise) and an array,
+              possibly empty, for an Organisation
+              (server/routes/teams.js's GET /:teamId). Shown only while
+              Join Requests is Allowed (`team.can_join`) -- a domain
+              restriction is meaningless once join requests are disabled
+              outright. State is carried in TEXT ("None"/"By Email
+              Domain"), never colour alone; the domain LIST itself is
+              disclosed only on hover/focus, via the same sideways
+              relative-group tooltip pattern `DeviceTypeIcon.jsx` uses --
+              never a native `title` attribute, which is not reliably
+              disclosed on keyboard focus. */}
+          {!team.parent_team_id && team.can_join && Array.isArray(team.allowed_domains) && (
+            <div className="flex items-center">
+              <span>Join Limited: </span>
+              {team.allowed_domains.length > 0 ? (
+                <span className="relative group ml-1" tabIndex={0}>
+                  <span className={`${TEAM_SUMMARY_BADGE_POSITIVE_CLASS} cursor-help`}>
+                    By Email Domain
+                  </span>
+                  <span className="absolute left-full top-1/2 transform -translate-y-1/2 ml-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
+                    {team.allowed_domains.join(', ')}
+                  </span>
+                </span>
+              ) : (
+                <span className={`ml-1 ${TEAM_SUMMARY_BADGE_CLASS}`}>
+                  None
+                </span>
+              )}
+            </div>
           )}
         </div>
       </div>
@@ -1214,38 +1263,70 @@ export default function TeamDetail({ user, refreshUser }) {
         />
       )}
 
-      {/* Org Domain Manager (only for root teams / organisations) */}
-      {!team.parent_team_id && (
-        <OrgDomainManager
-          orgId={team.id}
-          isAdmin={canManageTeam}
-        />
-      )}
-
       {/* Tabbed Interface */}
       <div className="card">
-        {/* Tab Navigation */}
+        {/* Tab Navigation. Bugfix: icon-only BELOW `sm:` only (was
+            icon-only on EVERY viewport, including desktop -- the same
+            regression the header action buttons had: a mobile fix must
+            not remove the text label at `sm:` and up). Below `sm:`, each
+            tab is icon + count only, so 5 tabs fit a narrow phone
+            without needing `overflow-x-auto` at all -- that scrollbar
+            is gone now that the icon-only width is small enough to fit.
+            At `sm:` and up, the ORIGINAL "Label (count)" text returns in
+            full, unabridged; `aria-label`/`title` stay set at every
+            width (harmless once the text is visible too) so the
+            accessible name is always correct regardless of viewport. */}
         <div className="border-b border-gray-200 dark:border-gray-700">
-          <nav className="-mb-px flex space-x-8">
+          <nav className="-mb-px flex space-x-3 sm:space-x-6" role="tablist">
             {[
               { id: 'members', label: 'Members', icon: UsersIcon, count: members.length },
+              // Team Devices sits between Members and Team Admins,
+              // gated on `devicesEnabled` exactly like the Add Team
+              // Device header button and the per-member "View member
+              // devices" affordance -- all three surfaces exist only
+              // while DEVICE_MGMT_ENABLED is on. Bugfix: this tab's
+              // count now MATCHES the other tabs' -- it used to
+              // hardcode `count: null` (icon alone, no badge) because
+              // this tab's list is NOT one of this page's own
+              // `members`/`admins`/`channels`/`subTeams` arrays;
+              // `TeamDeviceList` below owns its own fetch and list state
+              // entirely. Rather than duplicating that fetch here, this
+              // reads `deviceCount` (state above), kept in sync via
+              // `TeamDeviceList`'s own `onCountChange` callback. `null`
+              // (rendered as the icon alone, no badge, same as before)
+              // only until that first fetch resolves.
+              ...(devicesEnabled ? [{ id: 'devices', label: 'Team Devices', icon: DevicePhoneMobileIcon, count: deviceCount }] : []),
               { id: 'admins', label: 'Team Admins', icon: ShieldCheckIcon, count: admins.length },
-              { id: 'channels', label: 'Channels', icon: HashtagIcon, count: channels.length },
+              // SignalIcon, matching the icon Dashboard.jsx already uses
+              // for its own "Total Channels" stat tile -- the closest
+              // existing app-wide convention for "channels" as a
+              // concept, rather than this tab's previous HashtagIcon,
+              // which no other page uses for channels at all.
+              { id: 'channels', label: 'Channels', icon: SignalIcon, count: channels.length },
               { id: 'subteams', label: 'Sub-teams', icon: BuildingOfficeIcon, count: subTeams.length }
             ].map((tab) => {
               const Icon = tab.icon
+              const accessibleName = tab.count === null ? tab.label : `${tab.label} (${tab.count})`
               return (
                 <button
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id)}
-                  className={`flex items-center py-4 px-1 border-b-2 font-medium text-sm ${
+                  aria-label={accessibleName}
+                  title={accessibleName}
+                  {...tabAria(activeTab, tab.id)}
+                  className={`flex items-center py-4 px-1 border-b-2 font-medium text-sm flex-shrink-0 ${
                     activeTab === tab.id
                       ? 'border-primary-500 text-primary-600 dark:text-primary-400'
                       : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'
                   }`}
                 >
-                  <Icon className="h-5 w-5 mr-2" />
-                  {tab.label} ({tab.count})
+                  <Icon className="h-5 w-5 sm:mr-2" aria-hidden="true" />
+                  <span className="hidden sm:inline">
+                    {tab.count === null ? tab.label : `${tab.label} (${tab.count})`}
+                  </span>
+                  {tab.count !== null && (
+                    <span className="ml-1.5 sm:hidden">{tab.count}</span>
+                  )}
                 </button>
               )
             })}
@@ -1254,7 +1335,12 @@ export default function TeamDetail({ user, refreshUser }) {
 
         {/* Tab Content */}
         <div className="p-6">
-          {/* Search Bar */}
+          {/* Search Bar. Omitted for the Team Devices tab: that tab
+              renders `TeamDeviceList` directly, which is a self-contained
+              divided list with its own fetch/loading/error state, not
+              one of this page's own filterAndSort-backed arrays -- there
+              is nothing here for this search box to filter. */}
+          {activeTab !== 'devices' && (
           <div className="mb-4 flex items-center space-x-4">
             <div className="flex-1">
               <input
@@ -1269,10 +1355,99 @@ export default function TeamDetail({ user, refreshUser }) {
               {currentData.length} {activeTab}
             </div>
           </div>
+          )}
 
-          {/* Content based on active tab */}
+          {/* Team Devices tab: renders the same `TeamDeviceList` this
+              page used to show as a separate card BENEATH the tabbed
+              interface -- now one of the tabs instead. Its own doc
+              comment's "not a fifth tab inside it" framing predates this
+              change; this section is the update to that decision. Still
+              fetches from `GET /api/devices/team/:teamId`, a route
+              entirely separate from the human member list and the human
+              member-count query this page renders elsewhere, so this
+              tab cannot reintroduce a Team_Owned_Device into either
+              (`production-hardening` Criterion 27.9). */}
+          {activeTab === 'devices' && devicesEnabled && (
+            <TeamDeviceList key={deviceListVersion} teamId={team.id} onEnroll={setEnrollingDevice} user={user} onCountChange={setDeviceCount} />
+          )}
+
+          {/* Content based on active tab. Bugfix: Members now renders as
+              a `sm:hidden` stacked card list PLUS the existing
+              `hidden sm:block overflow-x-auto` table, matching the
+              pairing `TeamDeviceList.jsx`/`Teams.jsx` already use, so a
+              phone gets cards instead of a horizontally-scrolling
+              table. The inline edit form (`MemberEditRow`) has no card
+              equivalent -- editing a member is not something this
+              surface needs to support with a distinct mobile layout, so
+              a row being edited simply keeps rendering the (desktop-
+              shaped) `MemberEditRow` regardless of viewport; it is rare
+              enough, and self-contained enough, not to warrant a second
+              layout. */}
           {activeTab === 'members' && (
-            <div className="overflow-x-auto">
+            <>
+              <div className="sm:hidden divide-y divide-gray-200 dark:divide-gray-700">
+                {paginatedData.map((member) => (
+                  editingMemberId === member.id ? (
+                    <div key={member.id} className="overflow-x-auto">
+                      <table className="min-w-full">
+                        <tbody>
+                          <MemberEditRow
+                            colSpan={1}
+                            form={memberEditForm}
+                            setForm={setMemberEditForm}
+                            takRoleValues={takRoleValues}
+                            saving={savingMemberEdit}
+                            error={memberEditError}
+                            onSave={() => handleSaveMemberEdit(member.id)}
+                            onCancel={handleCancelEditMember}
+                          />
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div key={member.id} className="p-4 space-y-2 text-sm">
+                      <div className="flex items-start justify-between gap-2">
+                        <p className="font-medium text-gray-900 dark:text-gray-100 break-words">
+                          {member.first_name} {member.last_name}
+                        </p>
+                        {member.inherited_from_team_name ? (
+                          <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-blue-100 text-blue-800 dark:bg-blue-600 dark:text-blue-200 flex-shrink-0">
+                            Member of <Link to={`/teams/${member.inherited_from_team_id}`} className="underline hover:no-underline">{member.inherited_from_team_name}</Link>
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-gray-100 text-gray-800 dark:bg-gray-600 dark:text-gray-200 flex-shrink-0">
+                            Member
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-gray-500 dark:text-gray-400 break-words">{member.email}</p>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-teal-100 text-teal-800 dark:bg-teal-900 dark:text-teal-200">
+                          {member.tak_role || 'Team Member'}
+                        </span>
+                        {member.tak_callsign && (
+                          <span className="text-xs text-gray-500 dark:text-gray-400">{member.tak_callsign}</span>
+                        )}
+                      </div>
+                      {canManageTeam && (
+                        <MemberActions
+                          member={member}
+                          roleLabel="member"
+                          devicesEnabled={devicesEnabled}
+                          onEdit={handleStartEditMember}
+                          onResendWelcome={handleResendWelcome}
+                          onTransfer={setTransferringMember}
+                          onViewDevices={setDevicesForMember}
+                          onRemove={handleRemoveUser}
+                          variant="card"
+                        />
+                      )}
+                    </div>
+                  )
+                ))}
+              </div>
+
+              <div className="hidden sm:block overflow-x-auto">
               <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                 <thead className="bg-gray-50 dark:bg-gray-800">
                   <tr>
@@ -1345,66 +1520,16 @@ export default function TeamDetail({ user, refreshUser }) {
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                           {canManageTeam && (
-                          <div className="flex items-center justify-end space-x-3">
-                            <button
-                              onClick={() => handleStartEditMember(member)}
-                              className="text-gray-600 hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300"
-                              title="Edit member"
-                            >
-                              <PencilIcon className="h-4 w-4" />
-                            </button>
-                            <button
-                              onClick={() => handleResendWelcome(member)}
-                              className="text-gray-600 hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300"
-                              title="Resend welcome email"
-                            >
-                              <EnvelopeIcon className="h-4 w-4" />
-                            </button>
-                            {/* Requirement 15.1 */}
-                            <button
-                              onClick={() => setTransferringMember(member)}
-                              className="text-gray-600 hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300"
-                              title="Transfer member to another team"
-                              aria-label="Transfer member to another team"
-                            >
-                              <ArrowRightCircleIcon className="h-4 w-4" aria-hidden="true" />
-                            </button>
-                            {/* Requirement 6.3: opens the shared
-                                UserDevicesModal for this member. `member.id`
-                                is the LOCAL `users.id`, which is what the
-                                device route is keyed on. Whether the caller
-                                may see this member's devices is the server's
-                                call (403 when the member is not a
-                                Managed_User of the caller), shown inside the
-                                modal. */}
-                            {devicesEnabled && (
-                              <button
-                                onClick={() => setDevicesForMember(member)}
-                                className="text-gray-600 hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300"
-                                title="View member devices"
-                                aria-label="View member devices"
-                              >
-                                <DevicePhoneMobileIcon className="h-4 w-4" aria-hidden="true" />
-                              </button>
-                            )}
-                            {member.inherited_from_team_name ? (
-                              <button
-                                onClick={() => handleRemoveUser(member.id, 'member')}
-                                className="text-orange-600 hover:text-orange-500 dark:text-orange-400 dark:hover:text-orange-300"
-                                title="Remove from all teams (removes from entire hierarchy)"
-                              >
-                                <TrashIcon className="h-4 w-4" />
-                              </button>
-                            ) : (
-                              <button
-                                onClick={() => handleRemoveUser(member.id, 'member')}
-                                className="text-red-600 hover:text-red-500 dark:text-red-400 dark:hover:text-red-300"
-                                title="Remove from team"
-                              >
-                                <TrashIcon className="h-4 w-4" />
-                              </button>
-                            )}
-                          </div>
+                            <MemberActions
+                              member={member}
+                              roleLabel="member"
+                              devicesEnabled={devicesEnabled}
+                              onEdit={handleStartEditMember}
+                              onResendWelcome={handleResendWelcome}
+                              onTransfer={setTransferringMember}
+                              onViewDevices={setDevicesForMember}
+                              onRemove={handleRemoveUser}
+                            />
                           )}
                         </td>
                       </tr>
@@ -1412,11 +1537,78 @@ export default function TeamDetail({ user, refreshUser }) {
                   ))}
                 </tbody>
               </table>
-            </div>
+              </div>
+            </>
           )}
 
+          {/* Bugfix: same sm:hidden card / hidden sm:block table pairing
+              as Members above, sharing the same MemberActions
+              component. */}
           {activeTab === 'admins' && (
-            <div className="overflow-x-auto">
+            <>
+              <div className="sm:hidden divide-y divide-gray-200 dark:divide-gray-700">
+                {paginatedData.map((admin) => (
+                  editingMemberId === admin.id ? (
+                    <div key={admin.id} className="overflow-x-auto">
+                      <table className="min-w-full">
+                        <tbody>
+                          <MemberEditRow
+                            colSpan={1}
+                            form={memberEditForm}
+                            setForm={setMemberEditForm}
+                            takRoleValues={takRoleValues}
+                            saving={savingMemberEdit}
+                            error={memberEditError}
+                            onSave={() => handleSaveMemberEdit(admin.id)}
+                            onCancel={handleCancelEditMember}
+                          />
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div key={admin.id} className="p-4 space-y-2 text-sm">
+                      <div className="flex items-start justify-between gap-2">
+                        <p className="font-medium text-gray-900 dark:text-gray-100 break-words">
+                          {admin.first_name} {admin.last_name}
+                        </p>
+                        {admin.inherited_from_team_name ? (
+                          <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-purple-100 text-purple-800 dark:bg-purple-600 dark:text-purple-200 flex-shrink-0">
+                            Admin of <Link to={`/teams/${admin.inherited_from_team_id}`} className="underline hover:no-underline">{admin.inherited_from_team_name}</Link>
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 flex-shrink-0">
+                            Admin
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-gray-500 dark:text-gray-400 break-words">{admin.email}</p>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-teal-100 text-teal-800 dark:bg-teal-900 dark:text-teal-200">
+                          {admin.tak_role || 'Team Member'}
+                        </span>
+                        {admin.tak_callsign && (
+                          <span className="text-xs text-gray-500 dark:text-gray-400">{admin.tak_callsign}</span>
+                        )}
+                      </div>
+                      {canManageTeam && (
+                        <MemberActions
+                          member={admin}
+                          roleLabel="admin"
+                          devicesEnabled={devicesEnabled}
+                          onEdit={handleStartEditMember}
+                          onResendWelcome={handleResendWelcome}
+                          onTransfer={setTransferringMember}
+                          onViewDevices={setDevicesForMember}
+                          onRemove={handleRemoveUser}
+                          variant="card"
+                        />
+                      )}
+                    </div>
+                  )
+                ))}
+              </div>
+
+              <div className="hidden sm:block overflow-x-auto">
               <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                 <thead className="bg-gray-50 dark:bg-gray-800">
                   <tr>
@@ -1489,61 +1681,16 @@ export default function TeamDetail({ user, refreshUser }) {
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                           {canManageTeam && (
-                          <div className="flex items-center justify-end space-x-3">
-                            <button
-                              onClick={() => handleStartEditMember(admin)}
-                              className="text-gray-600 hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300"
-                              title="Edit admin"
-                            >
-                              <PencilIcon className="h-4 w-4" />
-                            </button>
-                            <button
-                              onClick={() => handleResendWelcome(admin)}
-                              className="text-gray-600 hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300"
-                              title="Resend welcome email"
-                            >
-                              <EnvelopeIcon className="h-4 w-4" />
-                            </button>
-                            {/* Requirement 15.1 */}
-                            <button
-                              onClick={() => setTransferringMember(admin)}
-                              className="text-gray-600 hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300"
-                              title="Transfer member to another team"
-                              aria-label="Transfer member to another team"
-                            >
-                              <ArrowRightCircleIcon className="h-4 w-4" aria-hidden="true" />
-                            </button>
-                            {/* Requirement 6.3: same shared UserDevicesModal
-                                as the Members tab above -- one modal, one
-                                state, both tabs. */}
-                            {devicesEnabled && (
-                              <button
-                                onClick={() => setDevicesForMember(admin)}
-                                className="text-gray-600 hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300"
-                                title="View member devices"
-                                aria-label="View member devices"
-                              >
-                                <DevicePhoneMobileIcon className="h-4 w-4" aria-hidden="true" />
-                              </button>
-                            )}
-                            {admin.inherited_from_team_name ? (
-                              <button
-                                onClick={() => handleRemoveUser(admin.id, 'admin')}
-                                className="text-orange-600 hover:text-orange-500 dark:text-orange-400 dark:hover:text-orange-300"
-                                title="Remove from all teams (removes from entire hierarchy)"
-                              >
-                                <TrashIcon className="h-4 w-4" />
-                              </button>
-                            ) : (
-                              <button
-                                onClick={() => handleRemoveUser(admin.id, 'admin')}
-                                className="text-red-600 hover:text-red-500 dark:text-red-400 dark:hover:text-red-300"
-                                title="Remove from team"
-                              >
-                                <TrashIcon className="h-4 w-4" />
-                              </button>
-                            )}
-                          </div>
+                            <MemberActions
+                              member={admin}
+                              roleLabel="admin"
+                              devicesEnabled={devicesEnabled}
+                              onEdit={handleStartEditMember}
+                              onResendWelcome={handleResendWelcome}
+                              onTransfer={setTransferringMember}
+                              onViewDevices={setDevicesForMember}
+                              onRemove={handleRemoveUser}
+                            />
                           )}
                         </td>
                       </tr>
@@ -1551,11 +1698,51 @@ export default function TeamDetail({ user, refreshUser }) {
                   ))}
                 </tbody>
               </table>
-            </div>
+              </div>
+            </>
           )}
 
+          {/* Bugfix: same sm:hidden card / hidden sm:block table
+              pairing as Members/Team Admins above. This tab is
+              read-only (no per-row actions), so its card is just the
+              same three facts as the table row. */}
           {activeTab === 'channels' && (
-            <div className="overflow-x-auto">
+            <>
+              <div className="sm:hidden divide-y divide-gray-200 dark:divide-gray-700">
+                {paginatedData.map((channel) => (
+                  <div key={channel.id} className="p-4 space-y-2 text-sm">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="font-medium text-gray-900 dark:text-gray-100 break-words">
+                          {channel.display_name}
+                        </p>
+                        {channel.custom_suffix && (
+                          <p className="text-xs text-gray-500 dark:text-gray-400">
+                            Suffix: {channel.custom_suffix}
+                          </p>
+                        )}
+                      </div>
+                      {channel.authentik_group_id && (
+                        <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200 flex-shrink-0">
+                          Synced
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${
+                        channel.channel_type === 'primary'
+                          ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
+                          : 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200'
+                      }`}>
+                        {channel.channel_type === 'primary' ? 'Primary' : 'Custom'}
+                      </span>
+                      <span className="text-gray-500 dark:text-gray-400">{channel.member_count || 0} members</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="hidden sm:block overflow-x-auto">
               <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                 <thead className="bg-gray-50 dark:bg-gray-800">
                   <tr>
@@ -1613,11 +1800,85 @@ export default function TeamDetail({ user, refreshUser }) {
                   ))}
                 </tbody>
               </table>
-            </div>
+              </div>
+            </>
           )}
 
+          {/* Bugfix: same sm:hidden card / hidden sm:block table
+              pairing as the tabs above -- mirrors the same shape
+              Teams.jsx's own overview table already got. Description is
+              inline text on the card (no hover-only tooltip -- useless
+              on a touchscreen), matching Teams.jsx's own card
+              treatment. */}
           {activeTab === 'subteams' && (
-            <div className="overflow-x-auto">
+            <>
+              <div className="sm:hidden divide-y divide-gray-200 dark:divide-gray-700">
+                {paginatedData.map((subTeam) => (
+                  <div key={subTeam.id} className="p-4 space-y-2 text-sm">
+                    <Link
+                      to={`/teams/${subTeam.id}`}
+                      className="font-medium text-gray-900 dark:text-gray-100 hover:text-primary-600 dark:hover:text-primary-400 break-words"
+                    >
+                      {subTeam.name}
+                    </Link>
+                    {subTeam.description && (
+                      <p className="text-gray-500 dark:text-gray-400">{subTeam.description}</p>
+                    )}
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+                      <div className="flex items-baseline gap-1">
+                        <span className="text-xs text-gray-500 dark:text-gray-400">Members:</span>
+                        <span className="text-gray-900 dark:text-gray-100">{subTeam.member_count || 0}</span>
+                      </div>
+                      <div className="flex items-baseline gap-1">
+                        <span className="text-xs text-gray-500 dark:text-gray-400">Sub-teams:</span>
+                        <span className="text-gray-900 dark:text-gray-100">{subTeam.sub_teams_count || 0}</span>
+                      </div>
+                      {subTeam.callsign_prefix && (
+                        <div className="flex items-baseline gap-1">
+                          <span className="text-xs text-gray-500 dark:text-gray-400">Prefix:</span>
+                          <span className="text-gray-900 dark:text-gray-100">{subTeam.callsign_prefix}</span>
+                        </div>
+                      )}
+                    </div>
+                    {/* Bugfix (mobile tap targets too small): button-box
+                        style matching MemberActions/DeviceActions/
+                        TeamRowActions' own `variant="card"` treatment --
+                        this pair of actions was never extracted into a
+                        shared component (only 2 icons), so the same
+                        p-2/rounded-lg/h-5 w-5 shapes are applied inline
+                        here instead. */}
+                    <div className="flex items-center justify-end space-x-3">
+                      <Link
+                        to={`/teams/${subTeam.id}`}
+                        className="p-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-primary-600 dark:bg-gray-700 dark:hover:bg-gray-600 dark:text-primary-400"
+                        title="View team details"
+                      >
+                        <MagnifyingGlassIcon className="h-5 w-5" />
+                      </Link>
+                      {(subTeam.sub_teams_count || 0) === 0 && (
+                        <button
+                          onClick={() => setDeleteSubTeamId(subTeam.id)}
+                          className="p-2 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 dark:bg-red-950/40 dark:hover:bg-red-900/60 dark:text-red-400"
+                          title="Delete sub-team"
+                        >
+                          <TrashIcon className="h-5 w-5" />
+                        </button>
+                      )}
+                      {(subTeam.sub_teams_count || 0) > 0 && (
+                        <button
+                          disabled
+                          className="p-2 rounded-lg bg-gray-100 text-gray-400 dark:bg-gray-700 dark:text-gray-600 cursor-not-allowed"
+                          title="Cannot delete team with sub-teams"
+                        >
+                          <TrashIcon className="h-5 w-5" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="hidden sm:block overflow-x-auto">
               <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                 <thead className="bg-gray-50 dark:bg-gray-800">
                   <tr>
@@ -1715,11 +1976,16 @@ export default function TeamDetail({ user, refreshUser }) {
                   ))}
                 </tbody>
               </table>
-            </div>
+              </div>
+            </>
           )}
 
-          {/* Empty State */}
-          {paginatedData.length === 0 && (
+          {/* Empty State. Omitted for the Team Devices tab -- TeamDeviceList
+              renders its own empty state ("No devices are enrolled under
+              this team.") and this generic one would otherwise ALSO render
+              underneath it, since `currentData` falls back to an empty
+              array for a tab id with no entry in `processedData`. */}
+          {activeTab !== 'devices' && paginatedData.length === 0 && (
             <div className="text-center py-8">
               <p className="text-gray-500 dark:text-gray-400">
                 {searchTerms[activeTab] ? `No ${activeTab} found matching your search.` : `No ${activeTab} yet.`}
@@ -1728,8 +1994,10 @@ export default function TeamDetail({ user, refreshUser }) {
           )}
 
           {/* Pagination */}
-          {totalPages > 1 && (
-            <div className="mt-6 flex items-center justify-between">
+          {/* Bugfix: same `flex-wrap gap-2` fix as Teams.jsx's identical
+              pagination row -- see that file's comment for why. */}
+          {activeTab !== 'devices' && totalPages > 1 && (
+            <div className="mt-6 flex flex-wrap items-center justify-between gap-2">
               <div className="text-sm text-gray-500 dark:text-gray-400">
                 Showing {startIndex + 1} to {Math.min(startIndex + itemsPerPage, currentData.length)} of {currentData.length} {activeTab}
               </div>
@@ -1757,29 +2025,19 @@ export default function TeamDetail({ user, refreshUser }) {
         </div>
       </div>
 
-      {/* takserver-enrollment Criteria 14.6, 14.7 (task 11.3): the Devices
-          section is its OWN card, BENEATH the tabbed Members/Team
-          Admins/Channels/Sub-teams interface above -- not a fifth tab inside
-          it, and not folded into the Members tab's table. `TeamDeviceList`
-          fetches from `GET /api/devices/team/:teamId`, a route entirely
-          separate from the human member list and the human member-count
-          query this page already renders above, so this section cannot
-          reintroduce a Team_Owned_Device into either (`production-hardening`
-          Criterion 27.9, preserved here). It is gated on `devicesEnabled`
-          exactly like the per-member "View member devices" affordance above,
-          since both surfaces exist only while DEVICE_MGMT_ENABLED is on. */}
-      {devicesEnabled && (
-        <TeamDeviceList teamId={team.id} onEnroll={setEnrollingDevice} />
-      )}
-
-      {/* Create Sub-Team Dialog */}
+      {/* Create Sub-Team Dialog. Bugfix: full-bleed on mobile
+          (`h-full w-full`, no rounding, `sm:p-4` on the overlay) rather
+          than a floating card -- its ~6 stacked fields/sections don't
+          fit a phone viewport regardless of box size, so a full-screen
+          sheet uses the space better than a small floating box would.
+          `sm:` and up keeps the original floating-card treatment. */}
       {showSubTeamDialog && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center sm:p-4 z-50">
           <div
             role="dialog"
             aria-modal="true"
             aria-labelledby="create-sub-team-title"
-            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto"
+            className="bg-white dark:bg-gray-800 shadow-xl w-full h-full sm:rounded-lg sm:max-w-2xl sm:h-auto sm:max-h-[90vh] overflow-y-auto"
           >
             <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
               <h3 id="create-sub-team-title" className="text-xl font-semibold text-gray-900 dark:text-gray-100">Create Team</h3>
@@ -1974,14 +2232,17 @@ export default function TeamDetail({ user, refreshUser }) {
         </div>
       )}
 
-      {/* Add Member Dialog */}
+      {/* Add Member Dialog. Bugfix: full-bleed on mobile, same treatment
+          as Create Sub-Team above -- its "Create New User" tab alone
+          (5 fields/blocks plus 2 info panels) never fits a phone
+          viewport regardless of box size. */}
       {showAddMemberDialog && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center sm:p-4 z-50">
           <div
             role="dialog"
             aria-modal="true"
             aria-labelledby="add-member-title"
-            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto"
+            className="bg-white dark:bg-gray-800 shadow-xl w-full h-full sm:rounded-lg sm:max-w-2xl sm:h-auto sm:max-h-[90vh] overflow-y-auto"
           >
             <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
               <h3 id="add-member-title" className="text-xl font-semibold text-gray-900 dark:text-gray-100">
@@ -2284,14 +2545,15 @@ export default function TeamDetail({ user, refreshUser }) {
         </div>
       )}
 
-      {/* Create Channel Dialog */}
+      {/* Create Channel Dialog. Bugfix: full-bleed on mobile, same
+          treatment as Create Sub-Team/Add Member above. */}
       {showChannelDialog && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center sm:p-4 z-50">
           <div
             role="dialog"
             aria-modal="true"
             aria-labelledby="create-channel-title"
-            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto"
+            className="bg-white dark:bg-gray-800 shadow-xl w-full h-full sm:rounded-lg sm:max-w-2xl sm:h-auto sm:max-h-[90vh] overflow-y-auto"
           >
             <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
               <h3 id="create-channel-title" className="text-xl font-semibold text-gray-900 dark:text-gray-100">Create Custom Channel</h3>
@@ -2487,6 +2749,22 @@ export default function TeamDetail({ user, refreshUser }) {
         />
       )}
 
+      {/* Header toolbar's "Add Team Device" action: creates a brand-new
+          Team_Owned_Device (POST /api/devices), distinct from the Team
+          Devices tab's "Enroll" action on an already-existing one. On
+          success, bumps `deviceListVersion` so the Team Devices tab's
+          `TeamDeviceList` remounts and shows the new device without a
+          full page reload. */}
+      {showAddDeviceDialog && (
+        <AddTeamDeviceDialog
+          teamId={team.id}
+          team={team}
+          allTeams={allTeams}
+          onClose={() => setShowAddDeviceDialog(false)}
+          onCreated={() => setDeviceListVersion((version) => version + 1)}
+        />
+      )}
+
       {/* takserver-enrollment Criteria 3.1, 3.6, 10.10 (task 11.3): the
           Team_Owned_Device's Enrollment_View, opened from the Devices
           section's "Enroll" action above. `fetchEnrollment` calls THIS
@@ -2498,13 +2776,17 @@ export default function TeamDetail({ user, refreshUser }) {
           one it is showing. A short-lived dialog: closing it does not need
           to cancel anything in flight, since `EnrollmentView` itself never
           auto-refreshes (see its own doc comment). */}
+      {/* Bugfix: full-bleed on mobile, same treatment as the other
+          large dialogs above -- the 4-tab EnrollmentView (Enrollment
+          Data grid, Device Enrollment Requirements list, instructions,
+          countdown) needs to scroll regardless of container height. */}
       {enrollingDevice && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center sm:p-4 z-50">
           <div
             role="dialog"
             aria-modal="true"
             aria-labelledby="enroll-device-title"
-            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-3xl w-full max-h-[90vh] overflow-y-auto"
+            className="bg-white dark:bg-gray-800 shadow-xl w-full h-full sm:rounded-lg sm:max-w-3xl sm:h-auto sm:max-h-[90vh] overflow-y-auto"
           >
             <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
               <h3 id="enroll-device-title" className="text-xl font-semibold text-gray-900 dark:text-gray-100">
@@ -2534,7 +2816,15 @@ export default function TeamDetail({ user, refreshUser }) {
         </div>
       )}
 
-      {/* Edit Team Dialog (shared with Teams.jsx) */}
+      {/* Edit Team Dialog (shared with Teams.jsx). `isAdmin={canManageTeam}`
+          gates the nested OrgDomainManager (Allowed Email Domains) the
+          same way this page's own header actions and Team Devices tab
+          already are. `isGlobalManager={isGlobalAdmin}` is DELIBERATELY
+          NOT `canManageTeam` -- region-channel-tiers: the Channel Access
+          tab has no Team_Admin fallback at all, unlike Allowed Email
+          Domains, so a Team_Admin who is not also a Global_Manager (a
+          real case `canManageTeam` alone does not distinguish) must not
+          see that tab. */}
       <TeamFormDialog
         mode="edit"
         team={team}
@@ -2543,6 +2833,8 @@ export default function TeamDetail({ user, refreshUser }) {
         colorMappings={colorMappings}
         isOpen={showEditDialog}
         onClose={() => setShowEditDialog(false)}
+        isAdmin={canManageTeam}
+        isGlobalManager={isGlobalAdmin}
         onSaved={(updatedTeam) => {
           // Requirement 14.3 (task 37.1 fix): reflect the team as the
           // server actually persisted it (`response.data.team`, passed

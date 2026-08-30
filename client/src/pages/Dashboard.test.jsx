@@ -252,6 +252,123 @@ const FAR_FUTURE_DEVICE = {
  * never calls adminAPI.getOrgInterest at all and reads only the
  * access_requests count.
  */
+// Bugfix (mobile tap targets too small):
+// 1. An "expandable channel" row (a channel that is ALSO a folder --
+//    another channel's group name matches its own display_name exactly,
+//    e.g. "tak_Region" alongside "tak_Region - Alpha") used to require
+//    hitting the small `p-1`/`h-4 w-4` chevron button specifically to
+//    expand it, unlike a plain folder row which is click-anywhere. The
+//    whole row is now the toggle target, matching the plain-folder row.
+// 2. Expand All / Collapse All buttons were `px-3 py-1` on `text-sm`
+//    (~28px tall); now `py-2` for a real ~36px target.
+describe('Dashboard folder tree tap targets (bugfix)', () => {
+  let container
+  let root
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    vi.clearAllMocks()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    container = document.createElement('div')
+    document.body.appendChild(container)
+
+    // "tak_Region" (readwrite, no suffix) is the PARENT/expandable
+    // channel; "tak_Region - Alpha" (also readwrite) nests under it as
+    // a child, since buildFolderTree splits display_name on the
+    // (default) " - " separator and "Region" resolves to an existing
+    // channel's own display_name.
+    usersAPI.getMe.mockResolvedValue({
+      data: {
+        user: { ...USER, groups: ['tak_Region', 'tak_Region - Alpha'] },
+        teams: []
+      }
+    })
+    channelsAPI.getDescriptions.mockResolvedValue({
+      data: {
+        channels: [
+          { name: 'tak_Region', display_name: 'Region', description: 'Region channel' },
+          { name: 'tak_Region - Alpha', display_name: 'Region - Alpha', description: 'Alpha sub-channel' }
+        ]
+      }
+    })
+    requestsAPI.getPending.mockResolvedValue({ data: { requests: [] } })
+    configAPI.getColorMappings.mockResolvedValue({ data: { colorMappings: {}, roleDescriptions: {} } })
+    configAPI.getPublic.mockResolvedValue({ data: {} })
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false, devices: [] })
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    vi.restoreAllMocks()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  const mount = async () => {
+    root = createRoot(container)
+    await act(async () => {
+      root.render(
+        <MemoryRouter>
+          <Dashboard user={USER} />
+        </MemoryRouter>
+      )
+    })
+    // Flush the pending fetch promises the page's own effect issues.
+    await act(async () => {
+      await Promise.resolve()
+    })
+  }
+
+  it('expands an expandable-channel row when the WHOLE row is clicked, not only its chevron', async () => {
+    await mount()
+
+    const regionHeading = Array.from(container.querySelectorAll('h3')).find((h) => h.textContent === 'Region')
+    expect(regionHeading).toBeTruthy()
+
+    // Its containing row is the element carrying the click handler now
+    // (was only the small chevron button inside it).
+    const row = regionHeading.closest('.cursor-pointer')
+    expect(row).toBeTruthy()
+    expect(container.textContent).not.toContain('Alpha')
+
+    await act(async () => {
+      row.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+
+    expect(container.textContent).toContain('Alpha')
+  })
+
+  it('renders the expandable-channel row\'s chevron as purely decorative (no button element of its own)', async () => {
+    await mount()
+
+    const regionHeading = Array.from(container.querySelectorAll('h3')).find((h) => h.textContent === 'Region')
+    const row = regionHeading.closest('.cursor-pointer')
+    expect(row.querySelector('button')).toBeNull()
+  })
+
+  it('gives Expand All / Collapse All a real ~36px tap target via py-2 (was py-1)', async () => {
+    await mount()
+
+    const expandAllButton = Array.from(container.querySelectorAll('button')).find(
+      (b) => b.textContent.trim() === 'Expand All'
+    )
+    const collapseAllButton = Array.from(container.querySelectorAll('button')).find(
+      (b) => b.textContent.trim() === 'Collapse All'
+    )
+    expect(expandAllButton).toBeTruthy()
+    expect(collapseAllButton).toBeTruthy()
+    expect(expandAllButton.className).toContain('py-2')
+    expect(collapseAllButton.className).toContain('py-2')
+    expect(expandAllButton.className).not.toContain('py-1')
+    expect(collapseAllButton.className).not.toContain('py-1')
+  })
+})
+
 describe('Dashboard "Pending Requests" stat (bugfix: pending-requests-badge)', () => {
   let container
   let root
@@ -293,13 +410,18 @@ describe('Dashboard "Pending Requests" stat (bugfix: pending-requests-badge)', (
     })
   }
 
+  // The dedicated "Pending Requests" stat tile was removed from the page
+  // (TAK Profile / My Channels / My Devices dashboard restyle); the
+  // computed count this suite validates now surfaces only in the
+  // "Quick Actions" banner's "You have N pending request(s)" heading,
+  // which is rendered only when the count is greater than 0.
   const pendingRequestsStatText = () => {
-    const label = Array.from(container.querySelectorAll('p')).find(
-      (p) => p.textContent.trim() === 'Pending Requests'
+    const heading = Array.from(container.querySelectorAll('h3')).find((h3) =>
+      /pending request/.test(h3.textContent)
     )
-    const statCard = label?.closest('.card')
-    // Rendered as a <Link> when > 0, plain text when 0 (Dashboard.jsx).
-    return statCard?.querySelector('a, p.text-2xl')?.textContent.trim() ?? null
+    if (!heading) return null
+    const match = heading.textContent.match(/You have (\d+) pending request/)
+    return match ? match[1] : null
   }
 
   it('sums access_requests and pending Org_Interest_Requests counts for a Global_Manager', async () => {
@@ -330,17 +452,16 @@ describe('Dashboard "Pending Requests" stat (bugfix: pending-requests-badge)', (
     expect(pendingRequestsStatText()).toBe('2')
   })
 
-  it('renders 0 (plain text, no link) when both counts are zero', async () => {
+  it('renders no "pending request" banner when both counts are zero', async () => {
     requestsAPI.getPending.mockResolvedValue({ data: { requests: [] } })
     adminAPI.getOrgInterest.mockResolvedValue({ data: { requests: [] } })
 
     await mount({ ...USER, is_global_manager: true })
 
-    expect(pendingRequestsStatText()).toBe('0')
-    const label = Array.from(container.querySelectorAll('p')).find(
-      (p) => p.textContent.trim() === 'Pending Requests'
-    )
-    expect(label.closest('.card').querySelector('a')).toBeNull()
+    // The banner (the sole surface for this stat now) only renders when
+    // stats.requests > 0, so a zero count means no banner at all.
+    expect(pendingRequestsStatText()).toBeNull()
+    expect(container.textContent).not.toContain('pending request')
   })
 })
 
@@ -717,6 +838,23 @@ describe('Dashboard "My Devices" card', () => {
       expect(row.textContent).toContain('Revoked')
 
       expect(button.getAttribute('aria-label')).toBe(revokeActionLabel(SEEN_DEVICE.clientUid))
+    })
+
+    // Bugfix (mobile tap target too small): the button used to be a bare
+    // h-5 w-5 icon with no padding at all -- a ~20px hit target. p-2
+    // rounded-lg enlarges the hit box without changing the icon's own
+    // rendered size, and gets a red-tinted hover background matching
+    // this app's other button-boxed destructive actions.
+    it('enlarges the hit box via p-2 rounded-lg, rather than sizing the bare icon (mobile tap target fix)', async () => {
+      await mount()
+
+      const button = revokeButtonFor(SEEN_DEVICE.clientUid)
+      expect(button.className).toContain('p-2')
+      expect(button.className).toContain('rounded-lg')
+      expect(button.className).toContain('hover:bg-red-50')
+
+      const icon = button.querySelector('svg')
+      expect(icon.getAttribute('class')).toContain('h-5 w-5')
     })
   })
 

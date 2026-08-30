@@ -18,6 +18,16 @@ const crypto = require('crypto');
 const pLimit = require('p-limit');
 const authentikService = require('../services/authentik');
 const TeamMembershipService = require('../services/TeamMembershipService');
+// region-channel-tiers: resolves a user's Organisation (Ancestor_Chain
+// index 0) to read response_channel_access/support_channel_access, in
+// assignUserToGlobalChannels and the resync_org_channel_tier_access handler.
+const Team = require('../models/Team');
+// region-channel-tiers: resync_org_channel_tier_access fans out one
+// assign_user_to_global_channels operation per affected user, mirroring
+// GlobalChannelService.assignAllUsersToGlobalChannels's own enqueue shape
+// (bulk_operations progress record + one EventPublisher.publishOperation
+// call per user).
+const EventPublisher = require('../services/EventPublisher');
 const { computeBackoffDelay } = require('./backoff');
 // Requirement 10.2/10.5 (task 30.2): partitions a fetched batch into
 // same-entity "lanes" (keyed by `target_user_id:target_group_id`, falling
@@ -31,6 +41,12 @@ const { groupByEntityKey } = require('./entityGrouping');
 // map, checked by `validatePayloadSchema` before `executeOperation`
 // dispatches to a handler.
 const operationSchemas = require('./operationSchemas');
+// region-channel-tiers: maps a region_channels.tier value ('response'/
+// 'support') to its Authentik group-name prefix (tak_Response.../
+// tak_Support...). Single source of truth shared with
+// GlobalChannelService.js -- see that constant's own doc comment in
+// server/config/constants.js.
+const { REGION_CHANNEL_TIER_PREFIX, BCH_CHANNEL_CATEGORY_PREFIX } = require('../config/constants');
 // Requirement 9.6/task 28.2: classifies a non-2xx Authentik API response
 // (or a caught network/timeout error) as 'retryable' or 'permanent', so
 // each Authentik-calling handler below can decide whether to let the
@@ -931,6 +947,10 @@ class SyncWorker {
         await this.syncExistingGlobalChannels(payload);
         break;
 
+      case 'resync_org_channel_tier_access':
+        await this.resyncOrgChannelTierAccess(payload);
+        break;
+
       case 'cleanup_orphaned_authentik_user':
         await this.cleanupOrphanedAuthentikUser(payload);
         break;
@@ -1322,12 +1342,30 @@ class SyncWorker {
   }
 
   async createBchChannelGroups(payload) {
-    const { channel_name, service_account_username, service_account_password, bch_channel_id } = payload;
-    
+    const { channel_name, category, description, service_account_username, service_account_password, bch_channel_id } = payload;
+
+    const categoryPrefix = BCH_CHANNEL_CATEGORY_PREFIX[category];
+    if (!categoryPrefix) {
+      throw new AuthentikApiError(
+        `create_bch_channel_groups payload carries an invalid category: ${category}`,
+        'permanent'
+      );
+    }
+
     const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
-    // Create read and write groups using tak_BCH format
-    const readGroupName = `tak_BCH${separator}${channel_name}_READ`;
-    const writeGroupName = `tak_BCH${separator}${channel_name}`;
+    // Create read and write groups using tak_<category> format
+    // (tak_BCH.../tak_UTL...).
+    const readGroupName = `tak_${categoryPrefix}${separator}${channel_name}_READ`;
+    const writeGroupName = `tak_${categoryPrefix}${separator}${channel_name}`;
+
+    // Bugfix: `description` was previously never set on creation (the
+    // enqueue payload never carried it) -- a freshly created channel's
+    // Authentik groups had no `attributes.description` at all until the
+    // next edit via updateBchChannelGroup, which always did pass it
+    // through. Falls back to `channel_name` when no description was
+    // supplied (an optional field), matching createRegionChannelGroup's
+    // own fallback shape.
+    const authentikDescription = description || channel_name;
     
     const readGroupResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
       method: 'POST',
@@ -1337,7 +1375,7 @@ class SyncWorker {
       },
       body: JSON.stringify({
         name: readGroupName,
-        attributes: { channel_type: 'bch', permission: 'read' }
+        attributes: { channel_type: 'bch', category, permission: 'read', description: authentikDescription }
       })
     });
     
@@ -1349,7 +1387,7 @@ class SyncWorker {
       },
       body: JSON.stringify({
         name: writeGroupName,
-        attributes: { channel_type: 'bch', permission: 'write' }
+        attributes: { channel_type: 'bch', category, permission: 'write', description: authentikDescription }
       })
     });
     
@@ -1417,15 +1455,32 @@ class SyncWorker {
   // `region_channels` table -- only a `group_id` column, no read/write
   // pair like BCH channels have). There is no "_READ" counterpart group
   // for regions in Authentik; confirmed against the live schema and
-  // Authentik's actual `tak_Regions - *` groups, none of which have a
-  // `_READ` sibling.
+  // Authentik's actual `tak_Response - */tak_Support - *` groups, none of
+  // which have a `_READ` sibling.
+  //
+  // region-channel-tiers: `payload.tier` ('response'/'support') selects
+  // the group-name prefix via REGION_CHANNEL_TIER_PREFIX --
+  // GlobalChannelService.createRegionChannel always supplies it (it
+  // validates the same set before ever enqueueing this operation), so an
+  // absent/unrecognized tier here indicates a caller bug rather than a
+  // legitimate "no tier" case, and is treated as a permanent failure
+  // rather than silently falling back to the old untiered `tak_Regions`
+  // name.
   async createRegionChannelGroup(payload) {
-    const { channel_name, region_channel_id } = payload;
-    
+    const { channel_name, region_channel_id, tier } = payload;
+
+    const tierPrefix = REGION_CHANNEL_TIER_PREFIX[tier];
+    if (!tierPrefix) {
+      throw new AuthentikApiError(
+        `create_region_channel_group payload carries an invalid tier: ${tier}`,
+        'permanent'
+      );
+    }
+
     const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
-    const groupName = `tak_Regions${separator}${channel_name}`;
+    const groupName = `tak_${tierPrefix}${separator}${channel_name}`;
     
-    logger.debug({ region_channel_id, groupName }, 'Creating region channel group');
+    logger.debug({ region_channel_id, groupName, tier }, 'Creating region channel group');
     
     // Get channel description from database
     const channelResult = await this.pool.query(
@@ -1474,9 +1529,17 @@ class SyncWorker {
   }
 
   async updateBchChannelGroup(payload) {
-    const { bch_channel_id, channel_name, description } = payload;
-    
-    logger.debug({ bch_channel_id, channel_name }, 'Updating BCH channel group');
+    const { bch_channel_id, channel_name, category, description } = payload;
+
+    const categoryPrefix = BCH_CHANNEL_CATEGORY_PREFIX[category];
+    if (!categoryPrefix) {
+      throw new AuthentikApiError(
+        `update_bch_channel_group payload carries an invalid category: ${category}`,
+        'permanent'
+      );
+    }
+
+    logger.debug({ bch_channel_id, channel_name, category }, 'Updating BCH channel group');
     
     // Get current group IDs
     const channelResult = await this.pool.query(
@@ -1496,8 +1559,8 @@ class SyncWorker {
     // Update read group
     if (read_group_id) {
       const readRequestBody = {
-        name: `tak_BCH${separator}${channel_name}_READ`,
-        attributes: { channel_type: 'bch', permission: 'read', description }
+        name: `tak_${categoryPrefix}${separator}${channel_name}_READ`,
+        attributes: { channel_type: 'bch', category, permission: 'read', description }
       };
       
       logger.debug({ bch_channel_id, groupType: 'read' }, 'Updating BCH read group');
@@ -1522,8 +1585,8 @@ class SyncWorker {
     // Update write group
     if (write_group_id) {
       const writeRequestBody = {
-        name: `tak_BCH${separator}${channel_name}`,
-        attributes: { channel_type: 'bch', permission: 'write', description }
+        name: `tak_${categoryPrefix}${separator}${channel_name}`,
+        attributes: { channel_type: 'bch', category, permission: 'write', description }
       };
       
       logger.debug({ bch_channel_id, groupType: 'write' }, 'Updating BCH write group');
@@ -1551,9 +1614,15 @@ class SyncWorker {
     
     logger.debug({ region_channel_id, channel_name }, 'Updating region channel group');
     
-    // Get current group ID
+    // Get current group ID AND tier -- tier is read from the database
+    // rather than the payload (unlike createRegionChannelGroup): the
+    // channel's tier is fixed at creation and never changes, and this
+    // handler already looks up the row for its stored group_id, so
+    // selecting `tier` alongside it costs nothing extra and avoids
+    // requiring update_region_channel_group's payload to carry a field
+    // that would always just repeat what's already stored.
     const channelResult = await this.pool.query(
-      'SELECT group_id FROM region_channels WHERE id = $1',
+      'SELECT group_id, tier FROM region_channels WHERE id = $1',
       [region_channel_id]
     );
     
@@ -1562,17 +1631,25 @@ class SyncWorker {
       return;
     }
     
-    const { group_id } = channelResult.rows[0];
+    const { group_id, tier } = channelResult.rows[0];
     
     if (!group_id) {
       logger.debug({ region_channel_id }, 'No group_id set for region channel');
       return;
     }
+
+    const tierPrefix = REGION_CHANNEL_TIER_PREFIX[tier];
+    if (!tierPrefix) {
+      throw new AuthentikApiError(
+        `region_channels row ${region_channel_id} carries an invalid tier: ${tier}`,
+        'permanent'
+      );
+    }
     
     const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
     const authentikDescription = `${description} (Bi-directional location sharing)`;
     const requestBody = {
-      name: `tak_Regions${separator}${channel_name}`,
+      name: `tak_${tierPrefix}${separator}${channel_name}`,
       attributes: { 
         channel_type: 'region',
         description: authentikDescription
@@ -3001,56 +3078,147 @@ class SyncWorker {
     return new TakServerApiError(`${messagePrefix}: ${error.message}`, classification);
   }
 
+  /**
+   * region-channel-tiers (task 8): rewritten to remove the former
+   * private-team branch entirely (per explicit product decision: a
+   * private team's members are treated IDENTICALLY to any other team's
+   * for global-channel purposes -- private Team_Visibility is about
+   * directory/listing scope, not about operational channel access) and
+   * to make Response/Support region-channel membership a genuine
+   * RECONCILE (add AND remove) driven by the user's Organisation's two
+   * flags, rather than the former one-directional "always add" logic.
+   *
+   * This ALSO fixes a pre-existing dead-code bug: the former
+   * `isPrivateTeamUser` branch read `region_channels.read_group_id`, a
+   * column that has never existed on that table (only `bch_channels` has
+   * a read/write pair) -- every private-team user therefore received
+   * ZERO region-channel access in practice, silently. There is no
+   * equivalent column to carry forward; region channels are still a
+   * single group per channel.
+   *
+   * BCH channels are UNCHANGED in spirit: every active user still gets
+   * unconditional read-group membership, never removed. Region channels
+   * (both tiers) are now genuinely reconciled: an Organisation's flag
+   * being `true` ensures membership (adding if missing) and `false`
+   * ensures NON-membership (removing if present) -- not merely "add if
+   * true, do nothing if false" as before.
+   *
+   * The "current" side of the reconcile is scoped ONLY to the group ids
+   * this function itself manages (every BCH read_group_id and every
+   * region group_id) -- computed as the INTERSECTION of the user's
+   * actual current Authentik group memberships (fetched fresh via
+   * `GET /core/users/{authentik_user_id}/`, whose `.groups` field is the
+   * same list-of-pks shape `authentikSync.js`'s user-list sync already
+   * relies on) with that managed set. This is deliberate and load-bearing:
+   * a user's Team/Sub_Team channel groups, and any other group membership
+   * entirely unrelated to global channels, must never be touched by this
+   * reconcile -- only intersecting first guarantees `toRemove` can never
+   * contain a group this function doesn't own.
+   *
+   * The user's Organisation is resolved from their Direct_Membership
+   * (`team_memberships` row with `inherited_from_team_id IS NULL` --
+   * there is at most one, per the partial unique index) via
+   * `Team.getAncestorChain(directTeamId)[0]`. A teamless user (no
+   * Direct_Membership row) has no Organisation and therefore no
+   * Response/Support flags to satisfy -- they are reconciled toward
+   * zero region-channel membership (any prior region-channel membership
+   * is removed), while still keeping their unconditional BCH read access.
+   */
   async assignUserToGlobalChannels(payload) {
     const user = await this.getUser(payload.target_user_id);
     if (!user) throw new Error(`User ${payload.target_user_id} not found`);
-    
-    // Check if user belongs to a private team
-    const teamResult = await this.pool.query(`
-      SELECT t.visibility 
-      FROM team_memberships tm
-      JOIN teams t ON tm.team_id = t.id
-      WHERE tm.user_id = $1
+
+    // Resolve the user's Organisation via their Direct_Membership (at
+    // most one row, per the product vocabulary's partial unique index).
+    // A teamless user has no Direct_Membership row and therefore no
+    // Organisation -- both flags are treated as `false` in that case,
+    // which reconciles them toward zero region-channel membership.
+    const directMembershipResult = await this.pool.query(`
+      SELECT team_id
+      FROM team_memberships
+      WHERE user_id = $1 AND inherited_from_team_id IS NULL
       LIMIT 1
     `, [payload.target_user_id]);
-    
-    const isPrivateTeamUser = teamResult.rows.length > 0 && teamResult.rows[0].visibility === 'private';
-    
-    // Get all global channel group IDs
+
+    let responseChannelAccess = false;
+    let supportChannelAccess = false;
+    if (directMembershipResult.rows.length > 0) {
+      const ancestorChain = await Team.getAncestorChain(directMembershipResult.rows[0].team_id);
+      const organisation = ancestorChain[0];
+      if (organisation) {
+        responseChannelAccess = Boolean(organisation.response_channel_access);
+        supportChannelAccess = Boolean(organisation.support_channel_access);
+      }
+    }
+
+    // Every BCH channel's read group -- unconditional target for every
+    // active user, exactly as before. Never removed: BCH read access has
+    // no org-flag gate.
     const bchResult = await this.pool.query(`
-      SELECT read_group_id, write_group_id 
-      FROM bch_channels 
+      SELECT read_group_id
+      FROM bch_channels
       WHERE read_group_id IS NOT NULL
     `);
-    
+    const bchReadGroupIds = bchResult.rows.map((row) => row.read_group_id);
+
+    // Every region channel's single group, grouped by tier.
     const regionResult = await this.pool.query(`
-      SELECT group_id, read_group_id 
-      FROM region_channels 
-      WHERE (group_id IS NOT NULL OR read_group_id IS NOT NULL)
+      SELECT group_id, tier
+      FROM region_channels
+      WHERE group_id IS NOT NULL
     `);
-    
-    const groupIds = [];
-    
-    // Add BCH read groups (all users get read access)
-    for (const bch of bchResult.rows) {
-      if (bch.read_group_id) {
-        groupIds.push(bch.read_group_id);
+    const responseGroupIds = regionResult.rows
+      .filter((row) => row.tier === 'response')
+      .map((row) => row.group_id);
+    const supportGroupIds = regionResult.rows
+      .filter((row) => row.tier === 'support')
+      .map((row) => row.group_id);
+
+    // The full set of group ids this function is responsible for --
+    // BCH read groups plus every region group of either tier -- used
+    // below to scope "current membership" to ONLY the groups this
+    // reconcile owns, so a user's Team/Sub_Team groups (or anything
+    // else) can never appear in `toRemove`.
+    const managedGroupIds = new Set([...bchReadGroupIds, ...responseGroupIds, ...supportGroupIds]);
+
+    // Target: BCH always, plus each tier's region groups only if the
+    // Organisation's corresponding flag is true.
+    const targetGroupIds = [
+      ...bchReadGroupIds,
+      ...(responseChannelAccess ? responseGroupIds : []),
+      ...(supportChannelAccess ? supportGroupIds : [])
+    ];
+
+    // Current: the user's actual Authentik group memberships, fetched
+    // fresh (not from any local cache), intersected with managedGroupIds.
+    let currentManagedGroupIds = [];
+    if (user.authentik_user_id) {
+      const userResponse = await fetch(
+        `${process.env.AUTHENTIK_URL}/api/v3/core/users/${user.authentik_user_id}/`,
+        {
+          headers: {
+            'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+
+      if (!userResponse.ok) {
+        const classification = classifyFailure(userResponse.status);
+        throw new AuthentikApiError(
+          `Failed to fetch current Authentik group membership for user ${payload.target_user_id}: ${userResponse.statusText}`,
+          classification
+        );
       }
+
+      const authentikUser = await userResponse.json();
+      const currentGroupIds = Array.isArray(authentikUser.groups) ? authentikUser.groups : [];
+      currentManagedGroupIds = currentGroupIds.filter((groupId) => managedGroupIds.has(groupId));
     }
-    
-    // Add region groups based on team privacy
-    for (const region of regionResult.rows) {
-      if (isPrivateTeamUser && region.read_group_id) {
-        // Private team users get read-only access
-        groupIds.push(region.read_group_id);
-      } else if (!isPrivateTeamUser && region.group_id) {
-        // Regular users get read-write access
-        groupIds.push(region.group_id);
-      }
-    }
-    
-    // Add user to each group
-    for (const groupId of groupIds) {
+
+    const { toAdd, toRemove } = computeMembershipDiff(currentManagedGroupIds, targetGroupIds);
+
+    for (const groupId of toAdd) {
       try {
         await this.addUserToGroup({
           target_user_id: payload.target_user_id,
@@ -3058,10 +3226,33 @@ class SyncWorker {
         });
       } catch (error) {
         logger.error({ target_user_id: payload.target_user_id, groupId, err: error }, 'Failed to add user to global channel group');
-        // Continue with other groups even if one fails
+        // Continue with other groups even if one fails.
       }
     }
-    
+
+    for (const groupId of toRemove) {
+      try {
+        await this.removeUserFromGroup({
+          target_user_id: payload.target_user_id,
+          target_group_id: groupId
+        });
+      } catch (error) {
+        logger.error({ target_user_id: payload.target_user_id, groupId, err: error }, 'Failed to remove user from global channel group');
+        // Continue with other groups even if one fails.
+      }
+    }
+
+    logger.debug(
+      {
+        target_user_id: payload.target_user_id,
+        responseChannelAccess,
+        supportChannelAccess,
+        added: toAdd.length,
+        removed: toRemove.length
+      },
+      'Reconciled global channel membership for user'
+    );
+
     // Update bulk operation progress
     if (payload.bulk_operation_id) {
       await this.pool.query(`
@@ -3071,6 +3262,78 @@ class SyncWorker {
         WHERE id = $1
       `, [payload.bulk_operation_id]);
     }
+  }
+
+  /**
+   * region-channel-tiers (task 9): reconciles a single Organisation's
+   * Response/Support region-channel membership after
+   * `PUT /api/teams/:teamId/channel-access` changes one of
+   * `response_channel_access`/`support_channel_access` (`server/routes/
+   * teams.js` enqueues this operation ONLY for the tier that actually
+   * changed value, with payload `{ organisation_id, tier }`).
+   *
+   * Deliberately does NOT reimplement the add/remove reconcile itself --
+   * `assignUserToGlobalChannels` (task 8) is already a full, idempotent,
+   * per-user reconcile driven by the SAME two Organisation flags this
+   * handler is reacting to. So the simplest and most correct
+   * implementation is exactly what `GlobalChannelService.
+   * assignAllUsersToGlobalChannels` already does for the "reconcile
+   * everyone" case, scoped down to "reconcile everyone under this one
+   * Organisation": resolve every user with a Direct_Membership
+   * (`inherited_from_team_id IS NULL`) row on the Organisation or any of
+   * its Sub_Teams (via `Team.getOrganisationTeams`, the existing
+   * whole-tree-of-Teams primitive), then enqueue one
+   * `assign_user_to_global_channels` operation per user, wrapped in a
+   * `bulk_operations` progress record for visibility -- the exact same
+   * enqueue shape `assignAllUsersToGlobalChannels` uses, just scoped to
+   * one Organisation's membership instead of every active user.
+   *
+   * `payload.tier` is read for logging only (which flag triggered this)
+   * -- the fan-out itself is tier-agnostic, since
+   * `assignUserToGlobalChannels` always reconciles BOTH tiers together
+   * for a user in one pass; there is no narrower "reconcile only the
+   * Response side" primitive to call, and building one would duplicate
+   * logic that already exists and is already correct.
+   */
+  async resyncOrgChannelTierAccess(payload) {
+    const { organisation_id, tier } = payload;
+
+    const orgTeams = await Team.getOrganisationTeams(organisation_id);
+    if (orgTeams.length === 0) {
+      logger.debug({ organisation_id, tier }, 'No teams found for Organisation; nothing to reconcile');
+      return;
+    }
+
+    const teamIds = orgTeams.map((team) => team.id);
+    const userIdsResult = await this.pool.query(`
+      SELECT DISTINCT user_id
+      FROM team_memberships
+      WHERE team_id = ANY($1::int[]) AND inherited_from_team_id IS NULL
+    `, [teamIds]);
+    const userIds = userIdsResult.rows.map((row) => row.user_id);
+
+    if (userIds.length === 0) {
+      logger.debug({ organisation_id, tier }, 'No Direct_Membership users found under Organisation; nothing to reconcile');
+      return;
+    }
+
+    const bulkOpId = await EventPublisher.publishBulkOperation(
+      `Reconcile ${tier} channel access for ${userIds.length} user(s) in Organisation ${organisation_id}`,
+      userIds.length,
+      null // System operation, triggered by an Organisation flag change.
+    );
+
+    for (const userId of userIds) {
+      await EventPublisher.publishOperation('assign_user_to_global_channels', {
+        target_user_id: userId,
+        bulk_operation_id: bulkOpId
+      });
+    }
+
+    logger.info(
+      { organisation_id, tier, usersQueued: userIds.length, bulkOperationId: bulkOpId },
+      'Queued global channel reconciliation for Organisation after channel-access flag change'
+    );
   }
 
   async syncExistingGlobalChannels(payload) {
@@ -3118,35 +3381,135 @@ class SyncWorker {
       // Define separator at the top
       const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
       
-      // Process BCH channels (groups starting with 'tak_BCH')
-      const bchPrefix = `tak_BCH${separator}`;
-      for (const group of groups) {
-        if (group.name.startsWith(bchPrefix) && group.name.endsWith('_READ')) {
+      // Process BCH/UTL channels (groups starting with 'tak_BCH'/'tak_UTL'
+      // -- the two BCH_CHANNEL_CATEGORY_PREFIX values), mirroring exactly
+      // how the region-channel loop below iterates
+      // REGION_CHANNEL_TIER_PREFIX instead of matching one hardcoded
+      // prefix. Unlike region channels, a BCH/UTL channel is a read/write
+      // GROUP PAIR per channel (`bch_channels` has both `read_group_id`
+      // and `write_group_id`, no single-group shape), so recognition
+      // keys off the `_READ` suffix and looks up its sibling write group
+      // by exact name equality, same as before category existed.
+      for (const [category, categoryPrefixValue] of Object.entries(BCH_CHANNEL_CATEGORY_PREFIX)) {
+        const bchPrefix = `tak_${categoryPrefixValue}${separator}`;
+
+        for (const group of groups) {
+          if (!(group.name.startsWith(bchPrefix) && group.name.endsWith('_READ'))) continue;
+
           // Extract channel name from read group
           const channelName = group.name.replace(bchPrefix, '').replace('_READ', '');
           
           // Find corresponding write group (without _READ suffix)
-          const writeGroupName = `tak_BCH${separator}${channelName}`;
+          const writeGroupName = `tak_${categoryPrefixValue}${separator}${channelName}`;
           const writeGroup = groups.find(g => g.name === writeGroupName);
           
           // Use write group's description if available, otherwise fall back to read group
-          const description = writeGroup?.attributes?.description || group.attributes?.description || `BCH Channel - ${channelName}`;
+          const description = writeGroup?.attributes?.description || group.attributes?.description || `${categoryPrefixValue} Channel - ${channelName}`;
           
-          // Check if this channel already exists in database
+          // Check if this channel already exists in database. Scoped to
+          // this group's OWN category, not just by name -- a "Data
+          // Packages" BCH channel and a "Data Packages" UTL channel are
+          // two distinct rows sharing a display name, exactly like the
+          // region loop's per-tier scoping below.
           const existingResult = await this.pool.query(
-            'SELECT id FROM bch_channels WHERE name ILIKE $1',
-            [channelName]
+            'SELECT id FROM bch_channels WHERE name ILIKE $1 AND category = $2',
+            [channelName, category]
           );
           
           if (existingResult.rows.length === 0) {
-            logger.debug({ channelName }, 'Importing BCH channel');
+            logger.debug({ channelName, category }, 'Importing BCH/UTL channel');
             
             // Create channel in database. display_name is NOT NULL with no
             // default (see baseline schema) -- mirrors channelName, same as
             // every other channel-like table's name/display_name pair.
             const insertResult = await this.pool.query(`
               INSERT INTO bch_channels (
-                name, display_name, description, read_group_id, write_group_id, created_by
+                name, display_name, description, read_group_id, write_group_id, category, created_by
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+              RETURNING id
+            `, [
+              channelName,
+              channelName,
+              description,
+              group.pk,
+              writeGroup?.pk || null,
+              category,
+              payload.synced_by
+            ]);
+            
+            bchCount++;
+            logger.debug({ channelName, category, bchChannelId: insertResult.rows[0].id }, 'Created BCH/UTL channel');
+          } else {
+            // Update existing channel with correct description and group IDs
+            logger.debug({ channelName, category }, 'Updating existing BCH/UTL channel');
+            
+            await this.pool.query(`
+              UPDATE bch_channels 
+              SET description = $1, read_group_id = $2, write_group_id = $3
+              WHERE name ILIKE $4 AND category = $5
+            `, [
+              description,
+              group.pk,
+              writeGroup?.pk || null,
+              channelName,
+              category
+            ]);
+            
+            logger.debug({ channelName, category }, 'Updated BCH/UTL channel with correct description');
+          }
+        }
+      }
+      
+      // Process Region channels (groups starting with 'tak_Response' or
+      // 'tak_Support' -- the two REGION_CHANNEL_TIER_PREFIX values).
+      // Unlike BCH channels, region channels are a SINGLE Authentik group
+      // per channel -- region_channels has only a `group_id` column, no
+      // `read_group_id`/write-pair (confirmed against the baseline schema
+      // and live DB; there is no "_READ" counterpart group for regions in
+      // Authentik). Every group matching either prefix is its own
+      // channel, tagged with the tier its prefix identifies. No handling
+      // for the FORMER single, untiered `tak_Regions` prefix is needed
+      // here -- every region channel in this deployment was deleted and
+      // will be recreated under a tiered prefix via seedRegionChannels/
+      // createRegionChannel, so a group still named `tak_Regions - X`
+      // would simply not match either prefix and stay unimported (a
+      // future admin who wants it imported can rename it in Authentik
+      // first, exactly as any other pre-existing-but-misnamed group
+      // would need to be).
+      for (const [tier, tierPrefixValue] of Object.entries(REGION_CHANNEL_TIER_PREFIX)) {
+        const regionPrefix = `tak_${tierPrefixValue}${separator}`;
+
+        for (const group of groups) {
+          if (!group.name.startsWith(regionPrefix)) continue;
+
+          const channelName = group.name.replace(regionPrefix, '');
+
+          let description = channelName;
+          if (group.attributes?.description) {
+            // Remove the "(Bi-directional location sharing)" suffix if present
+            description = group.attributes.description.replace(' (Bi-directional location sharing)', '');
+          }
+
+          // Check if this channel already exists in database. Scoped to
+          // this group's OWN tier, not just by name: a "Waikato" Response
+          // channel and a "Waikato" Support channel are two distinct rows
+          // sharing a display name, so matching by name alone would
+          // conflate them (and Authentik's own prefix already guarantees
+          // this loop iteration is only ever looking at one tier's groups).
+          const existingResult = await this.pool.query(
+            'SELECT id FROM region_channels WHERE name ILIKE $1 AND tier = $2',
+            [channelName, tier]
+          );
+
+          if (existingResult.rows.length === 0) {
+            logger.debug({ channelName, tier }, 'Importing Region channel');
+
+            // Create channel in database. display_name is NOT NULL with no
+            // default (see baseline schema) -- mirrors channelName, same as
+            // every other channel-like table's name/display_name pair.
+            const insertResult = await this.pool.query(`
+              INSERT INTO region_channels (
+                name, display_name, description, group_id, tier, created_by
               ) VALUES ($1, $2, $3, $4, $5, $6)
               RETURNING id
             `, [
@@ -3154,92 +3517,28 @@ class SyncWorker {
               channelName,
               description,
               group.pk,
-              writeGroup?.pk || null,
+              tier,
               payload.synced_by
             ]);
-            
-            bchCount++;
-            logger.debug({ channelName, bchChannelId: insertResult.rows[0].id }, 'Created BCH channel');
-          } else {
-            // Update existing channel with correct description and group IDs
-            logger.debug({ channelName }, 'Updating existing BCH channel');
-            
-            await this.pool.query(`
-              UPDATE bch_channels 
-              SET description = $1, read_group_id = $2, write_group_id = $3
-              WHERE name ILIKE $4
-            `, [
-              description,
-              group.pk,
-              writeGroup?.pk || null,
-              channelName
-            ]);
-            
-            logger.debug({ channelName }, 'Updated BCH channel with correct description');
-          }
-        }
-      }
-      
-      // Process Region channels (groups starting with 'tak_Regions'). Unlike
-      // BCH channels, region channels are a SINGLE Authentik group per
-      // channel -- region_channels has only a `group_id` column, no
-      // `read_group_id`/write-pair (confirmed against the baseline schema
-      // and live DB; there is no "_READ" counterpart group for regions in
-      // Authentik). Every group matching the prefix is its own channel.
-      const regionPrefix = `tak_Regions${separator}`;
-      
-      for (const group of groups) {
-        if (group.name.startsWith(regionPrefix)) {
-          const channelName = group.name.replace(regionPrefix, '');
-          
-          let description = channelName;
-          if (group.attributes?.description) {
-            // Remove the "(Bi-directional location sharing)" suffix if present
-            description = group.attributes.description.replace(' (Bi-directional location sharing)', '');
-          }
-          
-          // Check if this channel already exists in database
-          const existingResult = await this.pool.query(
-            'SELECT id FROM region_channels WHERE name ILIKE $1',
-            [channelName]
-          );
-          
-          if (existingResult.rows.length === 0) {
-            logger.debug({ channelName }, 'Importing Region channel');
-            
-            // Create channel in database. display_name is NOT NULL with no
-            // default (see baseline schema) -- mirrors channelName, same as
-            // every other channel-like table's name/display_name pair.
-            const insertResult = await this.pool.query(`
-              INSERT INTO region_channels (
-                name, display_name, description, group_id, created_by
-              ) VALUES ($1, $2, $3, $4, $5)
-              RETURNING id
-            `, [
-              channelName,
-              channelName,
-              description,
-              group.pk,
-              payload.synced_by
-            ]);
-            
+
             regionCount++;
-            logger.debug({ channelName, regionChannelId: insertResult.rows[0].id }, 'Created Region channel');
+            logger.debug({ channelName, tier, regionChannelId: insertResult.rows[0].id }, 'Created Region channel');
           } else {
             // Update existing channel with correct description and group id
-            logger.debug({ channelName }, 'Updating existing Region channel');
-            
+            logger.debug({ channelName, tier }, 'Updating existing Region channel');
+
             await this.pool.query(`
               UPDATE region_channels 
               SET description = $1, group_id = $2
-              WHERE name ILIKE $3
+              WHERE name ILIKE $3 AND tier = $4
             `, [
               description,
               group.pk,
-              channelName
+              channelName,
+              tier
             ]);
-            
-            logger.debug({ channelName }, 'Updated Region channel with correct description and group id');
+
+            logger.debug({ channelName, tier }, 'Updated Region channel with correct description and group id');
           }
         }
       }

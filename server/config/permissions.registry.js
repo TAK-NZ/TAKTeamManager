@@ -70,6 +70,14 @@ const routes = {
   // inherits automatically with no change here.
   'GET /api/teams/:teamId/callsign-level-options': ['team:read'],
   'DELETE /api/teams/:teamId': ['team:delete:global'],
+  // Response/Support channel-tier access flags (region-channel-tiers):
+  // Organisation-only, Global_Manager-only, no Team_Admin fallback --
+  // mirrors 'team:delete:global' exactly, deliberately NOT 'team:update'.
+  // A Team_Admin of an Organisation may edit that Organisation's name/
+  // description/etc via 'team:update', but never these two flags: they
+  // govern which Authentik region-channel groups an entire Organisation's
+  // membership is synced into, a decision reserved for a Global_Manager.
+  'PUT /api/teams/:teamId/channel-access': ['team:channel_access:manage'],
 
   // --- /api/users (server/routes/users.js) ---
   // The three user-directory LISTING routes (`GET /api/users`,
@@ -210,6 +218,14 @@ const routes = {
   'PUT /api/global-channels/bch/:channelId': ['global_channel:manage'],
   'PUT /api/global-channels/region/:channelId': ['global_channel:manage'],
   'POST /api/global-channels/sync-existing': ['global_channel:manage'],
+  // region-channel-tiers: seeds the standard Response/Support region
+  // channel set, reusing 'global_channel:manage' -- the same permission
+  // every other channel-management action here already requires.
+  'POST /api/global-channels/seed-regions': ['global_channel:manage'],
+  // region-channel-tiers (bugfix): read-only status check backing the
+  // client's "hide Seed button once complete" UI -- gated the same as
+  // the seed action itself, since it's management-surface status.
+  'GET /api/global-channels/region/seed-status': ['global_channel:manage'],
   // Requirement 4.4 / 24.5: the channel-deletion route, Global_Manager-only.
   'DELETE /api/global-channels/:channelType/:channelId': ['global_channel:manage'],
 
@@ -357,6 +373,14 @@ const routes = {
   // Global_Manager from creating/enrolling devices for their own team.
   'POST /api/devices': ['device:manage'],
   'POST /api/devices/:deviceUserId/qr-code': ['device:manage'],
+  // Bugfix ("unable to edit ... a team device"): device edit/delete
+  // routes. Share `device:manage` with the create route above -- the
+  // SAME `DeviceEnrollmentService.assertAuthorized` team-scoped check
+  // (Team.isAdmin OR is_global_manager) gates all three internally, so
+  // an admin who may create devices for a team may also edit or delete
+  // them.
+  'PATCH /api/devices/:deviceUserId': ['device:manage'],
+  'DELETE /api/devices/:deviceUserId': ['device:manage'],
   // Client UX correction: the preview counterpart of the QR-code route
   // above, resolving the same subject with the same authorization rule
   // (DeviceEnrollmentService.assertAuthorized, internally) but minting no

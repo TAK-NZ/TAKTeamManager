@@ -31,10 +31,12 @@ jest.mock('../config/database', () => ({
 }));
 jest.mock('../models/Team', () => ({
   isAdmin: jest.fn(),
-  getAncestorChain: jest.fn()
+  getAncestorChain: jest.fn(),
+  getFullMemberList: jest.fn()
 }));
 jest.mock('./TeamMembershipService', () => ({
-  addUserToTeam: jest.fn()
+  addUserToTeam: jest.fn(),
+  removeUserFromTeam: jest.fn()
 }));
 jest.mock('./EventPublisher', () => ({
   publishOperation: jest.fn()
@@ -44,7 +46,8 @@ jest.mock('./authentik', () => ({
   createAppPasswordToken: jest.fn()
 }));
 jest.mock('../models/User', () => ({
-  findById: jest.fn()
+  findById: jest.fn(),
+  update: jest.fn()
 }));
 jest.mock('./userAttributes', () => ({
   generateCallsign: jest.fn()
@@ -71,6 +74,7 @@ const {
   DeviceSessionCannotSelfEnrollError,
   TakServerNotConfiguredError
 } = require('./DeviceEnrollmentService');
+const { CallsignSuffixConflictError } = require('./CallsignSuffixUniquenessService');
 
 function buildMockClient() {
   return {
@@ -126,6 +130,10 @@ describe('DeviceEnrollmentService.createDevice', () => {
     pool.connect.mockResolvedValue(mockClient);
     pool.query.mockImplementation(buildPoolQueryMock());
     Team.getAncestorChain.mockResolvedValue([ORGANISATION_ROW]);
+    // Real `checkCallsignSuffixUniqueness` (not mocked here) calls
+    // `Team.getFullMemberList` -- an empty roster means no collision for
+    // every test that doesn't explicitly set up one.
+    Team.getFullMemberList.mockResolvedValue([]);
     authentikService.createUser.mockResolvedValue({ pk: 987 });
     TeamMembershipService.addUserToTeam.mockResolvedValue({ success: true, groupsQueued: 0 });
   });
@@ -190,6 +198,7 @@ describe('DeviceEnrollmentService.createDevice', () => {
       authentikUserId: 987,
       username: candidateUsername,
       label: 'Engine 4 Tablet',
+      callsignSuffix: null,
       teamId: 5
     });
   });
@@ -207,6 +216,100 @@ describe('DeviceEnrollmentService.createDevice', () => {
     // No label provided -> falls back to the minted username for the
     // Authentik display name, and label is reported as null.
     expect(result.label).toBeNull();
+  });
+
+  it('writes the supplied callsignSuffix into the Claim_Row INSERT and echoes it back on the result', async () => {
+    Team.isAdmin.mockResolvedValue(true);
+
+    const result = await DeviceEnrollmentService.createDevice(
+      5,
+      'Engine 4 Tablet',
+      { userId: 1, is_global_manager: false },
+      'Tanker1'
+    );
+
+    expect(Team.getFullMemberList).toHaveBeenCalledWith(5);
+
+    const claimCall = pool.query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO users')
+    );
+    expect(claimCall[1][2]).toBe('Tanker1');
+    expect(result.callsignSuffix).toBe('Tanker1');
+  });
+
+  it('trims a supplied callsignSuffix before checking uniqueness and before writing it', async () => {
+    Team.isAdmin.mockResolvedValue(true);
+
+    const result = await DeviceEnrollmentService.createDevice(
+      5,
+      'Engine 4 Tablet',
+      { userId: 1, is_global_manager: false },
+      '  Tanker1  '
+    );
+
+    const claimCall = pool.query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO users')
+    );
+    expect(claimCall[1][2]).toBe('Tanker1');
+    expect(result.callsignSuffix).toBe('Tanker1');
+  });
+
+  it('treats a null/empty callsignSuffix as absent -- no collision check against the roster, and NULL written', async () => {
+    Team.isAdmin.mockResolvedValue(true);
+
+    const result = await DeviceEnrollmentService.createDevice(
+      5,
+      'Engine 4 Tablet',
+      { userId: 1, is_global_manager: false },
+      ''
+    );
+
+    // checkCallsignSuffixUniqueness short-circuits on a falsy candidate
+    // without even calling Team.getFullMemberList.
+    expect(Team.getFullMemberList).not.toHaveBeenCalled();
+    const claimCall = pool.query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO users')
+    );
+    expect(claimCall[1][2]).toBeNull();
+    expect(result.callsignSuffix).toBeNull();
+  });
+
+  it('rejects with CallsignSuffixConflictError, mints no identifier and performs no Authentik call, when the callsignSuffix collides with an existing team member', async () => {
+    Team.isAdmin.mockResolvedValue(true);
+    Team.getFullMemberList.mockResolvedValue([
+      { id: 100, callsign_suffix: 'Tanker1' }
+    ]);
+
+    await expect(
+      DeviceEnrollmentService.createDevice(
+        5,
+        'Engine 4 Tablet',
+        { userId: 1, is_global_manager: false },
+        'tanker1'
+      )
+    ).rejects.toThrow(CallsignSuffixConflictError);
+
+    expect(pool.query).not.toHaveBeenCalled();
+    expect(authentikService.createUser).not.toHaveBeenCalled();
+    expect(pool.connect).not.toHaveBeenCalled();
+  });
+
+  it('rejects with CallsignSuffixConflictError when the callsignSuffix collides with an existing team-owned device (a users row via team_memberships, same table the check already queries)', async () => {
+    Team.isAdmin.mockResolvedValue(true);
+    Team.getFullMemberList.mockResolvedValue([
+      { id: 101, callsign_suffix: 'Truck2', is_team_device: true }
+    ]);
+
+    await expect(
+      DeviceEnrollmentService.createDevice(
+        5,
+        'Spare Tablet',
+        { userId: 1, is_global_manager: false },
+        'Truck2'
+      )
+    ).rejects.toThrow(CallsignSuffixConflictError);
+
+    expect(pool.query).not.toHaveBeenCalled();
   });
 
   it('rejects with DeviceEnrollmentAuthorizationError and resolves no Organisation, mints nothing, and performs no Authentik call or database write when unauthorized', async () => {
@@ -703,5 +806,220 @@ describe('DeviceEnrollmentService.listTeamDevices', () => {
     expect(sql).toContain('is_team_device = true');
     expect(params).toEqual([5]);
     expect(result.devices.every((d) => d.teamId === 5)).toBe(true);
+  });
+});
+
+/**
+ * Bugfix ("unable to edit ... a team device"): unit tests for
+ * `DeviceEnrollmentService.updateDevice`.
+ */
+describe('DeviceEnrollmentService.updateDevice', () => {
+  function mockDeviceLookup({ deviceRow = { id: 42, username: 'AUK-D7K3QMX', is_team_device: true }, teamId = 5 } = {}) {
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('SELECT id, username, is_team_device FROM users')) {
+        return Promise.resolve({ rows: deviceRow ? [deviceRow] : [] });
+      }
+      if (typeof sql === 'string' && sql.includes('FROM team_memberships')) {
+        return Promise.resolve({ rows: teamId !== undefined ? [{ team_id: teamId }] : [] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    Team.getFullMemberList.mockResolvedValue([]);
+  });
+
+  it('updates deviceLabel and callsignSuffix for an authorized team admin, returning the updated row', async () => {
+    Team.isAdmin.mockResolvedValue(true);
+    mockDeviceLookup();
+    User.update.mockResolvedValue({
+      id: 42,
+      username: 'AUK-D7K3QMX',
+      device_label: 'Renamed Tablet',
+      callsign_suffix: 'Tanker1'
+    });
+
+    const result = await DeviceEnrollmentService.updateDevice(
+      42,
+      { deviceLabel: 'Renamed Tablet', callsignSuffix: 'Tanker1' },
+      { userId: 1, is_global_manager: false }
+    );
+
+    expect(Team.isAdmin).toHaveBeenCalledWith(5, 1);
+    expect(User.update).toHaveBeenCalledWith(42, { device_label: 'Renamed Tablet', callsign_suffix: 'Tanker1' });
+    expect(result).toEqual({
+      deviceUserId: 42,
+      username: 'AUK-D7K3QMX',
+      deviceLabel: 'Renamed Tablet',
+      callsignSuffix: 'Tanker1',
+      teamId: 5
+    });
+  });
+
+  it('leaves a field untouched (no key in the User.update call) when it is not supplied', async () => {
+    Team.isAdmin.mockResolvedValue(true);
+    mockDeviceLookup();
+    User.update.mockResolvedValue({ id: 42, username: 'AUK-D7K3QMX', device_label: 'Old Label', callsign_suffix: null });
+
+    await DeviceEnrollmentService.updateDevice(42, { deviceLabel: 'New Label' }, { userId: 1, is_global_manager: false });
+
+    expect(User.update).toHaveBeenCalledWith(42, { device_label: 'New Label' });
+  });
+
+  it('checks callsignSuffix uniqueness before writing, excluding the device\'s own row from the comparison', async () => {
+    Team.isAdmin.mockResolvedValue(true);
+    mockDeviceLookup();
+    Team.getFullMemberList.mockResolvedValue([{ id: 42, callsign_suffix: 'Tanker1' }]);
+    User.update.mockResolvedValue({ id: 42, username: 'AUK-D7K3QMX', device_label: null, callsign_suffix: 'Tanker1' });
+
+    await DeviceEnrollmentService.updateDevice(42, { callsignSuffix: 'Tanker1' }, { userId: 1, is_global_manager: false });
+
+    expect(User.update).toHaveBeenCalledWith(42, { callsign_suffix: 'Tanker1' });
+  });
+
+  it('rejects with CallsignSuffixConflictError and performs no write when callsignSuffix collides with another team member/device', async () => {
+    Team.isAdmin.mockResolvedValue(true);
+    mockDeviceLookup();
+    Team.getFullMemberList.mockResolvedValue([{ id: 99, callsign_suffix: 'Tanker1' }]);
+
+    await expect(
+      DeviceEnrollmentService.updateDevice(42, { callsignSuffix: 'Tanker1' }, { userId: 1, is_global_manager: false })
+    ).rejects.toThrow(CallsignSuffixConflictError);
+
+    expect(User.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects with NotATeamOwnedDeviceError for a non-device target', async () => {
+    mockDeviceLookup({ deviceRow: { id: 42, username: 'jsmith', is_team_device: false } });
+
+    await expect(
+      DeviceEnrollmentService.updateDevice(42, { deviceLabel: 'x' }, { userId: 1, is_global_manager: false })
+    ).rejects.toThrow(NotATeamOwnedDeviceError);
+
+    expect(Team.isAdmin).not.toHaveBeenCalled();
+  });
+
+  it('rejects with NotATeamOwnedDeviceError when no matching users row exists at all', async () => {
+    mockDeviceLookup({ deviceRow: null });
+
+    await expect(
+      DeviceEnrollmentService.updateDevice(999, { deviceLabel: 'x' }, { userId: 1, is_global_manager: false })
+    ).rejects.toThrow(NotATeamOwnedDeviceError);
+  });
+
+  it('rejects with DeviceEnrollmentAuthorizationError and performs no write when the acting user is neither a team admin nor a Global_Manager', async () => {
+    Team.isAdmin.mockResolvedValue(false);
+    mockDeviceLookup();
+
+    await expect(
+      DeviceEnrollmentService.updateDevice(42, { deviceLabel: 'x' }, { userId: 3, is_global_manager: false })
+    ).rejects.toThrow(DeviceEnrollmentAuthorizationError);
+
+    expect(User.update).not.toHaveBeenCalled();
+  });
+
+  it('updates without checking Team.isAdmin for a Global_Manager', async () => {
+    mockDeviceLookup();
+    User.update.mockResolvedValue({ id: 42, username: 'AUK-D7K3QMX', device_label: 'x', callsign_suffix: null });
+
+    await DeviceEnrollmentService.updateDevice(42, { deviceLabel: 'x' }, { userId: 2, is_global_manager: true });
+
+    expect(Team.isAdmin).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Bugfix ("unable to ... delete a team device"): unit tests for
+ * `DeviceEnrollmentService.deleteDevice`.
+ */
+describe('DeviceEnrollmentService.deleteDevice', () => {
+  let originalFetch;
+
+  function mockDeviceLookup({ deviceRow = { id: 42, username: 'AUK-D7K3QMX', authentik_user_id: 555, is_team_device: true }, teamId = 5 } = {}) {
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('SELECT id, username, authentik_user_id, is_team_device FROM users')) {
+        return Promise.resolve({ rows: deviceRow ? [deviceRow] : [] });
+      }
+      if (typeof sql === 'string' && sql.includes('FROM team_memberships')) {
+        return Promise.resolve({ rows: teamId !== undefined ? [{ team_id: teamId }] : [] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    originalFetch = global.fetch;
+    global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 204 });
+    TeamMembershipService.removeUserFromTeam.mockResolvedValue({ success: true, groupsQueued: 0 });
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it('deletes an authorized device: removes team/channel memberships, deletes the Authentik user, and deletes the local users/user_cache rows', async () => {
+    Team.isAdmin.mockResolvedValue(true);
+    mockDeviceLookup();
+
+    const result = await DeviceEnrollmentService.deleteDevice(42, { userId: 1, is_global_manager: false });
+
+    expect(Team.isAdmin).toHaveBeenCalledWith(5, 1);
+    expect(TeamMembershipService.removeUserFromTeam).toHaveBeenCalledWith(42, 1);
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining('/core/users/555/'),
+      expect.objectContaining({ method: 'DELETE' })
+    );
+    const deleteCalls = pool.query.mock.calls.filter(
+      ([sql]) => typeof sql === 'string' && sql.includes('DELETE FROM')
+    );
+    expect(deleteCalls.some(([sql]) => sql.includes('user_cache'))).toBe(true);
+    expect(deleteCalls.some(([sql]) => sql.includes('FROM users'))).toBe(true);
+    expect(result).toEqual({ deviceUserId: 42, teamId: 5 });
+  });
+
+  it('rejects with NotATeamOwnedDeviceError for a non-device target, performing no delegated removal', async () => {
+    mockDeviceLookup({ deviceRow: { id: 42, username: 'jsmith', authentik_user_id: 555, is_team_device: false } });
+
+    await expect(
+      DeviceEnrollmentService.deleteDevice(42, { userId: 1, is_global_manager: false })
+    ).rejects.toThrow(NotATeamOwnedDeviceError);
+
+    expect(TeamMembershipService.removeUserFromTeam).not.toHaveBeenCalled();
+  });
+
+  it('rejects with DeviceEnrollmentAuthorizationError and performs no delegated removal when the acting user is neither a team admin nor a Global_Manager', async () => {
+    Team.isAdmin.mockResolvedValue(false);
+    mockDeviceLookup();
+
+    await expect(
+      DeviceEnrollmentService.deleteDevice(42, { userId: 3, is_global_manager: false })
+    ).rejects.toThrow(DeviceEnrollmentAuthorizationError);
+
+    expect(TeamMembershipService.removeUserFromTeam).not.toHaveBeenCalled();
+  });
+
+  it('deletes without checking Team.isAdmin for a Global_Manager', async () => {
+    mockDeviceLookup();
+
+    await DeviceEnrollmentService.deleteDevice(42, { userId: 2, is_global_manager: true });
+
+    expect(Team.isAdmin).not.toHaveBeenCalled();
+  });
+
+  it('still deletes the local rows when the Authentik delete call itself fails (logged, not rethrown)', async () => {
+    Team.isAdmin.mockResolvedValue(true);
+    mockDeviceLookup();
+    global.fetch = jest.fn().mockRejectedValue(new Error('Authentik unreachable'));
+
+    const result = await DeviceEnrollmentService.deleteDevice(42, { userId: 1, is_global_manager: false });
+
+    expect(result).toEqual({ deviceUserId: 42, teamId: 5 });
+    const deleteCalls = pool.query.mock.calls.filter(
+      ([sql]) => typeof sql === 'string' && sql.includes('DELETE FROM users')
+    );
+    expect(deleteCalls.length).toBeGreaterThan(0);
   });
 });

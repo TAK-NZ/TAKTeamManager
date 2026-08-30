@@ -32,9 +32,28 @@ jest.mock('../config/logger', () => ({
   createLogger: jest.fn(() => mockLoggerInstance)
 }));
 
+// region-channel-tiers: assignUserToGlobalChannels/resyncOrgChannelTierAccess
+// require `../models/Team` and `../services/EventPublisher` at module
+// scope, calling `Team.getAncestorChain`/`Team.getOrganisationTeams` and
+// `EventPublisher.publishOperation`/`publishBulkOperation` respectively --
+// mocked here (rather than left to hit the real modules, which would
+// route through the mocked `pg.Pool` above and never resolve) so the
+// dedicated describe blocks below can control their return values
+// directly.
+jest.mock('../models/Team', () => ({
+  getAncestorChain: jest.fn(),
+  getOrganisationTeams: jest.fn()
+}));
+jest.mock('../services/EventPublisher', () => ({
+  publishOperation: jest.fn(),
+  publishBulkOperation: jest.fn()
+}));
+
 const http = require('http');
 const { computeBackoffDelay } = require('./backoff');
 const SyncWorker = require('./syncWorker');
+const Team = require('../models/Team');
+const EventPublisher = require('../services/EventPublisher');
 // Property 3 (below): generates payloads against the real
 // operationSchemas.js map rather than a hand-picked subset of operation
 // types.
@@ -502,6 +521,8 @@ describe('Property 3: Payload validation failures never schedule a retry', () =>
     assign_user_to_global_channels: 'assignUserToGlobalChannels',
     deactivate_global_channel: 'deactivateGlobalChannel',
     sync_existing_global_channels: 'syncExistingGlobalChannels',
+    // region-channel-tiers: enqueued by PUT /api/teams/:teamId/channel-access.
+    resync_org_channel_tier_access: 'resyncOrgChannelTierAccess',
     cleanup_orphaned_authentik_user: 'cleanupOrphanedAuthentikUser',
     remove_team_channel_group: 'removeTeamChannelGroup',
     create_vendor_channel_group: 'createVendorChannelGroup',
@@ -1037,7 +1058,9 @@ describe('SyncWorker Authentik failure classification wiring', () => {
       retry_count: 0,
       max_retries: 48,
       correlation_id: 'corr-remove-team-channel-1',
-      payload: { channel_id: 10, authentik_group_id: 555 }
+      // Authentik group pks are UUID strings, never numbers -- see the
+      // fix note on operationSchemas.js's remove_team_channel_group entry.
+      payload: { channel_id: 10, authentik_group_id: 'group-pk-555' }
     };
 
     it('completes successfully (one markOperationCompleted UPDATE) when the single group DELETE succeeds', async () => {
@@ -1047,7 +1070,7 @@ describe('SyncWorker Authentik failure classification wiring', () => {
 
       expect(global.fetch).toHaveBeenCalledTimes(1);
       expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining('/core/groups/555/'),
+        expect.stringContaining('/core/groups/group-pk-555/'),
         expect.objectContaining({ method: 'DELETE' })
       );
       expect(worker.pool.query).toHaveBeenCalledTimes(1);
@@ -1060,18 +1083,18 @@ describe('SyncWorker Authentik failure classification wiring', () => {
       global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 204 });
       const operation = {
         ...baseOperation,
-        payload: { channel_id: 11, authentik_read_group_id: 201, authentik_write_group_id: 202 }
+        payload: { channel_id: 11, authentik_read_group_id: 'group-pk-201', authentik_write_group_id: 'group-pk-202' }
       };
 
       await worker.executeOperationSafely(operation);
 
       expect(global.fetch).toHaveBeenCalledTimes(2);
       expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining('/core/groups/201/'),
+        expect.stringContaining('/core/groups/group-pk-201/'),
         expect.objectContaining({ method: 'DELETE' })
       );
       expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining('/core/groups/202/'),
+        expect.stringContaining('/core/groups/group-pk-202/'),
         expect.objectContaining({ method: 'DELETE' })
       );
       expect(worker.pool.query).toHaveBeenCalledTimes(1);
@@ -1135,6 +1158,7 @@ describe('SyncWorker Authentik failure classification wiring', () => {
       correlation_id: 'corr-classify-2',
       payload: {
         channel_name: 'Test Channel',
+        category: 'BCH',
         service_account_username: 'svc-test',
         service_account_password: 'secret',
         bch_channel_id: 7
@@ -1178,6 +1202,217 @@ describe('SyncWorker Authentik failure classification wiring', () => {
   });
 
   /**
+   * bch-channel-category: `createBchChannelGroups`'s group-naming and
+   * category-validation behavior, mirroring `createRegionChannelGroup`'s
+   * own tier-naming tests below in shape.
+   */
+  describe('createBchChannelGroups category naming', () => {
+    const baseOperation = {
+      id: 'op-bch-category-1',
+      operation_type: 'create_bch_channel_groups',
+      retry_count: 0,
+      max_retries: 48,
+      correlation_id: 'corr-bch-category-1',
+      payload: {
+        channel_name: 'Data Packages',
+        category: 'UTL',
+        service_account_username: 'etl-data-packages',
+        service_account_password: 'secret',
+        bch_channel_id: 11
+      }
+    };
+
+    beforeEach(() => {
+      worker.pool.query = jest.fn().mockResolvedValue({ rows: [] });
+    });
+
+    it("names the read/write groups with the category's prefix (tak_UTL for category 'UTL')", async () => {
+      let call = 0;
+      global.fetch = jest.fn().mockImplementation(() => {
+        call++;
+        if (call <= 2) {
+          // The two group-creation POSTs (read, then write).
+          return Promise.resolve({
+            ok: true,
+            status: 201,
+            json: () => Promise.resolve({ pk: `grp-${call}` })
+          });
+        }
+        // Service-account create, set_password, add_user.
+        return Promise.resolve({
+          ok: true,
+          status: 201,
+          json: () => Promise.resolve({ pk: 'svc-pk' })
+        });
+      });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      const readCallBody = JSON.parse(global.fetch.mock.calls[0][1].body);
+      const writeCallBody = JSON.parse(global.fetch.mock.calls[1][1].body);
+      expect(readCallBody.name).toBe('tak_UTL - Data Packages_READ');
+      expect(writeCallBody.name).toBe('tak_UTL - Data Packages');
+      expect(readCallBody.attributes.category).toBe('UTL');
+      expect(writeCallBody.attributes.category).toBe('UTL');
+    });
+
+    it("names the read/write groups with the BCH category prefix for category 'BCH'", async () => {
+      let call = 0;
+      global.fetch = jest.fn().mockImplementation(() => {
+        call++;
+        return Promise.resolve({
+          ok: true,
+          status: 201,
+          json: () => Promise.resolve({ pk: `grp-${call}` })
+        });
+      });
+
+      await worker.executeOperationSafely({
+        ...baseOperation,
+        payload: { ...baseOperation.payload, channel_name: 'Test Channel', category: 'BCH' }
+      });
+
+      const readCallBody = JSON.parse(global.fetch.mock.calls[0][1].body);
+      expect(readCallBody.name).toBe('tak_BCH - Test Channel_READ');
+    });
+
+    // bch-channel-category: an invalid/missing category is a permanent
+    // failure (a caller bug -- GlobalChannelService always supplies a
+    // validated category), never a silent fall-back.
+    it('permanently fails on an invalid category, without calling Authentik at all', async () => {
+      global.fetch = jest.fn();
+
+      await worker.executeOperationSafely({
+        ...baseOperation,
+        payload: { ...baseOperation.payload, category: 'bogus' }
+      });
+
+      expect(global.fetch).not.toHaveBeenCalled();
+
+      const failCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('failure_category')
+      );
+      expect(failCall).toBeDefined();
+      expect(failCall[1][0]).toBe('failed');
+      expect(failCall[1][1]).toBe('permanent');
+    });
+
+    // Bugfix: `description` was previously never set on the two POST
+    // bodies at all (the field didn't exist on the payload), so a
+    // freshly created channel's Authentik groups carried no
+    // `attributes.description` until the next edit via
+    // updateBchChannelGroup.
+    it('includes the supplied description in both groups\' attributes', async () => {
+      let call = 0;
+      global.fetch = jest.fn().mockImplementation(() => {
+        call++;
+        return Promise.resolve({
+          ok: true,
+          status: 201,
+          json: () => Promise.resolve({ pk: `grp-${call}` })
+        });
+      });
+
+      await worker.executeOperationSafely({
+        ...baseOperation,
+        payload: { ...baseOperation.payload, description: 'Data package delivery channel' }
+      });
+
+      const readCallBody = JSON.parse(global.fetch.mock.calls[0][1].body);
+      const writeCallBody = JSON.parse(global.fetch.mock.calls[1][1].body);
+      expect(readCallBody.attributes.description).toBe('Data package delivery channel');
+      expect(writeCallBody.attributes.description).toBe('Data package delivery channel');
+    });
+
+    it('falls back to the channel name when no description was supplied (an optional field)', async () => {
+      let call = 0;
+      global.fetch = jest.fn().mockImplementation(() => {
+        call++;
+        return Promise.resolve({
+          ok: true,
+          status: 201,
+          json: () => Promise.resolve({ pk: `grp-${call}` })
+        });
+      });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      const readCallBody = JSON.parse(global.fetch.mock.calls[0][1].body);
+      expect(readCallBody.attributes.description).toBe('Data Packages');
+    });
+  });
+
+  /**
+   * bch-channel-category: `updateBchChannelGroup`'s category-aware
+   * rename-PATCH naming, mirroring `updateRegionChannelGroup`'s own
+   * tier-naming tests below in shape.
+   */
+  describe('updateBchChannelGroup category naming', () => {
+    const baseOperation = {
+      id: 'op-bch-category-update-1',
+      operation_type: 'update_bch_channel_group',
+      retry_count: 0,
+      max_retries: 48,
+      correlation_id: 'corr-bch-category-update-1',
+      payload: {
+        bch_channel_id: 11,
+        channel_name: 'Data Packages',
+        category: 'UTL',
+        description: 'Data package delivery channel'
+      }
+    };
+
+    beforeEach(() => {
+      worker.pool.query = jest.fn().mockResolvedValue({
+        rows: [{ read_group_id: 'read-pk', write_group_id: 'write-pk' }]
+      });
+    });
+
+    it("PATCHes both groups with the category's prefix (tak_UTL for category 'UTL')", async () => {
+      global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 200 });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+      const readBody = JSON.parse(global.fetch.mock.calls[0][1].body);
+      const writeBody = JSON.parse(global.fetch.mock.calls[1][1].body);
+      expect(readBody.name).toBe('tak_UTL - Data Packages_READ');
+      expect(writeBody.name).toBe('tak_UTL - Data Packages');
+      expect(readBody.attributes.category).toBe('UTL');
+    });
+
+    it("PATCHes both groups with the BCH category prefix for category 'BCH'", async () => {
+      global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 200 });
+
+      await worker.executeOperationSafely({
+        ...baseOperation,
+        payload: { ...baseOperation.payload, channel_name: 'Test Channel', category: 'BCH' }
+      });
+
+      const readBody = JSON.parse(global.fetch.mock.calls[0][1].body);
+      expect(readBody.name).toBe('tak_BCH - Test Channel_READ');
+    });
+
+    it('permanently fails on an invalid category, without calling Authentik at all', async () => {
+      global.fetch = jest.fn();
+
+      await worker.executeOperationSafely({
+        ...baseOperation,
+        payload: { ...baseOperation.payload, category: 'bogus' }
+      });
+
+      expect(global.fetch).not.toHaveBeenCalled();
+
+      const failCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('failure_category')
+      );
+      expect(failCall).toBeDefined();
+      expect(failCall[1][0]).toBe('failed');
+      expect(failCall[1][1]).toBe('permanent');
+    });
+  });
+
+  /**
    * Regression test: `createRegionChannelGroup` previously tried to create
    * a read/write GROUP PAIR for a region channel (mirroring BCH channels)
    * and then UPDATE region_channels.read_group_id/group_id -- but
@@ -1197,7 +1432,10 @@ describe('SyncWorker Authentik failure classification wiring', () => {
       correlation_id: 'corr-region-group-1',
       payload: {
         channel_name: 'Auckland',
-        region_channel_id: 9
+        region_channel_id: 9,
+        // region-channel-tiers: required since GlobalChannelService.
+        // createRegionChannel always supplies it.
+        tier: 'response'
       }
     };
 
@@ -1232,6 +1470,61 @@ describe('SyncWorker Authentik failure classification wiring', () => {
       expect(updateCall[0]).not.toContain('read_group_id');
       expect(updateCall[0]).toContain('group_id');
       expect(updateCall[1]).toEqual(['grp-auckland', 9]);
+    });
+
+    // region-channel-tiers: the group name's prefix must reflect the
+    // payload's tier -- 'tak_Response - <name>' for tier 'response',
+    // never the former single untiered 'tak_Regions - <name>' prefix.
+    it("names the created group with the tier's prefix (tak_Response for tier 'response')", async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 201,
+        json: () => Promise.resolve({ pk: 'grp-auckland' })
+      });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      const [, options] = global.fetch.mock.calls[0];
+      const body = JSON.parse(options.body);
+      expect(body.name).toBe('tak_Response - Auckland');
+    });
+
+    it("names the created group with the tier's prefix (tak_Support for tier 'support')", async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 201,
+        json: () => Promise.resolve({ pk: 'grp-auckland' })
+      });
+
+      await worker.executeOperationSafely({
+        ...baseOperation,
+        payload: { ...baseOperation.payload, tier: 'support' }
+      });
+
+      const [, options] = global.fetch.mock.calls[0];
+      const body = JSON.parse(options.body);
+      expect(body.name).toBe('tak_Support - Auckland');
+    });
+
+    // region-channel-tiers: an invalid/missing tier is a permanent
+    // failure (a caller bug -- GlobalChannelService always supplies a
+    // validated tier), never a silent fall-back to the old untiered name.
+    it('permanently fails on an invalid tier, without calling Authentik at all', async () => {
+      global.fetch = jest.fn();
+
+      await worker.executeOperationSafely({
+        ...baseOperation,
+        payload: { ...baseOperation.payload, tier: 'bogus' }
+      });
+
+      expect(global.fetch).not.toHaveBeenCalled();
+
+      const failCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('failure_category')
+      );
+      expect(failCall).toBeDefined();
+      expect(failCall[1][0]).toBe('failed');
+      expect(failCall[1][1]).toBe('permanent');
     });
 
     it('results in a markPermanentlyFailed-style UPDATE on a 4xx response from the group-creation call', async () => {
@@ -1308,9 +1601,11 @@ describe('SyncWorker Authentik failure classification wiring', () => {
     it('follows pagination.next across multiple pages and imports a BCH group found only on page 2', async () => {
       // Region channels are a SINGLE Authentik group per channel (no
       // "_READ" pair like BCH channels have -- see the region-matching
-      // fix in syncExistingGlobalChannels).
+      // fix in syncExistingGlobalChannels). region-channel-tiers: the
+      // prefix is now tier-specific (tak_Response/tak_Support), not the
+      // former single untiered tak_Regions.
       const page1Groups = [
-        { pk: 'g1', name: `tak_Regions${separator}North`, attributes: {} }
+        { pk: 'g1', name: `tak_Response${separator}North`, attributes: {} }
       ];
       const page2Groups = [
         { pk: 'g3', name: `tak_BCH${separator}Alpha_READ`, attributes: {} },
@@ -1366,6 +1661,127 @@ describe('SyncWorker Authentik failure classification wiring', () => {
       await worker.syncExistingGlobalChannels({ synced_by: 1 });
 
       expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  /**
+   * bch-channel-category: `syncExistingGlobalChannels` recognizes BOTH
+   * 'tak_BCH...' and 'tak_UTL...' prefixed groups (looping
+   * BCH_CHANNEL_CATEGORY_PREFIX, mirroring how the region-channel loop
+   * iterates REGION_CHANNEL_TIER_PREFIX), and scopes its existence
+   * check/import by (name, category) so a same-named BCH and UTL channel
+   * are never conflated.
+   */
+  describe('syncExistingGlobalChannels BCH/UTL category recognition', () => {
+    const separator = ' - ';
+    const originalSeparator = process.env.CHANNEL_FOLDER_SEPARATOR;
+
+    beforeEach(() => {
+      process.env.CHANNEL_FOLDER_SEPARATOR = separator;
+    });
+
+    afterEach(() => {
+      process.env.CHANNEL_FOLDER_SEPARATOR = originalSeparator;
+    });
+
+    it('imports a tak_UTL group as a new bch_channels row with category=\'UTL\'', async () => {
+      worker.pool.query = jest.fn().mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT id FROM bch_channels')) {
+          return Promise.resolve({ rows: [] });
+        }
+        if (typeof sql === 'string' && sql.includes('INSERT INTO bch_channels')) {
+          return Promise.resolve({ rows: [{ id: 1 }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      const groups = [
+        { pk: 'g1', name: `tak_UTL${separator}Data Packages_READ`, attributes: {} },
+        { pk: 'g2', name: `tak_UTL${separator}Data Packages`, attributes: {} }
+      ];
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: groups, pagination: {} })
+      });
+
+      await worker.syncExistingGlobalChannels({ synced_by: 1 });
+
+      const insertCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO bch_channels')
+      );
+      expect(insertCall).toBeDefined();
+      // name, display_name, description, read_group_id, write_group_id, category, created_by
+      expect(insertCall[1]).toEqual(['Data Packages', 'Data Packages', 'UTL Channel - Data Packages', 'g1', 'g2', 'UTL', 1]);
+    });
+
+    it('checks existence scoped by (name, category) -- a "Data Packages" BCH row does not satisfy a UTL import', async () => {
+      let existingCheckCalls = [];
+      worker.pool.query = jest.fn().mockImplementation((sql, params) => {
+        if (typeof sql === 'string' && sql.includes('SELECT id FROM bch_channels')) {
+          existingCheckCalls.push(params);
+          // Simulate: a BCH row with this name exists, but no UTL row does.
+          return Promise.resolve(
+            params[1] === 'BCH' ? { rows: [{ id: 42 }] } : { rows: [] }
+          );
+        }
+        if (typeof sql === 'string' && sql.includes('INSERT INTO bch_channels')) {
+          return Promise.resolve({ rows: [{ id: 2 }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      const groups = [
+        { pk: 'g1', name: `tak_UTL${separator}Data Packages_READ`, attributes: {} },
+        { pk: 'g2', name: `tak_UTL${separator}Data Packages`, attributes: {} }
+      ];
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: groups, pagination: {} })
+      });
+
+      await worker.syncExistingGlobalChannels({ synced_by: 1 });
+
+      // The existence check for the UTL group was scoped to category
+      // 'UTL' (found none), and a UTL row was still created despite a
+      // same-named BCH row existing.
+      expect(existingCheckCalls).toEqual(expect.arrayContaining([['Data Packages', 'UTL']]));
+      const insertCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO bch_channels')
+      );
+      expect(insertCall).toBeDefined();
+      expect(insertCall[1][5]).toBe('UTL');
+    });
+
+    it('updates an existing UTL row (by name AND category) rather than duplicating it', async () => {
+      worker.pool.query = jest.fn().mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT id FROM bch_channels')) {
+          return Promise.resolve({ rows: [{ id: 5 }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      const groups = [
+        { pk: 'g1', name: `tak_UTL${separator}Data Packages_READ`, attributes: {} },
+        { pk: 'g2', name: `tak_UTL${separator}Data Packages`, attributes: {} }
+      ];
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ results: groups, pagination: {} })
+      });
+
+      await worker.syncExistingGlobalChannels({ synced_by: 1 });
+
+      const updateCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('UPDATE bch_channels')
+      );
+      expect(updateCall).toBeDefined();
+      expect(updateCall[0]).toContain('category = $5');
+      expect(updateCall[1]).toEqual(expect.arrayContaining(['g1', 'g2', 'Data Packages', 'UTL']));
+
+      const insertCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO bch_channels')
+      );
+      expect(insertCall).toBeUndefined();
     });
   });
 
@@ -1831,6 +2247,329 @@ describe('SyncWorker Authentik failure classification wiring', () => {
       expect(sql).toContain('next_retry_at');
       expect(params[0]).toBe('pending');
     });
+  });
+});
+
+/**
+ * region-channel-tiers (task 8): assignUserToGlobalChannels resolves a
+ * user's Organisation via their Direct_Membership, reads
+ * response_channel_access/support_channel_access off it, diffs the
+ * user's REAL current Authentik group membership (scoped to only the
+ * groups this reconcile owns) against the target set, and both adds AND
+ * removes as needed. Rewritten in task 8 to remove the old
+ * isPrivateTeamUser branch entirely.
+ */
+describe('SyncWorker.assignUserToGlobalChannels', () => {
+  let worker;
+  let originalFetch;
+
+  // Builds a pool.query router keyed on distinguishing substrings in the
+  // SQL text, mirroring the `routePool` helper used elsewhere in this
+  // file for CloudTAK handler tests.
+  function routePool({
+    directMembershipRows = [],
+    bchReadGroupIds = [],
+    regionRows = []
+  }) {
+    return jest.fn((sql) => {
+      if (typeof sql === 'string' && /FROM users WHERE id/.test(sql)) {
+        return Promise.resolve({ rows: [{ id: 1, authentik_user_id: 'ak-user-1' }] });
+      }
+      if (typeof sql === 'string' && /FROM team_memberships/.test(sql) && /inherited_from_team_id IS NULL/.test(sql)) {
+        return Promise.resolve({ rows: directMembershipRows });
+      }
+      if (typeof sql === 'string' && /FROM bch_channels/.test(sql)) {
+        return Promise.resolve({ rows: bchReadGroupIds.map((id) => ({ read_group_id: id })) });
+      }
+      if (typeof sql === 'string' && /FROM region_channels/.test(sql)) {
+        return Promise.resolve({ rows: regionRows });
+      }
+      // bulk_operations progress UPDATE, etc.
+      return Promise.resolve({ rows: [] });
+    });
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    worker = new SyncWorker();
+    worker.addUserToGroup = jest.fn().mockResolvedValue();
+    worker.removeUserFromGroup = jest.fn().mockResolvedValue();
+    originalFetch = global.fetch;
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it('adds the user to the response group when their Organisation has response_channel_access=true and they are not currently a member', async () => {
+    worker.pool.query = routePool({
+      directMembershipRows: [{ team_id: 5 }],
+      bchReadGroupIds: [901],
+      regionRows: [{ group_id: 701, tier: 'response' }, { group_id: 702, tier: 'support' }]
+    });
+    Team.getAncestorChain.mockResolvedValue([
+      { id: 1, parent_team_id: null, response_channel_access: true, support_channel_access: false }
+    ]);
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ groups: [901] }) // currently only has the BCH read group
+    });
+
+    await worker.assignUserToGlobalChannels({ target_user_id: 1 });
+
+    expect(worker.addUserToGroup).toHaveBeenCalledWith({ target_user_id: 1, target_group_id: 701 });
+    expect(worker.removeUserFromGroup).not.toHaveBeenCalled();
+  });
+
+  it('removes the user from the support group when their Organisation has support_channel_access=false but they are currently a member', async () => {
+    worker.pool.query = routePool({
+      directMembershipRows: [{ team_id: 5 }],
+      bchReadGroupIds: [901],
+      regionRows: [{ group_id: 701, tier: 'response' }, { group_id: 702, tier: 'support' }]
+    });
+    Team.getAncestorChain.mockResolvedValue([
+      { id: 1, parent_team_id: null, response_channel_access: false, support_channel_access: false }
+    ]);
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ groups: [901, 702] }) // currently has BCH + support, but the flag is now off
+    });
+
+    await worker.assignUserToGlobalChannels({ target_user_id: 1 });
+
+    expect(worker.removeUserFromGroup).toHaveBeenCalledWith({ target_user_id: 1, target_group_id: 702 });
+    expect(worker.addUserToGroup).not.toHaveBeenCalled();
+  });
+
+  it('never touches a group outside managedGroupIds (e.g. an unrelated Team/Sub_Team group) even though the user is currently a member of it', async () => {
+    worker.pool.query = routePool({
+      directMembershipRows: [{ team_id: 5 }],
+      bchReadGroupIds: [901],
+      regionRows: [{ group_id: 701, tier: 'response' }, { group_id: 702, tier: 'support' }]
+    });
+    Team.getAncestorChain.mockResolvedValue([
+      { id: 1, parent_team_id: null, response_channel_access: false, support_channel_access: false }
+    ]);
+    const UNRELATED_TEAM_GROUP_ID = 12345;
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ groups: [901, UNRELATED_TEAM_GROUP_ID] })
+    });
+
+    await worker.assignUserToGlobalChannels({ target_user_id: 1 });
+
+    // Neither add nor remove is ever called with the unrelated group id.
+    expect(worker.addUserToGroup).not.toHaveBeenCalledWith(
+      expect.objectContaining({ target_group_id: UNRELATED_TEAM_GROUP_ID })
+    );
+    expect(worker.removeUserFromGroup).not.toHaveBeenCalledWith(
+      expect.objectContaining({ target_group_id: UNRELATED_TEAM_GROUP_ID })
+    );
+    // Nothing else needed reconciling either (bch read + both region
+    // groups already absent/target-absent consistently).
+    expect(worker.addUserToGroup).not.toHaveBeenCalled();
+    expect(worker.removeUserFromGroup).not.toHaveBeenCalled();
+  });
+
+  it('treats a teamless user (no Direct_Membership row) as having both flags false, removing any region group they currently hold', async () => {
+    worker.pool.query = routePool({
+      directMembershipRows: [], // no Direct_Membership row at all
+      bchReadGroupIds: [901],
+      regionRows: [{ group_id: 701, tier: 'response' }, { group_id: 702, tier: 'support' }]
+    });
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ groups: [901, 701] })
+    });
+
+    await worker.assignUserToGlobalChannels({ target_user_id: 1 });
+
+    expect(Team.getAncestorChain).not.toHaveBeenCalled();
+    expect(worker.removeUserFromGroup).toHaveBeenCalledWith({ target_user_id: 1, target_group_id: 701 });
+    expect(worker.addUserToGroup).not.toHaveBeenCalled();
+  });
+
+  it('never removes the BCH read group, regardless of the Organisation flags', async () => {
+    worker.pool.query = routePool({
+      directMembershipRows: [{ team_id: 5 }],
+      bchReadGroupIds: [901],
+      regionRows: []
+    });
+    Team.getAncestorChain.mockResolvedValue([
+      { id: 1, parent_team_id: null, response_channel_access: false, support_channel_access: false }
+    ]);
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ groups: [901] })
+    });
+
+    await worker.assignUserToGlobalChannels({ target_user_id: 1 });
+
+    expect(worker.removeUserFromGroup).not.toHaveBeenCalledWith(
+      expect.objectContaining({ target_group_id: 901 })
+    );
+  });
+
+  it('adds the user to the BCH read group when they are not yet a member, even with no Organisation at all', async () => {
+    worker.pool.query = routePool({
+      directMembershipRows: [],
+      bchReadGroupIds: [901],
+      regionRows: []
+    });
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ groups: [] })
+    });
+
+    await worker.assignUserToGlobalChannels({ target_user_id: 1 });
+
+    expect(worker.addUserToGroup).toHaveBeenCalledWith({ target_user_id: 1, target_group_id: 901 });
+  });
+
+  it('skips the Authentik group-membership fetch entirely (treats current membership as empty) when the user has no authentik_user_id', async () => {
+    worker.pool.query = jest.fn((sql) => {
+      if (typeof sql === 'string' && /FROM users WHERE id/.test(sql)) {
+        return Promise.resolve({ rows: [{ id: 1, authentik_user_id: null }] });
+      }
+      if (typeof sql === 'string' && /FROM team_memberships/.test(sql)) {
+        return Promise.resolve({ rows: [] });
+      }
+      if (typeof sql === 'string' && /FROM bch_channels/.test(sql)) {
+        return Promise.resolve({ rows: [{ read_group_id: 901 }] });
+      }
+      if (typeof sql === 'string' && /FROM region_channels/.test(sql)) {
+        return Promise.resolve({ rows: [] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    global.fetch = jest.fn();
+
+    await worker.assignUserToGlobalChannels({ target_user_id: 1 });
+
+    expect(global.fetch).not.toHaveBeenCalled();
+    // Nothing currently held (fetch skipped) means BCH read is the only add.
+    expect(worker.addUserToGroup).toHaveBeenCalledWith({ target_user_id: 1, target_group_id: 901 });
+  });
+
+  it('continues reconciling remaining groups when one add fails, logging the error rather than throwing', async () => {
+    worker.pool.query = routePool({
+      directMembershipRows: [{ team_id: 5 }],
+      bchReadGroupIds: [901],
+      regionRows: [{ group_id: 701, tier: 'response' }, { group_id: 702, tier: 'support' }]
+    });
+    Team.getAncestorChain.mockResolvedValue([
+      { id: 1, parent_team_id: null, response_channel_access: true, support_channel_access: true }
+    ]);
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ groups: [] })
+    });
+    worker.addUserToGroup = jest
+      .fn()
+      .mockRejectedValueOnce(new Error('Authentik unreachable'))
+      .mockResolvedValue();
+
+    await expect(worker.assignUserToGlobalChannels({ target_user_id: 1 })).resolves.toBeUndefined();
+
+    // All three target groups (bch + response + support) were attempted
+    // despite the first one failing.
+    expect(worker.addUserToGroup).toHaveBeenCalledTimes(3);
+    expect(mockLoggerInstance.error).toHaveBeenCalled();
+  });
+
+  it('throws an AuthentikApiError when fetching the user\'s current Authentik group membership fails', async () => {
+    worker.pool.query = routePool({
+      directMembershipRows: [{ team_id: 5 }],
+      bchReadGroupIds: [901],
+      regionRows: []
+    });
+    Team.getAncestorChain.mockResolvedValue([
+      { id: 1, parent_team_id: null, response_channel_access: false, support_channel_access: false }
+    ]);
+    global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 500, statusText: 'Internal Server Error' });
+
+    await expect(worker.assignUserToGlobalChannels({ target_user_id: 1 })).rejects.toThrow(
+      /Failed to fetch current Authentik group membership/
+    );
+  });
+});
+
+/**
+ * region-channel-tiers (task 9): resyncOrgChannelTierAccess resolves
+ * every Direct_Membership user under an Organisation's whole Team tree
+ * (via Team.getOrganisationTeams) and fans out one
+ * assign_user_to_global_channels operation per user, wrapped in a
+ * bulk_operations progress record.
+ */
+describe('SyncWorker.resyncOrgChannelTierAccess', () => {
+  let worker;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    worker = new SyncWorker();
+  });
+
+  it('resolves the Organisation tree via Team.getOrganisationTeams and enqueues one operation per Direct_Membership user under it', async () => {
+    Team.getOrganisationTeams.mockResolvedValue([{ id: 1 }, { id: 2 }, { id: 3 }]);
+    worker.pool.query = jest.fn().mockResolvedValue({
+      rows: [{ user_id: 10 }, { user_id: 11 }]
+    });
+    EventPublisher.publishBulkOperation.mockResolvedValue('bulk-op-1');
+
+    await worker.resyncOrgChannelTierAccess({ organisation_id: 1, tier: 'response' });
+
+    expect(Team.getOrganisationTeams).toHaveBeenCalledWith(1);
+    const [sql, params] = worker.pool.query.mock.calls[0];
+    expect(sql).toContain('team_memberships');
+    expect(sql).toContain('inherited_from_team_id IS NULL');
+    expect(params[0]).toEqual([1, 2, 3]);
+
+    expect(EventPublisher.publishBulkOperation).toHaveBeenCalledWith(
+      expect.stringContaining('response'),
+      2,
+      null
+    );
+    expect(EventPublisher.publishOperation).toHaveBeenCalledTimes(2);
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'assign_user_to_global_channels',
+      { target_user_id: 10, bulk_operation_id: 'bulk-op-1' }
+    );
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'assign_user_to_global_channels',
+      { target_user_id: 11, bulk_operation_id: 'bulk-op-1' }
+    );
+  });
+
+  it('does nothing (no bulk op, no enqueue) when the Organisation has no teams at all', async () => {
+    Team.getOrganisationTeams.mockResolvedValue([]);
+    worker.pool.query = jest.fn().mockResolvedValue({ rows: [] });
+
+    await worker.resyncOrgChannelTierAccess({ organisation_id: 999, tier: 'support' });
+
+    expect(EventPublisher.publishBulkOperation).not.toHaveBeenCalled();
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+  });
+
+  it('does nothing (no bulk op, no enqueue) when the Organisation tree has teams but no Direct_Membership users', async () => {
+    Team.getOrganisationTeams.mockResolvedValue([{ id: 1 }]);
+    worker.pool.query = jest.fn().mockResolvedValue({ rows: [] });
+
+    await worker.resyncOrgChannelTierAccess({ organisation_id: 1, tier: 'support' });
+
+    expect(EventPublisher.publishBulkOperation).not.toHaveBeenCalled();
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+  });
+
+  it('deduplicates via DISTINCT user_id in the query, never enqueuing the same user twice for one Organisation reconcile', async () => {
+    Team.getOrganisationTeams.mockResolvedValue([{ id: 1 }, { id: 2 }]);
+    worker.pool.query = jest.fn().mockResolvedValue({ rows: [{ user_id: 10 }] });
+    EventPublisher.publishBulkOperation.mockResolvedValue('bulk-op-2');
+
+    await worker.resyncOrgChannelTierAccess({ organisation_id: 1, tier: 'response' });
+
+    const [sql] = worker.pool.query.mock.calls[0];
+    expect(sql).toContain('DISTINCT user_id');
+    expect(EventPublisher.publishOperation).toHaveBeenCalledTimes(1);
   });
 });
 

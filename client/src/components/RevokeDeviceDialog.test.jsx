@@ -226,3 +226,49 @@ describe('RevokeDeviceDialog (mounted)', () => {
     expect(onClose).not.toHaveBeenCalled()
   })
 })
+
+// Bugfix (mobile UI/UX pass): the dialog box is full-bleed on mobile
+// (w-full h-full, no rounding) rather than a small floating card, for
+// consistency with every other modal in this app -- see
+// TeamDetail.jsx's comment on the same fix for its own dialogs.
+describe('RevokeDeviceDialog: full-bleed on mobile (bugfix)', () => {
+  let container
+  let root
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  it('renders the dialog box with w-full h-full and sm:-gated rounding/max-width, not an unconditional rounded-lg/max-w-lg', async () => {
+    root = createRoot(container)
+    await act(async () => {
+      root.render(
+        <RevokeDeviceDialog
+          device={{ deviceUserId: 1, username: 'AUK-D7K3QMX', deviceLabel: null }}
+          onClose={() => {}}
+          onRevoked={() => {}}
+        />
+      )
+    })
+
+    const dialog = container.querySelector('[role="dialog"]')
+    expect(dialog).not.toBeNull()
+    expect(dialog.className).toContain('w-full h-full')
+    expect(dialog.className).toContain('sm:rounded-lg')
+    expect(dialog.className).toContain('sm:max-w-lg')
+    expect(dialog.className).not.toMatch(/(?<!sm:)rounded-lg/)
+  })
+})

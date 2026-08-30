@@ -22,7 +22,6 @@ import { useTheme } from '../contexts/ThemeContext'
 const getNavigation = (user) => {
   const baseNavigation = [
     { name: 'Dashboard', href: '/dashboard', icon: HomeIcon },
-    { name: 'Orgs & Teams', href: '/teams', icon: UserGroupIcon },
     // Downloads comes before Enrollment: the workflow only runs in one
     // direction (install the client, then enroll it -- Downloads.jsx's own
     // subtitle says as much), so the first step belongs first in the nav.
@@ -37,6 +36,7 @@ const getNavigation = (user) => {
     // device (takserver-enrollment Criterion 15.2). The authorization
     // decision happens on the API call, not on nav visibility.
     { name: 'Enrollment', href: '/enrollment', icon: QrCodeIcon },
+    { name: 'Orgs & Teams', href: '/teams', icon: UserGroupIcon },
   ]
   
   if (user?.isAdmin || user?.is_global_manager) {
@@ -193,7 +193,15 @@ export default function Layout({ children, user }) {
               />
               <span className="text-lg font-bold text-gray-900 dark:text-gray-100">TAK Team Manager</span>
             </div>
-            <button onClick={() => setSidebarOpen(false)}>
+            {/* Bugfix (mobile tap target too small): this button had NO
+                classes at all -- not even a hit-box, colour, or hover
+                state. p-2 rounded-lg matches every other modal/drawer
+                close button in this app. */}
+            <button
+              onClick={() => setSidebarOpen(false)}
+              aria-label="Close menu"
+              className="p-2 rounded-lg text-gray-400 hover:text-gray-500 hover:bg-gray-100 dark:hover:text-gray-300 dark:hover:bg-gray-700"
+            >
               <XMarkIcon className="h-6 w-6" />
             </button>
           </div>
@@ -265,9 +273,16 @@ export default function Layout({ children, user }) {
       <div className="lg:pl-64">
         {/* Top bar */}
         <div className="sticky top-0 z-40 flex h-16 bg-white dark:bg-gray-800 shadow">
+          {/* Bugfix (mobile tap target too small): `flex items-center
+              justify-center` makes the ~64px-tall hit area explicit
+              (was relying on the parent flex row's default stretch
+              behaviour, unstated and easy to break by a future layout
+              change) -- combined with the existing `px-4`, this gives a
+              generous tap target rather than an ambiguous one. */}
           <button
-            className="px-4 text-gray-500 lg:hidden"
+            className="px-4 flex items-center justify-center text-gray-500 lg:hidden"
             onClick={() => setSidebarOpen(true)}
+            aria-label="Open menu"
           >
             <Bars3Icon className="h-6 w-6" />
           </button>

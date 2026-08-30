@@ -118,6 +118,26 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
     // user with no local `users` row yet) is exactly the signal that no
     // local per-user resource can exist for that row.
     const localUserIdByAuthentikUserId = new Map();
+    // Users-page-action-parity: authentik_user_id -> the user's DIRECT
+    // Membership team id (the same `tm.team_id`/`t.id` this query already
+    // joins to build `team_name`, just also projected as a raw id). The
+    // Users view's row actions (Edit via `PATCH /api/teams/:teamId/
+    // members/:userId`, and the Transfer dialog's source-team exclusion/
+    // display) need the ACTUAL team id, not only its rendered display
+    // string -- `team_name` alone cannot drive either. `null` for a user
+    // with no direct team membership, exactly like `team_name`.
+    const teamIdByAuthentikUserId = new Map();
+    // Users-page-action-parity: authentik_user_id -> the LOCAL editable
+    // fields the Member_List edit form (`MemberEditRow`) needs to pre-fill
+    // itself -- `first_name`/`last_name`/`tak_role`/`callsign_suffix` --
+    // sourced from the `users` row this query already joins via
+    // `tm.user_id = u.id`, rather than from Authentik's own payload
+    // (Authentik's `name`/`attributes` are a periodic-sync MIRROR of these
+    // same local columns per `authentikSync.js`, and `PATCH /api/teams/
+    // :teamId/members/:userId` writes to `users` directly -- so `users` is
+    // the authoritative, freshest copy). `null` for a user with no local
+    // `users` row, exactly like `local_user_id`.
+    const memberEditFieldsByAuthentikUserId = new Map();
     // takserver-enrollment Requirement 13.2/13.6: authentik_user_id ->
     // live certificate count, built from the SAME batched query below via
     // an additional `certs` derived-table LEFT JOIN keyed on `u.id`. A
@@ -156,7 +176,12 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
                u.id AS local_user_id,
                u.is_team_device AS is_team_device,
                u.origin_org_id AS origin_org_id,
+               u.first_name AS local_first_name,
+               u.last_name AS local_last_name,
+               u.tak_role AS local_tak_role,
+               u.callsign_suffix AS local_callsign_suffix,
                root.root_id AS direct_membership_org_id,
+               t.id AS team_id,
                CASE
                  WHEN t.parent_team_id IS NOT NULL THEN
                    COALESCE(root.root_callsign_prefix, root.root_name, '') || ' - ' || t.name
@@ -181,6 +206,13 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
         isTeamDeviceByAuthentikUserId.set(row.authentik_user_id, row.is_team_device === true);
         localUserIdByAuthentikUserId.set(row.authentik_user_id, row.local_user_id ?? null);
         liveCertificateCountByAuthentikUserId.set(row.authentik_user_id, row.live_certificate_count ?? 0);
+        teamIdByAuthentikUserId.set(row.authentik_user_id, row.team_id ?? null);
+        memberEditFieldsByAuthentikUserId.set(row.authentik_user_id, {
+          first_name: row.local_first_name ?? null,
+          last_name: row.local_last_name ?? null,
+          tak_role: row.local_tak_role ?? null,
+          callsign_suffix: row.local_callsign_suffix ?? null,
+        });
         // The `users` row exists locally, so its email/first_name are known,
         // but scoping only needs the org facts here; the email a candidate is
         // matched on comes from the Authentik payload in `toFacts` below,
@@ -214,8 +246,56 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
         // or with zero live `tak_devices` rows -- never null/undefined, so
         // the Multiple_Certificate_Warning can compare against a number
         // unconditionally.
-        live_certificate_count: liveCertificateCountByAuthentikUserId.get(user.pk) ?? 0
+        live_certificate_count: liveCertificateCountByAuthentikUserId.get(user.pk) ?? 0,
+        // Users-page-action-parity: additive, and null for a user with no
+        // direct team membership -- same fallback shape as `team_name`,
+        // which this is the raw id counterpart of.
+        team_id: teamIdByAuthentikUserId.get(user.pk) ?? null,
+        // Users-page-action-parity: additive, and null (each field) for a
+        // user with no local `users` row. These are the LOCAL columns the
+        // Member_List edit form pre-fills from -- deliberately spread
+        // AFTER `...user` so they win over anything same-named Authentik
+        // happened to return (Authentik's own payload carries no
+        // `tak_role`/`callsign_suffix` at all and no `first_name`/
+        // `last_name` split, only `name`, so there is no real collision
+        // today; this ordering is a documented safeguard against that
+        // changing silently).
+        ...(memberEditFieldsByAuthentikUserId.get(user.pk) ?? {
+          first_name: null,
+          last_name: null,
+          tak_role: null,
+          callsign_suffix: null,
+        })
       }));
+
+    // Users-page-action-parity: `can_manage` -- whether THIS caller may
+    // act on THIS row's own team (Edit/Transfer/Delete), independent of
+    // the `DirectoryScopeService` VISIBILITY scoping resolved just below.
+    // Visibility (who appears in the list) and management authority (which
+    // visible rows carry action buttons) are deliberately separate
+    // questions: `/users` must not be a wider-reaching escape hatch than
+    // `/teams`' own Member_List, where a Team_Admin can only edit/transfer/
+    // remove a member of a team they administer (`Team.isAdmin`) or one of
+    // its descendants.
+    //
+    // A Global_Manager can manage every row -- resolved from the SAME
+    // cached `is_global_manager` attribute `DirectoryScopeService
+    // .resolveScope` and the `user:read:team_admin` authorize.js resolver
+    // both already key off, so all three cannot disagree about who one is
+    // -- with no query issued. A non-Global_Manager gets ONE query (`Team
+    // .getManagedTeamIds`, resolved once per request, not once per row) and
+    // `can_manage` becomes a Set-membership test against each row's own
+    // `team_id`. A row with no direct team membership (`team_id: null`) is
+    // never manageable this way -- `Set.prototype.has(null)` is false --
+    // matching `MemberActions`' own `hasTeam` gating on the client.
+    const managedTeamIds = req.user && req.user.is_global_manager
+      ? null
+      : await Team.getManagedTeamIds(req.user && req.user.userId);
+
+    const usersWithManagement = usersWithTeams.map((user) => ({
+      ...user,
+      can_manage: managedTeamIds === null ? true : managedTeamIds.has(user.team_id)
+    }));
 
     // Requirement 10: a Global_Manager's response is not scoped at all.
     // `resolveScope` returns the frozen UNSCOPED sentinel for that caller, in
@@ -225,7 +305,7 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
 
     if (scope === DirectoryScopeService.UNSCOPED) {
       res.json({
-        users: usersWithTeams,
+        users: usersWithManagement,
         pagination: { page, pageSize, total: totalUsers }
       });
       return;
@@ -234,7 +314,7 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
     // Scoped (non-Global_Manager) caller. No SQL narrowing is possible here --
     // the page is Authentik's -- so the predicate runs in JS over the page.
     // The Team_Owned_Device exclusion has ALREADY happened above (Requirement
-    // 11.5), so `partitionCandidates` runs over `usersWithTeams` and its
+    // 11.5), so `partitionCandidates` runs over `usersWithManagement` and its
     // `excludedCount` counts users excluded BY THE SCOPING, not by the device
     // filter (Requirement 14.1).
     //
@@ -250,7 +330,7 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
         directMembershipOrgId: local ? local.directMembershipOrgId : null,
       };
     };
-    const { visible, excludedCount } = partitionCandidates(scope, usersWithTeams, toFacts);
+    const { visible, excludedCount } = partitionCandidates(scope, usersWithManagement, toFacts);
 
     DirectoryScopeService.logScopedResponse('GET /api/users', {
       userId: req.user.userId,
@@ -817,7 +897,19 @@ router.post('/callsign-suffix-preview', authenticateToken, authorize, [
     const organisation = ancestorChain[0];
     const pseudonymous = organisation?.pseudonymous_usernames === true;
 
-    if (pseudonymous) {
+    // Bugfix (AddTeamDeviceDialog live preview/collision-check, aligning
+    // it with the Create New User tab's UX): a Team_Owned_Device has no
+    // first/last name to derive a default suffix from at all -- there is
+    // nothing for `resolveNewUserIdentity`'s name-derived branch to
+    // compute regardless of the Organisation's `callsign_name_format`.
+    // When BOTH names are omitted, this preview degrades to exactly the
+    // same "no default, just check what was typed" behaviour the
+    // pseudonymous branch below already implements: a blank suffix has
+    // nothing to preview, and a non-blank one is checked directly against
+    // the shared uniqueness rule, with no mint attempt and no write.
+    const noNameSupplied = !firstName && !lastName;
+
+    if (pseudonymous || noNameSupplied) {
       const trimmedRequested = callsignSuffix ? callsignSuffix.trim() : '';
       if (!trimmedRequested) {
         return res.json({ suffix: null, required: true, conflict: null });

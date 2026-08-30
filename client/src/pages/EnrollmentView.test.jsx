@@ -287,6 +287,45 @@ describe('EnrollmentView (mounted)', () => {
     expect(installedLink.getAttribute('href')).toBe('/downloads')
   })
 
+  // Bugfix (#5): "Device Registration" previously always read "This device
+  // will be linked to your account", which is wrong for a Team_Owned_Device
+  // -- the whole point of a team device is that it is linked to the TEAM,
+  // not to any one operator's personal account.
+  describe('Device Registration wording (bug #5)', () => {
+    const deviceRegistrationText = () => {
+      const requirementsHeading = Array.from(container.querySelectorAll('h2')).find(
+        (heading) => heading.textContent === 'Device Enrollment Requirements'
+      )
+      const list = requirementsHeading.nextElementSibling
+      return Array.from(list.querySelectorAll('li')).find((li) => li.textContent.includes('Device Registration'))
+        ?.textContent
+    }
+
+    it('states the device is linked to the account for a human principal', async () => {
+      enrollmentAPI.previewSelf.mockResolvedValue({
+        data: { preview: buildPreviewFixture({ principalKind: 'human' }) },
+      })
+      await mount()
+      await flush()
+
+      const text = deviceRegistrationText()
+      expect(text).toContain('linked to your account')
+      expect(text).not.toContain('linked to the team')
+    })
+
+    it('states the device is linked to the TEAM, not a personal account, for a Team_Owned_Device principal', async () => {
+      enrollmentAPI.previewSelf.mockResolvedValue({
+        data: { preview: buildPreviewFixture({ principalKind: 'device' }) },
+      })
+      await mount()
+      await flush()
+
+      const text = deviceRegistrationText()
+      expect(text).toContain('linked to the team')
+      expect(text).not.toContain('linked to your account')
+    })
+  })
+
   // ── Pre-generation device notice, above the "Generate Enrollment Data"
   // button (one of two mutually exclusive variants by isAndroid) ────────
   describe('the pre-generation device notice above "Generate Enrollment Data"', () => {
@@ -1223,6 +1262,27 @@ describe('EnrollmentView (mounted)', () => {
         await Promise.resolve()
       })
       expect(writeText).toHaveBeenCalledWith(enrollment.host)
+    })
+
+    // Bugfix (mobile tap target too small): all four Manual-tab copy
+    // buttons (Description/Host Address/Username/Password) were bare
+    // h-4 w-4 icons with zero padding -- a ~16px hit target. -m-2 p-2
+    // enlarges the hit box without inflating the row's own layout.
+    it('enlarges all four copy buttons\' hit boxes via -m-2 p-2, without changing the icon\'s own rendered size', async () => {
+      await setUp()
+
+      const labels = ['Copy description', 'Copy host address', 'Copy username', 'Copy password']
+      for (const label of labels) {
+        const button = Array.from(container.querySelectorAll('button[aria-label]')).find(
+          (el) => el.getAttribute('aria-label') === label
+        )
+        expect(button, `missing button for "${label}"`).toBeTruthy()
+        expect(button.className).toContain('-m-2')
+        expect(button.className).toContain('p-2')
+
+        const icon = button.querySelector('svg')
+        expect(icon.getAttribute('class')).toContain('h-4 w-4')
+      }
     })
   })
 })

@@ -283,6 +283,18 @@ describe('UserDevicesModal (mounted)', () => {
     Array.from(container.querySelectorAll('tbody tr')).find((tr) => tr.textContent.includes(clientUid))
   const cellsOf = (tr) => Array.from(tr.querySelectorAll('td')).map((td) => td.textContent.trim())
 
+  // Bugfix (mobile UI/UX pass): full-bleed on mobile, matching every
+  // other modal in this app.
+  it('renders the dialog box with w-full h-full and sm:-gated rounding/max-width', async () => {
+    await mount()
+
+    const dialog = container.querySelector('[role="dialog"]')
+    expect(dialog.className).toContain('w-full h-full')
+    expect(dialog.className).toContain('sm:rounded-lg')
+    expect(dialog.className).toContain('sm:max-w-3xl')
+    expect(dialog.className).not.toMatch(/(?<!sm:)rounded-lg/)
+  })
+
   it('fetches the target user\'s devices and lists each one (Reqs 6.3, 6.4)', async () => {
     await mount()
 

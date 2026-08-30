@@ -27,7 +27,7 @@ scripts/               operational and CI scripts
 - Database access lives in models and services, never in routes.
 - Route handlers validate, authorize and delegate. Business rules live in services.
 - Tests are co-located: `X.test.js`, and `X.property.test.js` for property-based tests.
-- Structural/static-analysis guards are named for what they guard. Three exist: `client/src/utils/dateFormatConsumers.test.js`, `server/services/__tests__/martiEndpointContract.test.js`, `server/workers/operationSchemas.test.js`.
+- Structural/static-analysis guards are named for what they guard. Four exist: `client/src/utils/dateFormatConsumers.test.js`, `server/services/__tests__/martiEndpointContract.test.js`, `server/workers/operationSchemas.test.js`, `client/src/pages/channelTreeContrast.test.jsx`. The last locates a row by a stable visual anchor (an icon's class tokens or path-data shape), not by incidental markup like a wrapping `<button>` — a real UX change (e.g. removing a small dedicated toggle button in favour of a click-anywhere row) can legitimately remove the anchor a guard relied on, and the guard's extraction logic needs updating alongside it, without weakening what it actually asserts.
 
 ## Completed specs are history, not documentation
 

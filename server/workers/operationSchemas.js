@@ -85,26 +85,56 @@ module.exports = {
     }
   },
 
+  // bch-channel-category: `category` ('BCH'/'UTL') is required --
+  // GlobalChannelService.createBchChannel always supplies it (defaulting
+  // to 'BCH' when the caller omits one), having already validated it
+  // against the same two-value set the migration's CHECK constraint
+  // enforces, before ever enqueueing this operation. Mirrors
+  // create_region_channel_group's `tier` field exactly.
+  //
+  // Bugfix: `description` is now included, so createBchChannelGroups can
+  // set `attributes.description` on the two Authentik groups it creates
+  // -- it was missing entirely before, leaving a freshly created channel
+  // with no description in Authentik until the next edit. Declared
+  // OPTIONAL (never required): `POST /api/global-channels/bch`'s
+  // `description` body field is itself optional, so a channel created
+  // with no description at all is legitimate and must not fail payload
+  // validation.
   create_bch_channel_groups: {
     requiredFields: {
       channel_name: 'string',
+      category: 'string',
       service_account_username: 'string',
       service_account_password: 'string',
       bch_channel_id: 'number'
+    },
+    optionalFields: {
+      description: 'string'
     }
   },
 
+  // region-channel-tiers: `tier` ('response'/'support') is required --
+  // GlobalChannelService.createRegionChannel always supplies it, having
+  // already validated it against the same two-value set the migration's
+  // CHECK constraint enforces, before ever enqueueing this operation.
   create_region_channel_group: {
     requiredFields: {
       channel_name: 'string',
-      region_channel_id: 'number'
+      region_channel_id: 'number',
+      tier: 'string'
     }
   },
 
+  // bch-channel-category: `category` is required here too --
+  // GlobalChannelService.updateBchChannel reads the row's own stored
+  // category back before enqueueing (category is immutable after
+  // creation), so the worker's rename PATCH names the correct
+  // tak_BCH.../tak_UTL... group.
   update_bch_channel_group: {
     requiredFields: {
       bch_channel_id: 'number',
       channel_name: 'string',
+      category: 'string',
       description: 'string'
     }
   },
@@ -117,9 +147,20 @@ module.exports = {
     }
   },
 
+  // `channel_id` arrives as a route-param STRING all the way through:
+  // `DELETE /api/global-channels/:channelType/:channelId`
+  // (`server/routes/globalChannels.js`) never parses `req.params.channelId`
+  // to a number before passing it to
+  // `GlobalChannelService.deleteGlobalChannel`, which enqueues this
+  // operation with that same string value verbatim. Declaring `'number'`
+  // here made every `delete_global_channel` operation fail payload
+  // validation before ever reaching Authentik -- confirmed live, every
+  // historical row of this type had failed with
+  // `field "channel_id" has type "string", expected "number"`, so no
+  // Global_Channel delete has ever actually removed its Authentik group.
   delete_global_channel: {
     requiredFields: {
-      channel_id: 'number',
+      channel_id: 'string',
       channel_type: 'string'
     }
   },
@@ -142,6 +183,15 @@ module.exports = {
   sync_existing_global_channels: {
     requiredFields: {
       synced_by: 'number'
+    }
+  },
+
+  // region-channel-tiers: enqueued by PUT /api/teams/:teamId/channel-access
+  // (server/routes/teams.js) once per tier that actually changed value.
+  resync_org_channel_tier_access: {
+    requiredFields: {
+      organisation_id: 'number',
+      tier: 'string'
     }
   },
 
@@ -174,14 +224,23 @@ module.exports = {
   // primary team channel sets only `authentik_group_id`, never the
   // read/write pair) -- see `Team.createTeamChannel`/
   // `Channel.createCustomChannel`.
+  // `authentik_group_id`/`authentik_read_group_id`/`authentik_write_group_id`
+  // are Authentik group pks -- UUID STRINGS (`character varying(255)` on
+  // `channels` in the baseline schema), never numbers. Declaring
+  // `'number'` here made every `remove_team_channel_group` operation fail
+  // payload validation before ever reaching Authentik -- confirmed live
+  // against the dev database, every historical row of this type had
+  // failed with `field "authentik_group_id" has type "string", expected
+  // "number"`, so no Team deletion has ever actually cleaned up its
+  // Authentik channel groups; they were silently orphaned instead.
   remove_team_channel_group: {
     requiredFields: {
       channel_id: 'number'
     },
     optionalFields: {
-      authentik_group_id: 'number',
-      authentik_read_group_id: 'number',
-      authentik_write_group_id: 'number'
+      authentik_group_id: 'string',
+      authentik_read_group_id: 'string',
+      authentik_write_group_id: 'string'
     }
   },
 

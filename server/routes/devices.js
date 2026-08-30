@@ -5,6 +5,7 @@ const authorize = require('../middleware/authorize');
 const { getLogger } = require('../middleware/requestContext');
 const pool = require('../config/database');
 const DeviceEnrollmentService = require('../services/DeviceEnrollmentService');
+const { isValidCallsignSuffix } = require('../utils/callsignValidation');
 
 const router = express.Router();
 
@@ -84,7 +85,15 @@ const ERROR_STATUS_BY_NAME = {
   // transient failure of a reachable-but-erroring dependency -- 400
   // rather than 503, matching how `configValidator.isWellFormedUrl`
   // failures are surfaced elsewhere as client-facing 400s.
-  TakServerNotConfiguredError: 400
+  TakServerNotConfiguredError: 400,
+  // A device's requested callsignSuffix collided, case-insensitively,
+  // with another member's or device's in this team
+  // (`checkCallsignSuffixUniqueness`, called by `createDevice` before
+  // any Claim_Row is written) -- a request-validation failure, same
+  // treatment as every other caller of this shared check
+  // (`server/routes/teams.js`'s member-edit route, `server/routes/
+  // requests.js`'s approval route).
+  CallsignSuffixConflictError: 400
 };
 
 // takserver-enrollment Criterion 3.6 (task 8.3): `GET /team/:teamId`
@@ -122,7 +131,14 @@ function handleServiceError(res, error, logMessage) {
 // `DeviceEnrollmentAuthorizationError` (mapped to 403 below) otherwise.
 router.post('/', authenticateToken, authorize, [
   body('teamId').notEmpty().withMessage('teamId is required'),
-  body('label').optional({ nullable: true }).isString().trim().isLength({ max: 255 })
+  body('label').optional({ nullable: true }).isString().trim().isLength({ max: 255 }),
+  // Mirrors `server/routes/teams.js`'s member-edit route's own
+  // `callsignSuffix` validator exactly (`.custom(isValidCallsignSuffix)`)
+  // -- the same character class (letters, digits, `-`, `.`) applies to a
+  // device's Name segment as to a human's.
+  body('callsignSuffix').optional({ nullable: true }).isString().trim().isLength({ max: 150 })
+    .custom((value) => isValidCallsignSuffix(value))
+    .withMessage('callsignSuffix may only contain letters, digits, "-", and "."')
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -130,9 +146,9 @@ router.post('/', authenticateToken, authorize, [
   }
 
   try {
-    const { teamId, label } = req.body;
+    const { teamId, label, callsignSuffix } = req.body;
 
-    const device = await DeviceEnrollmentService.createDevice(teamId, label || null, req.user);
+    const device = await DeviceEnrollmentService.createDevice(teamId, label || null, req.user, callsignSuffix || null);
 
     res.status(201).json({ device });
   } catch (error) {
@@ -267,6 +283,76 @@ router.get('/team/:teamId', authenticateToken, authorize, [
     res.json(result);
   } catch (error) {
     handleServiceError(res, error, 'Failed to list team-owned devices');
+  }
+});
+
+// Bugfix ("unable to edit ... a team device"): updates an EXISTING
+// Team_Owned_Device's label and/or callsign suffix.
+// `DeviceEnrollmentService.updateDevice`'s own `assertAuthorized` call
+// performs the real "team admin OR Global_Manager" check, rejecting
+// with `DeviceEnrollmentAuthorizationError` (mapped to 403 below)
+// otherwise -- this route layer only gates general reachability via the
+// `device:manage` identifier, shared with `POST /` above (same
+// authorization boundary: an admin who may create devices for a team
+// may also edit them).
+router.patch('/:deviceUserId', authenticateToken, authorize, [
+  param('deviceUserId').isInt().withMessage('deviceUserId must be an integer'),
+  body('deviceLabel').optional({ nullable: true }).isString().trim().isLength({ max: 255 }),
+  body('callsignSuffix').optional({ nullable: true }).isString().trim().isLength({ max: 150 })
+    .custom((value) => isValidCallsignSuffix(value))
+    .withMessage('callsignSuffix may only contain letters, digits, "-", and "."')
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
+  try {
+    const { deviceUserId } = req.params;
+    const { deviceLabel, callsignSuffix } = req.body;
+
+    const device = await DeviceEnrollmentService.updateDevice(
+      deviceUserId,
+      { deviceLabel, callsignSuffix },
+      req.user
+    );
+
+    res.json({ device });
+  } catch (error) {
+    handleServiceError(res, error, 'Failed to update team-owned device');
+  }
+});
+
+// Bugfix ("unable to ... delete a team device"): permanently removes an
+// EXISTING Team_Owned_Device (team/channel memberships, Authentik user,
+// and local `users` row). Shares `device:manage` with the create/edit
+// routes above for the same reason.
+router.delete('/:deviceUserId', authenticateToken, authorize, [
+  param('deviceUserId').isInt().withMessage('deviceUserId must be an integer')
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
+  try {
+    const { deviceUserId } = req.params;
+
+    await DeviceEnrollmentService.deleteDevice(deviceUserId, req.user);
+
+    try {
+      await pool.query(
+        `INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [req.user.userId, 'device.delete', 'user', parseInt(deviceUserId, 10), null]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
+    res.json({ message: 'Team-owned device deleted successfully' });
+  } catch (error) {
+    handleServiceError(res, error, 'Failed to delete team-owned device');
   }
 });
 

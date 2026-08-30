@@ -291,53 +291,53 @@ describe('transfer action placement in TeamDetail.jsx (Req 15.1)', () => {
   // the global `URL` with whatwg-url, whose instances node:fs rejects.
   const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
 
-  // Returns the `<td>...</td>` cell that encloses `index`.
-  function enclosingTableCell(index) {
-    const start = source.lastIndexOf('<td', index)
-    const end = source.indexOf('</td>', index)
-    expect(start).toBeGreaterThan(-1)
-    expect(end).toBeGreaterThan(start)
-    return source.slice(start, end)
-  }
+  // Bugfix (mobile card fallback for Members/Team Admins): the transfer
+  // action, along with Edit/Resend welcome/View devices/Delete, is now
+  // defined ONCE inside the shared `MemberActions` component rather than
+  // inline in each tab's `<td>` -- the same drift-avoidance extraction
+  // `TeamDeviceList.jsx`'s own `DeviceActions` already does. `onTransfer`
+  // is passed through as a prop (`setTransferringMember`) rather than the
+  // button calling `setTransferringMember(member)`/`setTransferringMember(admin)`
+  // directly, so these checks now target `MemberActions`'s own definition
+  // (the single source of truth) plus each of its 4 call sites (Members
+  // card, Members table, Team Admins card, Team Admins table).
+  //
+  // Users-page-action-parity: `MemberActions` itself moved out of
+  // `TeamDetail.jsx` into the shared `components/MemberActions.jsx` (also
+  // used by `Users.jsx`), so the button-definition assertion reads THAT
+  // file; the call-site assertions below stay against `TeamDetail.jsx`'s
+  // own source, since the 4 usages are still there.
+  const memberActionsSource = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), '..', 'components', 'MemberActions.jsx'),
+    'utf8'
+  )
 
-  // `role` of `member` -> the Members table row; `role` of `admin` -> the
-  // Team Admins table row. Each table's row variable is what the button's
-  // onClick passes to `setTransferringMember`.
-  const rows = [
-    { role: 'member', rowVar: 'member' },
-    { role: 'admin', rowVar: 'admin' }
-  ]
-
-  it.each(rows)('renders exactly one transfer action on a $role row', ({ rowVar }) => {
-    const occurrences = source.split(`setTransferringMember(${rowVar})`).length - 1
+  it('defines the transfer action exactly once, inside MemberActions, as the ArrowRightCircleIcon button calling onTransfer(member)', () => {
+    const occurrences = memberActionsSource.split('onClick={() => hasTeam && onTransfer(member)}').length - 1
     expect(occurrences).toBe(1)
-  })
 
-  it.each(rows)('places the $role row transfer action inside a canManageTeam-gated action cell', ({ rowVar }) => {
-    const index = source.indexOf(`setTransferringMember(${rowVar})`)
-    expect(index).toBeGreaterThan(-1)
-
-    const cell = enclosingTableCell(index)
-    expect(cell).toContain('{canManageTeam && (')
-  })
-
-  it.each(rows)('gates the $role row transfer action on canManageTeam alone, with no additional condition', ({ rowVar }) => {
-    const index = source.indexOf(`setTransferringMember(${rowVar})`)
-    const cell = enclosingTableCell(index)
-    const gateStart = cell.indexOf('{canManageTeam && (')
-    const between = cell.slice(gateStart + '{canManageTeam && ('.length, cell.indexOf(`setTransferringMember(${rowVar})`))
-
-    // No nested conditional render opens between the gate and the button,
-    // so `canManageTeam` is the whole condition on the transfer action.
-    expect(between).not.toContain('&& (')
-    expect(between).not.toContain('? (')
-  })
-
-  it.each(rows)('renders the transfer action on a $role row as the ArrowRightCircleIcon button', ({ rowVar }) => {
-    const index = source.indexOf(`setTransferringMember(${rowVar})`)
-    const button = source.slice(index, source.indexOf('</button>', index))
+    const index = memberActionsSource.indexOf('onClick={() => hasTeam && onTransfer(member)}')
+    const button = memberActionsSource.slice(
+      memberActionsSource.lastIndexOf('<button', index),
+      memberActionsSource.indexOf('</button>', index)
+    )
     expect(button).toContain('ArrowRightCircleIcon')
-    expect(button).toContain('aria-label="Transfer member to another team"')
+    expect(button).toContain("aria-label={hasTeam ? 'Transfer member to another team' : noTeamTitle}")
+  })
+
+  it('passes onTransfer={setTransferringMember} from all 4 MemberActions call sites (Members card+table, Team Admins card+table)', () => {
+    const occurrences = source.split('onTransfer={setTransferringMember}').length - 1
+    expect(occurrences).toBe(4)
+  })
+
+  it('renders MemberActions exactly 4 times (Members card, Members table, Team Admins card, Team Admins table), each gated on canManageTeam alone', () => {
+    const usages = [...source.matchAll(/\{canManageTeam && \(\s*<MemberActions/g)]
+    expect(usages.length).toBe(4)
+  })
+
+  it('passes roleLabel="member" from the Members tab\'s 2 call sites and roleLabel="admin" from the Team Admins tab\'s 2 call sites', () => {
+    expect(source.split('roleLabel="member"').length - 1).toBe(2)
+    expect(source.split('roleLabel="admin"').length - 1).toBe(2)
   })
 
   it('renders the transfer dialog only while a member has been selected for transfer', () => {
@@ -755,41 +755,47 @@ describe('Create-user form under a Pseudonymous_Organisation target (takserver-e
   })
 })
 
-// takserver-enrollment Criterion 14.6 (task 11.5): the Devices section
-// (task 11.3) is purely additive. It must not reintroduce a
-// Team_Owned_Device into the human Member_List or the human member count
-// -- both of which pre-date this feature and are computed entirely from
-// `setMembers`/`setAdmins`, never from `TeamDeviceList` or its
-// `GET /api/devices/team/:teamId` fetch. Source-contract checks, per this
-// file's existing no-@testing-library convention: `TeamDeviceList` is
-// rendered as its OWN section outside the tabbed Members/Team
-// Admins/Channels/Sub-teams interface (never inside an `activeTab ===
-// 'members'` block), and every `setMembers`/`setAdmins` filter predicate
-// is built exclusively from the three human `role` values, with no
-// reference to a device concept anywhere in either filter.
+// takserver-enrollment Criterion 14.6 (task 11.5, since superseded by a
+// later UX decision -- Team Devices is now its own TAB, between Members
+// and Team Admins, rather than a separate card beneath the tabbed
+// interface): the Devices section is purely additive regardless of WHERE
+// it renders. It must not reintroduce a Team_Owned_Device into the human
+// Member_List or the human member count -- both pre-date this feature and
+// are computed entirely from `setMembers`/`setAdmins`, never from
+// `TeamDeviceList` or its `GET /api/devices/team/:teamId` fetch.
+// Source-contract checks, per this file's existing no-@testing-library
+// convention: `TeamDeviceList` is rendered ONLY inside its own
+// `activeTab === 'devices'` gate (never inside the Members tab's table,
+// and never unconditionally alongside it), and every
+// `setMembers`/`setAdmins` filter predicate is built exclusively from the
+// three human `role` values, with no reference to a device concept
+// anywhere in either filter.
 describe('The Devices section does not affect the human member list or count (takserver-enrollment Criterion 14.6)', () => {
   const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
 
-  it('renders <TeamDeviceList> outside every activeTab-gated block, never inside the Members tab\'s table', () => {
+  it('renders <TeamDeviceList> only inside its own activeTab === \'devices\' gate, never inside the Members tab\'s table', () => {
     const tdlIndex = source.indexOf('<TeamDeviceList')
     expect(tdlIndex).toBeGreaterThan(-1)
 
-    // The nearest `activeTab === '...'` gate opening BEFORE this render
-    // site, if any, must already have been closed before it -- i.e. there
-    // is no unclosed `{activeTab === 'members' && (` (or 'admins'/etc.)
-    // still open at the point <TeamDeviceList> appears. We check this by
-    // counting occurrences of each tab's opening gate and its matching
-    // "Tab Content" boundary comment, which this file places right before
-    // the tabbed <div className="card"> that contains all four tabs.
-    const tabbedCardStart = source.indexOf('{/* Tabbed Interface */}')
-    const tabbedCardEnd = source.indexOf('{/* takserver-enrollment Criteria 14.6, 14.7')
-    expect(tabbedCardStart).toBeGreaterThan(-1)
-    expect(tabbedCardEnd).toBeGreaterThan(tabbedCardStart)
+    // The nearest preceding `activeTab === '...'` gate must be the
+    // devices tab's own, not 'members' (or any other tab) -- i.e.
+    // <TeamDeviceList> is not nested inside the Members tab's rendering
+    // block.
+    const precedingGates = [...source.slice(0, tdlIndex).matchAll(/activeTab === '(\w+)'/g)]
+    expect(precedingGates.length).toBeGreaterThan(0)
+    const nearestGate = precedingGates[precedingGates.length - 1][1]
+    expect(nearestGate).toBe('devices')
+    expect(nearestGate).not.toBe('members')
 
-    // <TeamDeviceList> must render AFTER the tabbed interface's own
-    // comment-delimited region ends, i.e. it is a sibling section beneath
-    // the tabs rather than content nested inside one of them.
-    expect(tdlIndex).toBeGreaterThanOrEqual(tabbedCardEnd)
+    // The 'devices' tab definition itself must exist in the tabs array,
+    // between 'members' and 'admins' (Requirement: Team Devices sits
+    // between Members and Team Admins).
+    const membersTabIndex = source.indexOf("{ id: 'members', label: 'Members'")
+    const devicesTabIndex = source.indexOf("id: 'devices', label: 'Team Devices'")
+    const adminsTabIndex = source.indexOf("{ id: 'admins', label: 'Team Admins'")
+    expect(membersTabIndex).toBeGreaterThan(-1)
+    expect(devicesTabIndex).toBeGreaterThan(membersTabIndex)
+    expect(adminsTabIndex).toBeGreaterThan(devicesTabIndex)
   })
 
   it('never reads a device-related field in the setMembers/setAdmins filters that compute the human Member_List and its count', () => {
@@ -810,5 +816,572 @@ describe('The Devices section does not affect the human member list or count (ta
     // `members.length` alone -- not `members.length + devices.length` or
     // any other device-derived addend.
     expect(source.slice(tabDefIndex, tabDefIndex + 100)).not.toContain('device')
+  })
+})
+
+// Header toolbar restructuring: only Add Member and Add Team Device stay
+// directly visible; Edit/Add Admin/Add Sub-team/Create Channel move
+// behind a MoreOptionsMenu, each still carrying its own icon so the items
+// stay visually distinguishable from one another. Source-contract checks,
+// per this file's existing no-@testing-library convention.
+describe('header toolbar restructuring (Add Member + Add Team Device visible, rest behind More Options)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  it('imports and renders MoreOptionsMenu', () => {
+    expect(source).toContain("import MoreOptionsMenu from '../components/MoreOptionsMenu'")
+    expect(source).toContain('<MoreOptionsMenu')
+  })
+
+  it('imports and renders AddTeamDeviceDialog, gated on showAddDeviceDialog', () => {
+    expect(source).toContain("import AddTeamDeviceDialog from '../components/AddTeamDeviceDialog'")
+    expect(source).toContain('{showAddDeviceDialog && (')
+    expect(source).toContain('<AddTeamDeviceDialog')
+  })
+
+  it('renders exactly one visible "Add Member" button and one visible "Add Team Device" button in the header, both btn-primary and icon-only', () => {
+    const headerStart = source.indexOf('{canManageTeam && (')
+    const menuIndex = source.indexOf('<MoreOptionsMenu')
+    expect(headerStart).toBeGreaterThan(-1)
+    expect(menuIndex).toBeGreaterThan(headerStart)
+    const headerBlock = source.slice(headerStart, menuIndex)
+
+    // Bugfix (mobile toolbar): both buttons are icon-only now -- their
+    // name is carried by aria-label/title, not by visible button text --
+    // so this checks for the aria-label rather than visible text.
+    expect(headerBlock).toContain('aria-label="Add Member"')
+    expect(headerBlock).toContain('aria-label="Add Team Device"')
+    // Both visible actions use btn-primary now (promoted from
+    // btn-secondary), distinguishing them from the menu-hidden actions.
+    // Skip past the leading JSX comment (which itself mentions both
+    // labels in prose) before locating each button's own markup.
+    const commentEndIndex = headerBlock.lastIndexOf('*/}')
+    const afterComment = headerBlock.slice(commentEndIndex)
+
+    const addMemberIndex = afterComment.indexOf('aria-label="Add Member"')
+    const addMemberButtonStart = afterComment.lastIndexOf('<button', addMemberIndex)
+    expect(addMemberButtonStart).toBeGreaterThan(-1)
+    expect(afterComment.slice(addMemberButtonStart, addMemberIndex)).toContain('btn-primary')
+
+    const addDeviceIndex = afterComment.indexOf('aria-label="Add Team Device"')
+    const addDeviceButtonStart = afterComment.lastIndexOf('<button', addDeviceIndex)
+    expect(addDeviceButtonStart).toBeGreaterThan(-1)
+    expect(afterComment.slice(addDeviceButtonStart, addDeviceIndex)).toContain('btn-primary')
+  })
+
+  // Bugfix: all three header actions (Add Member, Add Team Device, More
+  // options) are icon-only ONLY below `sm:`, so they fit on one row on
+  // a narrow phone instead of wrapping -- at `sm:` and up the visible
+  // label text returns (a prior version of this fix wrongly went
+  // icon-only on EVERY viewport, including desktop; that regression is
+  // what this test now guards against).
+  it('shows Add Member/Add Team Device label text at sm: and up (hidden sm:inline), and only icon-only below sm:; MoreOptionsMenu gets the matching "below-sm" mode', () => {
+    const headerStart = source.indexOf('{canManageTeam && (')
+    const menuIndex = source.indexOf('<MoreOptionsMenu')
+    const headerBlock = source.slice(headerStart, menuIndex + 60)
+
+    expect(headerBlock).toContain('<MoreOptionsMenu')
+    expect(headerBlock).toContain('iconOnly="below-sm"')
+    // The label text is present, but only VISIBLE at sm:+ (hidden sm:inline)
+    // -- never unconditionally hidden, and never unconditionally shown
+    // without the responsive class (which would defeat the mobile fix).
+    expect(headerBlock).toContain('<span className="hidden sm:inline">Add Member</span>')
+    expect(headerBlock).toContain('<span className="hidden sm:inline">Add Team Device</span>')
+  })
+
+  it('moves Edit/Add Admin/Add Sub-team/Create Channel into the MoreOptionsMenu items array, each with an icon', () => {
+    const menuIndex = source.indexOf('<MoreOptionsMenu')
+    expect(menuIndex).toBeGreaterThan(-1)
+    const menuBlock = source.slice(menuIndex, menuIndex + 2000)
+
+    for (const [key, label, icon] of [
+      ['edit', 'Edit ${teamLabel}', 'PencilIcon'],
+      ['add-admin', 'Add Admin', 'ShieldCheckIcon'],
+      ['add-sub-team', 'Add Sub-team', 'FolderPlusIcon'],
+      ['create-channel', 'Create Channel', 'SignalIcon']
+    ]) {
+      expect(menuBlock).toContain(`key: '${key}'`)
+      expect(menuBlock).toContain(icon)
+    }
+  })
+
+  it('the Add Team Device button is gated on devicesEnabled, matching the Team Devices tab\'s own gating', () => {
+    const headerStart = source.indexOf('{canManageTeam && (')
+    const menuIndex = source.indexOf('<MoreOptionsMenu')
+    const headerBlock = source.slice(headerStart, menuIndex)
+    const commentEndIndex = headerBlock.lastIndexOf('*/}')
+    const afterComment = headerBlock.slice(commentEndIndex)
+    const buttonIndex = afterComment.indexOf('aria-label="Add Team Device"')
+    expect(buttonIndex).toBeGreaterThan(-1)
+    const precedingBlock = afterComment.slice(Math.max(0, buttonIndex - 400), buttonIndex)
+    expect(precedingBlock).toContain('devicesEnabled')
+  })
+
+  // Bugfix: on a phone, this toolbar is left-aligned (only becoming
+  // right-aligned AT `lg:`, via `lg:items-end` on its containing
+  // column), so MoreOptionsMenu's own default panel anchor (right-0,
+  // opening leftward) pushed the "More options" panel off the LEFT edge
+  // of the screen -- unrecoverable clipping, per this codebase's own
+  // tooltip convention, unlike right-edge clipping which is at least
+  // reachable by scrolling. `panelClassName` overrides the anchor to
+  // open rightward below `lg:` (onto the screen, matching where the
+  // trigger itself sits there) and leftward only at/above `lg:`.
+  it('passes panelClassName to MoreOptionsMenu, opening the panel rightward below lg: and leftward only at/above lg:, matching the toolbar\'s own lg:items-end breakpoint', () => {
+    const menuIndex = source.indexOf('<MoreOptionsMenu')
+    expect(menuIndex).toBeGreaterThan(-1)
+    const menuBlock = source.slice(menuIndex, menuIndex + 1200)
+    expect(menuBlock).toContain('panelClassName="left-0 lg:left-auto lg:right-0"')
+
+    // The toolbar's own right-alignment breakpoint is lg: (this is the
+    // fact panelClassName must match, not an independently chosen value).
+    const toolbarColumnIndex = source.lastIndexOf('flex flex-col gap-2 lg:items-end', menuIndex)
+    expect(toolbarColumnIndex).toBeGreaterThan(-1)
+    expect(toolbarColumnIndex).toBeLessThan(menuIndex)
+  })
+})
+
+// Team Devices tab: sits between Members and Team Admins, renders
+// TeamDeviceList only inside its own gate, and a device creation flow
+// (AddTeamDeviceDialog) exists distinctly from the tab's own "Enroll"
+// action on an existing device.
+describe('Team Devices tab (between Members and Team Admins)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  // Bugfix: this tab's count now MATCHES every other tab's -- it used
+  // to hardcode `count: null` (icon alone, no badge), the one
+  // inconsistency among the 5 tabs. It now reads `deviceCount` state,
+  // kept in sync via TeamDeviceList's own `onCountChange` callback.
+  it('defines the devices tab with DevicePhoneMobileIcon and a count sourced from deviceCount state, not a hardcoded null', () => {
+    const devicesTabIndex = source.indexOf("id: 'devices', label: 'Team Devices'")
+    expect(devicesTabIndex).toBeGreaterThan(-1)
+    const tabDef = source.slice(devicesTabIndex, devicesTabIndex + 120)
+    expect(tabDef).toContain('DevicePhoneMobileIcon')
+    expect(tabDef).toContain('count: deviceCount')
+    expect(tabDef).not.toContain('count: null')
+  })
+
+  it('declares deviceCount state, defaulting to null (icon alone, no badge, until the first fetch resolves)', () => {
+    expect(source).toContain('const [deviceCount, setDeviceCount] = useState(null)')
+  })
+
+  it('passes onCountChange={setDeviceCount} to TeamDeviceList, keeping the tab badge in sync with the list\'s own fetched count', () => {
+    const tdlIndex = source.indexOf('<TeamDeviceList')
+    expect(tdlIndex).toBeGreaterThan(-1)
+    const tdlLine = source.slice(tdlIndex, source.indexOf('/>', tdlIndex))
+    expect(tdlLine).toContain('onCountChange={setDeviceCount}')
+  })
+
+  it('renders no numeric suffix for a tab whose count is null (label alone, not "label (null)")', () => {
+    const renderIndex = source.indexOf('tab.count === null ? tab.label')
+    expect(renderIndex).toBeGreaterThan(-1)
+  })
+
+  it('bumps deviceListVersion in AddTeamDeviceDialog\'s onCreated, and passes it as TeamDeviceList\'s key so the tab remounts/refetches after a device is created', () => {
+    expect(source).toContain('const [deviceListVersion, setDeviceListVersion] = useState(0)')
+    expect(source).toContain('onCreated={() => setDeviceListVersion((version) => version + 1)}')
+    expect(source).toContain('<TeamDeviceList key={deviceListVersion}')
+  })
+
+  it('guards processedData/currentData against the devices tab id, which is not one of the four filterAndSort-backed arrays', () => {
+    expect(source).toContain('const currentData = processedData[activeTab] || []')
+  })
+
+  it('suppresses the generic empty-state and pagination blocks while the devices tab is active, since TeamDeviceList renders its own', () => {
+    expect(source).toContain("activeTab !== 'devices' && paginatedData.length === 0")
+    expect(source).toContain("activeTab !== 'devices' && totalPages > 1")
+  })
+})
+
+// Bugfix: the tab bar (Members/Team Devices/Team Admins/Channels/
+// Sub-teams) had NEITHER `flex-wrap` NOR a horizontal-scroll fallback,
+// unlike every other row on this page -- at 5 tabs of icon+text it
+// silently overflowed a narrow phone's card with no way to reach the
+// hidden tabs. A first pass fixed this by going icon-only on EVERY
+// viewport, which was itself a regression: it dropped the text label on
+// desktop too, and (icon-only being narrower than expected) left a
+// stray `overflow-x-auto` scrollbar with nothing left to scroll. The
+// corrected fix is icon+count-only BELOW `sm:` (fits a narrow phone
+// without needing overflow-x-auto at all) and the ORIGINAL full
+// "Label (count)" text restored at `sm:` and up.
+describe('Tab bar: icon+count below sm:, full "Label (count)" text at sm: and up (bugfix)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  it('does not wrap the tab bar in overflow-x-auto -- the icon-only width below sm: fits without it', () => {
+    const navIndex = source.indexOf('<nav className="-mb-px flex')
+    expect(navIndex).toBeGreaterThan(-1)
+    const wrapperOpenIndex = source.lastIndexOf('<div', navIndex)
+    const wrapperLine = source.slice(wrapperOpenIndex, source.indexOf('>', wrapperOpenIndex))
+    expect(wrapperLine).not.toContain('overflow-x-auto')
+  })
+
+  it('renders the full "Label (count)" text in a `hidden sm:inline` span, visible only at sm: and up', () => {
+    const navIndex = source.indexOf('<nav className="-mb-px flex')
+    const navEndIndex = source.indexOf('</nav>')
+    expect(navIndex).toBeGreaterThan(-1)
+    expect(navEndIndex).toBeGreaterThan(navIndex)
+    const navBlock = source.slice(navIndex, navEndIndex)
+    expect(navBlock).toContain('<span className="hidden sm:inline">')
+    expect(navBlock).toContain('{tab.count === null ? tab.label : `${tab.label} (${tab.count})`}')
+  })
+
+  it('renders the standalone numeric count badge only below sm: (sm:hidden), since the full text already carries the count at sm:+', () => {
+    const navIndex = source.indexOf('<nav className="-mb-px flex')
+    const navEndIndex = source.indexOf('</nav>')
+    const navBlock = source.slice(navIndex, navEndIndex)
+    expect(navBlock).toContain('{tab.count !== null && (')
+    expect(navBlock).toContain('<span className="ml-1.5 sm:hidden">{tab.count}</span>')
+  })
+
+  it('carries the full accessible name (label + count) via aria-label and title on the tab button at every width', () => {
+    const navIndex = source.indexOf('<nav className="-mb-px flex')
+    const navEndIndex = source.indexOf('</nav>')
+    const navBlock = source.slice(navIndex, navEndIndex)
+    expect(navBlock).toContain('const accessibleName = tab.count === null ? tab.label')
+    expect(navBlock).toContain('aria-label={accessibleName}')
+    expect(navBlock).toContain('title={accessibleName}')
+  })
+})
+
+// Bugfix: the Team Devices tab's count badge never appeared at all,
+// because the only thing that knows the count (`TeamDeviceList`'s own
+// `onCountChange`) does not MOUNT until the devices tab is actually
+// selected (`activeTab` defaults to 'members'), while every other tab's
+// count is read off state already fetched on page load regardless of
+// which tab is showing. A dedicated effect now fetches the device count
+// independently on page load (and again when `deviceListVersion` bumps,
+// i.e. after AddTeamDeviceDialog creates one), so the badge is present
+// from first render onward, not only after the tab has been opened once.
+describe('Team Devices tab count: fetched independently of TeamDeviceList mounting (bugfix)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  it('fetches the device count in its own effect, gated on devicesEnabled and teamId, and re-run on deviceListVersion', () => {
+    const effectIndex = source.indexOf('devicesAPI.getTeamDevices(teamId)')
+    expect(effectIndex).toBeGreaterThan(-1)
+    const effectBlockStart = source.lastIndexOf('useEffect(() => {', effectIndex)
+    const effectBlockEnd = source.indexOf('}, [devicesEnabled, teamId, deviceListVersion])', effectIndex)
+    expect(effectBlockStart).toBeGreaterThan(-1)
+    expect(effectBlockEnd).toBeGreaterThan(effectBlockStart)
+    const effectBlock = source.slice(effectBlockStart, effectBlockEnd)
+    expect(effectBlock).toContain('if (!devicesEnabled || !teamId)')
+    expect(effectBlock).toContain('setDeviceCount(response.data?.devices?.length ?? 0)')
+  })
+
+  it('this independent effect is a DIFFERENT fetch from TeamDeviceList\'s own onCountChange wiring, not a replacement for it', () => {
+    // Both must coexist: the effect covers "count on first load, before
+    // the tab is ever opened"; onCountChange covers "count stays live
+    // while the tab IS open and an edit/delete/transfer happens inside
+    // TeamDeviceList itself, which the effect has no visibility into.
+    expect(source).toContain('onCountChange={setDeviceCount}')
+    expect(source.split('setDeviceCount').length - 1).toBeGreaterThanOrEqual(2)
+  })
+})
+
+// "Join Limited" summary badge, Organisation-only, reading the
+// team.allowed_domains field the server attaches to GET /api/teams/:teamId.
+// Renamed from "Join limited by Email Domain: Yes/No" to a "Join Limited"
+// field stating "None"/"By Email Domain" literally, and consolidated into
+// the single-row summary alongside Visibility/Callsign Structure/Join
+// Requests, separated from "Parent Organisation" by a divider (bug #14).
+describe('"Join Limited" header badge (Organisation-only)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  it('is gated on both !team.parent_team_id and Array.isArray(team.allowed_domains)', () => {
+    const badgeIndex = source.indexOf('<span>Join Limited: </span>')
+    expect(badgeIndex).toBeGreaterThan(-1)
+    const precedingBlock = source.slice(Math.max(0, badgeIndex - 400), badgeIndex)
+    expect(precedingBlock).toContain('!team.parent_team_id')
+    expect(precedingBlock).toContain('Array.isArray(team.allowed_domains)')
+  })
+
+  it('states "None"/"By Email Domain" as text, never colour alone, and discloses the domain list only on hover/focus (never a native title attribute)', () => {
+    const badgeIndex = source.indexOf('<span>Join Limited: </span>')
+    const badgeBlock = source.slice(badgeIndex, badgeIndex + 1200)
+    expect(badgeBlock).toMatch(/>\s*By Email Domain\s*</)
+    expect(badgeBlock).toMatch(/>\s*None\s*</)
+    expect(badgeBlock).toContain('group-hover:opacity-100')
+    expect(badgeBlock).toContain('group-focus-within:opacity-100')
+    // No native title attribute anywhere in this badge's own markup --
+    // client convention forbids `title` as the disclosure mechanism.
+    expect(badgeBlock).not.toMatch(/title="/)
+  })
+
+  it('no longer renders OrgDomainManager as its own standalone card on this page', () => {
+    expect(source).not.toContain("import OrgDomainManager from '../components/OrgDomainManager'")
+    expect(source).not.toContain('<OrgDomainManager')
+  })
+})
+
+// Team header summary row: a divider after "Parent Organisation", and a
+// single consolidated colour for every badge in the row (bug #14).
+describe('Team header summary row (divider + consolidated colour)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  it('renders a divider between the Parent Organisation line and the summary row', () => {
+    const parentIndex = source.indexOf('Parent {parentTeam')
+    const hrIndex = source.indexOf('<hr ', parentIndex)
+    const summaryRowIndex = source.indexOf('Visibility: ', parentIndex)
+    expect(parentIndex).toBeGreaterThan(-1)
+    expect(hrIndex).toBeGreaterThan(parentIndex)
+    expect(summaryRowIndex).toBeGreaterThan(hrIndex)
+  })
+
+  it('shares one badge class (TEAM_SUMMARY_BADGE_CLASS) across Visibility/Callsign Structure/Join Requests/Join Limited', () => {
+    expect(source).toContain('const TEAM_SUMMARY_BADGE_CLASS =')
+    // Every summary badge in the row must reference the shared class
+    // rather than an inline, per-field colour class.
+    const rowStart = source.indexOf('<span>Visibility: </span>')
+    const rowEnd = source.indexOf('Join Limited', rowStart) + 1200
+    const rowBlock = source.slice(rowStart, rowEnd)
+    expect(rowBlock).toContain('TEAM_SUMMARY_BADGE_CLASS')
+    // No leftover per-badge colour utility classes from the old palette.
+    expect(rowBlock).not.toContain('bg-green-100')
+    expect(rowBlock).not.toContain('bg-purple-100')
+    expect(rowBlock).not.toContain('bg-indigo-100')
+  })
+
+  it('renames the "Callsign:" label to "Callsign Structure:" and combines Levels + name format into one badge', () => {
+    expect(source).toContain('Callsign Structure: ')
+    expect(source).not.toContain('<span>Callsign: </span>')
+  })
+
+  it('places the divider and summary row as a sibling of the 2-column grid, not inside its left column, so they span the full card width', () => {
+    const gridIndex = source.indexOf("<div className=\"grid grid-cols-1 lg:grid-cols-2 gap-6\">")
+    const gridCloseIndex = source.indexOf('</div>\n\n        {/* Divider')
+    const hrIndex = source.indexOf('<hr ', gridIndex)
+    expect(gridIndex).toBeGreaterThan(-1)
+    expect(gridCloseIndex).toBeGreaterThan(gridIndex)
+    expect(hrIndex).toBeGreaterThan(gridCloseIndex)
+  })
+
+  it('colours Visibility green for Public and red for Private, alongside its own text', () => {
+    expect(source).toContain("const TEAM_SUMMARY_BADGE_POSITIVE_CLASS =")
+    expect(source).toContain("const TEAM_SUMMARY_BADGE_NEGATIVE_CLASS =")
+    const visibilityIndex = source.indexOf("<span>Visibility: </span>")
+    const visibilityBlock = source.slice(visibilityIndex, visibilityIndex + 250)
+    expect(visibilityBlock).toContain("team.visibility === 'public' ? TEAM_SUMMARY_BADGE_POSITIVE_CLASS : TEAM_SUMMARY_BADGE_NEGATIVE_CLASS")
+  })
+
+  it('colours Join Requests green for Allowed and neutral gray for Disabled', () => {
+    const joinRequestsIndex = source.indexOf("<span>Join Requests: </span>")
+    const joinRequestsBlock = source.slice(joinRequestsIndex, joinRequestsIndex + 250)
+    expect(joinRequestsBlock).toContain("team.can_join ? TEAM_SUMMARY_BADGE_POSITIVE_CLASS : TEAM_SUMMARY_BADGE_CLASS")
+  })
+
+  it('colours "By Email Domain" green and "None" neutral gray for Join Limited', () => {
+    const joinLimitedIndex = source.indexOf("<span>Join Limited: </span>")
+    const joinLimitedBlock = source.slice(joinLimitedIndex, joinLimitedIndex + 800)
+    expect(joinLimitedBlock).toContain('TEAM_SUMMARY_BADGE_POSITIVE_CLASS')
+    expect(joinLimitedBlock).toContain('TEAM_SUMMARY_BADGE_CLASS')
+  })
+
+  it('only shows Join Limited while Join Requests is Allowed (team.can_join)', () => {
+    const gateIndex = source.indexOf('!team.parent_team_id && team.can_join && Array.isArray(team.allowed_domains)')
+    expect(gateIndex).toBeGreaterThan(-1)
+  })
+})
+
+// Channels tab icon: SignalIcon (matching Dashboard.jsx's own channel
+// stat-tile icon), no longer HashtagIcon.
+describe('Channels tab icon (SignalIcon, matching Dashboard.jsx)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  it('uses SignalIcon for the Channels tab definition', () => {
+    const channelsTabIndex = source.indexOf("id: 'channels', label: 'Channels'")
+    expect(channelsTabIndex).toBeGreaterThan(-1)
+    expect(source.slice(channelsTabIndex, channelsTabIndex + 80)).toContain('SignalIcon')
+  })
+
+  it('imports SignalIcon from heroicons', () => {
+    expect(source).toContain('SignalIcon')
+    const importLineIndex = source.indexOf("from '@heroicons/react/24/outline'")
+    const importLine = source.slice(Math.max(0, importLineIndex - 600), importLineIndex)
+    expect(importLine).toContain('SignalIcon')
+  })
+})
+
+// TeamFormDialog is passed isAdmin={canManageTeam} so its nested
+// OrgDomainManager (Allowed Email Domains) gates identically to every
+// other admin-only affordance on this page.
+describe('TeamFormDialog isAdmin wiring (Allowed Email Domains, now nested in the Edit dialog)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  it('passes isAdmin={canManageTeam} to the Edit Team TeamFormDialog', () => {
+    const dialogIndex = source.indexOf('<TeamFormDialog')
+    expect(dialogIndex).toBeGreaterThan(-1)
+    const dialogBlock = source.slice(dialogIndex, dialogIndex + 400)
+    expect(dialogBlock).toContain('isAdmin={canManageTeam}')
+  })
+})
+
+// Bugfix (mobile UI/UX pass): the team header title row (`h1` + colour
+// swatch + joinable icon) had no wrap/break behaviour at all, and the
+// title text can be a concatenated "{parentPrefix} - {teamName}" string
+// with no length cap.
+describe('TeamDetail.jsx: header title row wraps/breaks on a narrow viewport (bugfix)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  it('adds flex-wrap to the title row and break-words to the h1', () => {
+    const h1Index = source.indexOf('text-2xl font-bold text-gray-900 dark:text-gray-100 break-words')
+    expect(h1Index).toBeGreaterThan(-1)
+    const rowOpenIndex = source.lastIndexOf('<div className="flex items-center', h1Index)
+    const rowLine = source.slice(rowOpenIndex, source.indexOf('>', rowOpenIndex))
+    expect(rowLine).toContain('flex-wrap')
+  })
+
+  it('marks the colour swatch and joinable icon flex-shrink-0 so they never get squeezed by a wrapping long title', () => {
+    const swatchIndex = source.indexOf('backgroundColor: getTakColorHex(team.color)')
+    expect(swatchIndex).toBeGreaterThan(-1)
+    const swatchDivStart = source.lastIndexOf('<div', swatchIndex)
+    expect(source.slice(swatchDivStart, source.indexOf('>', swatchDivStart))).toContain('flex-shrink-0')
+
+    const joinableIndex = source.indexOf('title="Joinable team"')
+    expect(joinableIndex).toBeGreaterThan(-1)
+    const joinableStart = source.lastIndexOf('<ArrowLeftOnRectangleIcon', joinableIndex)
+    expect(source.slice(joinableStart, joinableIndex)).toContain('flex-shrink-0')
+  })
+})
+
+// Bugfix (mobile UI/UX pass): same pagination flex-wrap fix as Teams.jsx.
+describe('TeamDetail.jsx: pagination row wraps on a narrow viewport (bugfix)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  it('adds flex-wrap and a gap to the pagination summary+controls row', () => {
+    const index = source.indexOf('Showing {startIndex + 1} to')
+    expect(index).toBeGreaterThan(-1)
+    const rowOpenIndex = source.lastIndexOf('<div className="mt-6', index)
+    const rowLine = source.slice(rowOpenIndex, source.indexOf('>', rowOpenIndex))
+    expect(rowLine).toContain('flex-wrap')
+    expect(rowLine).toContain('justify-between')
+    expect(rowLine).toContain('gap-2')
+  })
+})
+
+// Bugfix (mobile UI/UX pass): Members, Team Admins, Channels and
+// Sub-teams tabs each now render a `sm:hidden` stacked card list PLUS
+// the existing `hidden sm:block overflow-x-auto` table, matching the
+// pairing TeamDeviceList.jsx/Teams.jsx already established, so a phone
+// gets cards instead of a horizontally-scrolling table.
+describe('TeamDetail.jsx: Members/Team Admins/Channels/Sub-teams tabs render sm:hidden cards + hidden sm:block table (bugfix)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  it('renders a sm:hidden card block ahead of a hidden sm:block table block for each of the 4 tabs', () => {
+    const tabGates = [
+      "activeTab === 'members' && (",
+      "activeTab === 'admins' && (",
+      "activeTab === 'channels' && (",
+      "activeTab === 'subteams' && ("
+    ]
+    for (const gate of tabGates) {
+      const gateIndex = source.indexOf(gate)
+      expect(gateIndex).toBeGreaterThan(-1)
+      const nextGateIndex = tabGates
+        .map((g) => source.indexOf(g, gateIndex + gate.length))
+        .filter((i) => i > -1)
+        .sort((a, b) => a - b)[0] ?? source.length
+      const tabBlock = source.slice(gateIndex, nextGateIndex)
+      const cardIndex = tabBlock.indexOf('sm:hidden divide-y')
+      const tableIndex = tabBlock.indexOf('hidden sm:block overflow-x-auto')
+      expect(cardIndex).toBeGreaterThan(-1)
+      expect(tableIndex).toBeGreaterThan(cardIndex)
+    }
+  })
+
+  it('shares MemberActions between the Members card and table (2 usages) and between the Team Admins card and table (2 usages)', () => {
+    const usages = source.split('<MemberActions').length - 1
+    expect(usages).toBe(4)
+  })
+
+  // Bugfix (mobile tap targets too small): the two CARD usages (Members
+  // card, Team Admins card) pass variant="card" for a real ~36px tap
+  // target; the two TABLE usages default to variant="table" (unchanged)
+  // since a desktop table row has no tap-target problem.
+  it('passes variant="card" from exactly the 2 mobile-card MemberActions usages, and no card variant from the 2 table usages', () => {
+    // Locate each <MemberActions usage and confirm exactly 2 of the 4
+    // carry variant="card" -- the sm:hidden card ones, not the table
+    // ones. Scoped to each usage's own JSX block (not a whole-file
+    // string count) so a doc comment elsewhere mentioning
+    // `variant="card"` in prose can't skew the count.
+    const usageIndices = [...source.matchAll(/<MemberActions/g)].map((m) => m.index)
+    expect(usageIndices.length).toBe(4)
+    const withCardVariant = usageIndices.filter((index) => {
+      const usageBlock = source.slice(index, source.indexOf('/>', index))
+      return usageBlock.includes('variant="card"')
+    })
+    expect(withCardVariant.length).toBe(2)
+  })
+
+  // Bugfix: the Sub-teams tab's inline view/delete actions were never
+  // extracted into a shared component (only 2 icons), so the same
+  // button-box treatment is applied literally rather than via a prop.
+  it('applies the same p-2/rounded-lg/h-5 w-5 button-box treatment inline to the Sub-teams card\'s View/Delete actions', () => {
+    const subteamsCardIndex = source.indexOf("activeTab === 'subteams'")
+    const subteamsTableIndex = source.indexOf('hidden sm:block overflow-x-auto', subteamsCardIndex)
+    expect(subteamsCardIndex).toBeGreaterThan(-1)
+    expect(subteamsTableIndex).toBeGreaterThan(subteamsCardIndex)
+    const cardBlock = source.slice(subteamsCardIndex, subteamsTableIndex)
+
+    expect(cardBlock).toContain('title="View team details"')
+    expect(cardBlock).toContain('p-2 rounded-lg bg-gray-100')
+    expect(cardBlock).toContain('h-5 w-5')
+    expect(cardBlock).toContain('title="Delete sub-team"')
+    expect(cardBlock).toContain('bg-red-50')
+  })
+
+  it('renders the Sub-teams card with inline "Label: value" stats (Members:/Sub-teams:), matching Teams.jsx\'s own card convention', () => {
+    const subteamsGateIndex = source.indexOf("activeTab === 'subteams' && (")
+    const cardIndex = source.indexOf('sm:hidden divide-y', subteamsGateIndex)
+    const tableIndex = source.indexOf('hidden sm:block overflow-x-auto', subteamsGateIndex)
+    const cardBlock = source.slice(cardIndex, tableIndex)
+    expect(cardBlock).toContain('Members:')
+    expect(cardBlock).toContain('Sub-teams:')
+    expect(cardBlock).toContain('flex items-baseline gap-1')
+  })
+
+  it('renders the Channels card with the channel_type badge and member count, and no action icons (read-only tab)', () => {
+    const channelsGateIndex = source.indexOf("activeTab === 'channels' && (")
+    const cardIndex = source.indexOf('sm:hidden divide-y', channelsGateIndex)
+    const tableIndex = source.indexOf('hidden sm:block overflow-x-auto', channelsGateIndex)
+    const cardBlock = source.slice(cardIndex, tableIndex)
+    expect(cardBlock).toContain('{channel.channel_type === \'primary\' ? \'Primary\' : \'Custom\'}')
+    expect(cardBlock).toContain('{channel.member_count || 0} members')
+    expect(cardBlock).not.toContain('<button')
+  })
+})
+
+// Bugfix (mobile UI/UX pass): TeamFormDialog, Add Member, Create
+// Sub-Team, Create Channel, and Enroll Device dialogs are all full-bleed
+// (h-full w-full, no rounding, sm:p-4 on the overlay) below `sm:`,
+// rather than a small floating card -- each has content that never fits
+// a phone viewport regardless of container size, so a full-screen sheet
+// uses the available space better. The smaller dialogs (Transfer
+// Member, Revoke Device, Add Team Device, User Devices) get the SAME
+// treatment for consistency, even though they'd likely fit unscrolled.
+describe('TeamDetail.jsx: large dialogs are full-bleed on mobile (bugfix)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  const dialogs = [
+    { name: 'Create Sub-Team', labelledby: 'create-sub-team-title' },
+    { name: 'Add Member', labelledby: 'add-member-title' },
+    { name: 'Create Channel', labelledby: 'create-channel-title' },
+    { name: 'Enroll Device', labelledby: 'enroll-device-title' }
+  ]
+
+  it.each(dialogs)('$name dialog: box is w-full h-full below sm:, with sm:rounded-lg and sm:h-auto at sm: and up', ({ labelledby }) => {
+    const labelledbyIndex = source.indexOf(`aria-labelledby="${labelledby}"`)
+    expect(labelledbyIndex).toBeGreaterThan(-1)
+    const classNameIndex = source.indexOf('className="bg-white', labelledbyIndex)
+    const classNameEnd = source.indexOf('"', classNameIndex + 'className="'.length)
+    const classes = source.slice(classNameIndex, classNameEnd)
+    expect(classes).toContain('w-full h-full')
+    expect(classes).toContain('sm:rounded-lg')
+    expect(classes).toContain('sm:h-auto')
+    expect(classes).not.toMatch(/(?<!sm:)rounded-lg/)
+  })
+
+  it.each(dialogs)('$name dialog: its overlay drops padding below sm: (sm:p-4, not an unconditional p-4)', ({ labelledby }) => {
+    const labelledbyIndex = source.indexOf(`aria-labelledby="${labelledby}"`)
+    const overlayIndex = source.lastIndexOf('<div className="fixed inset-0', labelledbyIndex)
+    const overlayLine = source.slice(overlayIndex, source.indexOf('>', overlayIndex))
+    expect(overlayLine).toContain('sm:p-4')
+    expect(overlayLine).not.toMatch(/(?<!sm:)p-4/)
   })
 })

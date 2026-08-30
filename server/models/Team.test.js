@@ -424,6 +424,31 @@ describe('Team.getUserTeams / Team.getAllTeams member_count excludes Team_Owned_
     expect(sql).toContain('LIMIT $1 OFFSET $2');
     expect(params).toEqual([50, 0]);
   });
+
+  // /teams overview: admin_count/device_count columns, shown between
+  // Members and Sub-teams so the overview table matches what each team's
+  // own Team Admins/Team Devices tabs count.
+  it('getAllTeams: SELECTs admin_count (direct role=admin, excluding devices) and device_count (direct, is_team_device=true)', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+
+    await Team.getAllTeams();
+
+    const [sql] = pool.query.mock.calls[0];
+    expect(sql).toContain("tm.role = 'admin' AND u.is_team_device IS NOT TRUE) as admin_count");
+    expect(sql).toContain('tm.inherited_from_team_id IS NULL AND u.is_team_device = true) as device_count');
+  });
+
+  it('getOrganisationTeams: SELECTs admin_count and device_count alongside member_count/sub_teams_count', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+
+    await Team.getOrganisationTeams(1, 42);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    const [sql, params] = pool.query.mock.calls[0];
+    expect(sql).toContain("tm.role = 'admin' AND u.is_team_device IS NOT TRUE) as admin_count");
+    expect(sql).toContain('tm.inherited_from_team_id IS NULL AND u.is_team_device = true) as device_count');
+    expect(params).toEqual([1, 42]);
+  });
 });
 
 /**
@@ -673,6 +698,168 @@ describe('Team.isAdmin (Requirement 4.1-4.4)', () => {
       'Error checking admin status'
     );
   });
+});
+
+/**
+ * Unit tests for `Team.getManagedTeamIds` (Users-page-action-parity): the
+ * downward-facing counterpart of `Team.isAdmin` -- given a userId, returns
+ * the Set of every team id they may act on (their direct admin teams,
+ * union every descendant of each at any depth).
+ */
+describe('Team.getManagedTeamIds (Users-page-action-parity)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('issues the expected recursive CTE and returns a Set built from the query rows', async () => {
+    pool.query.mockResolvedValue({ rows: [{ team_id: 4 }, { team_id: 7 }, { team_id: 9 }] });
+
+    const result = await Team.getManagedTeamIds(42);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    const [sql, params] = pool.query.mock.calls[0];
+    expect(sql).toContain('WITH RECURSIVE admin_teams');
+    expect(sql).toContain("role = 'admin'");
+    expect(sql).toContain('inherited_from_team_id IS NULL');
+    expect(sql).toContain('managed_teams');
+    expect(params).toEqual([42]);
+    expect(result).toBeInstanceOf(Set);
+    expect(result).toEqual(new Set([4, 7, 9]));
+  });
+
+  it('returns an empty Set for a user with no direct admin row anywhere', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+
+    const result = await Team.getManagedTeamIds(42);
+
+    expect(result).toEqual(new Set());
+  });
+
+  it('returns an empty Set (not a rejected promise) on a database error, matching isAdmin\'s fail-closed pattern', async () => {
+    pool.query.mockRejectedValue(new Error('db unavailable'));
+
+    const result = await Team.getManagedTeamIds(42);
+
+    expect(result).toEqual(new Set());
+    expect(mockLoggerInstance.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error), userId: 42 }),
+      'Error resolving managed team ids'
+    );
+  });
+});
+
+/**
+ * Property-based test: `getManagedTeamIds(userId)` agrees with
+ * `isAdmin(teamId, userId)` for every team in a generated hierarchy --
+ * `teamId` is in the returned Set if and only if `isAdmin(teamId, userId)`
+ * would return true. This is the DEFINITIONAL equivalence the two methods'
+ * own doc comments claim: one is a per-team upward walk, the other a
+ * once-per-user downward walk, and they must never disagree about which
+ * teams a given user may act on.
+ *
+ * Reuses this file's own `Team.isAdmin` property-test's hierarchy
+ * generator and admin-membership predicate (`hierarchyArb`,
+ * `ancestorsOf`, `hasDirectAdmin`) rather than redefining them, since the
+ * definition of "admin membership on an ancestor" must be identical for
+ * both properties to be comparable.
+ */
+describe('Property: getManagedTeamIds agrees with isAdmin for every team in the hierarchy', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  const USER_IDS = [101, 102, 103];
+
+  const hierarchyArb = fc.integer({ min: 1, max: 8 }).chain((teamCount) => {
+    const teamIds = Array.from({ length: teamCount }, (_, i) => i + 1);
+
+    const parentArb = fc.tuple(
+      ...teamIds.slice(1).map((_, i) => fc.integer({ min: 1, max: i + 1 }))
+    );
+
+    const membershipArb = fc.array(
+      fc.record({
+        teamId: fc.constantFrom(...teamIds),
+        userId: fc.constantFrom(...USER_IDS),
+        role: fc.constantFrom('admin', 'member'),
+        direct: fc.boolean()
+      }),
+      { maxLength: teamCount * USER_IDS.length * 2 }
+    );
+
+    return fc.tuple(parentArb, membershipArb).map(([parents, memberships]) => {
+      const parentMap = new Map();
+      parentMap.set(teamIds[0], null);
+      parents.forEach((parentId, i) => {
+        parentMap.set(teamIds[i + 1], parentId);
+      });
+      return { teamIds, parentMap, memberships };
+    });
+  });
+
+  function ancestorsOf(teamId, parentMap) {
+    const chain = [];
+    let current = teamId;
+    while (current !== null && current !== undefined) {
+      chain.push(current);
+      current = parentMap.get(current);
+    }
+    return chain;
+  }
+
+  function hasDirectAdmin(ancestors, userId, memberships) {
+    const ancestorSet = new Set(ancestors);
+    return memberships.some((m) =>
+      ancestorSet.has(m.teamId) && m.userId === userId && m.role === 'admin' && m.direct
+    );
+  }
+
+  test.prop([hierarchyArb, fc.constantFrom(...USER_IDS)], { numRuns: 100 })(
+    'getManagedTeamIds(userId) contains teamId iff isAdmin(teamId, userId) is true, for every generated team',
+    async ({ teamIds, parentMap, memberships }, userId) => {
+      // getManagedTeamIds's own query: every direct admin team for
+      // userId, unioned with every descendant of each at any depth --
+      // computed independently from the generated hierarchy/memberships
+      // rather than by re-deriving the SQL's own logic.
+      const directAdminTeams = teamIds.filter((teamId) =>
+        memberships.some((m) => m.teamId === teamId && m.userId === userId && m.role === 'admin' && m.direct)
+      );
+      const isDescendantOfAny = (teamId) => {
+        let current = parentMap.get(teamId);
+        while (current !== null && current !== undefined) {
+          if (directAdminTeams.includes(current)) {
+            return true;
+          }
+          current = parentMap.get(current);
+        }
+        return false;
+      };
+      const managedTeamIds = new Set(
+        teamIds.filter((teamId) => directAdminTeams.includes(teamId) || isDescendantOfAny(teamId))
+      );
+
+      pool.query.mockImplementation(async () => ({
+        rows: Array.from(managedTeamIds).map((teamId) => ({ team_id: teamId }))
+      }));
+
+      const managedResult = await Team.getManagedTeamIds(userId);
+      expect(managedResult).toEqual(managedTeamIds);
+
+      // Cross-check against isAdmin's own (independently mocked) upward
+      // walk for every team in the hierarchy.
+      pool.query.mockImplementation(async (_sql, params) => {
+        const [queriedTeamId, queriedUserId] = params;
+        const ancestors = ancestorsOf(queriedTeamId, parentMap);
+        const matches = hasDirectAdmin(ancestors, queriedUserId, memberships);
+        return { rows: matches ? [{ '?column?': 1 }] : [] };
+      });
+
+      for (const teamId of teamIds) {
+        const isAdminResult = await Team.isAdmin(teamId, userId);
+        expect(managedResult.has(teamId)).toBe(isAdminResult);
+      }
+    }
+  );
 });
 
 /**

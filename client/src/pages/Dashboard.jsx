@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Link } from 'react-router-dom'
-import { UserGroupIcon, UsersIcon, ClipboardDocumentListIcon, ArrowUpRightIcon, ArrowDownLeftIcon, ArrowsRightLeftIcon, MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon, InformationCircleIcon, FolderIcon, FolderOpenIcon, ChevronRightIcon as ChevronRightSmall, ChevronDownIcon, ChevronUpIcon, SignalIcon } from '@heroicons/react/24/outline'
+import { UsersIcon, ClipboardDocumentListIcon, ArrowUpRightIcon, ArrowDownLeftIcon, ArrowsRightLeftIcon, MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon, InformationCircleIcon, FolderIcon, FolderOpenIcon, ChevronRightIcon as ChevronRightSmall, ChevronDownIcon, ChevronUpIcon, SignalIcon, IdentificationIcon, DevicePhoneMobileIcon } from '@heroicons/react/24/outline'
 import { teamsAPI, requestsAPI, configAPI, usersAPI, channelsAPI, deviceManagementAPI, adminAPI } from '../services/api'
 import { buildFolderTree } from '../utils/channelTree'
 import { getTakColorHex } from '../utils/takColors'
@@ -241,15 +241,23 @@ export default function Dashboard({ user }) {
         // width entirely. Halving the per-level indent below `sm` keeps
         // the hierarchy visually distinguishable without costing that much
         // horizontal room; `sm:` and up is unchanged.
+        // Bugfix (mobile tap target too small, and inconsistent with the
+        // plain-folder row below): this row used to require hitting the
+        // small `p-1`/`h-4 w-4` chevron button specifically to expand it
+        // -- a ~24px target, and the ONLY way to expand this row type
+        // (unlike a plain folder, whose entire row is already
+        // click-anywhere-to-expand). The whole row is now the toggle
+        // target too, via `onClick`/`cursor-pointer` on this outer div,
+        // and the chevron is now purely decorative (no onClick/button of
+        // its own), matching the plain-folder row's own pattern exactly.
         items.push(
-          <div key={folderPath} className="flex items-center justify-between p-3 bg-gray-100 dark:bg-gray-700 rounded-lg ml-3 sm:ml-6">
+          <div
+            key={folderPath}
+            className="flex items-center justify-between p-3 bg-gray-100 dark:bg-gray-700 rounded-lg ml-3 sm:ml-6 cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-600"
+            onClick={() => toggleFolder(folderPath)}
+          >
             <div className="flex items-center flex-1">
-              <button
-                onClick={() => toggleFolder(folderPath)}
-                className="mr-2 p-1 hover:bg-gray-200 dark:hover:bg-gray-600 rounded"
-              >
-                <ChevronRightSmall className={`h-4 w-4 text-gray-500 dark:text-gray-300 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
-              </button>
+              <ChevronRightSmall className={`h-4 w-4 text-gray-500 dark:text-gray-300 transition-transform mr-2 flex-shrink-0 ${isExpanded ? 'rotate-90' : ''}`} />
               <div className="flex-1">
                 <div className="flex items-center">
                   <SignalIcon className="h-4 w-4 text-gray-900 dark:text-gray-100 mr-1.5 flex-shrink-0" />
@@ -571,12 +579,16 @@ export default function Dashboard({ user }) {
       {/* TAK Profile */}
       {(freshUser.takRole || freshUser.takColor || freshUser.takCallsign) && (
         <div className="card">
-          <h2 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">TAK Profile</h2>
-          {/* 2x2 layout: top row My Callsign / My TAK Role, bottom row
-              My Organisation / My Organisation's Function -- source order
-              drives grid placement, so the JSX below is ordered to match
-              rather than relying on any explicit grid-column/row utility. */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <h2 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4 flex items-center">
+            <IdentificationIcon className="h-5 w-5 mr-2 text-gray-900 dark:text-gray-100" />
+            TAK Profile
+          </h2>
+          {/* 3-column grid: first row My Callsign / My TAK Role / My
+              Organisation's Function, second row My Organisation / My Team
+              (third cell empty) -- source order drives grid placement, so
+              the JSX below is ordered to match rather than relying on any
+              explicit grid-column/row utility. */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             {freshUser.takCallsign && (
               <div>
                 <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">My Callsign</dt>
@@ -599,15 +611,6 @@ export default function Dashboard({ user }) {
                 </dd>
               </div>
             )}
-            <div>
-              <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">My Organisation</dt>
-              {/* Structural Organisation name (teams.name, root of the
-                  Ancestor_Chain -- server/routes/users.js's `rt.name`), not
-                  the colour-derived "function" shown below. A teamless
-                  user carries the literal string 'None', never blank
-                  (see the product rule on the None sentinel). */}
-              <dd className="text-sm text-gray-900 dark:text-gray-100">{userTeam?.organisation_name || 'None'}</dd>
-            </div>
             {freshUser.takColor && (
               <div>
                 <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">My Organisation's Function</dt>
@@ -631,25 +634,21 @@ export default function Dashboard({ user }) {
                 </dd>
               </div>
             )}
-          </div>
-        </div>
-      )}
-
-      {/* Stats */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div className="card">
-          <div className="flex items-center">
-            <div className="flex-shrink-0">
-              <UserGroupIcon className="h-8 w-8 text-gray-500 dark:text-gray-400" />
+            <div>
+              <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">My Organisation</dt>
+              {/* Structural Organisation name (teams.name, root of the
+                  Ancestor_Chain -- server/routes/users.js's `rt.name`), not
+                  the colour-derived "function" shown above. A teamless
+                  user carries the literal string 'None', never blank
+                  (see the product rule on the None sentinel). */}
+              <dd className="text-sm text-gray-900 dark:text-gray-100">{userTeam?.organisation_name || 'None'}</dd>
             </div>
-            <div className="ml-4">
-              <p className="text-sm font-medium text-gray-500 dark:text-gray-400">My Team</p>
-              <div className="flex items-center space-x-2">
-                <p className="text-lg font-bold text-gray-900 dark:text-gray-100">
-                  {userTeam ? userTeam.display_name : 'Not assigned to a unit'}
-                </p>
+            <div>
+              <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">My Team</dt>
+              <dd className="flex items-center text-sm text-gray-900 dark:text-gray-100">
+                {userTeam ? userTeam.display_name : 'Not assigned to a unit'}
                 {userTeam?.visibility === 'private' && (
-                  <div className="relative group">
+                  <div className="relative group ml-1">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor" className="h-4 w-4 text-red-500 cursor-help">
                       <path strokeLinecap="round" strokeLinejoin="round" d="M3.98 8.223A10.477 10.477 0 0 0 1.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.451 10.451 0 0 1 12 4.5c4.756 0 8.773 3.162 10.065 7.498a10.522 10.522 0 0 1-4.293 5.774M6.228 6.228 3 3m3.228 3.228 3.65 3.65m7.894 7.894L21 21m-3.228-3.228-3.65-3.65m0 0a3 3 0 1 0-4.243-4.243m4.242 4.242L9.88 9.88" />
                     </svg>
@@ -658,7 +657,7 @@ export default function Dashboard({ user }) {
                     </div>
                   </div>
                 )}
-              </div>
+              </dd>
               {!userTeam && (
                 <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
                   Contact your administrator to be assigned to a unit
@@ -667,115 +666,48 @@ export default function Dashboard({ user }) {
             </div>
           </div>
         </div>
+      )}
 
-        <div className="card">
-          <div className="flex items-center">
-            <div className="flex-shrink-0">
-              <ClipboardDocumentListIcon className="h-8 w-8 text-gray-500 dark:text-gray-400" />
+      {/* Pending Requests */}
+      {stats.requests > 0 && (
+        <div className="card bg-yellow-50 dark:bg-yellow-900/20 border-yellow-200 dark:border-yellow-800">
+          {/* Below `sm`: the icon + text stay on their own row and the
+              button drops underneath, full-width -- the previous single
+              `flex items-center` row with `ml-auto` squeezed the button
+              into whatever width was left beside the icon and two lines
+              of text, which is what "all messed up" on a phone. `sm:`
+              and up restores the original single-row layout with the
+              button pinned to the right via `sm:ml-auto`. */}
+          <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+            <div className="flex items-center">
+              <ClipboardDocumentListIcon className="h-6 w-6 text-yellow-600 dark:text-yellow-400 flex-shrink-0" />
+              <div className="ml-3">
+                <h3 className="text-sm font-medium text-yellow-800 dark:text-yellow-200">
+                  You have {stats.requests} pending request{stats.requests !== 1 ? 's' : ''}
+                </h3>
+                <p className="text-sm text-yellow-700 dark:text-yellow-300">
+                  Review team access requests from new users.
+                </p>
+              </div>
             </div>
-            <div className="ml-4">
-              <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Pending Requests</p>
-              {stats.requests > 0 ? <Link to="/requests" className="text-2xl font-bold text-primary-600 hover:text-primary-500 dark:text-primary-400 dark:hover:text-primary-300">{stats.requests}</Link> : <p className="text-2xl font-bold text-gray-900 dark:text-gray-100">{stats.requests}</p>}
+            <div className="sm:ml-auto">
+              <Link to="/requests" className="btn-primary block text-center sm:inline-block">
+                Review Requests
+              </Link>
             </div>
           </div>
         </div>
-
-        {/* Hidden below `md`: the "My Channels" card immediately below this
-            stats row already shows "N of M channels" directly under its own
-            heading, so this tile is a duplicate of information already on
-            screen -- worth the space on desktop (three tiles fill the row
-            evenly), not worth it on a phone where every tile is full-width
-            and stacked. */}
-        <div className="hidden md:block card">
-          <div className="flex items-center">
-            <div className="flex-shrink-0">
-              <SignalIcon className="h-8 w-8 text-gray-500 dark:text-gray-400" />
-            </div>
-            <div className="ml-4">
-              <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Total Channels</p>
-              <p className="text-2xl font-bold text-gray-900 dark:text-gray-100">
-                {filteredChannels.length}
-              </p>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* My Channels */}
-      <div className="card">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-medium text-gray-900 dark:text-gray-100">My Channels</h2>
-          <div className="flex items-center space-x-2">
-            <span className="text-sm text-gray-500 dark:text-gray-400">
-              {filteredChannels.length} of {userChannels.length} channels
-            </span>
-          </div>
-        </div>
-        
-        {/* Search and Controls */}
-        <div className="mb-4 space-y-3">
-          <div className="relative">
-            <MagnifyingGlassIcon className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
-            <input
-              type="text"
-              placeholder="Search channels by name or description..."
-              className="w-full pl-10 pr-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-500 dark:placeholder-gray-400"
-              value={searchQuery}
-              onChange={handleSearchChange}
-            />
-          </div>
-          
-          {filteredChannels.length > 0 && Object.keys(buildFolderTree(filteredChannels, folderSeparator).folders).length > 0 && (
-            <div className="flex items-center space-x-2">
-              <button
-                onClick={expandAllFolders}
-                className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
-              >
-                <ChevronDownIcon className="h-4 w-4 mr-1" />
-                Expand All
-              </button>
-              <button
-                onClick={collapseAllFolders}
-                className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
-              >
-                <ChevronUpIcon className="h-4 w-4 mr-1" />
-                Collapse All
-              </button>
-            </div>
-          )}
-        </div>
-        
-        {userChannels.length === 0 ? (
-          <div className="text-center py-8">
-            <p className="text-gray-500 dark:text-gray-400 mb-4">
-              You don't have access to any TAK channels yet.
-            </p>
-            {!userTeam && (
-              <p className="text-sm text-gray-400 dark:text-gray-500">
-                You need to be assigned to a unit to access channels.
-              </p>
-            )}
-          </div>
-        ) : filteredChannels.length === 0 ? (
-          <p className="text-gray-500 dark:text-gray-400 text-center py-8">
-            No channels match your search.
-          </p>
-        ) : (
-          <>
-            <div className="space-y-3">
-              {renderFolderTree(buildFolderTree(filteredChannels, folderSeparator))}
-            </div>
-
-          </>
-        )}
-      </div>
+      )}
 
       {/* My Devices (Requirements 5.1, 5.2, 5.3) -- rendered only when the
           reachability probe succeeded, i.e. the feature is enabled server-side. */}
       {devicesEnabled && (
         <div className="card">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-medium text-gray-900 dark:text-gray-100">My Devices</h2>
+            <h2 className="text-lg font-medium text-gray-900 dark:text-gray-100 flex items-center">
+              <DevicePhoneMobileIcon className="h-5 w-5 mr-2 text-gray-900 dark:text-gray-100" />
+              My Devices
+            </h2>
             <div className="flex items-center space-x-3">
               <span className="text-sm text-gray-500 dark:text-gray-400">
                 {devices.length} device{devices.length !== 1 ? 's' : ''}
@@ -854,36 +786,81 @@ export default function Dashboard({ user }) {
         />
       )}
 
-      {/* Quick Actions */}
-      {stats.requests > 0 && (
-        <div className="card bg-yellow-50 dark:bg-yellow-900/20 border-yellow-200 dark:border-yellow-800">
-          {/* Below `sm`: the icon + text stay on their own row and the
-              button drops underneath, full-width -- the previous single
-              `flex items-center` row with `ml-auto` squeezed the button
-              into whatever width was left beside the icon and two lines
-              of text, which is what "all messed up" on a phone. `sm:`
-              and up restores the original single-row layout with the
-              button pinned to the right via `sm:ml-auto`. */}
-          <div className="flex flex-col sm:flex-row sm:items-center gap-3">
-            <div className="flex items-center">
-              <ClipboardDocumentListIcon className="h-6 w-6 text-yellow-600 dark:text-yellow-400 flex-shrink-0" />
-              <div className="ml-3">
-                <h3 className="text-sm font-medium text-yellow-800 dark:text-yellow-200">
-                  You have {stats.requests} pending request{stats.requests !== 1 ? 's' : ''}
-                </h3>
-                <p className="text-sm text-yellow-700 dark:text-yellow-300">
-                  Review team access requests from new users.
-                </p>
-              </div>
-            </div>
-            <div className="sm:ml-auto">
-              <Link to="/requests" className="btn-primary block text-center sm:inline-block">
-                Review Requests
-              </Link>
-            </div>
+      {/* My Channels */}
+      <div className="card">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-medium text-gray-900 dark:text-gray-100 flex items-center">
+            <SignalIcon className="h-5 w-5 mr-2 text-gray-900 dark:text-gray-100" />
+            My Channels
+          </h2>
+          <div className="flex items-center space-x-2">
+            <span className="text-sm text-gray-500 dark:text-gray-400">
+              {filteredChannels.length} of {userChannels.length} channels
+            </span>
           </div>
         </div>
-      )}
+        
+        {/* Search and Controls */}
+        <div className="mb-4 space-y-3">
+          <div className="relative">
+            <MagnifyingGlassIcon className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
+            <input
+              type="text"
+              placeholder="Search channels by name or description..."
+              className="w-full pl-10 pr-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-500 dark:placeholder-gray-400"
+              value={searchQuery}
+              onChange={handleSearchChange}
+            />
+          </div>
+          
+          {filteredChannels.length > 0 && Object.keys(buildFolderTree(filteredChannels, folderSeparator).folders).length > 0 && (
+            // Bugfix (mobile tap target too small): py-2 (was py-1) --
+            // text-sm's ~20px line-height plus the old 8px vertical
+            // padding gave a ~28px-tall button; py-2 (16px) brings it
+            // to a real ~36px tap target.
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={expandAllFolders}
+                className="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
+              >
+                <ChevronDownIcon className="h-4 w-4 mr-1" />
+                Expand All
+              </button>
+              <button
+                onClick={collapseAllFolders}
+                className="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
+              >
+                <ChevronUpIcon className="h-4 w-4 mr-1" />
+                Collapse All
+              </button>
+            </div>
+          )}
+        </div>
+        
+        {userChannels.length === 0 ? (
+          <div className="text-center py-8">
+            <p className="text-gray-500 dark:text-gray-400 mb-4">
+              You don't have access to any TAK channels yet.
+            </p>
+            {!userTeam && (
+              <p className="text-sm text-gray-400 dark:text-gray-500">
+                You need to be assigned to a unit to access channels.
+              </p>
+            )}
+          </div>
+        ) : filteredChannels.length === 0 ? (
+          <p className="text-gray-500 dark:text-gray-400 text-center py-8">
+            No channels match your search.
+          </p>
+        ) : (
+          <>
+            <div className="space-y-3">
+              {renderFolderTree(buildFolderTree(filteredChannels, folderSeparator))}
+            </div>
+
+          </>
+        )}
+      </div>
     </div>
   )
 }

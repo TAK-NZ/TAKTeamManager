@@ -6,6 +6,7 @@ const { getLogger } = require('../middleware/requestContext');
 const Channel = require('../models/Channel');
 const Team = require('../models/Team');
 const pool = require('../config/database');
+const { REGION_CHANNEL_TIER_PREFIX, BCH_CHANNEL_CATEGORY_PREFIX } = require('../config/constants');
 const router = express.Router();
 
 // Get channel descriptions for user's groups
@@ -35,19 +36,35 @@ const router = express.Router();
 // `user_cache.groups`, populated by authentikSync.js's
 // `groupMap[groupId] = group.name`) holds the raw Authentik GROUP NAME,
 // e.g. "tak_Teams - FENZ - Southland District", "tak_BCH - Community -
-// Amateur Radio APRS_READ", "tak_Regions - Auckland". After stripping
-// the "tak_" prefix and any "_READ"/"_WRITE" suffix (both already done
-// below for the base-channel-name grouping itself):
+// Amateur Radio APRS_READ", "tak_Response - Auckland", "tak_UTL - Data
+// Packages". After stripping the "tak_" prefix and any
+// "_READ"/"_WRITE" suffix (both already done below for the
+// base-channel-name grouping itself):
 //   - a team channel's base name matches `channels.display_name` exactly
 //     (e.g. "Teams - FENZ - Southland District")
-//   - a BCH channel's base name has an additional "BCH - " prefix beyond
-//     what `bch_channels.name` stores (e.g. base name "BCH - Community -
-//     Amateur Radio APRS" -> bch_channels.name "Community - Amateur
-//     Radio APRS") -- confirmed against syncWorker.js's
-//     syncExistingGlobalChannels, which strips exactly `tak_BCH${separator}`
-//     (not just "tak_") when populating bch_channels.name
-//   - likewise a region channel's base name has an additional
-//     "Regions - " prefix beyond `region_channels.name`
+//   - a BCH/UTL channel's base name has an additional category prefix
+//     ("BCH - "/"UTL - ") beyond what `bch_channels.name` stores (e.g.
+//     base name "BCH - Community - Amateur Radio APRS" ->
+//     bch_channels.name "Community - Amateur Radio APRS") -- confirmed
+//     against syncWorker.js's syncExistingGlobalChannels, which strips
+//     exactly `tak_${categoryPrefix}${separator}` (not just "tak_") when
+//     populating bch_channels.name. `BCH_CHANNEL_CATEGORY_PREFIX`
+//     (server/config/constants.js) is the single source of truth for
+//     which category prefixes exist -- checking every one of its values
+//     here, rather than the single literal 'BCH', is the bugfix: a UTL
+//     channel's base name never started with 'BCH - ', fell through to
+//     the team-channel branch, missed there too, and rendered the
+//     Dashboard fallback literal 'TAK Channel' instead of its real
+//     description.
+//   - likewise a region channel's base name has an additional tier
+//     prefix ("Response - "/"Support - ") beyond `region_channels.name`,
+//     per `REGION_CHANNEL_TIER_PREFIX`. The FORMER single, untiered
+//     "Regions - " prefix no longer exists in this deployment (every
+//     region channel was recreated under a tiered prefix -- see
+//     region-channel-tiers) and checking for it here was the second half
+//     of the same bug: neither "Response - " nor "Support - " ever
+//     started with "Regions - ", so every region channel ALSO fell
+//     through to the team-channel branch and missed.
 router.get('/descriptions', authenticateToken, authorize, async (req, res) => {
   try {
     const userGroups = req.user.groups || [];
@@ -73,31 +90,49 @@ router.get('/descriptions', authenticateToken, authorize, async (req, res) => {
 
     // Fetch every locally-known description in 3 queries (not one query
     // per channel) and build lookup maps keyed the same way each table
-    // actually stores its own `name` column.
+    // actually stores its own `name` column. bch_channels/region_channels
+    // are now keyed by (name, category)/(name, tier) -- a same-named
+    // BCH+UTL pair or Response+Support pair is legitimately two distinct
+    // rows (see their respective UNIQUE(name, category/tier) constraints),
+    // so the lookup maps below are keyed by the SAME composite to avoid
+    // one silently shadowing the other.
     const [channelsResult, bchResult, regionResult] = await Promise.all([
       pool.query('SELECT display_name, description FROM channels WHERE description IS NOT NULL'),
-      pool.query('SELECT name, description FROM bch_channels WHERE description IS NOT NULL'),
-      pool.query('SELECT name, description FROM region_channels WHERE description IS NOT NULL')
+      pool.query('SELECT name, category, description FROM bch_channels WHERE description IS NOT NULL'),
+      pool.query('SELECT name, tier, description FROM region_channels WHERE description IS NOT NULL')
     ]);
 
     const teamChannelDescByDisplayName = new Map(
       channelsResult.rows.map((row) => [row.display_name, row.description])
     );
-    const bchDescByName = new Map(bchResult.rows.map((row) => [row.name, row.description]));
-    const regionDescByName = new Map(regionResult.rows.map((row) => [row.name, row.description]));
+    const bchDescByNameAndCategory = new Map(
+      bchResult.rows.map((row) => [`${row.name}::${row.category}`, row.description])
+    );
+    const regionDescByNameAndTier = new Map(
+      regionResult.rows.map((row) => [`${row.name}::${row.tier}`, row.description])
+    );
 
-    const bchPrefix = `BCH${separator}`;
-    const regionPrefix = `Regions${separator}`;
+    // Every recognized category/tier prefix, longest-first, so a
+    // (hypothetical) prefix that is itself a prefix of another can never
+    // be matched against the wrong one first.
+    const categoryPrefixes = Object.entries(BCH_CHANNEL_CATEGORY_PREFIX)
+      .map(([category, prefixValue]) => ({ kind: 'bch', key: category, prefix: `${prefixValue}${separator}` }));
+    const tierPrefixes = Object.entries(REGION_CHANNEL_TIER_PREFIX)
+      .map(([tier, prefixValue]) => ({ kind: 'region', key: tier, prefix: `${prefixValue}${separator}` }));
+    const allPrefixes = [...categoryPrefixes, ...tierPrefixes].sort((a, b) => b.prefix.length - a.prefix.length);
 
     const channelDescriptions = Array.from(baseChannels).map((baseName) => {
       // Use group name for hierarchy (remove tak_ prefix)
       const displayName = baseName.replace('tak_', '');
 
+      const matchedPrefix = allPrefixes.find(({ prefix }) => displayName.startsWith(prefix));
+
       let description;
-      if (displayName.startsWith(bchPrefix)) {
-        description = bchDescByName.get(displayName.slice(bchPrefix.length));
-      } else if (displayName.startsWith(regionPrefix)) {
-        description = regionDescByName.get(displayName.slice(regionPrefix.length));
+      if (matchedPrefix) {
+        const channelName = displayName.slice(matchedPrefix.prefix.length);
+        description = matchedPrefix.kind === 'bch'
+          ? bchDescByNameAndCategory.get(`${channelName}::${matchedPrefix.key}`)
+          : regionDescByNameAndTier.get(`${channelName}::${matchedPrefix.key}`);
       } else {
         description = teamChannelDescByDisplayName.get(displayName);
       }

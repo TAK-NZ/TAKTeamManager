@@ -1,3 +1,16 @@
 rules:
   - capability: all
     effect: allow
+
+  # This repo's branches are shared with other agents/sessions working in
+  # parallel. `git stash` (and pop/apply/drop) mutates or discards
+  # working-tree state that another agent may currently depend on, with no
+  # per-agent isolation -- so it always requires an explicit human
+  # go-ahead in the moment, never an agent's own judgment call (e.g. "let
+  # me stash to check if this failure is pre-existing"). Use `git
+  # diff`/`git log`/`git show`/`git stash list` instead for anything
+  # read-only. `ask` (not `deny`) because stashing is legitimate WITH
+  # permission -- this just forces the prompt every time.
+  - capability: shell
+    match: ["git stash*"]
+    effect: ask

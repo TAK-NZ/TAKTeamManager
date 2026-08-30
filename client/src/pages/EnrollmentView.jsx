@@ -8,6 +8,7 @@ import EnrollmentCountdown from '../components/EnrollmentCountdown'
 import FormattedDate, { DATE_PRECISION } from '../components/FormattedDate'
 import { isAndroidClient, isIOSClient } from '../utils/platformDetection'
 import { getTakColorHex } from '../utils/takColors'
+import { tabAria, TabPanel } from '../components/Tabs'
 
 /**
  * Enrollment_View (takserver-enrollment Requirement 10, task 9.5; UX
@@ -718,8 +719,10 @@ export default function EnrollmentView({
             </h2>
             <ul className="list-disc list-inside space-y-1 text-sm text-gray-700 dark:text-gray-300">
               <li>
-                <span className="font-medium">Device Registration:</span> This device will be linked to your
-                account. Only enroll devices that you are authorised to use and are personally responsible for.
+                <span className="font-medium">Device Registration:</span>{' '}
+                {isDevicePrincipal
+                  ? 'This device will be linked to the team, not to a personal account. Only enroll a device you are authorised to register on the team\'s behalf.'
+                  : 'This device will be linked to your account. Only enroll devices that you are authorised to use and are personally responsible for.'}
               </li>
               <li>
                 <span className="font-medium">Enrollment Duration:</span> Your device enrollment is valid for 1
@@ -795,8 +798,7 @@ export default function EnrollmentView({
                 >
                   <button
                     type="button"
-                    role="tab"
-                    aria-selected={activeTab === TABS.ATAK}
+                    {...tabAria(activeTab, TABS.ATAK)}
                     className={tabButtonClass(TABS.ATAK)}
                     onClick={() => setActiveTab(TABS.ATAK)}
                   >
@@ -805,8 +807,7 @@ export default function EnrollmentView({
                   </button>
                   <button
                     type="button"
-                    role="tab"
-                    aria-selected={activeTab === TABS.TAK_AWARE}
+                    {...tabAria(activeTab, TABS.TAK_AWARE)}
                     className={tabButtonClass(TABS.TAK_AWARE)}
                     onClick={() => setActiveTab(TABS.TAK_AWARE)}
                   >
@@ -815,8 +816,7 @@ export default function EnrollmentView({
                   </button>
                   <button
                     type="button"
-                    role="tab"
-                    aria-selected={activeTab === TABS.ITAK}
+                    {...tabAria(activeTab, TABS.ITAK)}
                     className={tabButtonClass(TABS.ITAK)}
                     onClick={() => setActiveTab(TABS.ITAK)}
                   >
@@ -825,8 +825,7 @@ export default function EnrollmentView({
                   </button>
                   <button
                     type="button"
-                    role="tab"
-                    aria-selected={activeTab === TABS.MANUAL}
+                    {...tabAria(activeTab, TABS.MANUAL)}
                     className={tabButtonClass(TABS.MANUAL)}
                     onClick={() => setActiveTab(TABS.MANUAL)}
                   >
@@ -837,7 +836,7 @@ export default function EnrollmentView({
                 </div>
 
                 <div className="pt-4">
-                  {activeTab === TABS.ATAK && (
+                  <TabPanel id={TABS.ATAK} activeTab={activeTab}>
                     <div className="text-center">
                       {/* The direct-enroll shortcut, ANDROID-ONLY (this
                           device already has ATAK installed and can follow
@@ -895,9 +894,9 @@ export default function EnrollmentView({
                         className="mx-auto w-full max-w-[240px] border border-gray-200 dark:border-gray-700 rounded-lg"
                       />
                     </div>
-                  )}
+                  </TabPanel>
 
-                  {activeTab === TABS.TAK_AWARE && (
+                  <TabPanel id={TABS.TAK_AWARE} activeTab={activeTab}>
                     <div className="text-center">
                       <DifferentDeviceNotice />
                       <ul className="text-sm text-gray-700 dark:text-gray-300 text-left list-disc list-inside mb-4 space-y-1 max-w-md mx-auto">
@@ -924,9 +923,9 @@ export default function EnrollmentView({
                         className="mx-auto w-full max-w-[240px] border border-gray-200 dark:border-gray-700 rounded-lg"
                       />
                     </div>
-                  )}
+                  </TabPanel>
 
-                  {activeTab === TABS.ITAK && (
+                  <TabPanel id={TABS.ITAK} activeTab={activeTab}>
                     <div className="text-center">
                       <DifferentDeviceNotice />
                       <ul className="text-sm text-gray-700 dark:text-gray-300 text-left list-disc list-inside mb-4 space-y-1 max-w-md mx-auto">
@@ -948,9 +947,9 @@ export default function EnrollmentView({
                         className="mx-auto w-full max-w-[240px] border border-gray-200 dark:border-gray-700 rounded-lg"
                       />
                     </div>
-                  )}
+                  </TabPanel>
 
-                  {activeTab === TABS.MANUAL && (
+                  <TabPanel id={TABS.MANUAL} activeTab={activeTab}>
                     <div className="max-w-md mx-auto space-y-4">
                       <p className="text-sm text-gray-700 dark:text-gray-300">
                         Enter these details manually on a WinTAK or other TAK client that cannot scan a QR code.
@@ -961,10 +960,17 @@ export default function EnrollmentView({
                           <span className="text-sm font-mono text-gray-900 dark:text-gray-100 break-all">
                             {manualDescription}
                           </span>
+                          {/* Bugfix (mobile tap target too small): -m-2
+                              p-2 enlarges the hit box (was a bare h-4 w-4
+                              icon with no padding, a ~16px target) without
+                              inflating the row's own visible layout --
+                              same technique InfoTooltip.jsx/
+                              OrgDomainManager.jsx use. Applied identically
+                              to all four copy buttons on this tab. */}
                           <button
                             type="button"
                             onClick={() => handleCopy(manualDescription, 'Description')}
-                            className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                            className="-m-2 p-2 rounded-lg text-gray-500 hover:text-gray-700 hover:bg-gray-100 dark:text-gray-400 dark:hover:text-gray-200 dark:hover:bg-gray-700"
                             aria-label="Copy description"
                             title="Copy description"
                           >
@@ -985,7 +991,7 @@ export default function EnrollmentView({
                           <button
                             type="button"
                             onClick={() => handleCopy(enrollment.host, 'Host address')}
-                            className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                            className="-m-2 p-2 rounded-lg text-gray-500 hover:text-gray-700 hover:bg-gray-100 dark:text-gray-400 dark:hover:text-gray-200 dark:hover:bg-gray-700"
                             aria-label="Copy host address"
                             title="Copy host address"
                           >
@@ -1019,7 +1025,7 @@ export default function EnrollmentView({
                           <button
                             type="button"
                             onClick={() => handleCopy(enrollment.username, 'Username')}
-                            className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                            className="-m-2 p-2 rounded-lg text-gray-500 hover:text-gray-700 hover:bg-gray-100 dark:text-gray-400 dark:hover:text-gray-200 dark:hover:bg-gray-700"
                             aria-label="Copy username"
                             title="Copy username"
                           >
@@ -1045,7 +1051,7 @@ export default function EnrollmentView({
                           <button
                             type="button"
                             onClick={() => handleCopy(itakUserCredentials.password, 'Password')}
-                            className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                            className="-m-2 p-2 rounded-lg text-gray-500 hover:text-gray-700 hover:bg-gray-100 dark:text-gray-400 dark:hover:text-gray-200 dark:hover:bg-gray-700"
                             aria-label="Copy password"
                             title="Copy password"
                           >
@@ -1054,7 +1060,7 @@ export default function EnrollmentView({
                         </dd>
                       </div>
                     </div>
-                  )}
+                  </TabPanel>
                 </div>
               </div>
 

@@ -74,6 +74,28 @@ class PseudonymousUsernamePolicySubTeamError extends Error {
 }
 
 /**
+ * Thrown by `Team.create`/`Team.update` when a `response_channel_access`
+ * or `support_channel_access` value is supplied for a Sub_Team (a team
+ * whose `parent_team_id` is not null). Both flags are Organisation-only
+ * in EXACTLY the way `pseudonymous_usernames` is -- this mirrors
+ * `PseudonymousUsernamePolicySubTeamError`'s placement (outside the
+ * create/update try/catch, so it always propagates distinctly to the
+ * caller rather than being swallowed by the fallback-to-basic-creation
+ * catch) and its typed-rejection shape. A single parameterized class
+ * covers both fields rather than two near-identical classes, since
+ * unlike `pseudonymous_usernames` neither flag carries an immutability
+ * rule once set on an Organisation -- there is no second, differently-
+ * worded error needed for either.
+ */
+class ChannelTierAccessSubTeamError extends Error {
+  constructor(fieldName) {
+    super(`${fieldName} can only be set on an Organisation`);
+    this.name = 'ChannelTierAccessSubTeamError';
+    this.fieldName = fieldName;
+  }
+}
+
+/**
  * takserver-enrollment Requirement 7.2/7.3 (task 5.4): thrown by
  * `Team.update` when a request attempts to change an EXISTING
  * Organisation's `pseudonymous_usernames` value (a resubmission of the
@@ -159,6 +181,15 @@ class Team {
     // is defaulted to `false` (root team) or forced to `null` (Sub_Team)
     // below, before ever reaching the INSERT.
     let { pseudonymous_usernames } = teamData;
+    // response_channel_access/support_channel_access are Organisation-only
+    // fields, mirroring pseudonymous_usernames exactly in tri-state shape:
+    // declared with `let` because each is defaulted (root team) or forced
+    // to `null` (Sub_Team) below, before ever reaching the INSERT. Unlike
+    // pseudonymous_usernames, both are freely mutable after creation via
+    // Team.update -- flipping either only triggers Response/Support
+    // group-membership reconciliation, never an identifier/certificate
+    // consequence, so neither carries an immutability guard.
+    let { response_channel_access, support_channel_access } = teamData;
 
     // Requirement 2.2/2.3: compute the Team_Depth this Sub_Team would
     // occupy (the parent's Team_Depth plus one), or 0 for a root
@@ -255,10 +286,42 @@ class Team {
       }
     }
 
+    // response_channel_access/support_channel_access: only ever stored on
+    // an Organisation row (`parent_team_id IS NULL`) -- a Sub_Team's value
+    // is always `NULL`, and a Sub_Team creation request that supplies
+    // either is a typed rejection, exactly as `pseudonymous_usernames`
+    // already behaves. Deliberately OUTSIDE the try/catch below, for the
+    // same reason as every other Organisation-only guard above: a typed
+    // rejection here must propagate to the caller, never be swallowed by
+    // the fallback-to-basic-creation catch.
+    if (parent_team_id) {
+      if (response_channel_access !== undefined && response_channel_access !== null) {
+        throw new ChannelTierAccessSubTeamError('responseChannelAccess');
+      }
+      if (support_channel_access !== undefined && support_channel_access !== null) {
+        throw new ChannelTierAccessSubTeamError('supportChannelAccess');
+      }
+      response_channel_access = null;
+      support_channel_access = null;
+    } else {
+      // Organisation (root team): the migration deliberately carries no
+      // column default, so the application supplies one here.
+      // response_channel_access defaults to `false` -- the Response/
+      // Emergency_Response tier is ES-only and opt-in. support_channel_access
+      // defaults to `true` -- the Support/outer tier is the all-agency
+      // continuation of what the former single Region tier already did.
+      response_channel_access = response_channel_access === undefined || response_channel_access === null
+        ? false
+        : Boolean(response_channel_access);
+      support_channel_access = support_channel_access === undefined || support_channel_access === null
+        ? true
+        : Boolean(support_channel_access);
+    }
+
     try {
       const result = await pool.query(
-        'INSERT INTO teams (name, description, callsign_prefix, color, visibility, can_join, parent_team_id, created_by, callsign_name_format, callsign_level_selection, pseudonymous_usernames) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *',
-        [name, description, callsign_prefix, color, visibility, can_join, parent_team_id, created_by, callsign_name_format, callsign_level_selection, pseudonymous_usernames]
+        'INSERT INTO teams (name, description, callsign_prefix, color, visibility, can_join, parent_team_id, created_by, callsign_name_format, callsign_level_selection, pseudonymous_usernames, response_channel_access, support_channel_access) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *',
+        [name, description, callsign_prefix, color, visibility, can_join, parent_team_id, created_by, callsign_name_format, callsign_level_selection, pseudonymous_usernames, response_channel_access, support_channel_access]
       );
       
       const team = result.rows[0];
@@ -341,8 +404,17 @@ class Team {
    * (root, `parent_team_id IS NULL`) down to and including the given Team
    * itself -- ordered ROOT-FIRST, each row carrying `id`, `name`,
    * `callsign_prefix`, `color`, `callsign_name_format`, `visibility`,
-   * `parent_team_id`, `pseudonymous_usernames`, and `depth` (0 at the
-   * Organisation, incrementing by one per level down to the given Team).
+   * `parent_team_id`, `pseudonymous_usernames`, `response_channel_access`,
+   * `support_channel_access`, and `depth` (0 at the Organisation,
+   * incrementing by one per level down to the given Team).
+   *
+   * region-channel-tiers: `response_channel_access`/`support_channel_access`
+   * are included for the same reason `pseudonymous_usernames` is (see
+   * below) -- `syncWorker.assignUserToGlobalChannels` reads both from
+   * index 0 (the Organisation) of this same call to decide Response/
+   * Support region-channel membership; on every other row both are
+   * always `NULL` (Sub_Teams never carry a value) and must never be read
+   * positionally from the tail.
    *
    * takserver-enrollment Requirement 6.7 (task 5.1): `pseudonymous_usernames`
    * is included so `UserProvisioningService.resolveNewUserIdentity` can read
@@ -372,19 +444,19 @@ class Team {
         WITH RECURSIVE ancestors AS (
           SELECT id, parent_team_id, name, callsign_prefix, color,
                  callsign_name_format, visibility, callsign_level_selection,
-                 pseudonymous_usernames,
+                 pseudonymous_usernames, response_channel_access, support_channel_access,
                  0 AS hops_from_target
           FROM teams WHERE id = $1
           UNION ALL
           SELECT t.id, t.parent_team_id, t.name, t.callsign_prefix, t.color,
                  t.callsign_name_format, t.visibility, t.callsign_level_selection,
-                 t.pseudonymous_usernames,
+                 t.pseudonymous_usernames, t.response_channel_access, t.support_channel_access,
                  a.hops_from_target + 1
           FROM teams t JOIN ancestors a ON t.id = a.parent_team_id
         )
         SELECT id, parent_team_id, name, callsign_prefix, color,
                callsign_name_format, visibility, callsign_level_selection,
-               pseudonymous_usernames,
+               pseudonymous_usernames, response_channel_access, support_channel_access,
                (SELECT MAX(hops_from_target) FROM ancestors) - hops_from_target AS depth
         FROM ancestors ORDER BY depth ASC
       `, [teamId]);
@@ -511,6 +583,26 @@ class Team {
           (SELECT COUNT(*) FROM team_memberships tm
            JOIN users u ON u.id = tm.user_id
            WHERE tm.team_id = oh.id AND u.is_team_device IS NOT TRUE) as member_count,
+          -- /teams overview: admin_count, matching what THIS team's own
+          -- Team Admins tab counts (TeamDetail.jsx's admins state,
+          -- Team.getMembers(teamId) rows filtered to role === 'admin').
+          -- An inherited team_memberships row is always written with the
+          -- literal role 'inherited' (TeamMembershipService.addUserToTeam),
+          -- never the original 'admin'/'member' -- so role = 'admin' on
+          -- THIS team's own rows is already exactly the direct-admin count,
+          -- with no separate inherited_from_team_id filter needed.
+          (SELECT COUNT(*) FROM team_memberships tm
+           JOIN users u ON u.id = tm.user_id
+           WHERE tm.team_id = oh.id AND tm.role = 'admin' AND u.is_team_device IS NOT TRUE) as admin_count,
+          -- /teams overview: device_count, matching what THIS team's own
+          -- Team Devices tab counts (DeviceEnrollmentService.listTeamDevices'
+          -- inherited_from_team_id IS NULL AND is_team_device = true
+          -- filter) -- a device belongs directly to exactly one team, so
+          -- only its direct row is counted here, not the 'inherited' rows
+          -- materialised on ancestor teams.
+          (SELECT COUNT(*) FROM team_memberships tm
+           JOIN users u ON u.id = tm.user_id
+           WHERE tm.team_id = oh.id AND tm.inherited_from_team_id IS NULL AND u.is_team_device = true) as device_count,
           (SELECT COUNT(*) FROM teams t2 WHERE t2.parent_team_id = oh.id) as sub_teams_count,
           COALESCE(
             (SELECT tm.role FROM team_memberships tm
@@ -682,6 +774,64 @@ class Team {
     }
   }
 
+  /**
+   * Users-page-action-parity: the SET of every `teams.id` that `userId`
+   * may act on as a Team_Admin -- every team they hold a DIRECT
+   * (`inherited_from_team_id IS NULL`) `role = 'admin'` row on, UNION
+   * every DESCENDANT of each of those teams at any depth. This is the
+   * downward-facing counterpart of `isAdmin` above (which walks UPWARD
+   * from a single `teamId` to answer "is userId an admin of teamId or one
+   * of its ancestors"): this method walks DOWNWARD from userId's admin
+   * teams to answer "which teams, in total, can userId act on".
+   *
+   * `isAdmin(teamId, userId)` and `getManagedTeamIds(userId).has(teamId)`
+   * are DEFINITIONALLY equivalent for any given `teamId` -- both encode
+   * "an admin of an ancestor may act on a descendant" -- so a caller with
+   * many rows to check (e.g. `GET /api/users` gating each row's
+   * `can_manage`) should call this ONCE and test membership in the
+   * returned Set, rather than calling `isAdmin` per row (which would
+   * re-run the recursive walk once per row instead of once per request).
+   *
+   * No existing helper already returns this: `BroadcastEmailService
+   * .getAdministeredTeamIds` returns only the DIRECT admin-team set with
+   * no descendant expansion (by its own documented design, for a
+   * different, narrower authorization rule), and `DeviceManagementService
+   * .isManagedUser` answers a per-user existence question via a
+   * materialized-inherited-row join rather than building an explicit team
+   * set at all. Neither is reused here because both are deliberately
+   * NARROWER than "every team `Team.isAdmin` would say yes to".
+   *
+   * @param {number|string} userId
+   * @returns {Promise<Set<number>>} every managed team id, `teamId`s as
+   *   returned by Postgres (numbers). Empty for a user with no direct
+   *   admin row anywhere.
+   */
+  static async getManagedTeamIds(userId) {
+    try {
+      const result = await pool.query(`
+        WITH RECURSIVE admin_teams AS (
+          SELECT team_id
+          FROM team_memberships
+          WHERE user_id = $1 AND role = 'admin' AND inherited_from_team_id IS NULL
+        ), managed_teams AS (
+          SELECT team_id FROM admin_teams
+          UNION
+          SELECT t.id AS team_id
+          FROM teams t
+          JOIN managed_teams mt ON t.parent_team_id = mt.team_id
+        )
+        SELECT team_id FROM managed_teams
+      `, [userId]);
+      return new Set(result.rows.map((row) => row.team_id));
+    } catch (error) {
+      logger.error({ err: error, userId }, 'Error resolving managed team ids');
+      // Fail closed: an empty set denies every row's can_manage rather
+      // than a thrown error propagating as a 500 for the whole listing,
+      // matching isAdmin's own fail-closed `catch` above.
+      return new Set();
+    }
+  }
+
   // Requirement 27.9 (task 49.5): `member_count` here is a dashboard-style
   // member count displayed on the Teams/TeamDetail pages, so it must
   // exclude Team_Owned_Device rows (`users.is_team_device = true`) the
@@ -733,6 +883,15 @@ class Team {
           (SELECT COUNT(*) FROM team_memberships tm
            JOIN users u ON u.id = tm.user_id
            WHERE tm.team_id = t.id AND u.is_team_device IS NOT TRUE) as member_count,
+          -- /teams overview: same admin_count/device_count columns as
+          -- getOrganisationTeams above, for the Global_Manager "all teams"
+          -- branch of GET /api/teams/my-teams.
+          (SELECT COUNT(*) FROM team_memberships tm
+           JOIN users u ON u.id = tm.user_id
+           WHERE tm.team_id = t.id AND tm.role = 'admin' AND u.is_team_device IS NOT TRUE) as admin_count,
+          (SELECT COUNT(*) FROM team_memberships tm
+           JOIN users u ON u.id = tm.user_id
+           WHERE tm.team_id = t.id AND tm.inherited_from_team_id IS NULL AND u.is_team_device = true) as device_count,
           (SELECT COUNT(*) FROM teams t2 WHERE t2.parent_team_id = t.id) as sub_teams_count,
           EXISTS(SELECT 1 FROM signup_codes sc WHERE sc.team_id = t.id) as has_signup_code
         FROM teams t
@@ -793,6 +952,14 @@ class Team {
     // (resubmitting the currently-stored value) or a rejection -- there
     // is no "change" case that reaches the UPDATE at all.
     let { pseudonymous_usernames } = updateData;
+    // response_channel_access/support_channel_access are validated/
+    // rejected below, before ever reaching the UPDATE. Unlike
+    // pseudonymous_usernames, a value supplied on an EXISTING Organisation
+    // is simply APPLIED (no immutability guard, no no-op-only handling) --
+    // flipping either flag only triggers Response/Support group-membership
+    // reconciliation via the Sync_Worker, never an identifier/certificate
+    // consequence.
+    let { response_channel_access, support_channel_access } = updateData;
 
     // Requirement 3.3/5.6/7.2: determine whether `teamId` is a Sub_Team (a
     // non-null `parent_team_id`) BEFORE building the UPDATE, so the
@@ -813,7 +980,9 @@ class Team {
       callsign_name_format !== undefined ||
       callsign_level_selection !== undefined ||
       pseudonymous_usernames !== undefined ||
-      callsign_prefix !== undefined
+      callsign_prefix !== undefined ||
+      response_channel_access !== undefined ||
+      support_channel_access !== undefined
     ) {
       existingTeam = await this.findById(teamId);
     }
@@ -836,6 +1005,15 @@ class Team {
       // mirroring callsign_level_selection's typed rejection exactly.
       if (pseudonymous_usernames !== undefined) {
         throw new PseudonymousUsernamePolicySubTeamError();
+      }
+      // response_channel_access/support_channel_access: reject (never
+      // silently ignore) either value supplied on a Sub_Team update,
+      // mirroring pseudonymous_usernames's typed rejection exactly.
+      if (response_channel_access !== undefined) {
+        throw new ChannelTierAccessSubTeamError('responseChannelAccess');
+      }
+      if (support_channel_access !== undefined) {
+        throw new ChannelTierAccessSubTeamError('supportChannelAccess');
       }
     } else if (callsign_level_selection !== undefined && callsign_level_selection !== null) {
       // Organisation: validate every element is an integer in
@@ -883,6 +1061,22 @@ class Team {
       pseudonymous_usernames = undefined;
     }
 
+    // response_channel_access/support_channel_access: freely mutable on
+    // an existing Organisation, unlike pseudonymous_usernames -- no
+    // no-op-only/immutability guard, just a boolean normalisation so the
+    // UPDATE's COALESCE always receives a real boolean or `undefined`
+    // ("not supplied"), never a truthy/falsy non-boolean equivalent.
+    // `null` is accepted the same as `undefined` here (COALESCE would
+    // otherwise store a literal NULL, re-introducing the Sub_Team-only
+    // "not applicable" state on an Organisation row, which the migration's
+    // own comment says should never happen once a row IS an Organisation).
+    if (response_channel_access !== undefined) {
+      response_channel_access = response_channel_access === null ? undefined : Boolean(response_channel_access);
+    }
+    if (support_channel_access !== undefined) {
+      support_channel_access = support_channel_access === null ? undefined : Boolean(support_channel_access);
+    }
+
     // Bugfix (callsign-handling): an Organisation's `callsign_prefix` is
     // its Organisation_Prefix -- immutable after creation, because every
     // Managed_Identifier already minted under it is a fixed string
@@ -912,8 +1106,8 @@ class Team {
 
     try {
       const result = await pool.query(
-        'UPDATE teams SET name = COALESCE($1, name), description = COALESCE($2, description), visibility = COALESCE($3, visibility), can_join = COALESCE($4, can_join), parent_team_id = $5, callsign_name_format = COALESCE($6, callsign_name_format), color = COALESCE($8, color), callsign_level_selection = COALESCE($9, callsign_level_selection), pseudonymous_usernames = COALESCE($10, pseudonymous_usernames), callsign_prefix = COALESCE($11, callsign_prefix), updated_at = CURRENT_TIMESTAMP WHERE id = $7 RETURNING *',
-        [name, description, visibility, can_join, parent_team_id, callsign_name_format, teamId, color, callsign_level_selection, pseudonymous_usernames, callsign_prefix]
+        'UPDATE teams SET name = COALESCE($1, name), description = COALESCE($2, description), visibility = COALESCE($3, visibility), can_join = COALESCE($4, can_join), parent_team_id = $5, callsign_name_format = COALESCE($6, callsign_name_format), color = COALESCE($8, color), callsign_level_selection = COALESCE($9, callsign_level_selection), pseudonymous_usernames = COALESCE($10, pseudonymous_usernames), callsign_prefix = COALESCE($11, callsign_prefix), response_channel_access = COALESCE($12, response_channel_access), support_channel_access = COALESCE($13, support_channel_access), updated_at = CURRENT_TIMESTAMP WHERE id = $7 RETURNING *',
+        [name, description, visibility, can_join, parent_team_id, callsign_name_format, teamId, color, callsign_level_selection, pseudonymous_usernames, callsign_prefix, response_channel_access, support_channel_access]
       );
       const updatedTeam = result.rows[0];
 
@@ -1422,5 +1616,6 @@ Team.PseudonymousUsernamePolicySubTeamError = PseudonymousUsernamePolicySubTeamE
 Team.PseudonymousUsernamePolicyImmutableError = PseudonymousUsernamePolicyImmutableError;
 Team.OrganisationCallsignPrefixImmutableError = OrganisationCallsignPrefixImmutableError;
 Team.CallsignPrefixConflictError = CallsignPrefixConflictError;
+Team.ChannelTierAccessSubTeamError = ChannelTierAccessSubTeamError;
 
 module.exports = Team;

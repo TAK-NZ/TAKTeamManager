@@ -1,9 +1,13 @@
 import { useState, useEffect } from 'react'
-import { XMarkIcon, LockClosedIcon, LockOpenIcon } from '@heroicons/react/24/outline'
+import { XMarkIcon, LockClosedIcon, LockOpenIcon, CheckIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import { teamsAPI } from '../services/api'
 import { labelFor, labelForNew } from '../utils/teamLabels'
 import { formatLevelLabel, groupCallsignLevelOptionsByDepth } from '../utils/callsignLevels'
+import OrgDomainManager from './OrgDomainManager'
+import ChannelAccessManager from './ChannelAccessManager'
+import InfoTooltip from './InfoTooltip'
+import { tabAria } from './Tabs'
 
 // Requirement 3.10 (task 32.6): mirrors
 // server/utils/callsignValidation.js's `isValidCallsignPrefix` character
@@ -49,6 +53,38 @@ export function isOrganisationCallsignPrefixMissing(parentTeamId, callsignPrefix
   return !trimmed
 }
 
+// Bugfix: `formData.callsignLevelSelection` and
+// `formData.pseudonymousUsernames` are ALWAYS seeded to a concrete value
+// for a Sub_Team -- `[]` and `false` respectively (see the edit-mode
+// seeding effect and `EMPTY_FORM_DATA`), never `undefined`/`null`. The
+// server's own guard for both fields is `value !== undefined` (Sub_Team
+// rejection in `Team.update`/`Team.create`) -- an empty array or `false`
+// still counts as "supplied", so saving ANY existing Sub_Team (even with
+// zero actual changes) always threw "callsignLevelSelection can only be
+// set on an Organisation", since the whole `formData` object was sent
+// verbatim as the request body.
+//
+// This builds the actual submit payload from `formData`, DELETING both
+// Organisation-only keys entirely for a Sub_Team (parentTeamId present)
+// rather than sending their always-populated placeholder values. Axios's
+// JSON serialization drops a key whose value is `undefined`, but never
+// drops an empty array or `false` -- so the key must be removed from the
+// object, not merely set to `undefined` on it (both approaches serialize
+// identically via `JSON.stringify`, but deleting is the explicit,
+// self-documenting one). For an Organisation, the payload is unchanged.
+//
+// Exported for direct unit testing, matching this file's convention of
+// testing extracted pure logic without rendering the component.
+export function buildTeamSubmitPayload(formData) {
+  if (!formData?.parentTeamId) {
+    return formData
+  }
+  const payload = { ...formData }
+  delete payload.callsignLevelSelection
+  delete payload.pseudonymousUsernames
+  return payload
+}
+
 // Small inline indicator shown next to a form field's label, making it
 // unambiguous at a glance whether a field can still be changed once the
 // team exists: a green OPEN padlock for a field that remains editable
@@ -70,6 +106,21 @@ function FieldLockIndicator({ locked, lockedReason, editableReason = 'Editable a
   )
 }
 
+// A named section heading inside the "Team Settings" tab, grouping
+// related fields under one label -- Identity, Callsign Structure,
+// Membership Policy, Description -- rather than the two arbitrary
+// height-balanced columns this form used to be split into. Matches the
+// small-caps section-heading treatment `EnrollmentView.jsx` already uses
+// for its own "Enrollment Data"/"Device Enrollment Requirements"
+// headings, so this modal's groupings read the same way that page's do.
+function SectionHeading({ children }) {
+  return (
+    <h4 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-3">
+      {children}
+    </h4>
+  )
+}
+
 const EMPTY_FORM_DATA = {
   name: '',
   description: '',
@@ -79,7 +130,13 @@ const EMPTY_FORM_DATA = {
   canJoin: false,
   parentTeamId: null,
   callsignLevelSelection: [],
-  callsignNameFormat: 'full_name',
+  // Default for a brand-new Organisation is "First Initial + Dot + Last
+  // Name" (e.g. "J.Doe"), not "Full Name" -- an operator creating a new
+  // Organisation gets the more space-efficient callsign format unless
+  // they choose otherwise. An existing team being EDITED still shows its
+  // own stored `callsign_name_format` value (see the edit-mode seeding
+  // effect below), so this default only affects the create path.
+  callsignNameFormat: 'first_initial_dot_last',
   // takserver-enrollment Requirement 6.1 (task 5.5): Organisation-only,
   // mirroring callsignLevelSelection's own EMPTY_FORM_DATA default --
   // false until an operator opts in at Organisation-creation time. Never
@@ -106,6 +163,28 @@ const EMPTY_FORM_DATA = {
  * inside this component. Local form state (`formData`,
  * `callsignLevelOptions`, submitting state) is owned internally.
  *
+ * ## Allowed Email Domains (`OrgDomainManager`), nested but independently saved
+ *
+ * When editing an EXISTING Organisation (`mode === 'edit'` and
+ * `!team.parent_team_id`), this dialog also renders `OrgDomainManager`
+ * beneath the main form -- moved here from its own standalone card on
+ * `TeamDetail.jsx` so an admin edits a Team's/Organisation's settings and
+ * its domain restriction in one place. This is a VISUAL nesting only:
+ * `OrgDomainManager` keeps its own independent fetch
+ * (`GET /orgs/:orgId/domains`) and its own independent whole-list-replace
+ * save (`PUT /orgs/:orgId/domains`, via `orgDomainsAPI`), decoupled from
+ * this dialog's own single `teamsAPI.update(...)` submit. Folding the two
+ * into one save would mean either a second API call bolted onto
+ * `doSubmit` (a partial-failure state where the team saves but the
+ * domains don't, or vice versa) or a bigger, cross-cutting server change
+ * to accept a domains array inside the team PATCH -- the domains table
+ * (`org_allowed_domains`) is a genuinely separate resource from `teams`,
+ * with its own list-replace save semantics, so keeping the two saves
+ * separate is the more honest representation of what is actually
+ * happening. Never rendered on create (there is no `orgId` yet) and never
+ * for a Sub_Team (domain restrictions are Organisation-only, matching
+ * `OrgDomainManager`'s own `isAdmin`-gated, Organisation-only design).
+ *
  * @param {'create'|'edit'} mode
  * @param {object|null} team - the team being edited (null when creating).
  * @param {Array<object>} teams - candidate teams for the Parent Team
@@ -118,6 +197,19 @@ const EMPTY_FORM_DATA = {
  * @param {(updatedTeam: object) => void} onSaved - invoked with the
  *   server's response team after a successful create/update, so each
  *   parent page can apply its own local state update.
+ * @param {boolean} [isAdmin] - passed straight through to the nested
+ *   `OrgDomainManager` as ITS `isAdmin` prop (that component renders
+ *   nothing at all when this is falsy). Defaults to `true` so
+ *   `Teams.jsx`'s call site -- which only ever opens this dialog for a
+ *   Global_Manager -- does not need to pass it explicitly.
+ * @param {boolean} [isGlobalManager] - region-channel-tiers: gates the
+ *   "Channel Access" tab (`ChannelAccessManager`), Global_Manager-only
+ *   with NO Team_Admin fallback -- deliberately a SEPARATE prop from
+ *   `isAdmin` above (which a Team_Admin also satisfies), since
+ *   `PUT /api/teams/:teamId/channel-access` has no Team_Admin path at
+ *   all. Defaults to `true` for the same reason `isAdmin` does:
+ *   `Teams.jsx`'s call site only ever opens this dialog for a
+ *   Global_Manager already.
  */
 export default function TeamFormDialog({
   mode,
@@ -127,11 +219,24 @@ export default function TeamFormDialog({
   colorMappings,
   isOpen,
   onClose,
-  onSaved
+  onSaved,
+  isAdmin = true,
+  isGlobalManager = true
 }) {
   const [formData, setFormData] = useState(EMPTY_FORM_DATA)
   const [submitting, setSubmitting] = useState(false)
   const [showCanJoinConfirm, setShowCanJoinConfirm] = useState(false)
+  // Bugfix (#13): "Allowed Email Domains" (OrgDomainManager) moves from a
+  // nested section beneath the main form into its own TAB, alongside a
+  // "Team Settings" tab holding the main form. Only rendered/consulted
+  // when the domains tab itself would be shown at all -- edit mode, on an
+  // Organisation (`editingTeam && !formData.parentTeamId`, the SAME gate
+  // OrgDomainManager's nested section used) -- so a Sub_Team or a
+  // brand-new team never sees a tab bar with only one working tab. Reset
+  // to 'settings' whenever the dialog opens/the team being edited
+  // changes (see the seeding effect below), so switching teams never
+  // leaves a stale tab selected.
+  const [activeFormTab, setActiveFormTab] = useState('settings')
   // Requirement 5.7-5.11 (task 32.4): the Callsign_Level_Selection
   // toggle-labelling lookup, grouped depth -> deduplicated/sorted
   // callsign_prefix values, sourced from
@@ -201,6 +306,13 @@ export default function TeamFormDialog({
       })
       setCallsignLevelOptions(new Map())
     }
+
+    // Bugfix (#13): always reopen on the Team Settings tab, regardless
+    // of which team was being edited or which tab was active last time
+    // the dialog was open -- a stale "Allowed Email Domains" selection
+    // must never survive into a NEW team's dialog (or a create dialog,
+    // where that tab does not even render).
+    setActiveFormTab('settings')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, mode, team])
 
@@ -247,9 +359,10 @@ export default function TeamFormDialog({
     setShowCanJoinConfirm(false)
     setSubmitting(true)
     try {
+      const payload = buildTeamSubmitPayload(formData)
       const response = editingTeam
-        ? await teamsAPI.update(editingTeam.id, formData)
-        : await teamsAPI.create(formData)
+        ? await teamsAPI.update(editingTeam.id, payload)
+        : await teamsAPI.create(payload)
       onSaved(response.data.team)
       onClose()
     } catch (error) {
@@ -261,30 +374,130 @@ export default function TeamFormDialog({
   }
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
-        <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center sm:p-4 z-50">
+      {/* Bugfix: fixed OUTER size (`h-[85vh]` at `sm:` and up, was a
+          content-driven `max-h-[90vh]`) plus `flex flex-col` --
+          switching tabs used to resize AND reposition this whole box,
+          because each tab's panel (Team Settings/Allowed Email
+          Domains/Channel Access) has wildly different content height,
+          and `max-h` combined with `overflow-y-auto` on this SAME
+          element let the box shrink to fit whichever panel was showing.
+          With the box's own height now fixed and only the content strip
+          below the tab bar scrolling internally (see the `flex-1
+          overflow-y-auto` wrapper below), the header, tab bar and
+          footer never move and the centered overlay never re-centers
+          around a different box size.
+
+          Bugfix (mobile full-screen): below `sm:`, this box is
+          `h-full w-full` with no rounding -- a full-bleed sheet, not a
+          floating card -- since the Team Settings tab alone (~10 form
+          controls across 4 sections, each with an info tooltip) never
+          fits a phone viewport regardless of how the box is sized; the
+          real choice at that point is between scrolling inside a small
+          floating box or scrolling inside one that uses the whole
+          screen. `sm:` and up keeps the original floating-card
+          treatment unchanged. */}
+      <div className="bg-white dark:bg-gray-800 shadow-xl w-full h-full sm:rounded-lg sm:max-w-4xl sm:h-[85vh] flex flex-col overflow-hidden">
+        <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
           <h3 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
             {editingTeam ? `Edit ${teamLabel}` : `Create New ${teamLabel}`}
           </h3>
+          {/* Bugfix (mobile tap target too small): p-2 rounded-lg box
+              around the icon, matching every other modal's close button
+              in this app -- was a bare h-6 w-6 icon with no padding. */}
           <button
             onClick={onClose}
-            className="text-gray-400 hover:text-gray-500 dark:hover:text-gray-300"
+            className="p-2 rounded-lg text-gray-400 hover:text-gray-500 hover:bg-gray-100 dark:hover:text-gray-300 dark:hover:bg-gray-700"
           >
             <XMarkIcon className="h-6 w-6" />
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="p-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="space-y-6">
-              <div>
+        {/* Bugfix (#13): a tab bar, but ONLY when there is a second tab to
+            show -- editing an existing Organisation. A Sub_Team and a
+            brand-new team both render the form directly with no tab bar
+            at all, matching how OrgDomainManager's OWN nested section was
+            already gated (`editingTeam && !formData.parentTeamId`). */}
+        {editingTeam && !formData.parentTeamId && (
+          <div className="border-b border-gray-200 dark:border-gray-700 px-6 flex-shrink-0">
+            <nav className="-mb-px flex space-x-8" role="tablist">
+              <button
+                type="button"
+                onClick={() => setActiveFormTab('settings')}
+                {...tabAria(activeFormTab, 'settings')}
+                className={`py-3 px-1 border-b-2 font-medium text-sm ${
+                  activeFormTab === 'settings'
+                    ? 'border-primary-500 text-primary-600 dark:text-primary-400'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'
+                }`}
+              >
+                Team Settings
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveFormTab('domains')}
+                {...tabAria(activeFormTab, 'domains')}
+                className={`py-3 px-1 border-b-2 font-medium text-sm ${
+                  activeFormTab === 'domains'
+                    ? 'border-primary-500 text-primary-600 dark:text-primary-400'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'
+                }`}
+              >
+                Allowed Email Domains
+              </button>
+              {/* region-channel-tiers: Global_Manager-only -- a Team_Admin
+                  who is not also a Global_Manager sees only the two tabs
+                  above, exactly as before this feature. */}
+              {isGlobalManager && (
+                <button
+                  type="button"
+                  onClick={() => setActiveFormTab('channelAccess')}
+                  {...tabAria(activeFormTab, 'channelAccess')}
+                  className={`py-3 px-1 border-b-2 font-medium text-sm ${
+                    activeFormTab === 'channelAccess'
+                      ? 'border-primary-500 text-primary-600 dark:text-primary-400'
+                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'
+                  }`}
+                >
+                  Channel Access
+                </button>
+              )}
+            </nav>
+          </div>
+        )}
+
+        {/* Bugfix: the scrolling region is now this single wrapper
+            (`flex-1 overflow-y-auto`) around everything between the tab
+            bar and the footer, rather than `overflow-y-auto` on the
+            OUTER box itself. The outer box's height is fixed (see
+            above), so only this strip grows/scrolls internally --
+            header, tab bar and footer stay put on every tab. */}
+        <div className="flex-1 overflow-y-auto">
+
+        {/* Bugfix (#13): the main form stays mounted whenever there is no
+            tab bar at all (a Sub_Team or a create dialog), and is HIDDEN
+            (not unmounted) rather than conditionally rendered while the
+            Allowed Email Domains tab is active -- an unsaved edit on this
+            tab must survive switching to the other tab and back, and
+            `<form>`'s own uncontrolled-input state (if any were ever
+            added) would otherwise reset on remount. `hidden` is a plain
+            CSS display:none toggle, so `handleSubmit` and every existing
+            input ref/state stay exactly as they were. */}
+        <div hidden={editingTeam && !formData.parentTeamId && activeFormTab !== 'settings'}>
+        <form id="team-settings-form" onSubmit={handleSubmit} className="p-6 space-y-8">
+          {/* Section 1: Identity -- what this team/organisation is and
+              where it sits in the hierarchy. */}
+          <div>
+            <SectionHeading>Identity</SectionHeading>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div className="md:col-span-2">
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                   Team Name *
                   <FieldLockIndicator
                     locked={false}
                     editableReason="Editable at any time, before or after creation"
                   />
+                  <InfoTooltip text="The name shown throughout the app for this team. For a Sub-team, the parent's prefix or name is automatically prepended to form its full display name." />
                 </label>
                 <input
                   type="text"
@@ -309,6 +522,9 @@ export default function TeamFormDialog({
                     lockedReason="An Organisation's Prefix cannot be changed after creation: every device and user identifier already minted under it is derived from this value"
                     editableReason="A Sub-team's Prefix may be corrected at any time -- it participates only in Callsign generation, never in a device/user identifier"
                   />
+                  <InfoTooltip text={formData.parentTeamId
+                    ? 'The Sub-team segment of generated callsigns, e.g. FENZ-STL-John Smith. Optional; may be corrected later.'
+                    : "The Organisation segment of every callsign minted under it, e.g. FENZ-John Smith. Required, and permanent once this Organisation is created -- every device and user identifier is derived from it."} />
                 </label>
                 <input
                   type="text"
@@ -333,11 +549,6 @@ export default function TeamFormDialog({
                   title="Only letters and digits are allowed (no -)"
                   placeholder={formData.parentTeamId ? "STL, CHC, etc." : "FENZ, DOC, etc."}
                 />
-                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                  {prefixLocked ? "An Organisation's Prefix cannot be changed after creation" :
-                   formData.parentTeamId ? 'Sub-team prefix for callsigns. Example: FENZ-STL-John Smith' :
-                   'Required for an Organisation. Team prefix for callsigns. Example: FENZ-John Smith'}
-                </p>
                 {!isValidCallsignPrefixInput(formData.callsignPrefix) && (
                   <p className="text-red-600 text-sm mt-1">Prefix may only contain letters and digits (no "-")</p>
                 )}
@@ -354,6 +565,18 @@ export default function TeamFormDialog({
                     locked={false}
                     editableReason="Editable at any time, before or after creation"
                   />
+                  {/* Bugfix: this field sits in the RIGHT-hand column of
+                      the Identity grid, close to the modal's own right
+                      edge -- opening rightward (the default) pushed the
+                      tooltip's w-64 popup past that edge, which the
+                      dialog's overflow-y-auto-only wrapper turned into a
+                      persistent horizontal scrollbar (leaving overflow-x
+                      at its default `visible` while overflow-y is
+                      non-visible computes to `overflow-x: auto`).
+                      `side="left"` follows the client convention: "open
+                      leftward from trailing columns, rightward
+                      elsewhere". */}
+                  <InfoTooltip text="Select a parent team to make this a Sub-team, or leave empty to make it a top-level Organisation." side="left" />
                 </label>
                 <select
                   value={formData.parentTeamId || ''}
@@ -389,268 +612,185 @@ export default function TeamFormDialog({
                     </option>
                   ))}
                 </select>
-                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                  Select a parent team to create a sub-team, or leave empty for a top-level team.
-                </p>
-              </div>
-
-              {!formData.parentTeamId && (
-                <>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                      Callsign Level Selection
-                      <FieldLockIndicator
-                        locked={false}
-                        editableReason="Editable at any time, before or after creation"
-                      />
-                    </label>
-                    <div className="flex flex-wrap gap-2">
-                      {Array.from({ length: maxTeamDepth || 0 }, (_, i) => i + 1).map((depth) => {
-                        const selected = formData.callsignLevelSelection.includes(depth)
-                        const prefixesForDepth = callsignLevelOptions.get(depth) || []
-                        return (
-                          <button
-                            key={depth}
-                            type="button"
-                            onClick={() => {
-                              const newSelection = selected
-                                ? formData.callsignLevelSelection.filter(d => d !== depth)
-                                : [...formData.callsignLevelSelection, depth]
-                              setFormData({ ...formData, callsignLevelSelection: newSelection })
-                            }}
-                            className={`px-3 py-1 text-xs font-medium rounded-full border transition-colors ${
-                              selected
-                                ? 'bg-primary-100 text-primary-800 border-primary-300 dark:bg-primary-900 dark:text-primary-200'
-                                : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50 dark:bg-gray-600 dark:text-gray-300 dark:border-gray-500 dark:hover:bg-gray-500'
-                            }`}
-                          >
-                            {formatLevelLabel(depth, prefixesForDepth)}
-                          </button>
-                        )
-                      })}
-                    </div>
-                    {formData.callsignLevelSelection.length > 0 && formData.callsignLevelSelection.length < (maxTeamDepth || 5) && (
-                      <p className="text-xs text-gray-600 dark:text-gray-300 mt-1">
-                        Currently selected: {formData.callsignLevelSelection.slice().sort((a, b) => a - b).map(d => `Level ${d}`).join(', ')}
-                      </p>
-                    )}
-                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                      Which Team-Depth levels to include in generated callsigns for this Organisation's hierarchy.
-                    </p>
-                  </div>
-
-                  {/*
-                    takserver-enrollment Requirement 6.1/6.2/7.1/7.2/9.7
-                    (task 5.5): the Pseudonymous_Username_Policy control.
-                    Organisation-only, mirroring the Callsign Level
-                    Selection block above -- rendered only inside this
-                    same `!formData.parentTeamId` fragment, never for a
-                    Sub_Team.
-
-                    The INPUT is disabled only when editing an EXISTING
-                    Organisation (`disabled={!!editingTeam}` below) -- it
-                    stays freely editable while the Organisation is still
-                    being created. The FieldLockIndicator is a SEPARATE
-                    question from that: `locked` states whether the field
-                    can EVER be changed once the Organisation exists, which
-                    is a fixed fact about this field independent of which
-                    mode the dialog is currently in. That is why Prefix and
-                    TAK Color both pass `locked={true}` unconditionally
-                    (see their own FieldLockIndicators above) rather than
-                    keying it to `editingTeam` -- and this control follows
-                    the same convention. Bugfix: it previously passed
-                    `locked={!!editingTeam}`, which showed a GREEN OPEN
-                    lock while creating, directly contradicting the "This
-                    cannot be changed once the Organisation is created"
-                    text rendered a few lines below it.
-                  */}
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                      Pseudonymous Usernames
-                      <FieldLockIndicator
-                        locked={true}
-                        lockedReason="Cannot be changed after the Organisation is created: switching this policy would require every existing member's username to change, invalidating every certificate Common Name and every device record in the Organisation, and forcing every device to re-enroll"
-                      />
-                    </label>
-                    <div className="flex items-start">
-                      <input
-                        type="checkbox"
-                        id="pseudonymousUsernames"
-                        checked={formData.pseudonymousUsernames}
-                        disabled={!!editingTeam}
-                        onChange={(e) => setFormData({ ...formData, pseudonymousUsernames: e.target.checked })}
-                        className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded mt-1 disabled:opacity-50"
-                      />
-                      <label
-                        htmlFor="pseudonymousUsernames"
-                        className={`ml-3 text-sm font-medium text-gray-700 dark:text-gray-300 ${editingTeam ? 'opacity-50' : ''}`}
-                      >
-                        Give new members usernames that carry no personal information
-                      </label>
-                    </div>
-                    {/*
-                      Requirement 8.2/8.3 (task 5.5, since amended): the
-                      Pseudonymity_Scope statement, in TEXT (never colour
-                      alone). Must NOT describe the policy as "anonymity"
-                      and must NOT claim TAK Team Manager holds no
-                      personally identifying information -- it still
-                      stores every member's first name, last name and
-                      email, and an operator can always re-identify a
-                      member from that record. The pseudonymity is
-                      against TAK Server and other TAK users only.
-
-                      The CloudTAK/WebTAK caveat this paragraph used to
-                      carry (Criterion 16.4 in the original
-                      takserver-enrollment spec: that connection path
-                      built the certificate Common Name/clientUid and the
-                      CoT uid from the member's EMAIL rather than their
-                      username, defeating the pseudonymity entirely for a
-                      CloudTAK/WebTAK member) is REMOVED -- that defeat has
-                      since been fixed upstream in the CloudTAK fork
-                      (`api/stateless/lib/authentik-provider.ts`,
-                      `api/common/connection-config.ts`), which now builds
-                      all three of those from the Authentik username, same
-                      as every other connection path. A pseudonymous
-                      member's CloudTAK/WebTAK session is pseudonymised
-                      exactly like their native ATAK/iTAK/WinTAK one.
-                    */}
-                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                      When enabled, each new member's TAK username (and therefore their certificate name) is a random identifier instead of one derived from their email or name. This is <strong>not anonymity</strong>: TAK Team Manager still stores the member's first name, last name and email address, so an operator can always re-identify them from that record. The protection is only against TAK Server and other TAK users seeing who a member is.
-                    </p>
-                    {!editingTeam && (
-                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                        This cannot be changed once the Organisation is created.
-                      </p>
-                    )}
-                  </div>
-                </>
-              )}
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                  Callsign Name Format
-                  <FieldLockIndicator
-                    locked={!!formData.parentTeamId}
-                    lockedReason="Sub-teams always inherit callsign name format from their parent team"
-                  />
-                </label>
-                <select
-                  value={formData.callsignNameFormat}
-                  onChange={formData.parentTeamId ? undefined : (e) => setFormData({...formData, callsignNameFormat: e.target.value})}
-                  className={`input w-full ${formData.parentTeamId ? 'bg-gray-100 dark:bg-gray-600 text-gray-500' : ''}`}
-                  disabled={!!formData.parentTeamId}
-                >
-                  <option value="full_name">Full Name (John Doe)</option>
-                  <option value="first_initial_last">First Initial + Last Name (J Doe)</option>
-                  <option value="first_last_initial">First Name + Last Initial (John D)</option>
-                  <option value="first_initial_dot_last">First Initial + Dot + Last Name (J.Doe)</option>
-                  <option value="user_defined">User Defined (Custom per-member suffix)</option>
-                </select>
-                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                  {formData.parentTeamId ? 'Sub-teams inherit callsign name format from parent team' :
-                   'How user names will appear in callsigns for this team hierarchy.'}
-                </p>
-                {!formData.parentTeamId && formData.callsignNameFormat === 'user_defined' && (
-                  <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
-                    New members will require a manually entered suffix
-                  </p>
-                )}
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                  TAK Colour
-                  <FieldLockIndicator
-                    locked={true}
-                    lockedReason={formData.parentTeamId ? 'Sub-teams always inherit TAK colour from their parent team' : 'Cannot be changed after the team is created'}
-                  />
-                </label>
-                <select
-                  value={formData.color}
-                  onChange={editingTeam || formData.parentTeamId ? undefined : (e) => setFormData({...formData, color: e.target.value})}
-                  className={`input w-full ${editingTeam || formData.parentTeamId ? 'bg-gray-100 dark:bg-gray-600 text-gray-500' : ''}`}
-                  disabled={!!(editingTeam || formData.parentTeamId)}
-                >
-                  {Object.keys(colorMappings).length > 0 ? (
-                    Object.entries(colorMappings).map(([color, organization]) => (
-                      <option key={color} value={color}>
-                        {organization && organization.trim() !== '' ? organization : color}
-                      </option>
-                    ))
-                  ) : (
-                    [
-                      { color: 'Yellow', org: 'Hato Hone St John' },
-                      { color: 'Cyan', org: 'Health New Zealand (Te Whatu Ora)' },
-                      { color: 'Green', org: 'Department of Conservation (DOC)' },
-                      { color: 'Red', org: 'Fire and Emergency New Zealand (FENZ)' },
-                      { color: 'Purple', org: 'National Emergency Management Agency (NEMA)' },
-                      { color: 'Orange', org: 'Land Search and Rescue New Zealand (LandSAR)' },
-                      { color: 'Blue', org: 'New Zealand Police' },
-                      { color: 'White', org: 'Wellington Free Ambulance' },
-                      { color: 'Maroon', org: 'New Zealand Red Cross' },
-                      { color: 'Dark Blue', org: 'New Zealand Customs Service' },
-                      { color: 'Teal', org: 'Coastguard New Zealand' },
-                      { color: 'Brown', org: 'New Zealand Defence Force (NZDF)' }
-                    ].map(({ color, org }) => (
-                      <option key={color} value={color}>
-                        {org}
-                      </option>
-                    ))
-                  )}
-                </select>
-                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                  {editingTeam ? 'TAK colour cannot be changed after team creation' :
-                   formData.parentTeamId ? 'Sub-teams inherit TAK colour from parent team' :
-                   'TAK colour designation for team members.'}
-                </p>
               </div>
             </div>
+          </div>
 
+          {/* Section 2: Callsign Structure -- everything that feeds
+              callsign generation for this team's hierarchy, grouped
+              together rather than split across the old two-column
+              layout. Callsign Level Selection is Organisation-only. */}
+          <div>
+            <SectionHeading>Callsign Structure</SectionHeading>
             <div className="space-y-6">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                  Description
-                  <FieldLockIndicator
-                    locked={false}
-                    editableReason="Editable at any time, before or after creation"
-                  />
-                </label>
-                <textarea
-                  value={formData.description}
-                  onChange={(e) => setFormData({...formData, description: e.target.value})}
-                  className="input w-full"
-                  rows={4}
-                  placeholder="Enter team description and purpose"
-                />
-              </div>
+              {!formData.parentTeamId && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Callsign Level Selection
+                    <FieldLockIndicator
+                      locked={false}
+                      editableReason="Editable at any time, before or after creation"
+                    />
+                    <InfoTooltip text="Which Team-Depth levels are included in generated callsigns across this Organisation's whole hierarchy." />
+                  </label>
+                  <div className="flex flex-wrap gap-2">
+                    {Array.from({ length: maxTeamDepth || 0 }, (_, i) => i + 1).map((depth) => {
+                      const selected = formData.callsignLevelSelection.includes(depth)
+                      const prefixesForDepth = callsignLevelOptions.get(depth) || []
+                      return (
+                        <button
+                          key={depth}
+                          type="button"
+                          onClick={() => {
+                            const newSelection = selected
+                              ? formData.callsignLevelSelection.filter(d => d !== depth)
+                              : [...formData.callsignLevelSelection, depth]
+                            setFormData({ ...formData, callsignLevelSelection: newSelection })
+                          }}
+                          // Bugfix (mobile tap target too small): py-2.5
+                          // (was py-1) -- text-xs's 16px line-height plus
+                          // the old 8px vertical padding gave a ~24px-tall
+                          // pill; py-2.5 (20px) brings it to a real ~36px
+                          // tap target while keeping the compact px-3
+                          // horizontal padding these need to fit several
+                          // pills per row.
+                          className={`inline-flex items-center gap-1 px-3 py-2.5 text-xs font-medium rounded-full border transition-colors ${
+                            selected
+                              ? 'bg-primary-100 text-primary-800 border-primary-300 dark:bg-primary-900 dark:text-primary-200'
+                              : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50 dark:bg-gray-600 dark:text-gray-300 dark:border-gray-500 dark:hover:bg-gray-500'
+                          }`}
+                        >
+                          {selected && <CheckIcon className="h-3 w-3" aria-hidden="true" />}
+                          {formatLevelLabel(depth, prefixesForDepth)}
+                        </button>
+                      )
+                    })}
+                  </div>
+                  {formData.callsignLevelSelection.length > 0 && formData.callsignLevelSelection.length < (maxTeamDepth || 5) && (
+                    <p className="text-xs text-gray-600 dark:text-gray-300 mt-1">
+                      Currently selected: {formData.callsignLevelSelection.slice().sort((a, b) => a - b).map(d => `Level ${d}`).join(', ')}
+                    </p>
+                  )}
+                </div>
+              )}
 
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                  Visibility
-                  <FieldLockIndicator
-                    locked={false}
-                    editableReason="Editable at any time, before or after creation"
-                  />
-                </label>
-                <select
-                  value={formData.visibility}
-                  onChange={(e) => setFormData({...formData, visibility: e.target.value})}
-                  className="input w-full"
-                >
-                  <option value="private">Private - Only visible to members</option>
-                  <option value="public">Public - Visible to all users</option>
-                </select>
-              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Callsign Name Format
+                    <FieldLockIndicator
+                      locked={!!formData.parentTeamId}
+                      lockedReason="Sub-teams always inherit callsign name format from their parent team"
+                    />
+                    <InfoTooltip text="How each member's name appears in the Name segment of their generated callsign. Sub-teams always inherit this from their Organisation." />
+                  </label>
+                  <select
+                    value={formData.callsignNameFormat}
+                    onChange={formData.parentTeamId ? undefined : (e) => setFormData({...formData, callsignNameFormat: e.target.value})}
+                    className={`input w-full ${formData.parentTeamId ? 'bg-gray-100 dark:bg-gray-600 text-gray-500' : ''}`}
+                    disabled={!!formData.parentTeamId}
+                  >
+                    <option value="full_name">Full Name (John Doe)</option>
+                    <option value="first_initial_last">First Initial + Last Name (J Doe)</option>
+                    <option value="first_last_initial">First Name + Last Initial (John D)</option>
+                    <option value="first_initial_dot_last">First Initial + Dot + Last Name (J.Doe)</option>
+                    <option value="user_defined">User Defined (Custom per-member suffix)</option>
+                  </select>
+                  {!formData.parentTeamId && formData.callsignNameFormat === 'user_defined' && (
+                    <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
+                      New members will require a manually entered suffix
+                    </p>
+                  )}
+                </div>
 
-              <div className="space-y-3">
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                  Team Settings
-                  <FieldLockIndicator
-                    locked={false}
-                    editableReason="Editable at any time, before or after creation"
-                  />
-                </label>
-                <div className="flex items-start">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    TAK Colour
+                    <FieldLockIndicator
+                      locked={true}
+                      lockedReason={formData.parentTeamId ? 'Sub-teams always inherit TAK colour from their parent team' : 'Cannot be changed after the team is created'}
+                    />
+                    {/* Bugfix: right-hand column of the Callsign
+                        Structure grid -- same right-edge overflow as
+                        Parent Team above. */}
+                    <InfoTooltip text="The TAK colour designation for this team's members. Sub-teams always inherit this from their Organisation, and it cannot be changed once a team is created." side="left" />
+                  </label>
+                  <select
+                    value={formData.color}
+                    onChange={editingTeam || formData.parentTeamId ? undefined : (e) => setFormData({...formData, color: e.target.value})}
+                    className={`input w-full ${editingTeam || formData.parentTeamId ? 'bg-gray-100 dark:bg-gray-600 text-gray-500' : ''}`}
+                    disabled={!!(editingTeam || formData.parentTeamId)}
+                  >
+                    {Object.keys(colorMappings).length > 0 ? (
+                      Object.entries(colorMappings).map(([color, organization]) => (
+                        <option key={color} value={color}>
+                          {organization && organization.trim() !== '' ? organization : color}
+                        </option>
+                      ))
+                    ) : (
+                      [
+                        { color: 'Yellow', org: 'Hato Hone St John' },
+                        { color: 'Cyan', org: 'Health New Zealand (Te Whatu Ora)' },
+                        { color: 'Green', org: 'Department of Conservation (DOC)' },
+                        { color: 'Red', org: 'Fire and Emergency New Zealand (FENZ)' },
+                        { color: 'Purple', org: 'National Emergency Management Agency (NEMA)' },
+                        { color: 'Orange', org: 'Land Search and Rescue New Zealand (LandSAR)' },
+                        { color: 'Blue', org: 'New Zealand Police' },
+                        { color: 'White', org: 'Wellington Free Ambulance' },
+                        { color: 'Maroon', org: 'New Zealand Red Cross' },
+                        { color: 'Dark Blue', org: 'New Zealand Customs Service' },
+                        { color: 'Teal', org: 'Coastguard New Zealand' },
+                        { color: 'Brown', org: 'New Zealand Defence Force (NZDF)' }
+                      ].map(({ color, org }) => (
+                        <option key={color} value={color}>
+                          {org}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Section 3: Membership Policy -- who can join, how they're
+              identified, and how visible this team is. Pseudonymous
+              Usernames moved here (from its old home beside Callsign
+              Level Selection) since it governs identity/membership, not
+              callsign structure. */}
+          <div>
+            <SectionHeading>Membership Policy</SectionHeading>
+            <div className="space-y-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Visibility
+                    <FieldLockIndicator
+                      locked={false}
+                      editableReason="Editable at any time, before or after creation"
+                    />
+                    <InfoTooltip text="Public teams are visible to all users browsing Orgs & Teams. Private teams are visible only to their own members and admins." />
+                  </label>
+                  <select
+                    value={formData.visibility}
+                    onChange={(e) => setFormData({...formData, visibility: e.target.value})}
+                    className="input w-full"
+                  >
+                    <option value="private">Private - Only visible to members</option>
+                    <option value="public">Public - Visible to all users</option>
+                  </select>
+                </div>
+
+                {/* Bugfix (mobile tap target too small): the outer
+                    element is now the `<label>` itself (was a plain
+                    `<div>` containing a separate `<label>` beside the
+                    checkbox) -- clicking ANYWHERE in this padded row,
+                    not just the bare 16px checkbox square or the label
+                    text's own bounds, now toggles the field. `-m-2 p-2`
+                    keeps the row's visible size/alignment unchanged
+                    (same technique InfoTooltip.jsx/OrgDomainManager.jsx
+                    use) while growing the actual clickable area. */}
+                <label htmlFor="canJoin" className="flex items-start pt-8 -m-2 p-2 rounded-lg cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50">
                   <input
                     type="checkbox"
                     id="canJoin"
@@ -659,40 +799,210 @@ export default function TeamFormDialog({
                     className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded mt-1"
                   />
                   <div className="ml-3">
-                    <label htmlFor="canJoin" className="text-sm text-gray-700 dark:text-gray-300 font-medium">
+                    <span className="text-sm text-gray-700 dark:text-gray-300 font-medium">
                       Allow join requests
-                    </label>
-                    <p className="text-xs text-gray-500 dark:text-gray-400">
-                      Users can request to join this team through the public interface.
-                    </p>
+                      {/* Bugfix: since the whole row is now a <label>
+                          (see above), a tap anywhere in it -- including
+                          on these two disclosure-only icons -- would
+                          otherwise ALSO toggle the checkbox (a bare
+                          `<span>` is not "labelable content" the browser
+                          excludes from a label's click-forwarding).
+                          `stopPropagation` keeps the icons' own hover/
+                          focus tooltips working while preventing an
+                          accidental toggle. */}
+                      <span onClick={(e) => e.stopPropagation()} className="inline-flex">
+                        <FieldLockIndicator
+                          locked={false}
+                          editableReason="Editable at any time, before or after creation"
+                        />
+                        {/* Bugfix: right-hand column of the Membership
+                            Policy grid -- same right-edge overflow as
+                            Parent Team/TAK Colour above. */}
+                        <InfoTooltip text="Lets users request to join this team through the public interface. Disabling this after a sign-up code was issued permanently deletes that code." side="left" />
+                      </span>
+                    </span>
                   </div>
-                </div>
+                </label>
+              </div>
+
+              {/*
+                takserver-enrollment Requirement 6.1/6.2/7.1/7.2/9.7
+                (task 5.5): the Pseudonymous_Username_Policy control.
+                Organisation-only, rendered only inside this same
+                `!formData.parentTeamId` fragment, never for a Sub_Team.
+
+                The INPUT is disabled only when editing an EXISTING
+                Organisation (`disabled={!!editingTeam}` below) -- it
+                stays freely editable while the Organisation is still
+                being created. The FieldLockIndicator is a SEPARATE
+                question from that: `locked` states whether the field
+                can EVER be changed once the Organisation exists, which
+                is a fixed fact about this field independent of which
+                mode the dialog is currently in -- so it passes
+                `locked={true}` unconditionally rather than keying it to
+                `editingTeam` (bugfix: it previously passed
+                `locked={!!editingTeam}`, which showed a GREEN OPEN lock
+                while creating, directly contradicting the "cannot be
+                changed" fact this field carries).
+
+                Requirement 8.2/8.3 (task 5.5, since amended): the
+                Pseudonymity_Scope tooltip text below must NOT describe
+                the policy as "anonymity" and must NOT claim TAK Team
+                Manager holds no personally identifying information --
+                it still stores every member's first name, last name and
+                email, so an operator can always re-identify a member
+                from that record. The pseudonymity is against TAK Server
+                and other TAK users only. This is stated in the tooltip
+                text (still real text, disclosed on hover/focus) rather
+                than as a standalone paragraph, matching every other
+                field's explanatory treatment in this modal now.
+              */}
+              <div>
+                {/* Bugfix (mobile tap target too small): the outer
+                    element is now the `<label>` itself (was a plain
+                    `<div>` with the checkbox and a separate `<label>`
+                    as siblings) -- same `-m-2 p-2` enlarged-hit-box
+                    technique as the "Allow join requests" checkbox
+                    above. A disabled checkbox (editing an existing
+                    Organisation) still renders `cursor-not-allowed`
+                    rather than `cursor-pointer`, and clicking the label
+                    is a no-op for a disabled control, matching native
+                    behaviour. */}
+                <label
+                  htmlFor="pseudonymousUsernames"
+                  className={`flex items-start -m-2 p-2 rounded-lg ${editingTeam ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50'}`}
+                >
+                  <input
+                    type="checkbox"
+                    id="pseudonymousUsernames"
+                    checked={formData.pseudonymousUsernames}
+                    disabled={!!editingTeam}
+                    onChange={(e) => setFormData({ ...formData, pseudonymousUsernames: e.target.checked })}
+                    className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded mt-1 disabled:opacity-50"
+                  />
+                  <span
+                    className={`ml-3 text-sm font-medium text-gray-700 dark:text-gray-300 ${editingTeam ? 'opacity-50' : ''}`}
+                  >
+                    Give new members usernames that carry no personal information
+                    {/* Bugfix: same click.stopPropagation() reasoning as
+                        the "Allow join requests" checkbox above -- these
+                        two disclosure-only icons must not toggle the
+                        checkbox when tapped. */}
+                    <span onClick={(e) => e.stopPropagation()} className="inline-flex">
+                      <FieldLockIndicator
+                        locked={true}
+                        lockedReason="Cannot be changed after the Organisation is created: switching this policy would require every existing member's username to change, invalidating every certificate Common Name and every device record in the Organisation, and forcing every device to re-enroll"
+                      />
+                      <InfoTooltip text={<>Each new member's TAK username (and certificate name) becomes a random identifier instead of one derived from their email or name. This is <strong>not anonymity</strong>: TAK Team Manager still stores the member's first name, last name and email address, so an operator can always re-identify them from that record. The protection is only against TAK Server and other TAK users seeing who a member is. This cannot be changed once the Organisation is created.</>} />
+                    </span>
+                  </span>
+                </label>
               </div>
             </div>
           </div>
 
-          <div className="flex justify-end space-x-3 pt-6 mt-6 border-t border-gray-200 dark:border-gray-700">
-            <button
-              type="button"
-              onClick={onClose}
-              className="btn-secondary px-6 py-2"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={submitting}
-              className="btn-primary px-6 py-2"
-            >
-              {(() => {
-                if (submitting) {
-                  return editingTeam ? `Updating ${teamLabel}...` : `Creating ${teamLabel}...`
-                }
-                return editingTeam ? `Update ${teamLabel}` : `Create ${teamLabel}`
-              })()}
-            </button>
+          {/* Section 4: Description -- free text, standalone since it
+              doesn't fit a policy group. */}
+          <div>
+            <SectionHeading>Description</SectionHeading>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                Description
+                <FieldLockIndicator
+                  locked={false}
+                  editableReason="Editable at any time, before or after creation"
+                />
+                <InfoTooltip text="A short description of this team's purpose, shown to admins and to prospective members considering a join request." />
+              </label>
+              <textarea
+                value={formData.description}
+                onChange={(e) => setFormData({...formData, description: e.target.value})}
+                className="input w-full"
+                rows={4}
+                placeholder="Enter team description and purpose"
+              />
+            </div>
           </div>
+
         </form>
+        </div>
+
+        {/* Bugfix (#13): "Allowed Email Domains" (OrgDomainManager), now
+            its own tab rather than a nested section beneath the main
+            form -- see this component's own doc comment for why it keeps
+            its own independent fetch/save, decoupled from the form
+            above. Organisation-only (no parentTeamId) and edit-only (an
+            Organisation must already exist to have an `id` this can
+            fetch/save against) -- the SAME gate that shows the tab bar
+            itself, so this is never reachable without a way to navigate
+            to it. */}
+        {editingTeam && !formData.parentTeamId && activeFormTab === 'domains' && (
+          <div className="px-6 pb-6 pt-6">
+            <OrgDomainManager orgId={editingTeam.id} isAdmin={isAdmin} />
+          </div>
+        )}
+
+        {/* region-channel-tiers: Channel Access tab, Global_Manager-only
+            (same gate as the tab button itself, plus ChannelAccessManager's
+            own isGlobalManager no-op as defense in depth). `org={editingTeam}`
+            passes the CURRENTLY STORED team row -- not `formData`, which
+            only ever carries the main form's fields -- so this reads the
+            Organisation's actual response_channel_access/
+            support_channel_access straight from the same object the page's
+            list already has, no extra fetch needed. */}
+        {editingTeam && !formData.parentTeamId && isGlobalManager && activeFormTab === 'channelAccess' && (
+          <div className="px-6 pb-6 pt-6">
+            <ChannelAccessManager
+              org={editingTeam}
+              isGlobalManager={isGlobalManager}
+              onSaved={onSaved}
+            />
+          </div>
+        )}
+
+        </div>
+        {/* End of the scrolling region (`flex-1 overflow-y-auto`) opened
+            above the main form -- the footer below stays OUTSIDE it,
+            fixed at the bottom of the dialog on every tab. */}
+
+        {/* Bugfix: Cancel/Update footer, moved OUTSIDE the `hidden`
+            main-form `<div>` so it is visible on every tab, not just
+            "Team Settings" -- it previously lived inside the `<form>`
+            itself, so switching to "Allowed Email Domains" or "Channel
+            Access" hid the only way to close or save the dialog at all.
+            The submit button now targets the main form by id
+            (`form="team-settings-form"`) rather than relying on
+            `type="submit"` inside that form's own tree, since it no
+            longer lives inside it; the form itself is still mounted (only
+            visually hidden via `hidden`), so this still runs the SAME
+            `handleSubmit` -- including the can-join confirmation gate --
+            regardless of which tab is showing. Allowed Email Domains and
+            Channel Access each keep their own independent Save button
+            (OrgDomainManager/ChannelAccessManager's own `dirty`-gated
+            buttons) for their own separately-saved resource; this footer
+            only ever submits the Team Settings form. */}
+        <div className="flex justify-end space-x-3 px-6 py-4 border-t border-gray-200 dark:border-gray-700 flex-shrink-0">
+          <button
+            type="button"
+            onClick={onClose}
+            className="btn-secondary px-6 py-2"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            form="team-settings-form"
+            disabled={submitting}
+            className="btn-primary px-6 py-2"
+          >
+            {(() => {
+              if (submitting) {
+                return editingTeam ? `Updating ${teamLabel}...` : `Creating ${teamLabel}...`
+              }
+              return editingTeam ? `Update ${teamLabel}` : `Create ${teamLabel}`
+            })()}
+          </button>
+        </div>
 
         {/* Disable join requests confirmation modal */}
         {showCanJoinConfirm && (

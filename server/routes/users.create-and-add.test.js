@@ -710,6 +710,83 @@ describe('POST /api/users/callsign-suffix-preview', () => {
     expect(mockLoggerError).toHaveBeenCalled();
   });
 
+  // Bugfix (AddTeamDeviceDialog live preview/collision-check, bug #6): a
+  // Team_Owned_Device has no first/last name, so this preview route
+  // degrades to the same "no default, just check what was typed" shape
+  // the Pseudonymous_Username_Policy branch already implements, WHEN BOTH
+  // names are omitted -- regardless of the Organisation's own policy.
+  describe('device-shaped preview: both firstName/lastName omitted (bug #6)', () => {
+    beforeEach(() => {
+      // A non-pseudonymous Organisation -- this branch must trigger on
+      // name-absence alone, independent of the policy flag.
+      pool.query.mockResolvedValue({
+        rows: [{ id: 3, parent_team_id: null, pseudonymous_usernames: false }]
+      });
+    });
+
+    it('reports required: true and never calls resolveNewUserIdentity for a blank callsignSuffix', async () => {
+      const res = await request(app).post('/api/users/callsign-suffix-preview').send({ teamId: 7 });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ suffix: null, required: true, conflict: null });
+      expect(UserProvisioningService.resolveNewUserIdentity).not.toHaveBeenCalled();
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it('reports the trimmed supplied suffix as clean with no mint attempt when it is unique', async () => {
+      const res = await request(app)
+        .post('/api/users/callsign-suffix-preview')
+        .send({ teamId: 7, callsignSuffix: '  Tanker1  ' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ suffix: 'Tanker1', required: false, conflict: null });
+      expect(UserProvisioningService.resolveNewUserIdentity).not.toHaveBeenCalled();
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it('reports a conflict when the supplied suffix collides with an existing team member/device', async () => {
+      // checkCallsignSuffixUniqueness (called by this branch) delegates to
+      // the REAL Team.getFullMemberList, which delegates to Team.getMembers
+      // -- an unmocked pool.query SELECT keyed by a WHERE clause distinct
+      // from the getAncestorChain SELECT above, so both are dispatched
+      // through one implementation reading the SQL text.
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('team_memberships')) {
+          return Promise.resolve({ rows: [{ id: 99, callsign_suffix: 'Tanker1', role: 'member' }] });
+        }
+        return Promise.resolve({ rows: [{ id: 3, parent_team_id: null, pseudonymous_usernames: false }] });
+      });
+
+      const res = await request(app)
+        .post('/api/users/callsign-suffix-preview')
+        .send({ teamId: 7, callsignSuffix: 'Tanker1' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.suffix).toBe('Tanker1');
+      expect(res.body.conflict).toEqual({
+        value: 'Tanker1',
+        message: expect.stringContaining('Tanker1')
+      });
+      expect(UserProvisioningService.resolveNewUserIdentity).not.toHaveBeenCalled();
+    });
+
+    it('does not take this branch when only one of firstName/lastName is supplied', async () => {
+      UserProvisioningService.resolveNewUserIdentity.mockResolvedValue({
+        username: undefined,
+        callsignSuffix: 'N.User',
+        pseudonymous: false,
+        claimId: null
+      });
+
+      const res = await request(app)
+        .post('/api/users/callsign-suffix-preview')
+        .send({ teamId: 7, firstName: 'New' });
+
+      expect(res.status).toBe(200);
+      expect(UserProvisioningService.resolveNewUserIdentity).toHaveBeenCalled();
+    });
+  });
+
   describe('Pseudonymous_Username_Policy branch (task 5.3)', () => {
     beforeEach(() => {
       // A single Organisation row with the policy enabled, matching what

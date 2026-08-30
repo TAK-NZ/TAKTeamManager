@@ -85,7 +85,14 @@ vi.mock('../services/api', () => ({
   deviceManagementAPI: { probeEnabled: vi.fn() },
   globalChannelsAPI: {
     getBchChannels: vi.fn(),
-    getRegionChannels: vi.fn()
+    getRegionChannels: vi.fn(),
+    // Bugfix (region-channel-tiers): GlobalChannels.jsx now calls this on
+    // mount to decide whether to show its "Seed Standard Region
+    // Channels" action. Stubbed even though this contrast test never
+    // asserts on it, since a named import of a missing export from a
+    // mocked ES module is a load-time failure the moment the component
+    // calls it.
+    getRegionSeedStatus: vi.fn()
   }
 }))
 
@@ -159,12 +166,13 @@ function declaredColors(element) {
 /**
  * Whether an element paints a RESTING background of its own.
  *
- * Resting specifically, and the distinction is load-bearing: the
- * Expandable_Channel_Row's toggle button declares `hover:bg-gray-200
- * dark:hover:bg-gray-600` and no resting background at all, so a
- * "declares any background" test would identify the BUTTON as the row and
- * then find no heading and no description inside it. The row is the box that
- * paints when nothing is hovered.
+ * Resting specifically, and the distinction is load-bearing: a Folder_Row
+ * or Expandable_Channel_Row's own inner `<div className="flex items-center
+ * flex-1">` wrapper carries no background at all, only `hover:` classes sit
+ * on the outer row alongside its resting `bg-gray-100 dark:bg-gray-700`, so
+ * a "declares any background" test would need to skip straight past any
+ * backgroundless wrapper on the way up. The row is the box that paints when
+ * nothing is hovered.
  */
 const paintsRestingBackground = (element) => {
   const { bg } = declaredColors(element)
@@ -225,11 +233,12 @@ function foregroundOf(element, description) {
 /**
  * The four background colours an element is painted against.
  *
- * This one DOES walk the ancestor chain, per layer, because that is precisely
- * how the Expandable_Channel_Row's toggle button works: the button declares
- * `hover:bg-gray-200 dark:hover:bg-gray-600` and no resting background at
- * all, so its resting background is the row's underneath it. Nearest
- * declaration per layer wins.
+ * This one DOES walk the ancestor chain, per layer, because the chevron and
+ * heading are nested a level or two inside the row's own backgroundless
+ * `<div className="flex items-center flex-1">` wrapper -- their nearest
+ * declared background is the outer row `<div>`'s `bg-gray-100
+ * dark:bg-gray-700` / `hover:bg-gray-200 dark:hover:bg-gray-600`, not
+ * anything on the immediate parent. Nearest declaration per layer wins.
  */
 function backgroundOf(element, root, description) {
   const declaredPerElement = chainFrom(element, root).map(declaredColors)
@@ -419,23 +428,31 @@ function findFolderRows(container, page, glyph) {
 /**
  * Every Expandable_Channel_Row in a container, measured.
  *
- * Found from its TOGGLE BUTTON -- a `<button>` containing a Disclosure_Chevron
- * (see `findChevron` above). That button is where the hover background lives: the row itself
- * carries no `hover:` class at all, and `hover:bg-gray-200
- * dark:hover:bg-gray-600` sits on the button, so the chevron inside it is
- * measured against the button's hover and the row's resting background. That
- * is why the background resolution above walks the ancestor chain per layer
- * rather than reading one element.
+ * Found from its Disclosure_Chevron directly (see `findChevron` above), the
+ * same way `findFolderRows` finds a Folder_Row from its Folder_Icon --
+ * bugfix (mobile tap target too small): the row's whole box is now the
+ * click/hover target (`cursor-pointer hover:bg-gray-200
+ * dark:hover:bg-gray-600` sit on the row `<div>` itself, alongside its
+ * resting `bg-gray-100 dark:bg-gray-700`), not a small dedicated toggle
+ * `<button>` wrapping only the chevron -- so there is no button left to
+ * anchor the search on. A chevron-bearing row still has to be told apart
+ * from a Folder_Row, which ALSO contains a chevron: a Folder_Row's row
+ * additionally contains a Folder_Icon, and an Expandable_Channel_Row's does
+ * not (it renders a `SignalIcon`, matched only incidentally as "not a
+ * folder"), so that is the exclusion this loop applies.
  */
 function findExpandableRows(container, page, glyph) {
   const rows = []
+  const isChevronSvg = (svg) => hasToken(svg, GRAY_TEXT) && classesOf(svg).includes('transition-transform')
 
-  for (const button of Array.from(container.querySelectorAll('button'))) {
-    const chevron = findChevron(svgsIn(button))
-    if (chevron === undefined) continue
-
-    const row = nearestRowBox(button, container)
+  for (const chevron of svgsIn(container).filter(isChevronSvg)) {
+    const row = nearestRowBox(chevron, container)
     if (row === null) continue
+    if (rows.some((measuredRow) => measuredRow.element === row)) continue
+
+    // A Folder_Row also contains a chevron; only a row WITHOUT a Folder_Icon
+    // is an Expandable_Channel_Row.
+    if (svgsIn(row).some(isFolderIconShape)) continue
 
     const heading = headingIn(row)
     const description = descriptionIn(row)
@@ -451,7 +468,8 @@ function findExpandableRows(container, page, glyph) {
       background,
       step: measureStep(background),
       icon: null,
-      // The toggle button's own hover is the background this chevron sits on.
+      // The row itself carries the hover background now (see the function
+      // doc comment above), the same as a Folder_Row's own chevron.
       chevron: measurePair(
         foregroundOf(chevron, 'an Expandable_Channel_Row Disclosure_Chevron'),
         backgroundOf(chevron, container, 'an Expandable_Channel_Row Disclosure_Chevron')
@@ -537,12 +555,27 @@ const DASHBOARD_CHANNEL_DESCRIPTIONS = [
   { name: 'tak_shared', display_name: 'Shared', description: 'Shared parent channel' }
 ]
 
+// bch-channel-category: GlobalChannels.jsx now renders TWO
+// bch_channels-derived sections (BCH, Utility) from this ONE fetch,
+// filtering by `channel.category` client-side -- see GlobalChannels.jsx's
+// `bchOnlyChannels`/`utlChannels`. One channel per category, each under a
+// folder-producing name DISTINCT from the other, so each section's
+// Folder_Row is measured independently rather than the two coincidentally
+// sharing one label (mirrors REGION_CHANNELS' own tier split below).
 const BCH_CHANNELS = [
-  { id: 1, name: 'Ops - Alpha', description: 'Alpha channel', created_by_name: 'Ada' }
+  { id: 1, name: 'Ops - Alpha', description: 'Alpha channel', created_by_name: 'Ada', category: 'BCH' },
+  { id: 4, name: 'Data - Packages', description: 'Data package delivery channel', created_by_name: 'Ada', category: 'UTL' }
 ]
 
+// region-channel-tiers: GlobalChannels.jsx now renders TWO region-derived
+// sections (Response, Support) from this ONE fetch, filtering by
+// `channel.tier` client-side -- see GlobalChannels.jsx's `responseChannels`/
+// `supportChannels`. One channel per tier, each under a folder-producing
+// name DISTINCT from the other, so each section's Folder_Row is measured
+// independently rather than the two coincidentally sharing one label.
 const REGION_CHANNELS = [
-  { id: 2, name: 'Region - North', description: 'North channel', created_by_name: 'Ada' }
+  { id: 2, name: 'North - Alpha', description: 'Alpha response channel', created_by_name: 'Ada', tier: 'response' },
+  { id: 3, name: 'South - Beta', description: 'Beta support channel', created_by_name: 'Ada', tier: 'support' }
 ]
 
 /**
@@ -692,9 +725,8 @@ describe('Channel_Tree_Row contrast: Dashboard.jsx (Reqs 5, 6, 7)', () => {
   })
 
   // -------------------------------------------------------------------------
-  // Criterion 5.7: the Disclosure_Chevron, in both row types. On the
-  // Expandable_Channel_Row the hover background comes from the toggle button
-  // rather than the row.
+  // Criterion 5.7: the Disclosure_Chevron, in both row types. Both rows'
+  // hover background lives on the row itself.
   // -------------------------------------------------------------------------
   describe('Disclosure_Chevron in a Folder_Row (Criterion 5.7)', () => {
     for (const layer of LAYERS) {
@@ -823,21 +855,28 @@ describe('Channel_Tree_Row contrast: GlobalChannels.jsx (Reqs 5, 6, 7)', () => {
       }
     })
 
-    it('found the folder rows in BOTH channel sections', () => {
-      // The page renders one tree per section, from two separate fetches. A
-      // fixture that only reached one of them would measure half the page.
+    it('found the folder rows in ALL FOUR channel sections (BCH, Utility, Response, Support)', () => {
+      // The page renders four trees (BCH, Utility, Response, Support) --
+      // BCH/Utility both come from the ONE getBchChannels fetch, split
+      // client-side by `channel.category`, and Response/Support both come
+      // from the ONE getRegionChannels fetch, split client-side by
+      // `channel.tier`, so a fixture/filter mismatch on either category or
+      // either tier would measure fewer than four folders.
       const labels = measured.collapsed.folderRows.map((row) => row.label)
       expect(labels).toContain('Ops')
-      expect(labels).toContain('Region')
+      expect(labels).toContain('Data')
+      expect(labels).toContain('North')
+      expect(labels).toContain('South')
     })
 
     it('did not mistake the section-header icons or a plain channel row\'s RadioIcon for a Folder_Icon', () => {
-      // `RadioIcon` heads both sections AND now sits on every channel row
-      // too (the channel-icon addition), and none of those are the folder
-      // GLYPH SHAPE the locator matches on -- so despite three RadioIcon
-      // sites in the fixture (two headers, one channel row: 'Ops - Alpha'),
-      // it still finds only the two real folders.
-      expect(measured.collapsed.folderRows).toHaveLength(2)
+      // `RadioIcon` heads all four sections AND now sits on every channel
+      // row too (the channel-icon addition), and none of those are the
+      // folder GLYPH SHAPE the locator matches on -- so despite the several
+      // RadioIcon sites in the fixture (four headers, two channel rows:
+      // 'Ops - Alpha', 'Data - Packages'), it still finds only the four
+      // real folders.
+      expect(measured.collapsed.folderRows).toHaveLength(4)
     })
   })
 

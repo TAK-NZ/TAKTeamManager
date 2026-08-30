@@ -35,9 +35,21 @@ router.get('/region', authenticateToken, authorize, async (req, res) => {
 });
 
 // Create BCH channel (global managers only)
+//
+// bch-channel-category: `category` ('BCH' or 'UTL') is OPTIONAL and
+// defaults to 'BCH' when omitted, unlike region channels' required
+// `tier` -- there is a real, meaningful default here (every pre-existing
+// caller means "BCH"), whereas a region channel has no analogous
+// default tier. GlobalChannelService.createBchChannel validates it
+// against the same two-value set the migration's CHECK constraint
+// enforces and throws before any INSERT if it's invalid, so this route
+// forwards the raw string through rather than duplicating an isIn()
+// list here that could drift from it -- mirroring the region-channel
+// route's own comment on this exact tradeoff.
 router.post('/bch', authenticateToken, authorize, [
   body('name').trim().isLength({ min: 1, max: 100 }),
-  body('description').optional().trim().isLength({ max: 500 })
+  body('description').optional().trim().isLength({ max: 500 }),
+  body('category').optional().isIn(['BCH', 'UTL'])
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -45,7 +57,7 @@ router.post('/bch', authenticateToken, authorize, [
   }
 
   try {
-    const { name, description } = req.body;
+    const { name, description, category } = req.body;
     
     // req.user.userId is already the local users.id (see
     // server/middleware/auth.js) -- no separate lookup by Authentik id is
@@ -53,13 +65,14 @@ router.post('/bch', authenticateToken, authorize, [
     // Authentik id), which is a different id space entirely.
     const result = await globalChannelService.createBchChannel({
       name,
-      description
+      description,
+      category
     }, req.user.userId);
     
     try {
       await pool.query(
         'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
-        [req.user.userId, 'global_channel.create_bch', 'bch_channel', result.channelId, JSON.stringify({ name })]
+        [req.user.userId, 'global_channel.create_bch', 'bch_channel', result.channelId, JSON.stringify({ name, category: category || 'BCH' })]
       );
     } catch (auditErr) {
       getLogger().error({ err: auditErr }, 'Failed to write audit log');
@@ -77,9 +90,18 @@ router.post('/bch', authenticateToken, authorize, [
 });
 
 // Create region channel (global managers only)
+//
+// region-channel-tiers: `tier` ('response' or 'support') is now REQUIRED
+// -- GlobalChannelService.createRegionChannel validates it against the
+// same two-value set the migration's CHECK constraint enforces and
+// throws before any INSERT if it's missing/invalid, so this route
+// forwards the raw string through and lets that validation be the single
+// source of truth rather than duplicating an isIn() list here that could
+// drift from it.
 router.post('/region', authenticateToken, authorize, [
   body('name').trim().isLength({ min: 1, max: 100 }),
-  body('description').optional().trim().isLength({ max: 500 })
+  body('description').optional().trim().isLength({ max: 500 }),
+  body('tier').isIn(['response', 'support'])
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -87,19 +109,20 @@ router.post('/region', authenticateToken, authorize, [
   }
 
   try {
-    const { name, description } = req.body;
+    const { name, description, tier } = req.body;
     
     // req.user.userId is already the local users.id -- see comment on the
     // BCH create route above.
     const result = await globalChannelService.createRegionChannel({
       name,
-      description
+      description,
+      tier
     }, req.user.userId);
     
     try {
       await pool.query(
         'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
-        [req.user.userId, 'global_channel.create_region', 'region_channel', result.channelId, JSON.stringify({ name })]
+        [req.user.userId, 'global_channel.create_region', 'region_channel', result.channelId, JSON.stringify({ name, tier })]
       );
     } catch (auditErr) {
       getLogger().error({ err: auditErr }, 'Failed to write audit log');
@@ -230,6 +253,53 @@ router.put('/region/:channelId', authenticateToken, authorize, [
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to update region channel');
     res.status(500).json({ error: 'Failed to update region channel' });
+  }
+});
+
+// Bugfix: reports whether the standard Response/Support region-channel
+// seed set (see the route below) is already complete, so the client can
+// hide the "Seed Standard Region Channels" action once there is nothing
+// left to seed instead of always showing it. Read-only, same
+// 'global_channel:manage' gate as the seed action itself (this is
+// management-surface status, not general channel-list data covered by
+// 'global_channel:read').
+router.get('/region/seed-status', authenticateToken, authorize, async (req, res) => {
+  try {
+    const status = await globalChannelService.getRegionSeedStatus();
+    res.json(status);
+  } catch (error) {
+    getLogger().error({ err: error }, 'Failed to get region seed status');
+    res.status(500).json({ error: 'Failed to get region seed status' });
+  }
+});
+
+// Seed the standard set of Response/Support region channels (global
+// managers only): the 16 ISO 3166-2:NZ regions (both tiers) plus Chatham
+// Islands (both tiers) and All of New Zealand (support tier only) -- see
+// server/config/regions.js and GlobalChannelService.seedRegionChannels's
+// own doc comment. Idempotent: safe to call again after some channels
+// already exist (e.g. a region was added to the standing list later);
+// only the missing (name, tier) pairs are created.
+router.post('/seed-regions', authenticateToken, authorize, async (req, res) => {
+  try {
+    const result = await globalChannelService.seedRegionChannels(req.user.userId);
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'global_channel.seed_regions', 'global_channel', null, JSON.stringify(result)]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
+    res.json({
+      message: 'Region channel seeding completed',
+      ...result
+    });
+  } catch (error) {
+    getLogger().error({ err: error }, 'Failed to seed region channels');
+    res.status(500).json({ error: 'Failed to seed region channels' });
   }
 });
 

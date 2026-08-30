@@ -13,11 +13,23 @@ const {
 const router = express.Router();
 
 // Requirement 7.1/7.6: apply the dedicated auth rate limiter (20 requests
-// per IP per 15-minute window) to every route in this router. Because this
-// runs before any handler below, an IP that exceeds the limit is rejected
-// with HTTP 429 and never reaches token exchange or any Authentik API
-// call for the offending request.
-router.use(authLimiter);
+// per IP per 15-minute window) to the OAuth2-flow routes below --
+// `/sso`, `/login`, `/silent`, `/silent-callback`, `/callback` -- each of
+// which either redirects to Authentik or performs a token exchange.
+//
+// Deliberately NOT `router.use(authLimiter)` at the router level: that
+// would also cover `/me` and `/logout` below, neither of which is an
+// OAuth2 login attempt or talks to Authentik. `/me` in particular is
+// re-fetched on every SPA page load/refresh (`App.jsx`'s mount effect,
+// doubled under React StrictMode in development) by an ALREADY
+// authenticated, cookie-bearing session -- there is no login/abuse surface
+// there for this limiter to protect, only a normal user's own reload
+// budget to needlessly consume. Folding it into the same 20-per-15-min
+// bucket as the OAuth routes meant a handful of ordinary page reloads
+// could 429 a real user with no login attempts at all. `/me` and
+// `/logout` remain covered by the general 1000-requests/15-min backstop
+// applied globally in `server/index.js`.
+const authFlowLimiter = authLimiter;
 
 // Requirement 3.1/3.2: cookie options shared by both the primary OAuth2
 // callback and the silent-auth callback when delivering the JWT_Token to
@@ -42,7 +54,7 @@ function getSessionCookieOptions() {
 }
 
 // SSO endpoint - immediately starts OAuth2 flow
-router.get('/sso', (req, res) => {
+router.get('/sso', authFlowLimiter, (req, res) => {
   const authURL = `${process.env.AUTHENTIK_URL}/application/o/authorize/` +
     `?response_type=code` +
     `&client_id=${process.env.AUTHENTIK_CLIENT_ID}` +
@@ -53,7 +65,7 @@ router.get('/sso', (req, res) => {
 });
 
 // OAuth2 login redirect
-router.get('/login', (req, res) => {
+router.get('/login', authFlowLimiter, (req, res) => {
   const authURL = `${process.env.AUTHENTIK_URL}/application/o/authorize/` +
     `?response_type=code` +
     `&client_id=${process.env.AUTHENTIK_CLIENT_ID}` +
@@ -66,7 +78,7 @@ router.get('/login', (req, res) => {
 // Silent authentication check (prompt=none) - used by the client to
 // silently re-establish a session (e.g. in a hidden iframe/popup) without
 // forcing an interactive login screen.
-router.get('/silent', (req, res) => {
+router.get('/silent', authFlowLimiter, (req, res) => {
   const authURL = `${process.env.AUTHENTIK_URL}/application/o/authorize/` +
     `?response_type=code` +
     `&client_id=${process.env.AUTHENTIK_CLIENT_ID}` +
@@ -81,7 +93,7 @@ router.get('/silent', (req, res) => {
 // the result is delivered to the opening window via postMessage rather than
 // a redirect, using the same 10000ms timeout, `code` validation, and error
 // handling pattern as the primary OAuth2 callback below.
-router.get('/silent-callback', async (req, res) => {
+router.get('/silent-callback', authFlowLimiter, async (req, res) => {
   // Requirement 1.3/1.4: derive the postMessage target origin from
   // FRONTEND_URL instead of a hardcoded host.
   const frontendOrigin = new URL(process.env.FRONTEND_URL).origin;
@@ -169,15 +181,16 @@ router.get('/silent-callback', async (req, res) => {
 // OAuth2 callback
 //
 // Requirement 7.5/7.6: `authCallbackFailureLimiter` gates this route
-// specifically, on top of the broader `authLimiter` already applied to
-// the whole router above. It rejects with 429 (before any token exchange
-// or Authentik API call) once the requesting IP has already recorded 10
-// failed callback attempts within the current 15-minute window.
-// `recordAuthCallbackFailure` is called only from the `catch` block below
-// -- i.e. only on an actual token-exchange/userinfo failure, never on a
-// successful callback (both outcomes redirect with HTTP 302, so success
-// vs. failure can't be distinguished by status code alone).
-router.get('/callback', authCallbackFailureLimiter, async (req, res) => {
+// specifically, on top of `authFlowLimiter` (the 20-per-15-min OAuth2-flow
+// limiter also applied to `/sso`, `/login`, `/silent`, `/silent-callback`
+// above). It rejects with 429 (before any token exchange or Authentik API
+// call) once the requesting IP has already recorded 10 failed callback
+// attempts within the current 15-minute window. `recordAuthCallbackFailure`
+// is called only from the `catch` block below -- i.e. only on an actual
+// token-exchange/userinfo failure, never on a successful callback (both
+// outcomes redirect with HTTP 302, so success vs. failure can't be
+// distinguished by status code alone).
+router.get('/callback', authFlowLimiter, authCallbackFailureLimiter, async (req, res) => {
   try {
     const { code } = req.query;
     if (!code) {

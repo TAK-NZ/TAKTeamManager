@@ -282,6 +282,18 @@ describe('TransferMemberDialog (mounted)', () => {
   const suffixInput = () => container.querySelector('#transfer-callsign-suffix')
   const optionValues = () => Array.from(select().options).map((o) => o.value).filter(Boolean)
 
+  // Bugfix (mobile UI/UX pass): full-bleed on mobile, matching every
+  // other modal in this app.
+  it('renders the dialog box with w-full h-full and sm:-gated rounding/max-width', async () => {
+    await mount()
+
+    const dialog = container.querySelector('[role="dialog"]')
+    expect(dialog.className).toContain('w-full h-full')
+    expect(dialog.className).toContain('sm:rounded-lg')
+    expect(dialog.className).toContain('sm:max-w-lg')
+    expect(dialog.className).not.toMatch(/(?<!sm:)rounded-lg/)
+  })
+
   const setSelectValue = async (value) => {
     const el = select()
     const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set

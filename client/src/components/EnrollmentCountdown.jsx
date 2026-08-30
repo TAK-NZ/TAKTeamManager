@@ -170,8 +170,12 @@ export default function EnrollmentCountdown({
       <span role="status" aria-live="polite" className="sr-only">
         {isExpired ? 'Enrollment code expired.' : ''}
       </span>
+      {/* Bugfix (mobile tap target too small): py-2 (was py-1.5) --
+          text-sm's ~20px line-height plus the old 12px vertical padding
+          gave a ~32px-tall button; py-2 (16px) brings it to a real ~36px
+          tap target. */}
       {isExpired && onRegenerate && (
-        <button type="button" onClick={onRegenerate} className="btn-secondary px-3 py-1.5 text-sm">
+        <button type="button" onClick={onRegenerate} className="btn-secondary px-3 py-2 text-sm">
           {regenerateLabel}
         </button>
       )}

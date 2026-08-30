@@ -394,13 +394,21 @@ export default function DeviceListRow({ device, onRevoke, compact = false }) {
         )}
       </td>
       <td className={`${padding} whitespace-nowrap text-right text-sm font-medium`}>
+        {/* Bugfix (mobile tap target too small): p-2 rounded-lg box
+            around the icon (was a bare h-5 w-5 icon with no padding),
+            matching the red-tinted button-box treatment
+            MemberActions.jsx/TeamDeviceList.jsx's DeviceActions/
+            Teams.jsx's TeamRowActions already use for their own
+            destructive actions. Shared between this desktop row and
+            the mobile DeviceListCard below, so both surfaces get the
+            larger target. */}
         <span className="relative group inline-flex">
           <button
             type="button"
             onClick={() => onRevoke(device)}
             disabled={isRevoked}
             aria-label={revokeActionLabel(device.clientUid)}
-            className="text-red-600 hover:text-red-800 dark:text-red-400 dark:hover:text-red-300 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-red-600 rounded focus:outline-none focus:ring-2 focus:ring-red-500"
+            className="p-2 rounded-lg text-red-600 hover:text-red-800 hover:bg-red-50 dark:text-red-400 dark:hover:text-red-300 dark:hover:bg-red-950/40 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-red-600 disabled:hover:bg-transparent focus:outline-none focus:ring-2 focus:ring-red-500"
           >
             <TrashIcon className="h-5 w-5" aria-hidden="true" />
           </button>
@@ -462,13 +470,16 @@ export function DeviceListCard({ device, onRevoke }) {
             {device.clientUid}
           </span>
         </div>
+        {/* Bugfix (mobile tap target too small): same p-2 rounded-lg
+            button-box as the desktop row's revoke button above --
+            this is the MOBILE surface, so the fix matters most here. */}
         <span className="relative group inline-flex flex-shrink-0">
           <button
             type="button"
             onClick={() => onRevoke(device)}
             disabled={isRevoked}
             aria-label={revokeActionLabel(device.clientUid)}
-            className="text-red-600 hover:text-red-800 dark:text-red-400 dark:hover:text-red-300 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-red-600 rounded focus:outline-none focus:ring-2 focus:ring-red-500"
+            className="p-2 rounded-lg text-red-600 hover:text-red-800 hover:bg-red-50 dark:text-red-400 dark:hover:text-red-300 dark:hover:bg-red-950/40 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-red-600 disabled:hover:bg-transparent focus:outline-none focus:ring-2 focus:ring-red-500"
           >
             <TrashIcon className="h-5 w-5" aria-hidden="true" />
           </button>

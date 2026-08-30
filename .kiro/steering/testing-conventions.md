@@ -95,7 +95,9 @@ Some tests exist to prove a defect. Write them against the UNFIXED code and conf
 
 ## Structural guards
 
-Three exist — `client/src/utils/dateFormatConsumers.test.js`, `server/services/__tests__/martiEndpointContract.test.js`, `server/workers/operationSchemas.test.js`. When writing one: keep the extractor a PURE function of source text so the matching rule itself is testable, assert anti-vacuity before asserting the rule, and make the failure message name the offending file and the acceptable resolutions. Verify a new guard actually BITES by temporarily introducing a violation.
+Four exist — `client/src/utils/dateFormatConsumers.test.js`, `server/services/__tests__/martiEndpointContract.test.js`, `server/workers/operationSchemas.test.js`, `client/src/pages/channelTreeContrast.test.jsx`. When writing one: keep the extractor a PURE function of source text so the matching rule itself is testable, assert anti-vacuity before asserting the rule, and make the failure message name the offending file and the acceptable resolutions. Verify a new guard actually BITES by temporarily introducing a violation.
+
+- `channelTreeContrast.test.jsx` is the one exception to "pure function of source text": it mounts the real page and locates a row in the RENDERED DOM, because contrast is a function of resolved classes and ancestor backgrounds, not source text. Its extractor still has to be a stable rule, though: locate a row by a durable visual anchor (an icon's class-token signature, or a `<path d="...">` shape read off the real dependency via `renderToStaticMarkup`, per `PlatformLogos.test.jsx`/`storeBadgeFidelity.test.jsx`'s direct-dependency-fidelity convention) — never by incidental markup shape like "chevron is inside a `<button>`". A genuine UX change (e.g. replacing a small dedicated toggle button with a click-anywhere row) can legitimately remove an anchor the extractor relied on; when that happens, update the extractor's locating rule to match the new structure, not the assertions it feeds — the same "tighten the query, don't loosen the assertion" rule below.
 
 ## Mock hygiene
 

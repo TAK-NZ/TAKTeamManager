@@ -122,6 +122,12 @@ The application is designed to run on AWS ECS Fargate with:
 
 Production hostname: **`team.tak.nz`**. The app is a single-origin SPA + API (one `FRONTEND_URL`/`APP_URL`, one OAuth2 `redirect_uri`, one session cookie), so it is served from exactly one hostname rather than split across several — Team Management, the Downloads page and the device Enrollment flow are all routes within the same bundle, not separate services. This follows the naming pattern of TAK-NZ's other `*.tak.nz` subdomains (`account`, `map`, `docs`) and replaces the standalone enrollment Lambda previously reachable at `devices.tak.nz`. CDK-based deployment of this hostname is a follow-up and not yet implemented.
 
+### When the CDK stack for the ALB is built: set `TRUSTED_PROXY_HOPS=1`
+
+The app trusts zero reverse-proxy hops by default (`TRUSTED_PROXY_HOPS=0`, see `.env.example`), which is correct for local/dev/test where nothing sits in front of it. Once this is actually deployed behind the ALB, set `TRUSTED_PROXY_HOPS=1` in that environment's config — otherwise `req.ip` resolves to the ALB's own address for every request, collapsing every `req.ip`-keyed rate limiter (`server/middleware/rateLimiters.js`'s `authFlowLimiter`, `requestAccessLimiter`, etc.) onto one shared bucket regardless of how many distinct real clients there are, and `helmet`'s HSTS/HTTPS detection misreads every request as plain HTTP. See `server/config/trustProxy.js`'s header comment and BUGS.md NOTE-001 for the full mechanism.
+
+This must be paired with an ECS security group rule restricting inbound traffic on the container port to the ALB's security group only (never `0.0.0.0/0` or a broad VPC CIDR) — the hop count alone doesn't stop a request that reaches the task directly from forging its own `X-Forwarded-For`. If a CDN (e.g. CloudFront) is ever added in front of the ALB, this becomes `2`, not `1`.
+
 ## License
 
 GNU Affero General Public License v3.0

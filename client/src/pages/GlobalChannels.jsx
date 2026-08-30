@@ -6,10 +6,15 @@ import { buildFolderTree } from '../utils/channelTree';
 
 export default function GlobalChannels({ user }) {
   const [bchChannels, setBchChannels] = useState([]);
+  // region-channel-tiers: `regionChannels` still holds every region row
+  // from the single GET /api/global-channels/region fetch (each row now
+  // carries `tier`); the two Response/Support cards below FILTER this one
+  // array client-side by `channel.tier` rather than fetching separately.
   const [regionChannels, setRegionChannels] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
+  // createType/editChannel.type are now 3-way: 'bch' | 'response' | 'support'.
   const [createType, setCreateType] = useState('bch');
   const [editChannel, setEditChannel] = useState(null);
   const [deleteChannel, setDeleteChannel] = useState(null);
@@ -17,6 +22,16 @@ export default function GlobalChannels({ user }) {
   const [showAssignDialog, setShowAssignDialog] = useState(false);
   const [assigningUsers, setAssigningUsers] = useState(false);
   const [syncingChannels, setSyncingChannels] = useState(false);
+  // region-channel-tiers: separate confirm/loading state for the region
+  // seed action, following the same pattern as showAssignDialog/assigningUsers.
+  const [showSeedDialog, setShowSeedDialog] = useState(false);
+  const [seedingRegions, setSeedingRegions] = useState(false);
+  // Bugfix: whether the standard Response/Support region-channel seed set
+  // is already complete -- null while unknown (still loading, or the
+  // status check itself failed), so the button defaults to SHOWN rather
+  // than being hidden on a false negative. Only an explicit `true` from
+  // the server hides it.
+  const [regionSeedComplete, setRegionSeedComplete] = useState(null);
   const [expandedFolders, setExpandedFolders] = useState(new Set());
   const [folderSeparator, setFolderSeparator] = useState(' - ');
   const [formData, setFormData] = useState({
@@ -25,6 +40,35 @@ export default function GlobalChannels({ user }) {
   });
 
   const isGlobalManager = user?.is_global_manager; // Global managers only
+
+  // region-channel-tiers: the two tier-filtered views every Response/Support
+  // card, create/edit modal, and folder-tree helper below reads from.
+  const responseChannels = regionChannels.filter((channel) => channel.tier === 'response');
+  const supportChannels = regionChannels.filter((channel) => channel.tier === 'support');
+
+  // bch-channel-category: `bchChannels` still holds every row from the
+  // single GET /api/global-channels/bch fetch (each row now carries
+  // `category`); the two BCH/Utility cards below FILTER this one array
+  // client-side by `channel.category`, exactly mirroring how
+  // responseChannels/supportChannels above split ONE regionChannels
+  // fetch by `tier` rather than fetching separately. A row with no
+  // `category` at all (defensive only -- the column is NOT NULL with a
+  // DEFAULT server-side, so this should never actually happen) falls
+  // back to the 'BCH' bucket rather than vanishing from both cards.
+  const utlChannels = bchChannels.filter((channel) => channel.category === 'UTL');
+  const bchOnlyChannels = bchChannels.filter((channel) => channel.category !== 'UTL');
+
+  // Maps a 4-way channelType ('bch'/'utl'/'response'/'support') to the
+  // channel list it renders from and the human-readable label used in
+  // headings/dialog titles/toast messages, so the create/edit/render code
+  // below reads from one table instead of branching four ways at each
+  // call site.
+  const CHANNEL_TYPE_META = {
+    bch: { label: 'BCH', channels: bchOnlyChannels },
+    utl: { label: 'Utility', channels: utlChannels },
+    response: { label: 'Response', channels: responseChannels },
+    support: { label: 'Support', channels: supportChannels }
+  };
 
   useEffect(() => {
     const fetchConfig = async () => {
@@ -38,6 +82,16 @@ export default function GlobalChannels({ user }) {
     
     fetchConfig();
     fetchChannels();
+    // The seed-status route is gated server-side by the same
+    // 'global_channel:manage' permission the seed action itself
+    // requires, and the button it drives is only ever rendered inside
+    // the isGlobalManager-gated management card below -- so skip the
+    // call entirely for a non-Global_Manager rather than firing a
+    // request that would only 403.
+    if (isGlobalManager) {
+      fetchRegionSeedStatus();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const fetchChannels = async () => {
@@ -57,23 +111,55 @@ export default function GlobalChannels({ user }) {
     }
   };
 
+  // Bugfix: refreshes whether the standard region seed set is complete,
+  // so the "Seed Standard Region Channels" action can hide itself once
+  // there's nothing left to seed. Called on mount and again after a
+  // successful seed run -- NOT after every edit/delete of a region
+  // channel, since editing an existing standard channel's name/
+  // description doesn't remove it from the seeded set (only a delete of
+  // one of the 35 standard rows would reintroduce a gap, and re-checking
+  // on every fetchChannels() call would mean this status query firing on
+  // every unrelated BCH create/edit too).
+  const fetchRegionSeedStatus = async () => {
+    try {
+      const response = await globalChannelsAPI.getRegionSeedStatus();
+      setRegionSeedComplete(response.data.missingCount === 0);
+    } catch (error) {
+      console.error('Failed to fetch region seed status:', error);
+      // Leave regionSeedComplete at its current value (defaults to null,
+      // i.e. "show the button") rather than assuming completion on a
+      // failed check.
+    }
+  };
+
   const handleCreate = async (e) => {
     e.preventDefault();
     
     try {
-      if (createType === 'bch') {
-        await globalChannelsAPI.createBchChannel(formData);
-        toast.success('BCH channel created successfully');
+      if (createType === 'bch' || createType === 'utl') {
+        // bch-channel-category: 'bch'/'utl' both create a bch_channels
+        // row (full parity: service account + read/write group pair),
+        // distinguished only by the `category` field the server accepts
+        // (server/routes/globalChannels.js validates it's one of the two
+        // values; omitted entirely for 'bch' since 'BCH' is the server's
+        // own default, matching every pre-existing caller's behavior).
+        await globalChannelsAPI.createBchChannel(
+          createType === 'utl' ? { ...formData, category: 'UTL' } : formData
+        );
       } else {
-        await globalChannelsAPI.createRegionChannel(formData);
-        toast.success('Region channel created successfully');
+        // region-channel-tiers: 'response'/'support' both create a region
+        // channel row, distinguished only by the `tier` field the server
+        // requires (server/routes/globalChannels.js validates it's one of
+        // the two values).
+        await globalChannelsAPI.createRegionChannel({ ...formData, tier: createType });
       }
+      toast.success(`${CHANNEL_TYPE_META[createType].label} channel created successfully`);
       
       setShowCreateModal(false);
       setFormData({ name: '', description: '' });
       fetchChannels();
     } catch (error) {
-      toast.error(`Failed to create ${createType} channel`);
+      toast.error(`Failed to create ${CHANNEL_TYPE_META[createType].label} channel`);
     }
   };
 
@@ -87,20 +173,34 @@ export default function GlobalChannels({ user }) {
     e.preventDefault();
     
     try {
-      if (editChannel.type === 'bch') {
+      if (editChannel.type === 'bch' || editChannel.type === 'utl') {
+        // bch-channel-category: category is immutable after creation
+        // (GlobalChannelService.updateBchChannel reads it back off the
+        // row itself), so it is never sent on update -- only
+        // name/description change, same as region channels' tier.
         await globalChannelsAPI.updateBchChannel(editChannel.id, formData);
-        toast.success('BCH channel updated successfully');
       } else {
+        // region-channel-tiers: tier is immutable after creation (it's
+        // fixed to the row's own stored value server-side), so it is
+        // never sent on update -- only name/description change.
         await globalChannelsAPI.updateRegionChannel(editChannel.id, formData);
-        toast.success('Region channel updated successfully');
       }
+      toast.success(`${CHANNEL_TYPE_META[editChannel.type].label} channel updated successfully`);
       
       setShowEditModal(false);
       setEditChannel(null);
       setFormData({ name: '', description: '' });
       fetchChannels();
+      // Bugfix: renaming a standard region channel's `name` away from
+      // its seeded region name reintroduces a gap in the standard set
+      // (the seed check matches by name+tier), so re-check on every
+      // response/support edit -- BCH channels are outside the seeded
+      // set entirely and never affect this.
+      if (editChannel.type === 'response' || editChannel.type === 'support') {
+        fetchRegionSeedStatus();
+      }
     } catch (error) {
-      toast.error(`Failed to update ${editChannel.type} channel`);
+      toast.error(`Failed to update ${CHANNEL_TYPE_META[editChannel.type].label} channel`);
     }
   };
 
@@ -108,17 +208,34 @@ export default function GlobalChannels({ user }) {
     setDeleteChannel({ id: channelId, type: channelType, name: channelName });
   };
 
+  // region-channel-tiers/bch-channel-category: `deleteChannel.type` carries
+  // the 4-way UI type ('bch'/'utl'/'response'/'support'), but
+  // DELETE /api/global-channels/:channelType/:channelId is server-scoped
+  // to CHANNEL_TABLE_ALLOWLIST's two actual table types -- 'bch'/'region',
+  // with no notion of category/tier at all (a bch_channels row is deleted
+  // the same way regardless of its category, exactly like a region
+  // channel regardless of its tier). This maps the UI type down to the
+  // server's channelType before the call.
+  const toServerChannelType = (type) => (type === 'response' || type === 'support' ? 'region' : 'bch');
+
   const confirmDelete = async () => {
     if (!deleteChannel) return;
     
     setDeletingChannel(true);
     try {
-      await globalChannelsAPI.deleteChannel(deleteChannel.type, deleteChannel.id);
-      toast.success(`${deleteChannel.type.toUpperCase()} channel deleted successfully`);
+      await globalChannelsAPI.deleteChannel(toServerChannelType(deleteChannel.type), deleteChannel.id);
+      toast.success(`${CHANNEL_TYPE_META[deleteChannel.type].label} channel deleted successfully`);
       fetchChannels();
+      // Bugfix: deleting one of the 35 standard region channels
+      // reintroduces a gap in the standard set -- re-check so the Seed
+      // button reappears rather than staying hidden. BCH deletes never
+      // affect this.
+      if (deleteChannel.type === 'response' || deleteChannel.type === 'support') {
+        fetchRegionSeedStatus();
+      }
       setDeleteChannel(null);
     } catch (error) {
-      toast.error(`Failed to delete ${deleteChannel.type} channel`);
+      toast.error(`Failed to delete ${CHANNEL_TYPE_META[deleteChannel.type].label} channel`);
     } finally {
       setDeletingChannel(false);
     }
@@ -147,6 +264,27 @@ export default function GlobalChannels({ user }) {
       toast.error('Failed to sync existing channels');
     } finally {
       setSyncingChannels(false);
+    }
+  };
+
+  const handleSeedRegions = async () => {
+    setSeedingRegions(true);
+    try {
+      const response = await globalChannelsAPI.seedRegionChannels();
+      const { created, skipped, failed } = response.data;
+      toast.success(`Region channels seeded: ${created} created, ${skipped} already existed${failed ? `, ${failed} failed` : ''}`);
+      setShowSeedDialog(false);
+      fetchChannels();
+      // Bugfix: re-check completeness after seeding so the button hides
+      // itself immediately, rather than staying visible until a full
+      // page reload. Deliberately re-queries the real DB state (rather
+      // than assuming success from the counts alone) since a partial
+      // failure (failed > 0) must not be reported as complete.
+      fetchRegionSeedStatus();
+    } catch (error) {
+      toast.error('Failed to seed region channels');
+    } finally {
+      setSeedingRegions(false);
     }
   };
 
@@ -244,7 +382,13 @@ export default function GlobalChannels({ user }) {
             </p>
             <p className="text-xs text-gray-500 dark:text-gray-500 mt-1">
               Created by {channel.created_by_name}
-              {channelType === 'bch' && channel.service_account_username && (
+              {/* bch-channel-category: a UTL channel gets the exact same
+                  service-account/credentials treatment as a BCH channel --
+                  both are bch_channels rows with the full read/write-group
+                  + service-account machinery, distinguished only by
+                  category, not by whether they carry a service account
+                  at all. */}
+              {(channelType === 'bch' || channelType === 'utl') && channel.service_account_username && (
                 <> • Service Account: {channel.service_account_username}</>
               )}
             </p>
@@ -252,7 +396,7 @@ export default function GlobalChannels({ user }) {
 
           {isGlobalManager && (
             <div className="flex items-center space-x-3">
-              {channelType === 'bch' && (
+              {(channelType === 'bch' || channelType === 'utl') && (
                 <button
                   onClick={() => handleGetCredentials(channel.id)}
                   className="text-blue-600 hover:text-blue-500 dark:text-blue-400 dark:hover:text-blue-300"
@@ -298,12 +442,12 @@ export default function GlobalChannels({ user }) {
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Global Channels</h1>
           <p className="text-gray-600 dark:text-gray-400">
-            Manage BCH (broadcast/ETL) and Region channels that all users have access to.
+            Manage BCH (broadcast/ETL), Utility, Response (emergency services) and Support (all-agency) channels that users have access to.
           </p>
         </div>
         
         {isGlobalManager && (
-          <div className="flex space-x-2">
+          <div className="flex flex-wrap gap-2">
             <button
               onClick={() => {
                 setCreateType('bch');
@@ -316,13 +460,33 @@ export default function GlobalChannels({ user }) {
             </button>
             <button
               onClick={() => {
-                setCreateType('region');
+                setCreateType('utl');
                 setShowCreateModal(true);
               }}
               className="btn-secondary flex items-center"
             >
               <PlusIcon className="h-4 w-4 mr-2" />
-              Create Region Channel
+              Create Utility Channel
+            </button>
+            <button
+              onClick={() => {
+                setCreateType('response');
+                setShowCreateModal(true);
+              }}
+              className="btn-secondary flex items-center"
+            >
+              <PlusIcon className="h-4 w-4 mr-2" />
+              Create Response Channel
+            </button>
+            <button
+              onClick={() => {
+                setCreateType('support');
+                setShowCreateModal(true);
+              }}
+              className="btn-secondary flex items-center"
+            >
+              <PlusIcon className="h-4 w-4 mr-2" />
+              Create Support Channel
             </button>
           </div>
         )}
@@ -352,10 +516,25 @@ export default function GlobalChannels({ user }) {
             >
               Assign All Users to Global Channels
             </button>
+            {/* Bugfix: hidden once the standard set is fully seeded --
+                `regionSeedComplete === true` is the ONLY state that hides
+                it; `null` (status not yet loaded, or the check itself
+                failed) and `false` both leave it shown. */}
+            {regionSeedComplete !== true && (
+              <button
+                onClick={() => setShowSeedDialog(true)}
+                className="btn-secondary"
+              >
+                Seed Standard Region Channels
+              </button>
+            )}
           </div>
           <div className="space-y-2 text-sm text-gray-600 dark:text-gray-400">
-            <p>• <strong>Sync Existing Channels:</strong> Import BCH and Region channels that already exist in Authentik</p>
+            <p>• <strong>Sync Existing Channels:</strong> Import BCH, Response and Support channels that already exist in Authentik</p>
             <p>• <strong>Assign All Users:</strong> Ensure all existing users are added to all active global channels</p>
+            {regionSeedComplete !== true && (
+              <p>• <strong>Seed Standard Region Channels:</strong> Create the standard set of Response/Support channels for every NZ region, Chatham Islands, and All of New Zealand (support only) -- safe to run again, only fills in any missing channels</p>
+            )}
           </div>
         </div>
       )}
@@ -369,10 +548,10 @@ export default function GlobalChannels({ user }) {
               BCH Channels (Broadcast/ETL)
             </h2>
           </div>
-          {bchChannels.length > 0 && Object.keys(buildFolderTree(bchChannels, folderSeparator, 'name').folders).length > 0 && (
+          {bchOnlyChannels.length > 0 && Object.keys(buildFolderTree(bchOnlyChannels, folderSeparator, 'name').folders).length > 0 && (
             <div className="flex items-center space-x-2">
               <button
-                onClick={() => expandAllFolders(bchChannels)}
+                onClick={() => expandAllFolders(bchOnlyChannels)}
                 className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
               >
                 <ChevronDownIcon className="h-4 w-4 mr-1" />
@@ -389,28 +568,104 @@ export default function GlobalChannels({ user }) {
           )}
         </div>
         
-        {bchChannels.length === 0 ? (
+        {bchOnlyChannels.length === 0 ? (
           <p className="text-gray-500 dark:text-gray-400">No BCH channels configured.</p>
         ) : (
           <div className="space-y-3">
-            {renderFolderTree(buildFolderTree(bchChannels, folderSeparator, 'name'), '', 'bch')}
+            {renderFolderTree(buildFolderTree(bchOnlyChannels, folderSeparator, 'name'), '', 'bch')}
           </div>
         )}
       </div>
 
-      {/* Region Channels */}
+      {/* Utility Channels */}
+      <div className="card">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center">
+            <RadioIcon className="h-6 w-6 text-purple-600 mr-2" />
+            <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
+              Utility Channels
+            </h2>
+          </div>
+          {utlChannels.length > 0 && Object.keys(buildFolderTree(utlChannels, folderSeparator, 'name').folders).length > 0 && (
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={() => expandAllFolders(utlChannels)}
+                className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
+              >
+                <ChevronDownIcon className="h-4 w-4 mr-1" />
+                Expand All
+              </button>
+              <button
+                onClick={collapseAllFolders}
+                className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
+              >
+                <ChevronUpIcon className="h-4 w-4 mr-1" />
+                Collapse All
+              </button>
+            </div>
+          )}
+        </div>
+        
+        {utlChannels.length === 0 ? (
+          <p className="text-gray-500 dark:text-gray-400">No utility channels configured.</p>
+        ) : (
+          <div className="space-y-3">
+            {renderFolderTree(buildFolderTree(utlChannels, folderSeparator, 'name'), '', 'utl')}
+          </div>
+        )}
+      </div>
+
+      {/* Response Channels */}
+      <div className="card">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center">
+            <GlobeAltIcon className="h-6 w-6 text-red-600 mr-2" />
+            <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
+              Response Channels (Emergency Services)
+            </h2>
+          </div>
+          {responseChannels.length > 0 && Object.keys(buildFolderTree(responseChannels, folderSeparator, 'name').folders).length > 0 && (
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={() => expandAllFolders(responseChannels)}
+                className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
+              >
+                <ChevronDownIcon className="h-4 w-4 mr-1" />
+                Expand All
+              </button>
+              <button
+                onClick={collapseAllFolders}
+                className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
+              >
+                <ChevronUpIcon className="h-4 w-4 mr-1" />
+                Collapse All
+              </button>
+            </div>
+          )}
+        </div>
+        
+        {responseChannels.length === 0 ? (
+          <p className="text-gray-500 dark:text-gray-400">No response channels configured.</p>
+        ) : (
+          <div className="space-y-3">
+            {renderFolderTree(buildFolderTree(responseChannels, folderSeparator, 'name'), '', 'response')}
+          </div>
+        )}
+      </div>
+
+      {/* Support Channels */}
       <div className="card">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center">
             <GlobeAltIcon className="h-6 w-6 text-green-600 mr-2" />
             <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
-              Region Channels
+              Support Channels (All Agencies)
             </h2>
           </div>
-          {regionChannels.length > 0 && Object.keys(buildFolderTree(regionChannels, folderSeparator, 'name').folders).length > 0 && (
+          {supportChannels.length > 0 && Object.keys(buildFolderTree(supportChannels, folderSeparator, 'name').folders).length > 0 && (
             <div className="flex items-center space-x-2">
               <button
-                onClick={() => expandAllFolders(regionChannels)}
+                onClick={() => expandAllFolders(supportChannels)}
                 className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
               >
                 <ChevronDownIcon className="h-4 w-4 mr-1" />
@@ -427,11 +682,11 @@ export default function GlobalChannels({ user }) {
           )}
         </div>
         
-        {regionChannels.length === 0 ? (
-          <p className="text-gray-500 dark:text-gray-400">No region channels configured.</p>
+        {supportChannels.length === 0 ? (
+          <p className="text-gray-500 dark:text-gray-400">No support channels configured.</p>
         ) : (
           <div className="space-y-3">
-            {renderFolderTree(buildFolderTree(regionChannels, folderSeparator, 'name'), '', 'region')}
+            {renderFolderTree(buildFolderTree(supportChannels, folderSeparator, 'name'), '', 'support')}
           </div>
         )}
       </div>
@@ -446,7 +701,7 @@ export default function GlobalChannels({ user }) {
             className="bg-white dark:bg-gray-800 rounded-lg p-6 w-full max-w-md"
           >
             <h3 id="create-global-channel-title" className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
-              Create {createType === 'bch' ? 'BCH' : 'Region'} Channel
+              Create {CHANNEL_TYPE_META[createType].label} Channel
             </h3>
             
             <form onSubmit={handleCreate} className="space-y-4">
@@ -503,7 +758,7 @@ export default function GlobalChannels({ user }) {
             className="bg-white dark:bg-gray-800 rounded-lg p-6 w-full max-w-md"
           >
             <h3 id="edit-global-channel-title" className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
-              Edit {editChannel?.type === 'bch' ? 'BCH' : 'Region'} Channel
+              Edit {editChannel ? CHANNEL_TYPE_META[editChannel.type].label : ''} Channel
             </h3>
             
             <form onSubmit={handleUpdate} className="space-y-4">
@@ -590,6 +845,43 @@ export default function GlobalChannels({ user }) {
         </div>
       )}
 
+      {/* Seed Standard Region Channels Confirmation Dialog */}
+      {showSeedDialog && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="seed-regions-title"
+            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full"
+          >
+            <div className="p-6">
+              <h3 id="seed-regions-title" className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
+                Seed Standard Region Channels
+              </h3>
+              <p className="text-gray-600 dark:text-gray-400 mb-6">
+                This will create up to 35 Response/Support channels (every NZ region, Chatham Islands, and All of New Zealand support-only) that don't already exist. Existing channels are left unchanged. Continue?
+              </p>
+              <div className="flex justify-end space-x-3">
+                <button
+                  onClick={() => setShowSeedDialog(false)}
+                  className="btn-secondary"
+                  disabled={seedingRegions}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleSeedRegions}
+                  disabled={seedingRegions}
+                  className="btn-primary"
+                >
+                  {seedingRegions ? 'Seeding...' : 'Seed Channels'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Delete Confirmation Dialog */}
       {deleteChannel && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
@@ -601,7 +893,7 @@ export default function GlobalChannels({ user }) {
           >
             <div className="p-6">
               <h3 id="delete-global-channel-title" className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
-                Delete {deleteChannel.type === 'bch' ? 'BCH' : 'Region'} Channel
+                Delete {CHANNEL_TYPE_META[deleteChannel.type].label} Channel
               </h3>
               <p className="text-gray-600 dark:text-gray-400 mb-6">
                 Are you sure you want to delete the {deleteChannel.type} channel "{deleteChannel.name}"? This action cannot be undone.

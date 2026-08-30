@@ -36,7 +36,8 @@ jest.mock('../models/Team', () => {
     CallsignLevelSelectionRangeError,
     CallsignLevelSelectionSubTeamError,
     PseudonymousUsernamePolicySubTeamError,
-    PseudonymousUsernamePolicyImmutableError
+    PseudonymousUsernamePolicyImmutableError,
+    ChannelTierAccessSubTeamError
   } = jest.requireActual('../models/Team');
   return {
     getAllTeams: jest.fn(),
@@ -47,13 +48,15 @@ jest.mock('../models/Team', () => {
     getAncestorChain: jest.fn(),
     getOrganisationTeams: jest.fn(),
     findById: jest.fn(),
+    getMembers: jest.fn(),
     create: jest.fn(),
     update: jest.fn(),
     TeamDepthExceededError,
     CallsignLevelSelectionRangeError,
     CallsignLevelSelectionSubTeamError,
     PseudonymousUsernamePolicySubTeamError,
-    PseudonymousUsernamePolicyImmutableError
+    PseudonymousUsernamePolicyImmutableError,
+    ChannelTierAccessSubTeamError
   };
 });
 
@@ -77,6 +80,15 @@ jest.mock('../middleware/auth', () => ({
 }));
 
 jest.mock('../middleware/authorize', () => (req, res, next) => next());
+
+// PUT /:teamId/channel-access enqueues a resync_org_channel_tier_access
+// Sync_Operation via EventPublisher.publishOperation -- mocked here so
+// tests can assert enqueue/no-enqueue behavior without touching a real
+// sync_operations table (EventPublisher.publishOperation itself writes
+// through `pool`, which is already mocked above).
+jest.mock('../services/EventPublisher', () => ({
+  publishOperation: jest.fn().mockResolvedValue('op-id')
+}));
 
 // Requirement 5.12 (task 11.6) / 13.6 (task 28.1): PUT /api/teams/:teamId
 // and PATCH /api/teams/:teamId/members/:userId both require
@@ -116,6 +128,7 @@ const Team = require('../models/Team');
 const User = require('../models/User');
 const TeamVisibilityService = require('../services/TeamVisibilityService');
 const { checkCallsignSuffixUniqueness, CallsignSuffixConflictError } = require('../services/CallsignSuffixUniquenessService');
+const EventPublisher = require('../services/EventPublisher');
 const teamsRouter = require('./teams');
 
 function buildApp() {
@@ -1179,6 +1192,244 @@ describe('pseudonymousUsernames validation (takserver-enrollment Requirements 6.
   });
 });
 
+describe('PUT /api/teams/:teamId/channel-access', () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockIsAdmin = true;
+    app = buildApp();
+    pool.query.mockResolvedValue({ rows: [] });
+  });
+
+  it('rejects a non-boolean responseChannelAccess with 400 before calling Team.update', async () => {
+    const res = await request(app)
+      .put('/api/teams/42/channel-access')
+      .send({ responseChannelAccess: 'not-a-boolean' });
+
+    expect(res.status).toBe(400);
+    expect(Team.update).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 when the target team does not exist', async () => {
+    Team.findById.mockResolvedValue(null);
+
+    const res = await request(app)
+      .put('/api/teams/999/channel-access')
+      .send({ responseChannelAccess: true });
+
+    expect(res.status).toBe(404);
+    expect(Team.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects a Sub_Team target with 400 before calling Team.update, using the request-shape-specific message', async () => {
+    Team.findById.mockResolvedValue({
+      id: 5,
+      parent_team_id: 1,
+      response_channel_access: null,
+      support_channel_access: null
+    });
+
+    const res = await request(app)
+      .put('/api/teams/5/channel-access')
+      .send({ responseChannelAccess: true });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/only be set on an Organisation/);
+    expect(Team.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects an empty body (neither field supplied) with 400 before calling Team.update', async () => {
+    Team.findById.mockResolvedValue({
+      id: 42,
+      parent_team_id: null,
+      response_channel_access: false,
+      support_channel_access: true
+    });
+
+    const res = await request(app).put('/api/teams/42/channel-access').send({});
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/At least one of/);
+    expect(Team.update).not.toHaveBeenCalled();
+  });
+
+  it('responds 400 with the Sub_Team message when Team.update throws ChannelTierAccessSubTeamError (defense in depth)', async () => {
+    Team.findById.mockResolvedValue({
+      id: 42,
+      parent_team_id: null,
+      response_channel_access: false,
+      support_channel_access: true
+    });
+    Team.update.mockRejectedValue(new Team.ChannelTierAccessSubTeamError('responseChannelAccess'));
+
+    const res = await request(app)
+      .put('/api/teams/42/channel-access')
+      .send({ responseChannelAccess: true });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('responseChannelAccess can only be set on an Organisation');
+    expect(res.body.team).toBeUndefined();
+  });
+
+  it('passes both flags through to Team.update as response_channel_access/support_channel_access', async () => {
+    Team.findById.mockResolvedValue({
+      id: 42,
+      parent_team_id: null,
+      response_channel_access: false,
+      support_channel_access: false
+    });
+    Team.update.mockResolvedValue({
+      id: 42,
+      response_channel_access: true,
+      support_channel_access: true
+    });
+
+    const res = await request(app)
+      .put('/api/teams/42/channel-access')
+      .send({ responseChannelAccess: true, supportChannelAccess: true });
+
+    expect(res.status).toBe(200);
+    expect(Team.update).toHaveBeenCalledWith(
+      '42',
+      expect.objectContaining({ response_channel_access: true, support_channel_access: true })
+    );
+    expect(res.body.team).toEqual(
+      expect.objectContaining({ response_channel_access: true, support_channel_access: true })
+    );
+  });
+
+  it('enqueues a resync_org_channel_tier_access operation only for the tier that actually changed', async () => {
+    Team.findById.mockResolvedValue({
+      id: 42,
+      parent_team_id: null,
+      response_channel_access: false,
+      support_channel_access: true
+    });
+    Team.update.mockResolvedValue({
+      id: 42,
+      response_channel_access: true, // changed: false -> true
+      support_channel_access: true // unchanged: stays true
+    });
+
+    const res = await request(app)
+      .put('/api/teams/42/channel-access')
+      .send({ responseChannelAccess: true, supportChannelAccess: true });
+
+    expect(res.status).toBe(200);
+    expect(EventPublisher.publishOperation).toHaveBeenCalledTimes(1);
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'resync_org_channel_tier_access',
+      { organisation_id: 42, tier: 'response' },
+      1
+    );
+  });
+
+  it('enqueues nothing when both flags are resubmitted with their current, unchanged values (no-op)', async () => {
+    Team.findById.mockResolvedValue({
+      id: 42,
+      parent_team_id: null,
+      response_channel_access: false,
+      support_channel_access: true
+    });
+    Team.update.mockResolvedValue({
+      id: 42,
+      response_channel_access: false,
+      support_channel_access: true
+    });
+
+    const res = await request(app)
+      .put('/api/teams/42/channel-access')
+      .send({ responseChannelAccess: false, supportChannelAccess: true });
+
+    expect(res.status).toBe(200);
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+  });
+
+  it('enqueues both tiers when both flags actually change', async () => {
+    Team.findById.mockResolvedValue({
+      id: 42,
+      parent_team_id: null,
+      response_channel_access: false,
+      support_channel_access: true
+    });
+    Team.update.mockResolvedValue({
+      id: 42,
+      response_channel_access: true,
+      support_channel_access: false
+    });
+
+    const res = await request(app)
+      .put('/api/teams/42/channel-access')
+      .send({ responseChannelAccess: true, supportChannelAccess: false });
+
+    expect(res.status).toBe(200);
+    expect(EventPublisher.publishOperation).toHaveBeenCalledTimes(2);
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'resync_org_channel_tier_access',
+      { organisation_id: 42, tier: 'response' },
+      1
+    );
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'resync_org_channel_tier_access',
+      { organisation_id: 42, tier: 'support' },
+      1
+    );
+  });
+
+  it('still returns 200 with the updated team when the enqueue itself fails (fire-and-forget, logged not thrown)', async () => {
+    Team.findById.mockResolvedValue({
+      id: 42,
+      parent_team_id: null,
+      response_channel_access: false,
+      support_channel_access: true
+    });
+    Team.update.mockResolvedValue({
+      id: 42,
+      response_channel_access: true,
+      support_channel_access: true
+    });
+    EventPublisher.publishOperation.mockRejectedValue(new Error('queue unavailable'));
+
+    const res = await request(app)
+      .put('/api/teams/42/channel-access')
+      .send({ responseChannelAccess: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.team.response_channel_access).toBe(true);
+  });
+
+  it('writes an audit log entry with the resulting flag values', async () => {
+    Team.findById.mockResolvedValue({
+      id: 42,
+      parent_team_id: null,
+      response_channel_access: false,
+      support_channel_access: true
+    });
+    Team.update.mockResolvedValue({
+      id: 42,
+      response_channel_access: true,
+      support_channel_access: true
+    });
+
+    await request(app)
+      .put('/api/teams/42/channel-access')
+      .send({ responseChannelAccess: true });
+
+    const auditCall = pool.query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO audit_logs')
+    );
+    expect(auditCall).toBeDefined();
+    expect(auditCall[1]).toEqual([
+      1,
+      'team.channel_access.update',
+      'team',
+      42,
+      JSON.stringify({ response_channel_access: true, support_channel_access: true })
+    ]);
+  });
+});
+
 /**
  * Structural guard, takserver-enrollment Requirement 7.1 (task 5.9): no
  * route anywhere in `server/routes/users.js` accepts a change to an
@@ -1559,5 +1810,89 @@ describe('PUT /api/teams/:teamId — can_join=false deletes signup codes (Task 1
       ([sql]) => typeof sql === 'string' && sql.includes('DELETE FROM signup_codes')
     );
     expect(deleteCalls).toHaveLength(0);
+  });
+});
+
+/**
+ * Integration tests for `GET /api/teams/:teamId`'s `team.allowed_domains`
+ * field (Client UX: the Team_Detail_Page header's "Join limited by Email
+ * Domain" summary badge).
+ *
+ * Organisation-only (no `parent_team_id`): an array (possibly empty) of
+ * the Organisation's `org_allowed_domains` rows for an Organisation, and
+ * `null` for a Sub_Team, matching `OrgDomainManager`'s own Organisation-
+ * only gating. This is ADDITIVE to the existing response shape -- no
+ * existing field changes.
+ */
+describe("GET /api/teams/:teamId team.allowed_domains summary field", () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockIsAdmin = true;
+    app = buildApp();
+    Team.getMembers.mockResolvedValue([]);
+  });
+
+  it('includes the Organisation\'s allowed_domains as a sorted array when domains are configured', async () => {
+    Team.findById.mockResolvedValue({ id: 1, name: 'FENZ', parent_team_id: null, color: 'Red' });
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('FROM org_allowed_domains')) {
+        return Promise.resolve({ rows: [{ domain: 'fenz.govt.nz' }, { domain: 'fire.govt.nz' }] });
+      }
+      if (typeof sql === 'string' && sql.includes('FROM channels')) {
+        return Promise.resolve({ rows: [] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const res = await request(app).get('/api/teams/1');
+
+    expect(res.status).toBe(200);
+    expect(res.body.team.allowed_domains).toEqual(['fenz.govt.nz', 'fire.govt.nz']);
+  });
+
+  it('includes an empty array when the Organisation has no configured domains (unrestricted)', async () => {
+    Team.findById.mockResolvedValue({ id: 1, name: 'FENZ', parent_team_id: null, color: 'Red' });
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('FROM org_allowed_domains')) {
+        return Promise.resolve({ rows: [] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const res = await request(app).get('/api/teams/1');
+
+    expect(res.status).toBe(200);
+    expect(res.body.team.allowed_domains).toEqual([]);
+  });
+
+  it('sets allowed_domains to null for a Sub_Team, without querying org_allowed_domains at all', async () => {
+    Team.findById.mockResolvedValue({ id: 5, name: 'Sub', parent_team_id: 1, color: 'Red' });
+    pool.query.mockResolvedValue({ rows: [] });
+
+    const res = await request(app).get('/api/teams/5');
+
+    expect(res.status).toBe(200);
+    expect(res.body.team.allowed_domains).toBeNull();
+    const domainCalls = pool.query.mock.calls.filter(
+      ([sql]) => typeof sql === 'string' && sql.includes('org_allowed_domains')
+    );
+    expect(domainCalls).toHaveLength(0);
+  });
+
+  it('sets allowed_domains to null and does not fail the whole request when the domains query itself fails', async () => {
+    Team.findById.mockResolvedValue({ id: 1, name: 'FENZ', parent_team_id: null, color: 'Red' });
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('FROM org_allowed_domains')) {
+        return Promise.reject(new Error('db unavailable'));
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const res = await request(app).get('/api/teams/1');
+
+    expect(res.status).toBe(200);
+    expect(res.body.team.allowed_domains).toBeNull();
   });
 });

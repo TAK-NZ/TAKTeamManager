@@ -172,12 +172,14 @@ export default function UserDevicesModal({ userId, userName, onClose }) {
 
   return (
     <>
-      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+      {/* Bugfix: full-bleed on mobile, matching the app-wide modal
+          treatment -- see RevokeDeviceDialog.jsx's identical comment. */}
+      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center sm:p-4 z-50">
         <div
           role="dialog"
           aria-modal="true"
           aria-labelledby="user-devices-title"
-          className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-3xl w-full max-h-[90vh] overflow-y-auto"
+          className="bg-white dark:bg-gray-800 shadow-xl w-full h-full sm:rounded-lg sm:max-w-3xl sm:h-auto sm:max-h-[90vh] overflow-y-auto"
         >
           <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
             <div>
@@ -186,11 +188,15 @@ export default function UserDevicesModal({ userId, userName, onClose }) {
               </h3>
               <p className="text-sm text-gray-500 dark:text-gray-400">{targetName}</p>
             </div>
+            {/* Bugfix (mobile tap target too small): p-2 rounded-lg box
+                around the icon, matching every other modal's close
+                button in this app -- was a bare h-6 w-6 icon with no
+                padding. */}
             <button
               type="button"
               onClick={onClose}
               aria-label="Close devices dialog"
-              className="text-gray-400 hover:text-gray-500 dark:hover:text-gray-300"
+              className="p-2 rounded-lg text-gray-400 hover:text-gray-500 hover:bg-gray-100 dark:hover:text-gray-300 dark:hover:bg-gray-700"
             >
               <XMarkIcon className="h-6 w-6" />
             </button>

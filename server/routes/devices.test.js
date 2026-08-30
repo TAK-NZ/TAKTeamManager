@@ -54,6 +54,8 @@ jest.mock('../services/DeviceEnrollmentService', () => {
     generateEnrollmentQrCode: jest.fn(),
     previewEnrollmentQrCode: jest.fn(),
     listTeamDevices: jest.fn(),
+    updateDevice: jest.fn(),
+    deleteDevice: jest.fn(),
     DeviceEnrollmentAuthorizationError,
     NotATeamOwnedDeviceError,
     TakServerNotConfiguredError
@@ -116,7 +118,7 @@ describe('POST /api/devices', () => {
       label: 'Engine 4 Tablet',
       teamId: 3
     });
-    expect(DeviceEnrollmentService.createDevice).toHaveBeenCalledWith(3, 'Engine 4 Tablet', mockUser);
+    expect(DeviceEnrollmentService.createDevice).toHaveBeenCalledWith(3, 'Engine 4 Tablet', mockUser, null);
   });
 
   it('allows a standard authenticated user to reach the handler (team-admin success case)', async () => {
@@ -133,7 +135,7 @@ describe('POST /api/devices', () => {
     const res = await request(app).post('/api/devices').send({ teamId: 4 });
 
     expect(res.status).toBe(201);
-    expect(DeviceEnrollmentService.createDevice).toHaveBeenCalledWith(4, null, mockUser);
+    expect(DeviceEnrollmentService.createDevice).toHaveBeenCalledWith(4, null, mockUser, null);
   });
 
   it('returns 400 on invalid body without calling the service', async () => {
@@ -154,6 +156,55 @@ describe('POST /api/devices', () => {
     const res = await request(app).post('/api/devices').send({ teamId: 4 });
 
     expect(res.status).toBe(403);
+  });
+
+  it('passes a supplied callsignSuffix through to the service', async () => {
+    asGlobalManager();
+    DeviceEnrollmentService.createDevice.mockResolvedValue({
+      deviceUserId: 10,
+      authentikUserId: 99,
+      username: 'device-abc',
+      label: 'Engine 4 Tablet',
+      callsignSuffix: 'Tanker1',
+      teamId: 3
+    });
+
+    const res = await request(app).post('/api/devices').send({
+      teamId: 3,
+      label: 'Engine 4 Tablet',
+      callsignSuffix: 'Tanker1'
+    });
+
+    expect(res.status).toBe(201);
+    expect(DeviceEnrollmentService.createDevice).toHaveBeenCalledWith(3, 'Engine 4 Tablet', mockUser, 'Tanker1');
+  });
+
+  it('rejects a callsignSuffix containing a disallowed character with 400, without calling the service', async () => {
+    asGlobalManager();
+
+    const res = await request(app).post('/api/devices').send({
+      teamId: 3,
+      callsignSuffix: 'Tanker 1'
+    });
+
+    expect(res.status).toBe(400);
+    expect(DeviceEnrollmentService.createDevice).not.toHaveBeenCalled();
+  });
+
+  it('maps a CallsignSuffixConflictError from the service to 400', async () => {
+    asGlobalManager();
+    const { CallsignSuffixConflictError } = require('../services/CallsignSuffixUniquenessService');
+    DeviceEnrollmentService.createDevice.mockRejectedValue(
+      new CallsignSuffixConflictError('Tanker1')
+    );
+
+    const res = await request(app).post('/api/devices').send({
+      teamId: 3,
+      callsignSuffix: 'Tanker1'
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Tanker1/);
   });
 });
 
@@ -478,5 +529,185 @@ describe('GET /api/devices/team/:teamId', () => {
 
     expect(res.status).toBe(400);
     expect(DeviceEnrollmentService.listTeamDevices).not.toHaveBeenCalled();
+  });
+});
+
+// Bugfix ("unable to edit ... a team device"): device edit route.
+describe('PATCH /api/devices/:deviceUserId', () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    app = buildApp();
+  });
+
+  it('updates a device and returns 200 with the updated device info', async () => {
+    asGlobalManager();
+    DeviceEnrollmentService.updateDevice.mockResolvedValue({
+      deviceUserId: 10,
+      username: 'AUK-D7K3QMX',
+      deviceLabel: 'Renamed Tablet',
+      callsignSuffix: 'Tanker1',
+      teamId: 3
+    });
+
+    const res = await request(app).patch('/api/devices/10').send({
+      deviceLabel: 'Renamed Tablet',
+      callsignSuffix: 'Tanker1'
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.device).toEqual({
+      deviceUserId: 10,
+      username: 'AUK-D7K3QMX',
+      deviceLabel: 'Renamed Tablet',
+      callsignSuffix: 'Tanker1',
+      teamId: 3
+    });
+    expect(DeviceEnrollmentService.updateDevice).toHaveBeenCalledWith(
+      '10',
+      { deviceLabel: 'Renamed Tablet', callsignSuffix: 'Tanker1' },
+      mockUser
+    );
+  });
+
+  it('allows a standard authenticated user to reach the handler (team-admin success case)', async () => {
+    asStandardUser(5);
+    DeviceEnrollmentService.updateDevice.mockResolvedValue({
+      deviceUserId: 11,
+      username: 'AUK-D0000AA',
+      deviceLabel: 'x',
+      callsignSuffix: null,
+      teamId: 4
+    });
+
+    const res = await request(app).patch('/api/devices/11').send({ deviceLabel: 'x' });
+
+    expect(res.status).toBe(200);
+    expect(DeviceEnrollmentService.updateDevice).toHaveBeenCalledWith('11', { deviceLabel: 'x', callsignSuffix: undefined }, mockUser);
+  });
+
+  it('returns 400 for a non-integer deviceUserId without calling the service', async () => {
+    asGlobalManager();
+
+    const res = await request(app).patch('/api/devices/not-a-number').send({ deviceLabel: 'x' });
+
+    expect(res.status).toBe(400);
+    expect(DeviceEnrollmentService.updateDevice).not.toHaveBeenCalled();
+  });
+
+  it('rejects a callsignSuffix containing a disallowed character with 400, without calling the service', async () => {
+    asGlobalManager();
+
+    const res = await request(app).patch('/api/devices/10').send({ callsignSuffix: 'Tanker 1' });
+
+    expect(res.status).toBe(400);
+    expect(DeviceEnrollmentService.updateDevice).not.toHaveBeenCalled();
+  });
+
+  it('maps DeviceEnrollmentAuthorizationError from the service to 403', async () => {
+    asStandardUser(5);
+    DeviceEnrollmentService.updateDevice.mockRejectedValue(
+      new DeviceEnrollmentService.DeviceEnrollmentAuthorizationError()
+    );
+
+    const res = await request(app).patch('/api/devices/10').send({ deviceLabel: 'x' });
+
+    expect(res.status).toBe(403);
+  });
+
+  it('maps NotATeamOwnedDeviceError from the service to 400', async () => {
+    asGlobalManager();
+    DeviceEnrollmentService.updateDevice.mockRejectedValue(
+      new DeviceEnrollmentService.NotATeamOwnedDeviceError()
+    );
+
+    const res = await request(app).patch('/api/devices/10').send({ deviceLabel: 'x' });
+
+    expect(res.status).toBe(400);
+  });
+
+  it('maps a CallsignSuffixConflictError from the service to 400', async () => {
+    asGlobalManager();
+    const { CallsignSuffixConflictError } = require('../services/CallsignSuffixUniquenessService');
+    DeviceEnrollmentService.updateDevice.mockRejectedValue(
+      new CallsignSuffixConflictError('Tanker1')
+    );
+
+    const res = await request(app).patch('/api/devices/10').send({ callsignSuffix: 'Tanker1' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Tanker1/);
+  });
+});
+
+// Bugfix ("unable to ... delete a team device"): device delete route.
+describe('DELETE /api/devices/:deviceUserId', () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    app = buildApp();
+    pool.query.mockResolvedValue({ rows: [] });
+  });
+
+  it('deletes a device, writes an audit_logs row, and returns 200', async () => {
+    asGlobalManager();
+    DeviceEnrollmentService.deleteDevice.mockResolvedValue({ deviceUserId: 10, teamId: 3 });
+
+    const res = await request(app).delete('/api/devices/10');
+
+    expect(res.status).toBe(200);
+    expect(DeviceEnrollmentService.deleteDevice).toHaveBeenCalledWith('10', mockUser);
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    const [sql, params] = pool.query.mock.calls[0];
+    expect(sql).toContain('INSERT INTO audit_logs');
+    expect(params[0]).toBe(mockUser.userId);
+    expect(params[1]).toBe('device.delete');
+    expect(params[2]).toBe('user');
+    expect(params[3]).toBe(10);
+  });
+
+  it('allows a standard authenticated user to reach the handler (team-admin success case)', async () => {
+    asStandardUser(5);
+    DeviceEnrollmentService.deleteDevice.mockResolvedValue({ deviceUserId: 11, teamId: 4 });
+
+    const res = await request(app).delete('/api/devices/11');
+
+    expect(res.status).toBe(200);
+    expect(DeviceEnrollmentService.deleteDevice).toHaveBeenCalledWith('11', mockUser);
+  });
+
+  it('returns 400 for a non-integer deviceUserId without calling the service', async () => {
+    asGlobalManager();
+
+    const res = await request(app).delete('/api/devices/not-a-number');
+
+    expect(res.status).toBe(400);
+    expect(DeviceEnrollmentService.deleteDevice).not.toHaveBeenCalled();
+  });
+
+  it('maps DeviceEnrollmentAuthorizationError from the service to 403 and writes no audit log', async () => {
+    asStandardUser(5);
+    DeviceEnrollmentService.deleteDevice.mockRejectedValue(
+      new DeviceEnrollmentService.DeviceEnrollmentAuthorizationError()
+    );
+
+    const res = await request(app).delete('/api/devices/10');
+
+    expect(res.status).toBe(403);
+    expect(pool.query).not.toHaveBeenCalled();
+  });
+
+  it('maps NotATeamOwnedDeviceError from the service to 400', async () => {
+    asGlobalManager();
+    DeviceEnrollmentService.deleteDevice.mockRejectedValue(
+      new DeviceEnrollmentService.NotATeamOwnedDeviceError()
+    );
+
+    const res = await request(app).delete('/api/devices/10');
+
+    expect(res.status).toBe(400);
+    expect(pool.query).not.toHaveBeenCalled();
   });
 });

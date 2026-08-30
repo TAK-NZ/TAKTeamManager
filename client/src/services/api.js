@@ -195,6 +195,12 @@ export const teamsAPI = {
   delete: (id) => api.delete(`/teams/${id}`),
   getCallsignLevelOptions: (id) => api.get(`/teams/${id}/callsign-level-options`),
   updateMember: (teamId, userId, data) => api.patch(`/teams/${teamId}/members/${userId}`, data),
+  // region-channel-tiers: Global_Manager-only, Organisation-only. data:
+  // { responseChannelAccess?, supportChannelAccess? } -- deliberately a
+  // SEPARATE endpoint from `update()` above (server/routes/teams.js's
+  // `team:channel_access:manage` permission has no Team_Admin fallback,
+  // unlike `team:update`).
+  updateChannelAccess: (id, data) => api.put(`/teams/${id}/channel-access`, data),
 };
 
 export const bulkImportAPI = {
@@ -273,6 +279,14 @@ export const globalChannelsAPI = {
   assignAllUsers: () => api.post('/global-channels/assign-all-users'),
   deleteChannel: (channelType, channelId) => api.delete(`/global-channels/${channelType}/${channelId}`),
   syncExistingChannels: () => api.post('/global-channels/sync-existing'),
+  // region-channel-tiers: seeds the standard 35-channel Response/Support
+  // set (16 regions x 2 tiers + Chatham Islands x 2 tiers + National
+  // support-only) -- see server/services/GlobalChannelService.
+  // seedRegionChannels's own doc comment.
+  seedRegionChannels: () => api.post('/global-channels/seed-regions'),
+  // region-channel-tiers (bugfix): backs the "hide Seed button once
+  // complete" UI check.
+  getRegionSeedStatus: () => api.get('/global-channels/region/seed-status'),
 };
 
 // Removes any filter key whose value is '', null, or undefined, so an
@@ -448,6 +462,14 @@ export const enrollmentAPI = {
 };
 
 export const devicesAPI = {
+  // Creates a brand-new Team_Owned_Device for `teamId` (Requirement 27
+  // Criteria 2, 4). `label` and `callsignSuffix` are both optional --
+  // `callsignSuffix` is checked server-side against the SAME per-team
+  // uniqueness rule a human member's callsign suffix is checked against
+  // (`checkCallsignSuffixUniqueness`), so a caller should be ready to
+  // handle a 400 naming a colliding value.
+  create: (teamId, label, callsignSuffix) => api.post('/devices', { teamId, label, callsignSuffix }),
+
   // A Team's Team_Owned_Devices, for that Team's admin (Criterion 14.7). Each
   // device carries no email field at all -- a device has none (Criterion 5.10).
   getTeamDevices: (teamId) => api.get(`/devices/team/${teamId}`),
@@ -462,6 +484,18 @@ export const devicesAPI = {
   // "Enrollment Data" fields for a Team_Owned_Device without minting a
   // token, matching enrollmentAPI.previewSelf()'s no-mint contract.
   previewQrCode: (deviceUserId) => api.get(`/devices/${deviceUserId}/preview`),
+
+  // Bugfix ("unable to edit ... a team device"): updates an existing
+  // device's label/callsign suffix. `updates` is `{deviceLabel?,
+  // callsignSuffix?}`; either key may be omitted to leave that column
+  // untouched. A colliding callsignSuffix comes back as a 400 naming
+  // the conflicting value, same shape as `create` above.
+  update: (deviceUserId, updates) => api.patch(`/devices/${deviceUserId}`, updates),
+
+  // Bugfix ("unable to ... delete a team device"): permanently removes
+  // an existing device (team membership, Authentik user, and local
+  // account).
+  delete: (deviceUserId) => api.delete(`/devices/${deviceUserId}`),
 };
 
 export default api;

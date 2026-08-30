@@ -214,6 +214,28 @@ describe('EnrollmentCountdown', () => {
     expect(onRegenerate).toHaveBeenCalledTimes(2)
   })
 
+  // Bugfix (mobile tap target too small): px-3 py-1.5 on text-sm gave a
+  // ~32px-tall button, under the ~36px floor. py-2 brings it to a real
+  // tap target.
+  it('gives the regenerate button py-2 (was py-1.5) for a real ~36px tap target', async () => {
+    const now = Date.now()
+    vi.setSystemTime(now)
+    const expiresAt = new Date(now + 1000).toISOString()
+
+    root = createRoot(container)
+    await act(async () => {
+      root.render(<EnrollmentCountdown expiresAt={expiresAt} onRegenerate={() => {}} />)
+    })
+    await act(async () => {
+      vi.advanceTimersByTime(2000)
+    })
+
+    const button = container.querySelector('button')
+    expect(button).toBeTruthy()
+    expect(button.className).toContain('py-2')
+    expect(button.className).not.toContain('py-1.5')
+  })
+
   it('renders no regenerate affordance at all when onRegenerate is omitted, even once EXPIRED', async () => {
     const now = Date.now()
     vi.setSystemTime(now)

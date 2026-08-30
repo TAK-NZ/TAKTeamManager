@@ -355,6 +355,23 @@ const rowScopedResolvers = {
   },
 
   /**
+   * `team:channel_access:manage` — Global_Manager-only, no row-scoped
+   * fallback. Mirrors `team:delete:global` exactly, deliberately NOT
+   * `team:update`'s `Team.isAdmin` fallback: a Team_Admin of an
+   * Organisation may edit that Organisation's ordinary fields via
+   * `team:update`, but response_channel_access/support_channel_access
+   * govern which Authentik region-channel groups the whole
+   * Organisation's membership is synced into, which is reserved for a
+   * Global_Manager regardless of Team_Admin status.
+   *
+   * @param {import('express').Request} req
+   * @returns {Promise<boolean>}
+   */
+  'team:channel_access:manage': async (req) => {
+    return Boolean(req.user && req.user.is_global_manager);
+  },
+
+  /**
    * `user:create:team_admin` — `POST /api/users` (the older create-user
    * route). Mirrors the inline check that used to live in `users.js`'s
    * `POST /`; that inline check incorrectly compared against

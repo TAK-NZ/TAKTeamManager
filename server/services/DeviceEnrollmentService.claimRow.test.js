@@ -199,15 +199,18 @@ describe('DeviceEnrollmentService.createDevice -- Claim_Row phasing ORDER (Requi
     //   email              -> NULL
     //   device_label       -> $2  (the supplied label)
     expect(normalizedSql).toContain(
-      'INSERT INTO users (username, authentik_user_id, is_active, is_team_device, email, device_label)'
+      'INSERT INTO users (username, authentik_user_id, is_active, is_team_device, email, device_label, callsign_suffix)'
     );
-    expect(normalizedSql).toContain('VALUES ($1, NULL, false, true, NULL, $2)');
+    expect(normalizedSql).toContain('VALUES ($1, NULL, false, true, NULL, $2, $3)');
 
-    const [candidateUsername, deviceLabelParam] = claimCall.args;
+    const [candidateUsername, deviceLabelParam, callsignSuffixParam] = claimCall.args;
     expect(isManagedIdentifier(candidateUsername)).toBe(true);
     expect(candidateUsername.startsWith('AUK-D')).toBe(true);
     expect(candidateUsername).toBe(result.username);
     expect(deviceLabelParam).toBe('Engine 4 Tablet');
+    // No callsignSuffix was supplied to createDevice in this test -- the
+    // third parameter is null, never the empty string.
+    expect(callsignSuffixParam).toBeNull();
   });
 });
 
@@ -291,7 +294,7 @@ describe("DeviceEnrollmentService.createDevice -- NULL, never '', for a Team_Own
     // `email`'s VALUES slot is a literal NULL, not a parameter and not the
     // empty string -- there is no code path by which this statement could
     // write ''.
-    expect(normalizedSql).toContain('VALUES ($1, NULL, false, true, NULL, $2)');
+    expect(normalizedSql).toContain('VALUES ($1, NULL, false, true, NULL, $2, $3)');
     expect(claimSql).not.toContain("''");
 
     // `createDevice` itself never touches `user_cache`: that table is

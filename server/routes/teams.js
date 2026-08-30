@@ -11,6 +11,7 @@ const { isValidCallsignPrefix, isValidCallsignSuffix } = require('../utils/calls
 const { TAK_ROLE_VALUES } = require('./settings');
 const { checkCallsignSuffixUniqueness, CallsignSuffixConflictError } = require('../services/CallsignSuffixUniquenessService');
 const TeamVisibilityService = require('../services/TeamVisibilityService');
+const EventPublisher = require('../services/EventPublisher');
 const router = express.Router();
 
 // Get joinable teams (public endpoint)
@@ -444,6 +445,126 @@ router.put('/:teamId', authenticateToken, authorize, [
   }
 });
 
+// Update an Organisation's Response/Support channel-tier access flags.
+// Global_Manager-only (Requirement: 'team:channel_access:manage' is
+// deliberately NOT 'team:update' -- see the Permission_Registry entry's
+// comment), no Team_Admin fallback: a Team_Admin of this very Organisation
+// cannot reach this route even for their own Organisation.
+router.put('/:teamId/channel-access', authenticateToken, authorize, [
+  body('responseChannelAccess').optional().isBoolean(),
+  body('supportChannelAccess').optional().isBoolean()
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
+  try {
+    // Authorization (global manager only) is enforced centrally by
+    // authorize.js via the
+    // 'PUT /api/teams/:teamId/channel-access': ['team:channel_access:manage']
+    // Permission_Registry entry.
+
+    const team = await Team.findById(req.params.teamId);
+    if (!team) {
+      return res.status(404).json({ error: 'Team not found' });
+    }
+
+    // response_channel_access/support_channel_access are Organisation-only
+    // (Team.update rejects a Sub_Team supplying either with a typed
+    // ChannelTierAccessSubTeamError, mapped to 400 below as defense in
+    // depth), but checking here too lets this route return a clearer,
+    // request-shape-specific message before ever calling Team.update.
+    if (team.parent_team_id !== null) {
+      return res.status(400).json({
+        error: 'Response/Support channel access can only be set on an Organisation, not a Sub_Team'
+      });
+    }
+
+    const { responseChannelAccess, supportChannelAccess } = req.body;
+
+    if (responseChannelAccess === undefined && supportChannelAccess === undefined) {
+      return res.status(400).json({
+        error: 'At least one of responseChannelAccess or supportChannelAccess must be supplied'
+      });
+    }
+
+    // Diff against the CURRENTLY stored values before updating, so the
+    // reconciliation Sync_Operation below is only enqueued for a flag that
+    // actually changed -- a no-op resubmission (e.g. re-saving a form with
+    // an unchanged flag) must not re-trigger a full Organisation-wide
+    // group-membership reconciliation.
+    const responseChanged =
+      responseChannelAccess !== undefined &&
+      Boolean(responseChannelAccess) !== Boolean(team.response_channel_access);
+    const supportChanged =
+      supportChannelAccess !== undefined &&
+      Boolean(supportChannelAccess) !== Boolean(team.support_channel_access);
+
+    const updatedTeam = await Team.update(req.params.teamId, {
+      response_channel_access: responseChannelAccess,
+      support_channel_access: supportChannelAccess
+    });
+
+    // Enqueue one reconciliation Sync_Operation per tier that actually
+    // changed, resolving every user under this Organisation's tree and
+    // adding/removing their Response/Support group membership to match
+    // the new flag state (see syncWorker's resync_org_channel_tier_access
+    // handler). Enqueued OUTSIDE any transaction (Team.update itself does
+    // not run in one), matching the fire-and-forget enqueue pattern
+    // Team.create/Team.update already use for create_cloudtak_group/
+    // update_cloudtak_group -- a transient enqueue failure must not fail
+    // the flag update itself, since the flag is the source of truth and a
+    // missed reconciliation is self-healed by the next explicit sync.
+    for (const tier of ['response', 'support']) {
+      const changed = tier === 'response' ? responseChanged : supportChanged;
+      if (!changed) continue;
+      try {
+        await EventPublisher.publishOperation(
+          'resync_org_channel_tier_access',
+          { organisation_id: parseInt(req.params.teamId, 10), tier },
+          req.user.userId
+        );
+      } catch (enqueueError) {
+        getLogger().error(
+          { err: enqueueError, teamId: req.params.teamId, tier },
+          'Error enqueuing resync_org_channel_tier_access'
+        );
+      }
+    }
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [
+          req.user.userId,
+          'team.channel_access.update',
+          'team',
+          parseInt(req.params.teamId, 10),
+          JSON.stringify({
+            response_channel_access: updatedTeam.response_channel_access,
+            support_channel_access: updatedTeam.support_channel_access
+          })
+        ]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
+    res.json({ team: updatedTeam });
+  } catch (error) {
+    // Team.update throws this BEFORE any UPDATE is attempted when either
+    // flag is supplied on a Sub_Team update request. Should not normally
+    // be reachable here given the explicit check above, but kept as
+    // defense in depth against the two checks ever drifting.
+    if (error instanceof Team.ChannelTierAccessSubTeamError) {
+      return res.status(400).json({ error: error.message });
+    }
+    getLogger().error({ err: error }, 'Failed to update channel access');
+    res.status(500).json({ error: 'Failed to update channel access' });
+  }
+});
+
 // Get team details
 router.get('/:teamId', authenticateToken, authorize, async (req, res) => {
   try {
@@ -476,7 +597,46 @@ router.get('/:teamId', authenticateToken, authorize, async (req, res) => {
       channels = [];
     }
 
-    res.json({ team, members: members || [], channels: channels || [] });
+    // Client UX: a Team_Detail_Page header summary ("Join limited by
+    // Email Domain: Yes/No", with the domain list on hover for "Yes")
+    // needs to know this Organisation's `org_allowed_domains` without
+    // its own separate round trip. Organisation-only (no
+    // `parent_team_id`) -- a Sub_Team never carries its own domain
+    // restriction, matching `OrgDomainManager`'s existing Organisation-
+    // only gating -- so `team.allowed_domains` is `null` for a Sub_Team
+    // and an array (possibly empty) for an Organisation. This is
+    // ADDITIVE to the `team` object; it changes no existing field and
+    // introduces no new top-level response key.
+    if (!team.parent_team_id) {
+      try {
+        const domainResult = await pool.query(
+          'SELECT domain FROM org_allowed_domains WHERE org_id = $1 ORDER BY domain',
+          [team.id]
+        );
+        team.allowed_domains = domainResult.rows.map((row) => row.domain);
+      } catch (domainError) {
+        getLogger().error({ err: domainError }, 'Error fetching org allowed domains, continuing with null');
+        team.allowed_domains = null;
+      }
+    } else {
+      team.allowed_domains = null;
+    }
+
+    // Bugfix: `Team.getMembers` deliberately returns every
+    // team_memberships row including a Team_Owned_Device's (that query
+    // is a documented pure alias reused as `Team.getFullMemberList` by
+    // `CallsignSuffixUniquenessService`, which NEEDS device rows
+    // included to catch a device/human callsign_suffix collision -- see
+    // that method's own doc comment). This Member_List-facing response
+    // is a different consumer with a different requirement: a device has
+    // no username and is not a Member/Admin a human admin can manage
+    // through this list (edit/resend-welcome/transfer/remove), so it is
+    // filtered out HERE, at the response boundary, rather than inside
+    // `Team.getMembers` itself where it would also strip rows the
+    // uniqueness check depends on.
+    const humanMembers = (members || []).filter((member) => !member.is_team_device);
+
+    res.json({ team, members: humanMembers, channels: channels || [] });
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to fetch team details');
     res.status(500).json({ error: 'Failed to fetch team', details: error.message });

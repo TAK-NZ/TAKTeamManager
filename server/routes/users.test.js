@@ -30,9 +30,18 @@ jest.mock('../services/authentik', () => ({
   getUsers: jest.fn()
 }));
 
+// Users-page-action-parity: `mockAuthUser` is a mutable box the mock factory
+// below reads on every request, so a describe block that needs a
+// non-Global_Manager caller (to exercise the new `can_manage` field's
+// `Team.getManagedTeamIds` branch) can reassign it in its own `beforeEach`
+// without needing a second, differently-mocked `buildApp`. Every
+// PRE-EXISTING describe block never reassigns it, so it keeps running as
+// the same Global_Manager (`is_global_manager: true`) it always has.
+const mockAuthUser = { id: 1, userId: 1, is_global_manager: true };
+
 jest.mock('../middleware/auth', () => ({
   authenticateToken: (req, res, next) => {
-    req.user = { id: 1, userId: 1, is_global_manager: true };
+    req.user = { ...mockAuthUser };
     next();
   },
   requireTeamAdmin: (req, res, next) => next()
@@ -358,6 +367,336 @@ describe('GET /api/users live certificate count (Requirement 13.2, 13.6)', () =>
     expect(sql).toMatch(/FROM tak_devices/);
     expect(sql).toMatch(/user_id IS NOT NULL AND revoked = false/);
     expect(sql).toMatch(/COALESCE\(certs\.live_certificate_count, 0\) AS live_certificate_count/);
+  });
+});
+
+/**
+ * Users-page-action-parity: `GET /api/users` additionally projects
+ * `team_id` -- the user's direct-membership team's raw id, alongside the
+ * pre-existing `team_name` display string. The Users view's row actions
+ * (Edit via `PATCH /api/teams/:teamId/members/:userId`, and the Transfer
+ * dialog's source-team context) need the actual id, not only the rendered
+ * name, and it comes from the SAME batched query -- no new round trip.
+ */
+describe('GET /api/users projects team_id alongside team_name (Users-page-action-parity)', () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    app = buildApp();
+  });
+
+  it('attaches team_id for a user with a direct team membership', async () => {
+    authentikService.getUsers.mockResolvedValue({
+      results: [{ pk: 1, username: 'alice' }],
+      count: 1
+    });
+    pool.query.mockResolvedValue({
+      rows: [{ authentik_user_id: 1, team_name: 'Alpha Team', team_id: 42 }]
+    });
+
+    const res = await request(app).get('/api/users');
+
+    expect(res.status).toBe(200);
+    const alice = res.body.users.find((u) => u.pk === 1);
+    expect(alice.team_id).toBe(42);
+  });
+
+  it('defaults team_id to null for a user absent from the query result rows', async () => {
+    authentikService.getUsers.mockResolvedValue({
+      results: [{ pk: 1, username: 'no-team-user' }],
+      count: 1
+    });
+    pool.query.mockResolvedValue({ rows: [] });
+
+    const res = await request(app).get('/api/users');
+
+    expect(res.status).toBe(200);
+    const user = res.body.users.find((u) => u.pk === 1);
+    expect(user.team_id).toBeNull();
+  });
+
+  it('defaults team_id to null when the query returns the row but with no team_id (no direct membership)', async () => {
+    authentikService.getUsers.mockResolvedValue({
+      results: [{ pk: 1, username: 'no-team-user' }],
+      count: 1
+    });
+    pool.query.mockResolvedValue({
+      rows: [{ authentik_user_id: 1, team_name: null, team_id: null }]
+    });
+
+    const res = await request(app).get('/api/users');
+
+    expect(res.status).toBe(200);
+    const user = res.body.users.find((u) => u.pk === 1);
+    expect(user.team_id).toBeNull();
+  });
+
+  it('the SQL text projects t.id as team_id', async () => {
+    authentikService.getUsers.mockResolvedValue({
+      results: [{ pk: 1, username: 'alice' }],
+      count: 1
+    });
+    pool.query.mockResolvedValue({ rows: [] });
+
+    await request(app).get('/api/users');
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    const [sql] = pool.query.mock.calls[0];
+    expect(sql).toMatch(/t\.id AS team_id/);
+  });
+});
+
+/**
+ * Users-page-action-parity: `GET /api/users` additionally projects the
+ * LOCAL `users` columns the Member_List edit form (`MemberEditRow`) needs
+ * to pre-fill itself -- `first_name`, `last_name`, `tak_role`,
+ * `callsign_suffix` -- from the SAME batched query, never from
+ * Authentik's own payload.
+ */
+describe('GET /api/users projects local member-edit fields (Users-page-action-parity)', () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    app = buildApp();
+  });
+
+  it('attaches first_name, last_name, tak_role, callsign_suffix from the local users row', async () => {
+    authentikService.getUsers.mockResolvedValue({
+      results: [{ pk: 1, username: 'alice', name: 'Alice Authentik' }],
+      count: 1
+    });
+    pool.query.mockResolvedValue({
+      rows: [{
+        authentik_user_id: 1,
+        local_first_name: 'Alice',
+        local_last_name: 'Local',
+        local_tak_role: 'Team Lead',
+        local_callsign_suffix: 'A.Local'
+      }]
+    });
+
+    const res = await request(app).get('/api/users');
+
+    expect(res.status).toBe(200);
+    const alice = res.body.users.find((u) => u.pk === 1);
+    expect(alice.first_name).toBe('Alice');
+    expect(alice.last_name).toBe('Local');
+    expect(alice.tak_role).toBe('Team Lead');
+    expect(alice.callsign_suffix).toBe('A.Local');
+  });
+
+  it('defaults all four fields to null for a user absent from the query result rows', async () => {
+    authentikService.getUsers.mockResolvedValue({
+      results: [{ pk: 1, username: 'no-local-row' }],
+      count: 1
+    });
+    pool.query.mockResolvedValue({ rows: [] });
+
+    const res = await request(app).get('/api/users');
+
+    expect(res.status).toBe(200);
+    const user = res.body.users.find((u) => u.pk === 1);
+    expect(user.first_name).toBeNull();
+    expect(user.last_name).toBeNull();
+    expect(user.tak_role).toBeNull();
+    expect(user.callsign_suffix).toBeNull();
+  });
+
+  it('the SQL text projects the four local columns under their local_ aliases', async () => {
+    authentikService.getUsers.mockResolvedValue({
+      results: [{ pk: 1, username: 'alice' }],
+      count: 1
+    });
+    pool.query.mockResolvedValue({ rows: [] });
+
+    await request(app).get('/api/users');
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    const [sql] = pool.query.mock.calls[0];
+    expect(sql).toMatch(/u\.first_name AS local_first_name/);
+    expect(sql).toMatch(/u\.last_name AS local_last_name/);
+    expect(sql).toMatch(/u\.tak_role AS local_tak_role/);
+    expect(sql).toMatch(/u\.callsign_suffix AS local_callsign_suffix/);
+  });
+});
+
+/**
+ * Users-page-action-parity: `GET /api/users` additionally projects
+ * `can_manage`, answering "may THIS caller act on THIS row's own team"
+ * (Edit/Transfer/Delete), independent of `DirectoryScopeService`'s
+ * VISIBILITY scoping. A Global_Manager can manage every row with no
+ * extra query; a non-Global_Manager gets exactly one extra query
+ * (`Team.getManagedTeamIds`) and `can_manage` becomes a Set-membership
+ * test against the row's own `team_id`.
+ */
+describe('GET /api/users projects can_manage (Users-page-action-parity)', () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    app = buildApp();
+  });
+
+  afterEach(() => {
+    // Restore the shared mock user to the Global_Manager every other
+    // describe block in this file relies on.
+    mockAuthUser.id = 1;
+    mockAuthUser.userId = 1;
+    mockAuthUser.is_global_manager = true;
+  });
+
+  it('sets can_manage: true for every row for a Global_Manager, with no extra query', async () => {
+    authentikService.getUsers.mockResolvedValue({
+      results: [{ pk: 1, username: 'alice' }, { pk: 2, username: 'bob' }],
+      count: 2
+    });
+    pool.query.mockResolvedValue({
+      rows: [
+        { authentik_user_id: 1, team_name: 'Alpha Team', team_id: 4 },
+        { authentik_user_id: 2, team_name: null, team_id: null }
+      ]
+    });
+
+    const res = await request(app).get('/api/users');
+
+    expect(res.status).toBe(200);
+    // The team-name batched query is the ONLY pool.query call -- no
+    // Team.getManagedTeamIds query for a Global_Manager.
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(res.body.users.find((u) => u.pk === 1).can_manage).toBe(true);
+    expect(res.body.users.find((u) => u.pk === 2).can_manage).toBe(true);
+  });
+
+  it('sets can_manage: true only for rows whose team_id is in Team.getManagedTeamIds\'s result, for a non-Global_Manager', async () => {
+    mockAuthUser.id = 9;
+    mockAuthUser.userId = 9;
+    mockAuthUser.is_global_manager = false;
+
+    authentikService.getUsers.mockResolvedValue({
+      results: [
+        { pk: 1, username: 'alice' }, // managed team
+        { pk: 2, username: 'bob' },   // unmanaged team
+        { pk: 3, username: 'carol' }  // no team at all
+      ],
+      count: 3
+    });
+
+    pool.query.mockImplementation(async (sql) => {
+      // `managed_teams` is the CTE name UNIQUE to Team.getManagedTeamIds --
+      // DirectoryScopeService.resolveScope's Q1 also names its first CTE
+      // `admin_teams`, so matching on that alone would also intercept
+      // (and mis-shape the response for) the VISIBILITY-scoping query this
+      // non-Global_Manager path additionally issues.
+      if (typeof sql === 'string' && sql.includes('managed_teams')) {
+        // Team.getManagedTeamIds(9) -- caller administers team 4 (and its
+        // descendants, already flattened by the real recursive query;
+        // this mock just returns the flattened set directly).
+        return { rows: [{ team_id: 4 }] };
+      }
+      // DirectoryScopeService.resolveScope's Q1 (Scoped_Organisations):
+      // this test is about `can_manage`, a SEPARATE question from
+      // visibility, so it admits every candidate via provenance
+      // (`origin_org_id: 100` on every row below, matched against this
+      // resolved Organisation) rather than actually exercising the
+      // domain-matching path -- Q2/Q3 below are answered empty since
+      // provenance alone is enough to admit them.
+      if (typeof sql === 'string' && sql.includes('WITH RECURSIVE admin_teams')) {
+        return { rows: [{ id: 100, name: 'Org' }] };
+      }
+      if (typeof sql === 'string' && sql.includes('org_allowed_domains')) {
+        return { rows: [] };
+      }
+      if (typeof sql === 'string' && sql.includes('excluded_email_domains')) {
+        return { rows: [] };
+      }
+      // The team-name batched query.
+      return {
+        rows: [
+          { authentik_user_id: 1, team_name: 'Alpha Team', team_id: 4, origin_org_id: 100 },
+          { authentik_user_id: 2, team_name: 'Beta Team', team_id: 7, origin_org_id: 100 },
+          { authentik_user_id: 3, team_name: null, team_id: null, origin_org_id: 100 }
+        ]
+      };
+    });
+
+    const res = await request(app).get('/api/users');
+
+    expect(res.status).toBe(200);
+    expect(res.body.users.find((u) => u.pk === 1).can_manage).toBe(true);
+    expect(res.body.users.find((u) => u.pk === 2).can_manage).toBe(false);
+    expect(res.body.users.find((u) => u.pk === 3).can_manage).toBe(false);
+  });
+
+  it('calls Team.getManagedTeamIds with req.user.userId (the LOCAL id), not req.user.id (the Authentik id)', async () => {
+    mockAuthUser.id = 999; // Authentik id -- must NOT be what's queried
+    mockAuthUser.userId = 9; // local users.id -- must be what's queried
+    mockAuthUser.is_global_manager = false;
+
+    authentikService.getUsers.mockResolvedValue({
+      results: [{ pk: 1, username: 'alice' }],
+      count: 1
+    });
+
+    let capturedParams = null;
+    pool.query.mockImplementation(async (sql, params) => {
+      // `managed_teams` disambiguates Team.getManagedTeamIds's query from
+      // DirectoryScopeService.resolveScope's own, differently-shaped
+      // `admin_teams`-named CTE -- both happen to take the same [userId]
+      // parameter shape here, so matching the wrong one would still pass
+      // this specific assertion while testing nothing real.
+      if (typeof sql === 'string' && sql.includes('managed_teams')) {
+        capturedParams = params;
+        return { rows: [] };
+      }
+      if (typeof sql === 'string' && sql.includes('WITH RECURSIVE admin_teams')) {
+        return { rows: [] };
+      }
+      if (typeof sql === 'string' && (sql.includes('org_allowed_domains') || sql.includes('excluded_email_domains'))) {
+        return { rows: [] };
+      }
+      return { rows: [{ authentik_user_id: 1, team_name: null, team_id: null }] };
+    });
+
+    await request(app).get('/api/users');
+
+    expect(capturedParams).toEqual([9]);
+  });
+
+  it('sets can_manage: false for every row when Team.getManagedTeamIds resolves an empty Set (no administered team anywhere)', async () => {
+    mockAuthUser.id = 9;
+    mockAuthUser.userId = 9;
+    mockAuthUser.is_global_manager = false;
+
+    authentikService.getUsers.mockResolvedValue({
+      results: [{ pk: 1, username: 'alice' }],
+      count: 1
+    });
+
+    pool.query.mockImplementation(async (sql) => {
+      // See the disambiguation note in the test above: `managed_teams` is
+      // unique to Team.getManagedTeamIds, distinct from
+      // DirectoryScopeService.resolveScope's own `admin_teams`-named CTE.
+      if (typeof sql === 'string' && sql.includes('managed_teams')) {
+        return { rows: [] };
+      }
+      if (typeof sql === 'string' && sql.includes('WITH RECURSIVE admin_teams')) {
+        return { rows: [{ id: 100, name: 'Org' }] };
+      }
+      if (typeof sql === 'string' && sql.includes('org_allowed_domains')) {
+        return { rows: [] };
+      }
+      if (typeof sql === 'string' && sql.includes('excluded_email_domains')) {
+        return { rows: [] };
+      }
+      return { rows: [{ authentik_user_id: 1, team_name: 'Alpha Team', team_id: 4, origin_org_id: 100 }] };
+    });
+
+    const res = await request(app).get('/api/users');
+
+    expect(res.status).toBe(200);
+    expect(res.body.users.find((u) => u.pk === 1).can_manage).toBe(false);
   });
 });
 

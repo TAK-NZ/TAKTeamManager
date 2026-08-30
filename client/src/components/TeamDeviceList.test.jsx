@@ -92,6 +92,47 @@ describe('TeamDeviceList (mounted)', () => {
     expect(container.textContent).toBe('')
   })
 
+  // Bugfix: TeamDetail.jsx's Team Devices tab was the only one of 5 tabs
+  // with no item count badge, since this list's fetch/state is entirely
+  // internal to this component. `onCountChange` reports the fetched
+  // TOTAL (unfiltered by the search box), matching every other tab's own
+  // count semantics (their own full list length, not a filtered subset).
+  it('reports the fetched device count via onCountChange, unfiltered by the search term', async () => {
+    devicesAPI.getTeamDevices.mockResolvedValue({
+      data: {
+        devices: [
+          { deviceUserId: 1, username: 'AUK-D7K3QMX', deviceLabel: 'Engine 4 Tablet', teamId: 5, createdAt: '2025-01-02T03:04:05Z', liveCertificateCount: 1 },
+          { deviceUserId: 2, username: 'AUK-D9Q2WXY', deviceLabel: null, teamId: 5, createdAt: '2025-02-03T03:04:05Z', liveCertificateCount: 0 },
+        ],
+      },
+    })
+    const onCountChange = vi.fn()
+
+    root = createRoot(container)
+    await act(async () => {
+      root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} onCountChange={onCountChange} />)
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(onCountChange).toHaveBeenCalledWith(2)
+  })
+
+  it('does not throw when onCountChange is omitted', async () => {
+    devicesAPI.getTeamDevices.mockResolvedValue({ data: { devices: [] } })
+
+    root = createRoot(container)
+    await expect(
+      act(async () => {
+        root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+      })
+    ).resolves.not.toThrow()
+    await act(async () => {
+      await Promise.resolve()
+    })
+  })
+
   it('renders each device by Device_Display_Name and Managed_Identifier, with no email anywhere', async () => {
     devicesAPI.getTeamDevices.mockResolvedValue({
       data: {
@@ -161,7 +202,7 @@ describe('TeamDeviceList (mounted)', () => {
       await Promise.resolve()
     })
 
-    const button = container.querySelector('button')
+    const button = container.querySelector('button[title="Enroll device"]')
     await act(async () => {
       button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
@@ -221,6 +262,49 @@ describe('TeamDeviceList (mounted)', () => {
     expect(container.textContent).toContain('AUK-D5H8NRT')
     expect(container.textContent).not.toContain('@')
     expect(container.querySelector('[data-field="email"]')).toBeNull()
+  })
+
+  // Bugfix (mobile tap targets too small): the card block's DeviceActions
+  // usage passes variant="card" (p-2/rounded-lg/h-5 w-5 button box); the
+  // desktop table's usage stays the default compact variant (bare h-4 w-4
+  // icon, no box). Both render simultaneously in jsdom (CSS-only
+  // sm:hidden/hidden sm:block, not conditional rendering), so this reads
+  // each action's button from its own DOM subtree via the .sm\\:hidden /
+  // .hidden.sm\\:block wrapper.
+  it('gives the mobile card\'s device actions a button-box (variant="card"), while the desktop table keeps the compact bare-icon style', async () => {
+    devicesAPI.getTeamDevices.mockResolvedValue({
+      data: {
+        devices: [
+          { deviceUserId: 1, username: 'AUK-D7K3QMX', deviceLabel: 'Engine 4 Tablet', teamId: 5, createdAt: '2025-01-02T03:04:05Z', liveCertificateCount: 0 },
+        ],
+      },
+    })
+
+    root = createRoot(container)
+    await act(async () => {
+      root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    const cardWrapper = container.querySelector('.sm\\:hidden')
+    const tableWrapper = container.querySelector('.hidden.sm\\:block')
+    expect(cardWrapper).not.toBeNull()
+    expect(tableWrapper).not.toBeNull()
+
+    const cardEditButton = cardWrapper.querySelector('button[title="Edit device"]')
+    const tableEditButton = tableWrapper.querySelector('button[title="Edit device"]')
+    expect(cardEditButton).not.toBeNull()
+    expect(tableEditButton).not.toBeNull()
+
+    expect(cardEditButton.className).toContain('p-2')
+    expect(cardEditButton.className).toContain('rounded-lg')
+    expect(cardEditButton.querySelector('svg').getAttribute('class')).toContain('h-5 w-5')
+
+    expect(tableEditButton.className).not.toContain('p-2')
+    expect(tableEditButton.className).not.toContain('rounded-lg')
+    expect(tableEditButton.querySelector('svg').getAttribute('class')).toContain('h-4 w-4')
   })
 
   it('renders no `<table overflow-x-auto>` combination anywhere', async () => {

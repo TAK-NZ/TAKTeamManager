@@ -180,22 +180,32 @@ export default function RevokeDeviceDialog({ device, userId, userName, onClose, 
   }
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+    // Bugfix: full-bleed on mobile (h-full w-full, no rounding,
+    // sm:p-4 on the overlay), matching the full-screen-on-mobile
+    // treatment every other modal in this app now uses -- this one is
+    // small enough to fit a phone viewport unscrolled already, but a
+    // consistent modal presentation across the app is worth more than
+    // this one dialog keeping its old floating-card look below `sm:`.
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center sm:p-4 z-50">
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby="revoke-device-title"
-        className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-lg w-full max-h-[90vh] overflow-y-auto"
+        className="bg-white dark:bg-gray-800 shadow-xl w-full h-full sm:rounded-lg sm:max-w-lg sm:h-auto sm:max-h-[90vh] overflow-y-auto"
       >
         <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
           <h3 id="revoke-device-title" className="text-xl font-semibold text-gray-900 dark:text-gray-100">
             Revoke Device
           </h3>
+          {/* Bugfix (mobile tap target too small): p-2 rounded-lg box
+              around the icon, matching every other modal's close button
+              in this app -- was a bare h-6 w-6 icon with no padding at
+              all, a ~24px hit target. */}
           <button
             type="button"
             onClick={handleClose}
             aria-label="Close revoke dialog"
-            className="text-gray-400 hover:text-gray-500 dark:hover:text-gray-300"
+            className="p-2 rounded-lg text-gray-400 hover:text-gray-500 hover:bg-gray-100 dark:hover:text-gray-300 dark:hover:bg-gray-700"
           >
             <XMarkIcon className="h-6 w-6" />
           </button>
