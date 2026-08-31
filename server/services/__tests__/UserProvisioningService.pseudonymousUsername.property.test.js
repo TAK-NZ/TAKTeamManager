@@ -233,14 +233,43 @@ function sharesSubstringOfAtLeastThreeChars(sources, candidate) {
 // Full scenario generator
 // ---------------------------------------------------------------------------
 
-const scenarioArb = fc.record({
-  firstName: fc.string({ maxLength: 15 }),
-  lastName: fc.string({ maxLength: 15 }),
-  requestedUsername: fc.string({ maxLength: 20 }),
-  emailScenario: emailScenarioArb,
-  chain: chainArb,
-  claimRowId: fc.integer({ min: 1, max: 999999 })
-});
+const scenarioArb = fc
+  .record({
+    firstName: fc.string({ maxLength: 15 }),
+    lastName: fc.string({ maxLength: 15 }),
+    requestedUsername: fc.string({ maxLength: 20 }),
+    emailScenario: emailScenarioArb,
+    chain: chainArb,
+    claimRowId: fc.integer({ min: 1, max: 999999 })
+  })
+  // Bugfix (flaky false failure): the minted username always starts with
+  // `${organisationPrefix}-U...` BY DESIGN -- that prefix is not PII, and
+  // its presence in the username is not a leak this property is about.
+  // `organisationPrefixArb` and `firstName`/`lastName` are drawn from
+  // fully independent arbitraries with no coordination between them, so
+  // a 3+ character substring overlap between the two occurs by pure
+  // chance often enough for fast-check to find one within a few hundred
+  // runs (observed: organisationPrefix "PtLA" / firstName "PtL"). That
+  // coincidence would make the overlap-check assertion below fail even
+  // though nothing leaked -- the shared text came from the prefix
+  // legitimately, never from the name. Filtering it out here keeps the
+  // assertion meaningful: any remaining overlap between the RESOLVED
+  // USERNAME and a name can only be explained by the mint actually
+  // incorporating the name, which is the real thing this property
+  // guards against.
+  .filter((scenario) => {
+    const prefix = scenario.chain[0].callsign_prefix;
+    // Checked in BOTH directions: sharesSubstringOfAtLeastThreeChars only
+    // slides windows of its first argument across its second, so either
+    // ordering alone could miss an overlap when the two strings differ
+    // substantially in length.
+    return (
+      !sharesSubstringOfAtLeastThreeChars([prefix], scenario.firstName) &&
+      !sharesSubstringOfAtLeastThreeChars([scenario.firstName], prefix) &&
+      !sharesSubstringOfAtLeastThreeChars([prefix], scenario.lastName) &&
+      !sharesSubstringOfAtLeastThreeChars([scenario.lastName], prefix)
+    );
+  });
 
 // ---------------------------------------------------------------------------
 // Anti-vacuity counters, checked in the trailing it().
