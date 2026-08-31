@@ -43,7 +43,7 @@ Thumbs.db
 
 # Docs - not needed at runtime, marginal context-size reduction
 README.md
-ARCHITECTURE.md
+docs
 LICENSE
 
 # Runtime-uploaded settings assets - server-generated, not build inputs
