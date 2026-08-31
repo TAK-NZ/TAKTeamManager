@@ -6,7 +6,7 @@ import TeamDeviceList, {
   deviceDisplayName,
   interpretTeamDeviceListError,
 } from './TeamDeviceList.jsx'
-import { devicesAPI } from '../services/api'
+import { devicesAPI, usersAPI } from '../services/api'
 
 // takserver-enrollment Requirements 5.9, 5.10, 14.7 (task 11.2)
 //
@@ -18,6 +18,16 @@ globalThis.React = React
 vi.mock('../services/api', () => ({
   devicesAPI: {
     getTeamDevices: vi.fn(),
+  },
+  // account-lifecycle-management Requirement 1.11: stubbed because
+  // `SuspendAccountDialog` (rendered by this component) imports
+  // `usersAPI` from this same mocked module -- a named import of a
+  // missing export from a mocked ES module is a load-time failure, per
+  // this project's mock-hygiene convention, even on a test that never
+  // opens that dialog.
+  usersAPI: {
+    suspendAccount: vi.fn(),
+    unsuspendAccount: vi.fn(),
   },
 }))
 
@@ -397,5 +407,187 @@ describe('TeamDeviceList (mounted)', () => {
 
     expect(container.querySelector('table')).toBeNull()
     expect(container.querySelector('.overflow-x-auto')).toBeNull()
+  })
+
+  // account-lifecycle-management Requirement 1.11: Suspend/Unsuspend is
+  // offered on the Team Devices tab too (a Team_Owned_Device is a `users`
+  // row like any other), mirroring `MemberActions.jsx`'s own
+  // onSuspend/accountStatus convention exactly.
+  describe('Suspend/Unsuspend action (account-lifecycle-management)', () => {
+    const baseDevice = {
+      deviceUserId: 1,
+      username: 'AUK-D7K3QMX',
+      deviceLabel: 'Engine 4 Tablet',
+      teamId: 5,
+      createdAt: '2025-01-02T03:04:05Z',
+      liveCertificateCount: 0
+    }
+
+    it('renders nothing when the device carries no accountStatus (active, the pre-existing default)', async () => {
+      devicesAPI.getTeamDevices.mockResolvedValue({ data: { devices: [{ ...baseDevice }] } })
+
+      root = createRoot(container)
+      await act(async () => {
+        root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+      })
+      await act(async () => {
+        await Promise.resolve()
+      })
+
+      // Undefined accountStatus is not 'orphaned', so the action is
+      // still offered (as a "Suspend" action, since it's not
+      // 'suspended' either) -- this exercises that default branch.
+      expect(container.querySelector('button[title="Suspend device account"]')).not.toBeNull()
+    })
+
+    it('renders a closed-lock "Suspend device account" button when accountStatus is "active"', async () => {
+      devicesAPI.getTeamDevices.mockResolvedValue({
+        data: { devices: [{ ...baseDevice, accountStatus: 'active' }] }
+      })
+
+      root = createRoot(container)
+      await act(async () => {
+        root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+      })
+      await act(async () => {
+        await Promise.resolve()
+      })
+
+      expect(container.querySelector('button[title="Suspend device account"]')).not.toBeNull()
+      expect(container.querySelector('button[title="Unsuspend device account"]')).toBeNull()
+    })
+
+    it('renders an open-lock "Unsuspend device account" button when accountStatus is "suspended"', async () => {
+      devicesAPI.getTeamDevices.mockResolvedValue({
+        data: { devices: [{ ...baseDevice, accountStatus: 'suspended' }] }
+      })
+
+      root = createRoot(container)
+      await act(async () => {
+        root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+      })
+      await act(async () => {
+        await Promise.resolve()
+      })
+
+      expect(container.querySelector('button[title="Unsuspend device account"]')).not.toBeNull()
+      expect(container.querySelector('button[title="Suspend device account"]')).toBeNull()
+    })
+
+    it('omits the action entirely when accountStatus is "orphaned"', async () => {
+      devicesAPI.getTeamDevices.mockResolvedValue({
+        data: { devices: [{ ...baseDevice, accountStatus: 'orphaned' }] }
+      })
+
+      root = createRoot(container)
+      await act(async () => {
+        root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+      })
+      await act(async () => {
+        await Promise.resolve()
+      })
+
+      expect(container.querySelector('button[title="Suspend device account"]')).toBeNull()
+      expect(container.querySelector('button[title="Unsuspend device account"]')).toBeNull()
+      // The rest of the action group (Edit/Transfer/Enroll/Delete) is
+      // unaffected -- only Suspend/Unsuspend is omitted.
+      expect(container.querySelector('button[title="Delete device"]')).not.toBeNull()
+    })
+
+    it('opens the shared SuspendAccountDialog with this device\'s targetUserId/targetName/mode when the action is activated', async () => {
+      devicesAPI.getTeamDevices.mockResolvedValue({
+        data: { devices: [{ ...baseDevice, accountStatus: 'active' }] }
+      })
+
+      root = createRoot(container)
+      await act(async () => {
+        root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+      })
+      await act(async () => {
+        await Promise.resolve()
+      })
+
+      const button = container.querySelector('button[title="Suspend device account"]')
+      await act(async () => {
+        button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+
+      const dialogTitle = container.querySelector('#suspend-account-title')
+      expect(dialogTitle).not.toBeNull()
+      expect(dialogTitle.textContent).toBe('Suspend Account')
+      expect(container.textContent).toContain('Engine 4 Tablet')
+    })
+
+    it('renders the shared "Suspended"/"Account not found in Authentik" text badge for the corresponding accountStatus', async () => {
+      devicesAPI.getTeamDevices.mockResolvedValue({
+        data: {
+          devices: [
+            { ...baseDevice, deviceUserId: 1, accountStatus: 'suspended' },
+            { ...baseDevice, deviceUserId: 2, username: 'AUK-D9Q2WXY', accountStatus: 'orphaned' }
+          ]
+        }
+      })
+
+      root = createRoot(container)
+      await act(async () => {
+        root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+      })
+      await act(async () => {
+        await Promise.resolve()
+      })
+
+      expect(container.textContent).toContain('Suspended')
+      expect(container.textContent).toContain('Account not found in Authentik')
+    })
+
+    it('renders no account-status badge for an active device', async () => {
+      devicesAPI.getTeamDevices.mockResolvedValue({
+        data: { devices: [{ ...baseDevice, accountStatus: 'active' }] }
+      })
+
+      root = createRoot(container)
+      await act(async () => {
+        root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+      })
+      await act(async () => {
+        await Promise.resolve()
+      })
+
+      expect(container.textContent).not.toContain('Suspended')
+      expect(container.textContent).not.toContain('Account not found in Authentik')
+    })
+
+    it('refetches the device list after a successful suspend/unsuspend, via the dialog\'s onCompleted callback', async () => {
+      devicesAPI.getTeamDevices
+        .mockResolvedValueOnce({ data: { devices: [{ ...baseDevice, accountStatus: 'active' }] } })
+        .mockResolvedValueOnce({ data: { devices: [{ ...baseDevice, accountStatus: 'suspended' }] } })
+      usersAPI.suspendAccount.mockResolvedValue({ data: {} })
+
+      root = createRoot(container)
+      await act(async () => {
+        root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+      })
+      await act(async () => {
+        await Promise.resolve()
+      })
+
+      const suspendButton = container.querySelector('button[title="Suspend device account"]')
+      await act(async () => {
+        suspendButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+
+      const confirmButton = container.querySelector('#suspend-account-title')
+        .closest('[role="dialog"]')
+        .querySelector('button.btn-danger')
+      await act(async () => {
+        confirmButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+      await act(async () => {
+        await Promise.resolve()
+      })
+
+      expect(usersAPI.suspendAccount).toHaveBeenCalledWith(1)
+      expect(devicesAPI.getTeamDevices).toHaveBeenCalledTimes(2)
+    })
   })
 })

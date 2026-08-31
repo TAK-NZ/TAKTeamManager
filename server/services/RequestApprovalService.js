@@ -209,8 +209,21 @@ class RequestApprovalService {
     let resolvedCallsignSuffix = null;
     let resolvedUsername = null;
     let resolvedClaimId = null;
+    let resolvedReclaimedUserId = null;
 
     if (preFetchedRequest.request_type === 'new_account') {
+      // account-lifecycle-management Requirement 5.2/5.3 (task 11.1): a
+      // Reclaimable_Account lookup, run BEFORE `createAuthentikUserForNewAccount`
+      // below -- a plain DB read with no external-call ordering constraint of
+      // its own, so it fits naturally alongside the identity resolution that
+      // already runs here in Phase 1. `resolvedClaimId` (the pseudonymous
+      // Claim_Row mechanism) and `resolvedReclaimedUserId` (this one) are
+      // deliberately mutually exclusive -- a request's email can match AT MOST
+      // one of "a Claim_Row this same sign-up flow just inserted" or "an
+      // unrelated, pre-existing orphaned row" -- so this lookup only runs when
+      // no Claim_Row was resolved, and `UserProvisioningService.createAndAddUser`
+      // itself also treats the two params as mutually exclusive (see its own
+      // doc comment).
       const resolvedIdentity = await this.resolveAndCheckCallsignSuffixForApproval(
         preFetchedRequest,
         callsignSuffixOverride
@@ -218,6 +231,15 @@ class RequestApprovalService {
       resolvedCallsignSuffix = resolvedIdentity.callsignSuffix;
       resolvedUsername = resolvedIdentity.username;
       resolvedClaimId = resolvedIdentity.claimId;
+
+      if (resolvedClaimId == null) {
+        const reclaimResult = await pool.query(
+          `SELECT id FROM users WHERE email = $1 AND account_status = 'orphaned' LIMIT 1`,
+          [preFetchedRequest.requester_email]
+        );
+        resolvedReclaimedUserId = reclaimResult.rows[0]?.id ?? null;
+      }
+
       newAccountAuthentikUser = await this.createAuthentikUserForNewAccount(preFetchedRequest, resolvedUsername);
     }
 
@@ -300,6 +322,7 @@ class RequestApprovalService {
         resolvedCallsignSuffix,
         resolvedUsername,
         resolvedClaimId,
+        resolvedReclaimedUserId,
         callsignSuffixOverride,
         approverIsGlobalManager
       });
@@ -788,7 +811,7 @@ class RequestApprovalService {
     }
   }
 
-  async processApprovedRequest(client, request, { newAccountAuthentikUser, adminId, resolvedCallsignSuffix = null, resolvedUsername = null, resolvedClaimId = null, callsignSuffixOverride = null, approverIsGlobalManager = false } = {}) {
+  async processApprovedRequest(client, request, { newAccountAuthentikUser, adminId, resolvedCallsignSuffix = null, resolvedUsername = null, resolvedClaimId = null, resolvedReclaimedUserId = null, callsignSuffixOverride = null, approverIsGlobalManager = false } = {}) {
     switch (request.request_type) {
       case 'new_account': {
         // Requirement 18.1 (task 38.1): the Authentik user was already
@@ -838,7 +861,17 @@ class RequestApprovalService {
           // upsert, which cannot match a Claim_Row's NULL
           // `authentik_user_id` under `ON CONFLICT`. `null` (the default)
           // for a policy-disabled Organisation, where no Claim_Row exists.
-          claimId: resolvedClaimId
+          claimId: resolvedClaimId,
+          // account-lifecycle-management Requirement 5.3 (task 11.1): when
+          // this request's verified email matched a Reclaimable_Account
+          // (Phase 1, above), `resolvedReclaimedUserId` names that existing
+          // orphaned row -- `createAndAddUser` adopts it (Requirement 5.5:
+          // same `id`, so its full prior audit history stays attributed to
+          // it) instead of inserting a second row that would collide with
+          // `users_email_key`. `null` when no orphaned match exists, and
+          // mutually exclusive with `claimId` (see the Phase-1 comment
+          // above resolving it).
+          reclaimedUserId: resolvedReclaimedUserId
         });
       }
       case 'team_change': {

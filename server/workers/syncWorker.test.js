@@ -525,6 +525,10 @@ describe('Property 3: Payload validation failures never schedule a retry', () =>
     resync_org_channel_tier_access: 'resyncOrgChannelTierAccess',
     cleanup_orphaned_authentik_user: 'cleanupOrphanedAuthentikUser',
     remove_team_channel_group: 'removeTeamChannelGroup',
+    // Bugfix (Channels tab has no edit action, and no way to add/edit a
+    // custom channel's Authentik/LDAP description): enqueued by
+    // Channel.updateCustomChannel.
+    update_channel_group: 'updateChannelGroup',
     create_vendor_channel_group: 'createVendorChannelGroup',
     create_deployment_channel_group: 'createDeploymentChannelGroup',
     remove_all_members_from_group: 'removeAllMembersFromGroup',
@@ -1128,6 +1132,118 @@ describe('SyncWorker Authentik failure classification wiring', () => {
 
     it('results in the existing handleOperationError retryable path on a 5xx response', async () => {
       global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 503, statusText: 'Service Unavailable' });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      expect(worker.pool.query).toHaveBeenCalledTimes(1);
+      const [sql, params] = worker.pool.query.mock.calls[0];
+      expect(sql).toContain('next_retry_at');
+      expect(params[0]).toBe('pending');
+    });
+
+    it('treats a rejected fetch (network error) as retryable', async () => {
+      global.fetch = jest.fn().mockRejectedValue(new Error('ECONNREFUSED'));
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      expect(worker.pool.query).toHaveBeenCalledTimes(1);
+      const [sql, params] = worker.pool.query.mock.calls[0];
+      expect(sql).toContain('next_retry_at');
+      expect(params[0]).toBe('pending');
+    });
+  });
+
+  /**
+   * Bugfix (Channels tab has no edit action, and no way to add/edit a
+   * custom channel's Authentik/LDAP description): `updateChannelGroup`
+   * PATCHes each non-null Authentik group id carried on the payload
+   * with the new description, following the exact same
+   * fetch/`AuthentikApiError`/`classifyFailure` pattern -- including
+   * 404-is-a-no-op handling per group id -- as `removeTeamChannelGroup`
+   * immediately above, since it iterates the same three group-id fields.
+   */
+  describe('updateChannelGroup', () => {
+    const baseOperation = {
+      id: 'op-update-channel-1',
+      operation_type: 'update_channel_group',
+      retry_count: 0,
+      max_retries: 48,
+      correlation_id: 'corr-update-channel-1',
+      payload: { channel_id: 10, description: 'New description', authentik_group_id: 'group-pk-555' }
+    };
+
+    it('completes successfully (one markOperationCompleted UPDATE) when the single group PATCH succeeds', async () => {
+      global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 200 });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/core/groups/group-pk-555/'),
+        expect.objectContaining({
+          method: 'PATCH',
+          body: JSON.stringify({ attributes: { description: 'New description' } })
+        })
+      );
+      expect(worker.pool.query).toHaveBeenCalledTimes(1);
+      const [sql, params] = worker.pool.query.mock.calls[0];
+      expect(sql).toContain('completed');
+      expect(params[0]).toBe('completed');
+    });
+
+    it('patches each non-null group id (rw + read + write) when present, and completes successfully', async () => {
+      global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 200 });
+      const operation = {
+        ...baseOperation,
+        payload: {
+          channel_id: 11,
+          description: 'Updated',
+          authentik_group_id: 'group-pk-200',
+          authentik_read_group_id: 'group-pk-201',
+          authentik_write_group_id: 'group-pk-202'
+        }
+      };
+
+      await worker.executeOperationSafely(operation);
+
+      expect(global.fetch).toHaveBeenCalledTimes(3);
+      for (const groupId of ['group-pk-200', 'group-pk-201', 'group-pk-202']) {
+        expect(global.fetch).toHaveBeenCalledWith(
+          expect.stringContaining(`/core/groups/${groupId}/`),
+          expect.objectContaining({ method: 'PATCH' })
+        );
+      }
+      expect(worker.pool.query).toHaveBeenCalledTimes(1);
+      expect(worker.pool.query.mock.calls[0][1][0]).toBe('completed');
+    });
+
+    it('treats a 404 response for a group id as an already-absent group (success, not a failure)', async () => {
+      global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 404, statusText: 'Not Found' });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      expect(worker.pool.query).toHaveBeenCalledTimes(1);
+      const [sql, params] = worker.pool.query.mock.calls[0];
+      expect(sql).toContain('completed');
+      expect(params[0]).toBe('completed');
+    });
+
+    it('results in a markPermanentlyFailed-style UPDATE (failed/permanent, no next_retry_at/retry_count) on a 4xx response other than 404', async () => {
+      global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 400, statusText: 'Bad Request', text: async () => 'Bad Request' });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      expect(worker.pool.query).toHaveBeenCalledTimes(1);
+      const [sql, params] = worker.pool.query.mock.calls[0];
+      expect(sql).toContain('failure_category');
+      expect(sql).not.toContain('next_retry_at');
+      expect(sql).not.toContain('retry_count');
+      expect(params[0]).toBe('failed');
+      expect(params[1]).toBe('permanent');
+    });
+
+    it('results in the existing handleOperationError retryable path on a 5xx response', async () => {
+      global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 503, statusText: 'Service Unavailable', text: async () => 'Service Unavailable' });
 
       await worker.executeOperationSafely({ ...baseOperation });
 

@@ -14,8 +14,13 @@ jest.mock('../config/logger', () => ({
 
 jest.mock('axios');
 
+jest.mock('./EventPublisher', () => ({
+  publishOperation: jest.fn()
+}));
+
 const axios = require('axios');
 const db = require('../config/database');
+const EventPublisher = require('./EventPublisher');
 const authentikSync = require('./authentikSync');
 
 describe('AuthentikSyncService.syncUsers', () => {
@@ -263,6 +268,235 @@ describe('AuthentikSyncService.syncUsers', () => {
     );
 
     expect(authentikSync.isRunning).toBe(false);
+  });
+});
+
+// account-lifecycle-management Requirements 2, 3 (tasks 6.3, 7.6):
+// AuthentikSyncService.reconcileOrphanedAccounts, called from syncUsers()
+// only on the success path.
+describe('AuthentikSyncService.reconcileOrphanedAccounts (account-lifecycle-management)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    authentikSync.isRunning = false;
+    console.error = jest.fn();
+    console.log = jest.fn();
+  });
+
+  it('is never invoked when the fetch loop\'s own catch already aborted the run (group-list fetch failure)', async () => {
+    const users = [{ pk: 'user-1', username: 'user1', email: 'user1@example.com', groups: [], is_active: true, attributes: {} }];
+    db.query.mockResolvedValue({ rows: [] });
+    axios.get.mockImplementation((url) => {
+      if (url.includes('/api/v3/core/users/')) {
+        return Promise.resolve({ data: { results: users, pagination: {} } });
+      }
+      if (url.includes('/api/v3/core/groups/')) {
+        return Promise.reject(new Error('groups endpoint unreachable'));
+      }
+      return Promise.reject(new Error(`Unexpected URL: ${url}`));
+    });
+
+    const reconcileSpy = jest.spyOn(authentikSync, 'reconcileOrphanedAccounts');
+
+    await authentikSync.syncUsers();
+
+    expect(reconcileSpy).not.toHaveBeenCalled();
+    reconcileSpy.mockRestore();
+  });
+
+  it('is never invoked when the paginated user-list fetch itself throws (outer catch)', async () => {
+    db.query.mockResolvedValue({ rows: [] });
+    axios.get.mockRejectedValue(new Error('Authentik unreachable'));
+
+    const reconcileSpy = jest.spyOn(authentikSync, 'reconcileOrphanedAccounts');
+
+    await authentikSync.syncUsers();
+
+    expect(reconcileSpy).not.toHaveBeenCalled();
+    reconcileSpy.mockRestore();
+  });
+
+  it('IS invoked, with the exact fetched authentik id set, after a fully successful sync run', async () => {
+    const users = [
+      { pk: 1, username: 'user1', email: 'user1@example.com', groups: [], is_active: true, attributes: {} },
+      { pk: 2, username: 'user2', email: 'user2@example.com', groups: [], is_active: true, attributes: {} }
+    ];
+    db.query.mockResolvedValue({ rows: [] });
+    axios.get.mockImplementation((url) => {
+      if (url.includes('/api/v3/core/users/')) {
+        return Promise.resolve({ data: { results: users, pagination: {} } });
+      }
+      if (url.includes('/api/v3/core/groups/')) {
+        return Promise.resolve({ data: { results: [], pagination: {} } });
+      }
+      return Promise.reject(new Error(`Unexpected URL: ${url}`));
+    });
+
+    const reconcileSpy = jest.spyOn(authentikSync, 'reconcileOrphanedAccounts').mockResolvedValue(undefined);
+
+    await authentikSync.syncUsers();
+
+    expect(reconcileSpy).toHaveBeenCalledWith(['1', '2']);
+    reconcileSpy.mockRestore();
+  });
+
+  it('excludes rows already account_status = \'orphaned\' from its candidate query', async () => {
+    db.query.mockResolvedValue({ rows: [] });
+
+    await authentikSync.reconcileOrphanedAccounts(['100', '200']);
+
+    const [sql, params] = db.query.mock.calls.find(([q]) => typeof q === 'string' && q.includes('FROM users'));
+    expect(sql).toContain("account_status <> 'orphaned'");
+    expect(sql).toContain('authentik_user_id::text <> ALL($1::text[])');
+    expect(params).toEqual([['100', '200']]);
+  });
+
+  it('does nothing further when the candidate query returns zero rows', async () => {
+    db.query.mockResolvedValue({ rows: [] });
+
+    await authentikSync.reconcileOrphanedAccounts(['1']);
+
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+    expect(db.query).toHaveBeenCalledTimes(1); // only the SELECT
+  });
+
+  it('performs all 4 steps for a human candidate row: enqueue tak_usernames, clear cache callsign/color, mark orphaned + is_active=false on both tables, and a system-attributed audit log', async () => {
+    const candidateRow = { id: 42, authentik_user_id: 999, is_team_device: false, username: 'ada' };
+    db.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('FROM users')) {
+        return Promise.resolve({ rows: [candidateRow] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    EventPublisher.publishOperation.mockResolvedValue(1);
+
+    await authentikSync.reconcileOrphanedAccounts([]);
+
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'revoke_tak_certificates',
+      { tak_usernames: ['ada'] },
+      -1
+    );
+
+    expect(db.query).toHaveBeenCalledWith(
+      'UPDATE user_cache SET tak_callsign = $1, tak_color = $2 WHERE authentik_id = $3',
+      ['None', 'None', '999']
+    );
+
+    expect(db.query).toHaveBeenCalledWith(
+      "UPDATE users SET account_status = 'orphaned', is_active = false WHERE id = $1",
+      [42]
+    );
+    expect(db.query).toHaveBeenCalledWith(
+      'UPDATE user_cache SET is_active = false WHERE authentik_id = $1',
+      ['999']
+    );
+
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO audit_logs'),
+      [-1, 'user.orphaned', 'user', 42, JSON.stringify({ reason: 'authentik_account_missing' })]
+    );
+  });
+
+  it('enqueues client_uid (not tak_usernames) and SKIPS the cache-callsign-clear step for a Team_Owned_Device candidate row', async () => {
+    const deviceRow = { id: 7, authentik_user_id: 501, is_team_device: true, username: 'AUK-D7K3QMX' };
+    db.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('FROM users')) {
+        return Promise.resolve({ rows: [deviceRow] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    EventPublisher.publishOperation.mockResolvedValue(1);
+
+    await authentikSync.reconcileOrphanedAccounts([]);
+
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'revoke_tak_certificates',
+      { client_uid: 'AUK-D7K3QMX' },
+      -1
+    );
+
+    // No callsign/color clear for a device row (Requirement 3 Criterion 2).
+    expect(db.query).not.toHaveBeenCalledWith(
+      'UPDATE user_cache SET tak_callsign = $1, tak_color = $2 WHERE authentik_id = $3',
+      expect.anything()
+    );
+
+    // The orphan-marking and audit steps still run for a device row.
+    expect(db.query).toHaveBeenCalledWith(
+      "UPDATE users SET account_status = 'orphaned', is_active = false WHERE id = $1",
+      [7]
+    );
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO audit_logs'),
+      [-1, 'user.orphaned', 'user', 7, JSON.stringify({ reason: 'authentik_account_missing' })]
+    );
+  });
+
+  it('never issues a DELETE statement against any table (Criterion 3.5)', async () => {
+    const candidateRow = { id: 1, authentik_user_id: 1, is_team_device: false, username: 'someone' };
+    db.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('FROM users')) {
+        return Promise.resolve({ rows: [candidateRow] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    EventPublisher.publishOperation.mockResolvedValue(1);
+
+    await authentikSync.reconcileOrphanedAccounts([]);
+
+    const deleteCalls = db.query.mock.calls.filter(
+      ([sql]) => typeof sql === 'string' && /^\s*DELETE/i.test(sql)
+    );
+    expect(deleteCalls).toHaveLength(0);
+  });
+
+  it('continues processing the remaining candidate rows when one row\'s step throws', async () => {
+    const failingRow = { id: 1, authentik_user_id: 111, is_team_device: false, username: 'failing-user' };
+    const okRow = { id: 2, authentik_user_id: 222, is_team_device: false, username: 'ok-user' };
+
+    db.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('FROM users')) {
+        return Promise.resolve({ rows: [failingRow, okRow] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    EventPublisher.publishOperation.mockImplementation((operationType, payload) => {
+      if (payload.tak_usernames && payload.tak_usernames[0] === 'failing-user') {
+        return Promise.reject(new Error('enqueue failed'));
+      }
+      return Promise.resolve(1);
+    });
+
+    await authentikSync.reconcileOrphanedAccounts([]);
+
+    // The ok-user's steps still ran despite the failing-user's enqueue
+    // rejecting first.
+    expect(db.query).toHaveBeenCalledWith(
+      "UPDATE users SET account_status = 'orphaned', is_active = false WHERE id = $1",
+      [2]
+    );
+    expect(db.query).not.toHaveBeenCalledWith(
+      "UPDATE users SET account_status = 'orphaned', is_active = false WHERE id = $1",
+      [1]
+    );
+
+    expect(mockLoggerInstance.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error), userId: 1 }),
+      expect.stringContaining('failed to orphan one candidate row')
+    );
+  });
+
+  it('does not throw and skips the sweep entirely when the candidate SELECT itself fails', async () => {
+    db.query.mockRejectedValue(new Error('DB unavailable'));
+
+    await expect(authentikSync.reconcileOrphanedAccounts(['1'])).resolves.toBeUndefined();
+
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+    expect(mockLoggerInstance.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error) }),
+      expect.stringContaining('failed to query candidate rows')
+    );
   });
 });
 

@@ -278,6 +278,27 @@ export default function Requests({ user }) {
                         </p>
                       </div>
 
+                      {/* account-lifecycle-management Requirement 5.2:
+                          distinguishes a Reclaimable_Account match from an
+                          ordinary brand-new-person request -- the same
+                          amber-notice treatment the team_change card above
+                          uses for its own admin-rights consequence, so both
+                          cards' "worth a second look before approving"
+                          notices read consistently. Additive: rendered only
+                          when the server found an orphaned match
+                          (`request.reclaimableAccount` is non-null), never
+                          changes the request's own displayed type/badge. */}
+                      {request.reclaimableAccount && (
+                        <p className="mt-4 text-sm text-amber-800 dark:text-amber-200 bg-amber-50 dark:bg-amber-900 p-3 rounded-lg">
+                          This email matches a previous account whose Authentik identity no
+                          longer exists (Account_Status: orphaned). Approving this request will
+                          reclaim that existing account rather than creating a new one -- its
+                          prior activity history is preserved, but its team membership and any
+                          admin rights are NOT automatically restored; assign them fresh as part
+                          of this approval.
+                        </p>
+                      )}
+
                       <div className="mt-4">
                         <p className="font-medium text-gray-900 dark:text-gray-100 mb-2">Reason for Access:</p>
                         <p className="text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-700 p-3 rounded-lg">{request.justification}</p>

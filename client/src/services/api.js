@@ -242,6 +242,14 @@ export const usersAPI = {
   // with { status: 'pending_approval', ... } when the move needs the other
   // team's approval; 400/403/404/409 reject with { error } in the body.
   transfer: (userId, data) => api.post(`/users/${userId}/transfer`, data),
+  // account-lifecycle-management Requirement 1: suspend/unsuspend an
+  // account (human member or Team_Owned_Device). Resolves 200 with
+  // { userId, accountStatus }; 400 with { error } naming the account's
+  // current status when the transition isn't valid from it (e.g.
+  // suspending an already-suspended or orphaned account); 404 when
+  // `userId` names no account.
+  suspendAccount: (userId) => api.post(`/users/${userId}/suspend`),
+  unsuspendAccount: (userId) => api.post(`/users/${userId}/unsuspend`),
 };
 
 export const channelsAPI = {
@@ -253,6 +261,15 @@ export const channelsAPI = {
   addMember: (channelId, data) => api.post(`/channels/${channelId}/members`, data),
   removeMember: (channelId, userId) => api.delete(`/channels/${channelId}/members/${userId}`),
   getMembers: (channelId) => api.get(`/channels/${channelId}/members`),
+  // Bugfix (Channels tab has no edit action, and no way to add/edit a
+  // custom channel's Authentik/LDAP description): updates a CUSTOM
+  // channel's description (server-side rejects a primary/team channel
+  // with a 404 -- that one has no standalone edit path of its own).
+  update: (channelId, data) => api.put(`/channels/${channelId}`, data),
+  // Bugfix (Channels tab had no delete-channel action): deletes a
+  // CUSTOM channel (server-side rejects a primary/team channel with a
+  // 404 -- that one has no standalone delete path of its own).
+  delete: (channelId) => api.delete(`/channels/${channelId}`),
 };
 
 export const requestsAPI = {

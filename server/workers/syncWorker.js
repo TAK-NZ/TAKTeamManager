@@ -959,6 +959,10 @@ class SyncWorker {
         await this.removeTeamChannelGroup(payload);
         break;
 
+      case 'update_channel_group':
+        await this.updateChannelGroup(payload);
+        break;
+
       case 'create_vendor_channel_group':
         await this.createVendorChannelGroup(payload);
         break;
@@ -1842,6 +1846,63 @@ class SyncWorker {
         const classification = classifyFailure(response.status);
         throw new AuthentikApiError(
           `Failed to delete team channel Authentik group ${groupId}: ${response.statusText}`,
+          classification
+        );
+      }
+    }
+  }
+
+  /**
+   * Bugfix (Channels tab has no edit action, and no way to add/edit a
+   * custom channel's Authentik/LDAP description): enqueued by
+   * `Channel.updateCustomChannel` after updating the local `channels`
+   * row's `description`. Patches EACH of the channel's present Authentik
+   * groups (rw/read/write -- unlike `updateBchChannelGroup`'s read/write
+   * pair, a custom channel has up to three) with the new description,
+   * mirroring `removeTeamChannelGroup`'s own "iterate every present
+   * group id" shape immediately above rather than
+   * `updateBchChannelGroup`'s hardcoded two-groups-by-name shape, since
+   * this operation never renames a group -- only `attributes.description`
+   * changes, so no `name` field is sent in the PATCH body at all.
+   *
+   * A 404 for any one group id is treated as an already-absent group
+   * (nothing further to reconcile for that id) exactly like
+   * `removeTeamChannelGroup`'s own 404 handling, and processing
+   * continues with the next group id.
+   */
+  async updateChannelGroup(payload) {
+    const { channel_id, description } = payload;
+
+    const groupIds = [
+      payload.authentik_group_id,
+      payload.authentik_read_group_id,
+      payload.authentik_write_group_id
+    ].filter((groupId) => groupId != null);
+
+    for (const groupId of groupIds) {
+      const response = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${groupId}/`, {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ attributes: { description } })
+      });
+
+      if (response.status === 404) {
+        logger.debug(
+          { channelId: channel_id, groupId },
+          'Custom channel Authentik group not found; skipping description update for this group id'
+        );
+        continue;
+      }
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        logger.error({ channelId: channel_id, groupId, status: response.status, err: errorText }, 'Failed to update custom channel Authentik group');
+        const classification = classifyFailure(response.status);
+        throw new AuthentikApiError(
+          `Failed to update custom channel Authentik group ${groupId}: ${response.status} ${errorText}`,
           classification
         );
       }

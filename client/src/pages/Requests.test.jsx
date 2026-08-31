@@ -327,6 +327,63 @@ describe('Requests page team_change card (mounted)', () => {
     expect(other.querySelector(`#callsign-suffix-${NEW_ACCOUNT_REQUEST.id}`)).not.toBeNull()
   })
 
+  // account-lifecycle-management Requirement 5.2 (task 11.4): a
+  // `new_account` card whose `reclaimableAccount` field is present shows
+  // a distinct notice, without changing the card's own displayed type.
+  describe('reclaimableAccount notice (account-lifecycle-management)', () => {
+    it('shows a distinct notice on a new_account card whose reclaimableAccount is present', async () => {
+      requestsAPI.getPending.mockResolvedValue({
+        data: {
+          requests: [
+            TEAM_CHANGE_REQUEST,
+            { ...NEW_ACCOUNT_REQUEST, reclaimableAccount: { userId: 777, previousTeamId: 42 } }
+          ]
+        }
+      })
+
+      await mountPage()
+
+      const card = newAccountCard()
+      expect(card.textContent).toMatch(/orphaned/i)
+      expect(card.textContent).toMatch(/reclaim/i)
+    })
+
+    it('shows no notice on a new_account card whose reclaimableAccount is null', async () => {
+      requestsAPI.getPending.mockResolvedValue({
+        data: {
+          requests: [{ ...NEW_ACCOUNT_REQUEST, reclaimableAccount: null }]
+        }
+      })
+
+      await mountPage()
+
+      const card = newAccountCard()
+      expect(card.textContent).not.toMatch(/orphaned/i)
+    })
+
+    it('shows no notice on a new_account card whose response carries no reclaimableAccount field at all', async () => {
+      await mountPage() // default fixture has no reclaimableAccount field
+
+      const card = newAccountCard()
+      expect(card.textContent).not.toMatch(/orphaned/i)
+    })
+
+    it('never renders the notice on a team_change card (the field is only ever meaningful for new_account)', async () => {
+      requestsAPI.getPending.mockResolvedValue({
+        data: {
+          requests: [
+            { ...TEAM_CHANGE_REQUEST, reclaimableAccount: { userId: 1, previousTeamId: null } },
+            NEW_ACCOUNT_REQUEST
+          ]
+        }
+      })
+
+      await mountPage()
+
+      expect(teamChangeCard().textContent).not.toMatch(/orphaned/i)
+    })
+  })
+
   it('renders an approve control and a deny control (Req 16.2)', async () => {
     await mountPage()
 

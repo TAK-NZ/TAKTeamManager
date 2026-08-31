@@ -6,6 +6,7 @@ const { getLogger } = require('../middleware/requestContext');
 const Channel = require('../models/Channel');
 const Team = require('../models/Team');
 const pool = require('../config/database');
+const EventPublisher = require('../services/EventPublisher');
 const { REGION_CHANNEL_TIER_PREFIX, BCH_CHANNEL_CATEGORY_PREFIX } = require('../config/constants');
 const router = express.Router();
 
@@ -230,6 +231,195 @@ router.get('/team/:teamId', authenticateToken, authorize, async (req, res) => {
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to fetch channels');
     res.status(500).json({ error: 'Failed to fetch channels' });
+  }
+});
+
+// Bugfix (Channels tab had no delete-channel or manage-members action):
+// list a custom channel's members. Read-only, so it is gated by the
+// same 'channel:read' identifier as the two GET routes above rather
+// than a new one.
+router.get('/:channelId/members', authenticateToken, authorize, async (req, res) => {
+  try {
+    const { channelId } = req.params;
+    const members = await Channel.getMembers(channelId);
+    res.json({ members });
+  } catch (error) {
+    getLogger().error({ err: error }, 'Failed to fetch channel members');
+    res.status(500).json({ error: 'Failed to fetch channel members' });
+  }
+});
+
+// Bugfix (Channels tab had no manage-members action): adds (or updates
+// the permission of) one member on a custom channel. Uses
+// Channel.addMember directly, which -- since the Issue 2 fix above --
+// enqueues the matching add_user_to_group Sync_Operation itself, so this
+// route stays a thin wrapper.
+router.post('/:channelId/members', authenticateToken, authorize, [
+  // Bugfix (silent permanent sync failure): `.isInt()` alone only
+  // VALIDATES that the string looks like an integer -- it does not
+  // mutate `req.body.userId`, which stays a string (the `<select>`
+  // element's value, on the client). `.toInt()` performs the actual
+  // coercion, matching the pattern already used for
+  // `targetTeamId`/`teams.js`'s own member-add route -- without it,
+  // the enqueued `add_user_to_group` payload's `target_user_id` fails
+  // `operationSchemas.js`'s `'number'` type check permanently (never
+  // retried), so the local add would succeed while Authentik silently
+  // never received it.
+  body('userId').isInt().toInt(),
+  body('permission').isIn(['read', 'write', 'read_write'])
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
+  try {
+    const { channelId } = req.params;
+    const { userId, permission } = req.body;
+
+    const channel = await Channel.findById(channelId);
+    if (!channel) {
+      return res.status(404).json({ error: 'Channel not found' });
+    }
+
+    const membership = await Channel.addMember(channelId, userId, permission);
+
+    const targetGroupId = Channel.resolveGroupIdForPermission(channel, permission);
+    if (targetGroupId) {
+      await EventPublisher.publishOperation('add_user_to_group', {
+        target_user_id: userId,
+        target_group_id: targetGroupId
+      }, req.user.userId);
+    } else {
+      getLogger().warn(
+        { channelId, userId, permission },
+        'Skipped add_user_to_group enqueue: no matching Authentik group id for this permission'
+      );
+    }
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'channel.member_add', 'channel', parseInt(channelId, 10), JSON.stringify({ userId, permission })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
+    res.status(201).json({ member: membership });
+  } catch (error) {
+    getLogger().error({ err: error }, 'Failed to add channel member');
+    res.status(500).json({ error: 'Failed to add channel member' });
+  }
+});
+
+// Bugfix (Channels tab had no manage-members action): removes one
+// member from a custom channel. Channel.removeMember enqueues the
+// matching remove_user_from_group Sync_Operation itself.
+router.delete('/:channelId/members/:userId', authenticateToken, authorize, async (req, res) => {
+  try {
+    const { channelId } = req.params;
+    // Bugfix (silent permanent sync failure): Express route params are
+    // ALWAYS strings, never numbers -- passing `req.params.userId`
+    // straight through to `Channel.removeMember` enqueued
+    // `remove_user_from_group` with `target_user_id` as a string, which
+    // `operationSchemas.js`'s payload-validation schema requires to be a
+    // `number`. That mismatch fails validation permanently (never
+    // retried, since a malformed payload never becomes valid by
+    // retrying it) -- so the removal was correct locally but silently
+    // never reached Authentik at all. Parsed to an integer here, at the
+    // route boundary, matching the audit-log INSERT immediately below
+    // (which already did this correctly).
+    const userId = parseInt(req.params.userId, 10);
+
+    const removed = await Channel.removeMember(channelId, userId);
+    if (!removed) {
+      return res.status(404).json({ error: 'Channel membership not found' });
+    }
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'channel.member_remove', 'channel', parseInt(channelId, 10), JSON.stringify({ userId })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
+    res.json({ message: 'Member removed from channel successfully' });
+  } catch (error) {
+    getLogger().error({ err: error }, 'Failed to remove channel member');
+    res.status(500).json({ error: 'Failed to remove channel member' });
+  }
+});
+
+// Bugfix (Channels tab has no edit action, and no way to add/edit a
+// custom channel's Authentik/LDAP description): updates a CUSTOM
+// channel's description. Channel.updateCustomChannel refuses (returns
+// null, mapped to 404 here) for a primary/team channel, matching
+// DELETE's own refusal below -- a primary channel has no standalone
+// edit path of its own either. Scoped to description only; renaming a
+// custom channel would require renaming all three of its Authentik
+// groups, which is out of scope for this fix.
+router.put('/:channelId', authenticateToken, authorize, [
+  body('description').optional({ nullable: true }).trim().isLength({ max: 500 })
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
+  try {
+    const { channelId } = req.params;
+    const { description } = req.body;
+
+    const updated = await Channel.updateCustomChannel(channelId, { description }, req.user.userId);
+    if (!updated) {
+      return res.status(404).json({ error: 'Custom channel not found' });
+    }
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'channel.update', 'channel', parseInt(channelId, 10), JSON.stringify({ description })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
+    res.json({ channel: updated });
+  } catch (error) {
+    getLogger().error({ err: error }, 'Failed to update channel');
+    res.status(500).json({ error: 'Failed to update channel' });
+  }
+});
+
+// Bugfix (Channels tab had no delete-channel action): deletes a CUSTOM
+// channel. Channel.deleteCustomChannel refuses (returns null, mapped to
+// 404 here) for a primary/team channel, which has no standalone delete
+// path of its own -- it is deleted only as part of Team.delete.
+router.delete('/:channelId', authenticateToken, authorize, async (req, res) => {
+  try {
+    const { channelId } = req.params;
+
+    const deleted = await Channel.deleteCustomChannel(channelId, req.user.userId);
+    if (!deleted) {
+      return res.status(404).json({ error: 'Custom channel not found' });
+    }
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'channel.delete', 'channel', parseInt(channelId, 10), JSON.stringify({ teamId: deleted.team_id })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
+    res.json({ message: 'Channel deleted successfully' });
+  } catch (error) {
+    getLogger().error({ err: error }, 'Failed to delete channel');
+    res.status(500).json({ error: 'Failed to delete channel' });
   }
 });
 

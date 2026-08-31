@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { formatCallsignLevels, formatCallsignNameFormatExample, computeTeamDepth, getInitialMemberEditForm, isValidMemberCallsignSuffix, isValidSubTeamCallsignPrefix, extractCallsignSuffixServerError, isValidNewUserEmail, isPseudonymousOrganisation, resolveInitialTab } from './TeamDetail.jsx';
+import { formatCallsignLevels, formatCallsignNameFormatExample, computeTeamDepth, getInitialMemberEditForm, isValidMemberCallsignSuffix, isValidSubTeamCallsignPrefix, extractCallsignSuffixServerError, isValidNewUserEmail, isPseudonymousOrganisation, resolveInitialTab, describeAccountStatusBadge } from './TeamDetail.jsx';
 
 // Validates: Requirements 1.1, 1.2, 2.4, 2.5
 //
@@ -674,7 +674,9 @@ describe('Members list includes admins (Defect 1)', () => {
 
   it('includes admin rows in every setMembers filter', () => {
     const matches = source.match(/setMembers\(allMembers\.filter\([^)]*\)\)/g) || []
-    expect(matches.length).toBe(6)
+    // account-lifecycle-management task 4.2 added a 7th call site,
+    // `refreshMembersAfterSuspend`, matching this exact shape.
+    expect(matches.length).toBe(7)
     for (const m of matches) {
       expect(m).toContain("m.role === 'admin'")
       expect(m).toContain("m.role === 'member'")
@@ -684,7 +686,9 @@ describe('Members list includes admins (Defect 1)', () => {
 
   it('keeps the Team Admins list admin-only', () => {
     const matches = source.match(/setAdmins\(allMembers\.filter\([^)]*\)\)/g) || []
-    expect(matches.length).toBe(6)
+    // account-lifecycle-management task 4.2 added a 7th call site,
+    // `refreshMembersAfterSuspend`, matching this exact shape.
+    expect(matches.length).toBe(7)
     for (const m of matches) {
       expect(m).toBe("setAdmins(allMembers.filter(m => m.role === 'admin'))")
     }
@@ -751,6 +755,102 @@ describe('Remove as Admin flow (bugfix: Team Admins tab action-set mismatch)', (
     expect(block).toContain('disabled={removingAdminInFlight}')
     // No type-to-confirm text input, unlike the "Permanently Delete User" dialog.
     expect(block).not.toContain('removeConfirmInput')
+  })
+})
+
+// account-lifecycle-management Requirement 4.1-4.3 (task 8.2/8.3): a
+// per-row text badge on the Members/Team Admins tabs, sourced from
+// `account_status` via the shared `describeAccountStatusBadge` helper
+// (now in `utils/accountStatusBadge.js`, re-exported here per this
+// file's established convention). Source-contract tests only.
+describe('Account status badge (account-lifecycle-management)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  it('imports describeAccountStatusBadge from the shared utils module', () => {
+    expect(source).toContain("import { describeAccountStatusBadge } from '../utils/accountStatusBadge'")
+  })
+
+  it('re-exports describeAccountStatusBadge under its original name for backward-compatible imports', () => {
+    expect(source).toContain('export { describeAccountStatusBadge }')
+  })
+
+  it('renders the badge at all 4 Members/Team Admins card+table call sites, keyed off member.account_status / admin.account_status', () => {
+    const memberOccurrences = source.split('describeAccountStatusBadge(member.account_status)').length - 1
+    const adminOccurrences = source.split('describeAccountStatusBadge(admin.account_status)').length - 1
+    // Each call site references the helper twice (a truthy guard, then the
+    // className/label reads) -- at least 2 per call site per row (member
+    // card has 1 guard + 1 read via a shared className/label lookup
+    // pattern), so this asserts presence across all 4 rather than an exact
+    // multiple, which would be brittle to a harmless refactor of how many
+    // times the same call is written inline.
+    expect(memberOccurrences).toBeGreaterThanOrEqual(2)
+    expect(adminOccurrences).toBeGreaterThanOrEqual(2)
+  })
+
+  it('describeAccountStatusBadge itself never returns a badge for "active", so no badge is queried', () => {
+    expect(describeAccountStatusBadge('active')).toBeNull()
+  })
+})
+
+// account-lifecycle-management Requirement 1.11 (task 4.3): Suspend/
+// Unsuspend is offered on both the Members and Team Admins tabs (card and
+// table variants -- 4 call sites total), sharing one `SuspendAccountDialog`
+// instance the same way Transfer/View Devices already share theirs above.
+// Source-contract tests only, per this file's established convention (no
+// @testing-library/react in this project).
+describe('Suspend/Unsuspend action (account-lifecycle-management)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  it('imports SuspendAccountDialog from the shared component', () => {
+    expect(source).toContain("import SuspendAccountDialog from '../components/SuspendAccountDialog'")
+  })
+
+  it('handleSuspendClick derives mode from the clicked row\'s own account_status, defaulting to suspend', () => {
+    expect(source).toContain('const handleSuspendClick = (member) => {')
+    const index = source.indexOf('const handleSuspendClick = (member) => {')
+    const block = source.slice(index, source.indexOf('\n  }', index))
+    expect(block).toContain('setSuspendingMember({')
+    expect(block).toContain('member,')
+    expect(block).toContain("mode: member.account_status === 'suspended' ? 'unsuspend' : 'suspend'")
+  })
+
+  it('all 4 MemberActions/AdminActions call sites (Members card+table, Team Admins card+table) pass onSuspend gated on account_status !== "orphaned"', () => {
+    const occurrences = source.split("onSuspend={member.account_status !== 'orphaned' ? handleSuspendClick : undefined}").length - 1
+    const adminOccurrences = source.split("onSuspend={admin.account_status !== 'orphaned' ? handleSuspendClick : undefined}").length - 1
+    expect(occurrences).toBe(2)
+    expect(adminOccurrences).toBe(2)
+  })
+
+  it('all 4 call sites also pass accountStatus={member.account_status} / accountStatus={admin.account_status}', () => {
+    const memberOccurrences = source.split('accountStatus={member.account_status}').length - 1
+    const adminOccurrences = source.split('accountStatus={admin.account_status}').length - 1
+    expect(memberOccurrences).toBe(2)
+    expect(adminOccurrences).toBe(2)
+  })
+
+  it('refreshMembersAfterSuspend refetches members/admins from teamsAPI.getById, matching the refresh pattern used by every other mutation on this page, without refetching channels', () => {
+    expect(source).toContain('const refreshMembersAfterSuspend = async () => {')
+    const index = source.indexOf('const refreshMembersAfterSuspend = async () => {')
+    const block = source.slice(index, source.indexOf('\n  }', index))
+    expect(block).toContain('const teamResponse = await teamsAPI.getById(team.id)')
+    expect(block).toContain("setMembers(allMembers.filter(m => m.role === 'member' || m.role === 'inherited' || m.role === 'admin'))")
+    expect(block).toContain("setAdmins(allMembers.filter(m => m.role === 'admin'))")
+    // Unlike confirmRemoveUser/handleTransferCompleted, suspending/
+    // unsuspending changes no channel membership, so there is nothing for
+    // a channelsAPI refetch to update here.
+    expect(block).not.toContain('channelsAPI.getByTeam')
+  })
+
+  it('renders SuspendAccountDialog gated on suspendingMember, wired to its mode/targetUserId/targetName/onClose/onCompleted', () => {
+    expect(source).toContain('{suspendingMember && (')
+    const index = source.indexOf('{suspendingMember && (')
+    const dialogEnd = source.indexOf('\n      )}', index)
+    const block = source.slice(index, dialogEnd)
+    expect(block).toContain('<SuspendAccountDialog')
+    expect(block).toContain('mode={suspendingMember.mode}')
+    expect(block).toContain('targetUserId={suspendingMember.member.id}')
+    expect(block).toContain('onClose={() => setSuspendingMember(null)}')
+    expect(block).toContain('onCompleted={refreshMembersAfterSuspend}')
   })
 })
 
@@ -1539,10 +1639,11 @@ describe('TeamDetail.jsx: Members/Team Admins/Channels/Sub-teams tabs render sm:
     expect(withCardVariant.length).toBe(1)
   })
 
-  // Bugfix: the Sub-teams tab's inline view/delete actions were never
-  // extracted into a shared component (only 2 icons), so the same
-  // button-box treatment is applied literally rather than via a prop.
-  it('applies the same p-2/rounded-lg/h-5 w-5 button-box treatment inline to the Sub-teams card\'s View/Delete actions', () => {
+  // Bugfix: the Sub-teams tab's inline view/edit/delete actions were
+  // never extracted into a shared component (only 3 icons), so the
+  // same button-box treatment is applied literally rather than via a
+  // prop.
+  it('applies the same p-2/rounded-lg/h-5 w-5 button-box treatment inline to the Sub-teams card\'s View/Edit/Delete actions', () => {
     const subteamsCardIndex = source.indexOf("activeTab === 'subteams'")
     const subteamsTableIndex = source.indexOf('hidden sm:block overflow-x-auto', subteamsCardIndex)
     expect(subteamsCardIndex).toBeGreaterThan(-1)
@@ -1552,8 +1653,106 @@ describe('TeamDetail.jsx: Members/Team Admins/Channels/Sub-teams tabs render sm:
     expect(cardBlock).toContain('title="View team details"')
     expect(cardBlock).toContain('p-2 rounded-lg bg-gray-100')
     expect(cardBlock).toContain('h-5 w-5')
+    expect(cardBlock).toContain('title="Edit sub-team"')
     expect(cardBlock).toContain('title="Delete sub-team"')
     expect(cardBlock).toContain('bg-red-50')
+  })
+
+  // Bugfix (Sub-teams tab missing Edit/Delete parity with /teams):
+  // Teams.jsx's own overview list offers Edit and Delete via
+  // `TeamRowActions` for every row the caller may act on; this tab
+  // previously had no Edit action at all, and Delete was entirely
+  // ungated on the client. Both are now gated on `canManageTeam`, in
+  // BOTH the card and the table -- "View team details" stays
+  // unconditional in both, matching its pre-existing (and Teams.jsx's
+  // own) always-visible treatment.
+  it('offers "Edit sub-team" and "Delete sub-team" gated on canManageTeam, in both the card and the table; "View team details" stays ungated', () => {
+    const subteamsGateIndex = source.indexOf("activeTab === 'subteams' && (")
+    const nextTabGateIndex = source.indexOf("activeTab !== 'devices' && paginatedData.length === 0", subteamsGateIndex)
+    const block = source.slice(subteamsGateIndex, nextTabGateIndex > -1 ? nextTabGateIndex : source.length)
+
+    for (const title of ['title="Edit sub-team"', 'title="Delete sub-team"']) {
+      const occurrences = block.split(title).length - 1
+      expect(occurrences).toBe(2)
+      const usageIndices = [...block.matchAll(new RegExp(title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))].map((m) => m.index)
+      for (const index of usageIndices) {
+        const precedingCanManage = block.lastIndexOf('canManageTeam && (', index)
+        expect(precedingCanManage).toBeGreaterThan(-1)
+        expect(precedingCanManage).toBeLessThan(index)
+      }
+    }
+
+    const viewOccurrences = block.split('title="View team details"').length - 1
+    expect(viewOccurrences).toBe(2)
+    const viewIndices = [...block.matchAll(/title="View team details"/g)].map((m) => m.index)
+    for (const index of viewIndices) {
+      // "View team details" must NOT be nested inside a canManageTeam
+      // gate that starts after the enclosing space-x-3 row div -- i.e.
+      // the nearest preceding canManageTeam-gate (if any at all) must
+      // sit BEFORE this row's own action-row div, not immediately
+      // wrapping this specific Link.
+      const rowDivIndex = block.lastIndexOf('<div className="flex items-center justify-end space-x-3">', index)
+      expect(rowDivIndex).toBeGreaterThan(-1)
+      const canManageBetween = block.indexOf('canManageTeam && (', rowDivIndex)
+      expect(canManageBetween === -1 || canManageBetween > index).toBe(true)
+    }
+  })
+
+  it('opens the Edit Sub-Team dialog via setEditingSubTeam(subTeam) from both the card and the table', () => {
+    const subteamsGateIndex = source.indexOf("activeTab === 'subteams' && (")
+    const nextTabGateIndex = source.indexOf("activeTab !== 'devices' && paginatedData.length === 0", subteamsGateIndex)
+    const block = source.slice(subteamsGateIndex, nextTabGateIndex > -1 ? nextTabGateIndex : source.length)
+    const occurrences = block.split('onClick={() => setEditingSubTeam(subTeam)}').length - 1
+    expect(occurrences).toBe(2)
+  })
+
+  // Bugfix: `sub_teams_count` is a `COUNT(*)` result (Team.getSubTeams),
+  // which `pg` returns as a STRING (Postgres bigint -> string, to avoid
+  // JS precision loss), never a number. `(x || 0) === 0` -- the check
+  // gating "Delete sub-team" vs. its disabled "Cannot delete" sibling --
+  // is a STRICT equality, so `"0" === 0` was always false: for a
+  // genuinely childless sub-team (the common case), NEITHER button ever
+  // rendered, leaving Delete missing entirely. `> 0` was unaffected (JS
+  // coerces both operands numerically for relational operators), which
+  // is why this went unnoticed for the "has children" case. The fix
+  // wraps both comparisons in `Number(...)` so the check is unaffected
+  // by whether the driver returns a string or a number.
+  it('wraps the sub_teams_count comparison in Number(...) so a string "0" from pg\'s bigint COUNT(*) still matches (bugfix)', () => {
+    const subteamsGateIndex = source.indexOf("activeTab === 'subteams' && (")
+    const nextTabGateIndex = source.indexOf("activeTab !== 'devices' && paginatedData.length === 0", subteamsGateIndex)
+    const block = source.slice(subteamsGateIndex, nextTabGateIndex > -1 ? nextTabGateIndex : source.length)
+
+    const zeroOccurrences = block.split('Number(subTeam.sub_teams_count || 0) === 0').length - 1
+    const positiveOccurrences = block.split('Number(subTeam.sub_teams_count || 0) > 0').length - 1
+    expect(zeroOccurrences).toBe(2)
+    expect(positiveOccurrences).toBe(2)
+
+    // The old, unwrapped shape must not reappear -- checked with a
+    // negative lookbehind rather than a plain substring match, since
+    // "Number(subTeam.sub_teams_count || 0)" itself contains
+    // "(subTeam.sub_teams_count || 0)" as a substring once the "Number"
+    // prefix is stripped away.
+    expect(block).not.toMatch(/(?<!Number)\(subTeam\.sub_teams_count \|\| 0\) === 0/)
+    expect(block).not.toMatch(/(?<!Number)\(subTeam\.sub_teams_count \|\| 0\) > 0/)
+  })
+
+  // Bugfix (Sub-teams tab missing Edit/Delete parity with /teams): a
+  // SEPARATE TeamFormDialog instance from the page's own Edit Team
+  // dialog -- that one always edits `team` itself (this page's own
+  // team), never a sub-team row.
+  it('renders a second TeamFormDialog for editingSubTeam, distinct from the page\'s own Edit Team dialog', () => {
+    const dialogUsages = [...source.matchAll(/<TeamFormDialog/g)].map((m) => m.index)
+    expect(dialogUsages.length).toBe(2)
+    const subTeamDialogIndex = dialogUsages.find((index) => {
+      const block = source.slice(index, source.indexOf('/>', index) > -1 ? source.indexOf('/>', index) : source.length)
+      return block.includes('team={editingSubTeam}')
+    })
+    expect(subTeamDialogIndex).toBeGreaterThan(-1)
+    const block = source.slice(subTeamDialogIndex, source.indexOf('/>', subTeamDialogIndex))
+    expect(block).toContain('mode="edit"')
+    expect(block).toContain('isOpen={!!editingSubTeam}')
+    expect(block).toContain('onClose={() => setEditingSubTeam(null)}')
+    expect(block).toContain('isAdmin={canManageTeam}')
   })
 
   it('renders the Sub-teams card with inline "Label: value" stats (Members:/Sub-teams:), matching Teams.jsx\'s own card convention', () => {
@@ -1616,14 +1815,206 @@ describe('TeamDetail.jsx: Members/Team Admins/Channels/Sub-teams tabs render sm:
     })
   })
 
-  it('renders the Channels card with the channel_type badge and member count, and no action icons (read-only tab)', () => {
+  it('renders the Channels card with the channel_type badge and member count', () => {
     const channelsGateIndex = source.indexOf("activeTab === 'channels' && (")
     const cardIndex = source.indexOf('sm:hidden divide-y', channelsGateIndex)
     const tableIndex = source.indexOf('hidden sm:block overflow-x-auto', channelsGateIndex)
     const cardBlock = source.slice(cardIndex, tableIndex)
     expect(cardBlock).toContain('{channel.channel_type === \'primary\' ? \'Primary\' : \'Custom\'}')
     expect(cardBlock).toContain('{channel.member_count || 0} members')
-    expect(cardBlock).not.toContain('<button')
+  })
+})
+
+// Bugfix (Channels tab had no delete-channel or manage-members action;
+// and separately, no edit action / no way to add/edit a custom
+// channel's Authentik/LDAP description): the Channels tab used to be
+// genuinely read-only (no per-row actions at all) -- both the card and
+// the table now offer "Edit channel", "Manage channel members" and
+// "Delete channel", each only for a Custom, non-primary channel -- a
+// primary/team channel has no standalone edit or delete path of its
+// own, and its membership is managed automatically rather than through
+// the custom-channel member endpoints ChannelMembersDialog drives.
+// Source-contract tests only, per this file's established convention.
+describe('Channels tab actions (bugfix: had no delete-channel or manage-members action)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  function channelsTabBlock() {
+    const gateIndex = source.indexOf("activeTab === 'channels' && (")
+    expect(gateIndex).toBeGreaterThan(-1)
+    const nextTabGateIndex = source.indexOf("activeTab === 'subteams' && (", gateIndex)
+    expect(nextTabGateIndex).toBeGreaterThan(gateIndex)
+    return source.slice(gateIndex, nextTabGateIndex)
+  }
+
+  // Bugfix: a primary channel's membership is managed automatically
+  // (Team.createTeamChannel / TeamMembershipService.addUserToTeam's
+  // auto-insert into channel_memberships), never through the
+  // custom-channel Channel.addMember/removeMember endpoints that
+  // ChannelMembersDialog drives -- those are scoped to custom channels'
+  // three-group (RW/READ/WRITE) Authentik semantics, which a primary
+  // channel never has (it only ever populates authentik_group_id).
+  // "Manage channel members" is therefore gated the same way "Delete
+  // channel" already is: on canManageTeam AND channel.channel_type !==
+  // 'primary', not on canManageTeam alone.
+  it('offers "Manage channel members" in BOTH the card and the table, gated on canManageTeam AND channel.channel_type !== \'primary\'', () => {
+    const block = channelsTabBlock()
+    const occurrences = block.split('title="Manage channel members"').length - 1
+    expect(occurrences).toBe(2)
+    const usageIndices = [...block.matchAll(/title="Manage channel members"/g)].map((m) => m.index)
+    for (const index of usageIndices) {
+      const precedingCanManage = block.lastIndexOf('canManageTeam && (', index)
+      expect(precedingCanManage).toBeGreaterThan(-1)
+      expect(precedingCanManage).toBeLessThan(index)
+      const precedingGuard = block.lastIndexOf("channel.channel_type !== 'primary' && (", index)
+      expect(precedingGuard).toBeGreaterThan(-1)
+      expect(precedingGuard).toBeLessThan(index)
+      // The primary-channel guard must be the nearer (innermost) of the
+      // two, i.e. nested inside the canManageTeam gate, not the other
+      // way round -- matching "Delete channel"'s existing nesting.
+      expect(precedingGuard).toBeGreaterThan(precedingCanManage)
+    }
+  })
+
+  // Bugfix (Channels tab has no edit action, and no way to add/edit a
+  // custom channel's Authentik/LDAP description): "Edit channel" is
+  // gated the same way "Delete channel"/"Manage channel members" are --
+  // on canManageTeam AND channel.channel_type !== 'primary' -- since a
+  // primary channel has no standalone edit path either (renaming it
+  // would require renaming all three of its Authentik groups, out of
+  // scope for this fix; it never even reaches that dialog since it's
+  // never rendered for a primary channel).
+  it('offers "Edit channel" in BOTH the card and the table, gated on canManageTeam AND channel.channel_type !== \'primary\'', () => {
+    const block = channelsTabBlock()
+    const occurrences = block.split('title="Edit channel"').length - 1
+    expect(occurrences).toBe(2)
+    const usageIndices = [...block.matchAll(/title="Edit channel"/g)].map((m) => m.index)
+    for (const index of usageIndices) {
+      const precedingCanManage = block.lastIndexOf('canManageTeam && (', index)
+      expect(precedingCanManage).toBeGreaterThan(-1)
+      expect(precedingCanManage).toBeLessThan(index)
+      const precedingGuard = block.lastIndexOf("channel.channel_type !== 'primary' && (", index)
+      expect(precedingGuard).toBeGreaterThan(-1)
+      expect(precedingGuard).toBeLessThan(index)
+      expect(precedingGuard).toBeGreaterThan(precedingCanManage)
+    }
+  })
+
+  it('opens the Edit Channel dialog via setEditingChannel(channel), seeding editChannelDescription from channel.description, from both usages', () => {
+    const block = channelsTabBlock()
+    const occurrences = block.split('setEditingChannel(channel)').length - 1
+    expect(occurrences).toBe(2)
+    const seedOccurrences = block.split("setEditChannelDescription(channel.description || '')").length - 1
+    expect(seedOccurrences).toBe(2)
+  })
+
+  it('renders each channel\'s description (when present) in both the card and the table', () => {
+    const block = channelsTabBlock()
+    const occurrences = block.split('{channel.description}').length - 1
+    expect(occurrences).toBe(2)
+  })
+
+  it('defines handleEditChannel calling channelsAPI.update with editingChannel.id and { description: editChannelDescription }, then refetches via channelsAPI.getByTeam', () => {
+    expect(source).toContain('const handleEditChannel = async (e) => {')
+    const index = source.indexOf('const handleEditChannel = async (e) => {')
+    const block = source.slice(index, source.indexOf('\n  }', index))
+    expect(block).toContain('await channelsAPI.update(editingChannel.id, { description: editChannelDescription })')
+    expect(block).toContain('const channelsResponse = await channelsAPI.getByTeam(team.id)')
+    expect(block).toContain('setChannels(channelsResponse.data.channels || [])')
+  })
+
+  it('renders an "Edit" dialog for editingChannel with a description textarea, gated on editingChannel', () => {
+    expect(source).toContain('{editingChannel && (')
+    const index = source.indexOf('{editingChannel && (')
+    const dialogEnd = source.indexOf('\n      )}', index)
+    const block = source.slice(index, dialogEnd)
+    expect(block).toContain('onSubmit={handleEditChannel}')
+    expect(block).toContain('value={editChannelDescription}')
+    expect(block).toContain('onChange={(e) => setEditChannelDescription(e.target.value)}')
+    expect(block).toContain('onClick={() => setEditingChannel(null)}')
+    expect(block).toContain('disabled={savingChannelEdit}')
+  })
+
+  it('opens ChannelMembersDialog via setManagingMembersChannel(channel) from both usages', () => {
+    const block = channelsTabBlock()
+    const occurrences = block.split('onClick={() => setManagingMembersChannel(channel)}').length - 1
+    expect(occurrences).toBe(2)
+  })
+
+  it('offers "Delete channel" only when channel.channel_type !== \'primary\', in BOTH the card and the table', () => {
+    const block = channelsTabBlock()
+    const occurrences = block.split('title="Delete channel"').length - 1
+    expect(occurrences).toBe(2)
+    const usageIndices = [...block.matchAll(/title="Delete channel"/g)].map((m) => m.index)
+    for (const index of usageIndices) {
+      const precedingGuard = block.lastIndexOf("channel.channel_type !== 'primary' && (", index)
+      expect(precedingGuard).toBeGreaterThan(-1)
+      expect(precedingGuard).toBeLessThan(index)
+    }
+  })
+
+  it('opens the delete-channel confirmation via setDeletingChannel(channel) (the whole row, not just an id) from both usages', () => {
+    const block = channelsTabBlock()
+    const occurrences = block.split('onClick={() => setDeletingChannel(channel)}').length - 1
+    expect(occurrences).toBe(2)
+  })
+
+  it('defines handleDeleteChannel calling channelsAPI.delete with deletingChannel.id, distinct from handleDeleteSubTeam', () => {
+    expect(source).toContain('const handleDeleteChannel = async () => {')
+    const index = source.indexOf('const handleDeleteChannel = async () => {')
+    const block = source.slice(index, source.indexOf('\n  }', index))
+    expect(block).toContain('await channelsAPI.delete(deletingChannel.id)')
+  })
+
+  // Consistency bugfix: deleting a channel now requires typing its own
+  // display_name to confirm, matching "Permanently Delete User"'s
+  // type-to-confirm pattern -- the plain Cancel/Confirm shape this
+  // dialog originally had (mirroring "Delete Sub-Team") understated how
+  // disruptive losing a channel's Authentik group is for every member
+  // on it.
+  it('renders a type-to-confirm "Delete Channel" dialog requiring the channel\'s own display_name, gated on deletingChannel', () => {
+    expect(source).toContain('{deletingChannel && (')
+    const index = source.indexOf('{deletingChannel && (')
+    const dialogEnd = source.indexOf('\n      )}', index)
+    const block = source.slice(index, dialogEnd)
+    expect(block).toContain('Delete Channel')
+    expect(block).toContain('{deletingChannel.display_name}')
+    expect(block).toContain('value={deleteChannelConfirmInput}')
+    expect(block).toContain('onChange={(e) => setDeleteChannelConfirmInput(e.target.value)}')
+    expect(block).toContain('onClick={handleDeleteChannel}')
+    expect(block).toContain('disabled={deletingChannelInFlight || deleteChannelConfirmInput !== deletingChannel.display_name}')
+    // Cancel must also clear the typed confirmation text, so a re-open
+    // for a different channel never starts pre-filled with a stale value.
+    const cancelIndex = block.indexOf('setDeletingChannel(null)')
+    expect(cancelIndex).toBeGreaterThan(-1)
+    expect(block.slice(cancelIndex, cancelIndex + 120)).toContain('setDeleteChannelConfirmInput(\'\')')
+  })
+
+  it('renders ChannelMembersDialog gated on managingMembersChannel, passing the team\'s own members as teamMembers', () => {
+    expect(source).toContain('{managingMembersChannel && (')
+    const index = source.indexOf('{managingMembersChannel && (')
+    const block = source.slice(index, source.indexOf('/>', index))
+    expect(block).toContain('<ChannelMembersDialog')
+    expect(block).toContain('channel={managingMembersChannel}')
+    expect(block).toContain('teamMembers={members}')
+    expect(block).toContain('onClose={() => setManagingMembersChannel(null)}')
+  })
+
+  // Bugfix (Channels tab showed "0 members" right after creating a
+  // channel with members): POST /channels/custom's response is the raw
+  // INSERTed channels row, which carries no member_count field at all
+  // (that field only exists on GET /channels/team/:teamId's response,
+  // computed via a LEFT JOIN COUNT) -- appending it directly to
+  // `channels` therefore always rendered 0 regardless of how many
+  // members were actually added.
+  it('handleCreateChannel refetches the team\'s channel list via channelsAPI.getByTeam rather than appending the raw creation response', () => {
+    const index = source.indexOf('const handleCreateChannel = async (e) => {')
+    expect(index).toBeGreaterThan(-1)
+    const block = source.slice(index, source.indexOf('\n  }', index))
+    expect(block).toContain('await channelsAPI.createCustom(')
+    expect(block).toContain('const channelsResponse = await channelsAPI.getByTeam(team.id)')
+    expect(block).toContain('setChannels(channelsResponse.data.channels || [])')
+    // The old bug's exact shape must not reappear.
+    expect(block).not.toContain('setChannels([...channels, response.data.channel])')
   })
 })
 
@@ -1860,5 +2251,35 @@ describe('Add Existing User tab: name/callsign-suffix onboarding review (member 
     expect(successIndex).toBeGreaterThan(-1)
     const successBlock = fnBody.slice(fnBody.lastIndexOf('setShowAddMemberDialog(false)', successIndex), successIndex + 200)
     expect(successBlock).toContain("dispatchNewUserForm({ type: 'reset' })")
+  })
+})
+
+// Bugfix (silent Authentik-delete failure on permanent delete): the
+// local account is deleted either way, but the two outcomes read very
+// differently to the admin -- a plain success toast when Authentik's
+// own account delete succeeded (or the field is absent, the
+// pre-existing response shape), versus a distinct error toast naming
+// the queued-for-retry cleanup when it didn't. Source-contract tests
+// only, per this file's established convention.
+describe('Permanently Delete User: authentikAccountDeleted toast (bugfix: silent Authentik-delete failure)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  it('branches on response?.data?.authentikAccountDeleted === false, with a distinct queued-for-retry error toast, rather than always calling toast.success', () => {
+    const index = source.indexOf('const confirmRemoveUser = async () => {')
+    expect(index).toBeGreaterThan(-1)
+    const fnEnd = source.indexOf('\n  }', index)
+    const block = source.slice(index, fnEnd)
+
+    expect(block).toContain('if (response?.data?.authentikAccountDeleted === false) {')
+    expect(block).toContain("toast.error('User removed, but their Authentik account could not be deleted immediately. Cleanup has been queued for retry.')")
+    expect(block).toContain("toast.success('User permanently deleted')")
+  })
+
+  it('never surfaces certificateRevocationDryRun as a client toast (a static deployment setting, not a per-request failure)', () => {
+    const index = source.indexOf('const confirmRemoveUser = async () => {')
+    const fnEnd = source.indexOf('\n  }', index)
+    const block = source.slice(index, fnEnd)
+
+    expect(block).not.toContain('certificateRevocationDryRun')
   })
 })

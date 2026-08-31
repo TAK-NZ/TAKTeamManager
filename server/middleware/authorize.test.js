@@ -131,7 +131,12 @@ jest.mock('../config/permissions.registry', () => {
       // mirrored from the production registry so the
       // `device:read:team_admin` resolver can be exercised through the
       // middleware.
-      'GET /api/devices/team/:teamId': ['device:read:team_admin']
+      'GET /api/devices/team/:teamId': ['device:read:team_admin'],
+      // account-lifecycle-management task 3.1: the shared `user:suspend`
+      // resolver, mirrored from the production registry so both
+      // suspend/unsuspend routes can be exercised through the middleware.
+      'POST /api/users/:userId/suspend': ['user:suspend'],
+      'POST /api/users/:userId/unsuspend': ['user:suspend']
     },
     roleDefaults: {
       global_manager: ['*'],
@@ -231,6 +236,13 @@ function buildApp(user) {
   // `device:read:team_admin`. Reads only the `:teamId` route param, so no
   // body parser is needed.
   app.get('/api/devices/team/:teamId', authorize, (req, res) => res.status(200).json({ ok: true }));
+  // account-lifecycle-management task 3.1: both routes share the
+  // `user:suspend` resolver, which reads only the `:userId` route param
+  // (via a `pool.query` Direct_Membership lookup, exactly like
+  // `resolveTeamAdminOfBodyTeamId`'s sibling resolvers), so no body
+  // parser is needed on either.
+  app.post('/api/users/:userId/suspend', authorize, (req, res) => res.status(200).json({ ok: true }));
+  app.post('/api/users/:userId/unsuspend', authorize, (req, res) => res.status(200).json({ ok: true }));
   return app;
 }
 
@@ -1797,5 +1809,146 @@ describe('authorize (task 8.5: device:read:team_admin row-scoped resolver)', () 
       errorCategory: 'authorization_check_exception',
       permission: 'device:read:team_admin'
     });
+  });
+});
+
+/**
+ * account-lifecycle-management task 3.1 (Requirement 1 Criteria 1, 6): the
+ * `user:suspend` row-scoped resolver, backing BOTH
+ * `POST /api/users/:userId/suspend` and
+ * `POST /api/users/:userId/unsuspend`. Global_Manager OR
+ * `Team.isAdmin(teamId, req.user.userId)` where `teamId` is the target
+ * account's Direct_Membership team, resolved via the same `pool.query`
+ * shape `user:team:transfer`'s resolver already uses.
+ */
+describe('authorize (task 3.1: user:suspend row-scoped resolver)', () => {
+  const TARGET_USER_ID = 42;
+
+  function postSuspend(user, targetUserId = TARGET_USER_ID) {
+    return request(buildApp(user))
+      .post(`/api/users/${targetUserId}/suspend`)
+      .set('X-Forwarded-For', TEST_IP);
+  }
+
+  function postUnsuspend(user, targetUserId = TARGET_USER_ID) {
+    return request(buildApp(user))
+      .post(`/api/users/${targetUserId}/unsuspend`)
+      .set('X-Forwarded-For', TEST_IP);
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  afterEach(() => {
+    mockIsAdmin.mockReset();
+    pool.query.mockReset();
+  });
+
+  it.each([
+    ['suspend', postSuspend],
+    ['unsuspend', postUnsuspend]
+  ])('permits a Global_Manager on %s without consulting Team.isAdmin or the Direct_Membership lookup', async (_label, send) => {
+    const res = await send({ userId: 1, id: 'authentik-id-1', is_global_manager: true });
+
+    expect(res.status).toBe(200);
+    expect(mockIsAdmin).not.toHaveBeenCalled();
+    expect(pool.query).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['suspend', postSuspend],
+    ['unsuspend', postUnsuspend]
+  ])('permits an admin (per Team.isAdmin) of the target account\u2019s Direct_Membership team on %s', async (_label, send) => {
+    pool.query.mockResolvedValueOnce({ rows: [{ team_id: 7 }] });
+    mockIsAdmin.mockResolvedValueOnce(true);
+
+    const res = await send({ userId: 1, id: 'authentik-id-1', is_global_manager: false });
+
+    expect(res.status).toBe(200);
+    expect(mockIsAdmin).toHaveBeenCalledWith(7, 1);
+  });
+
+  it('resolves the Direct_Membership team via the exact same query shape DeviceEnrollmentService.deleteDevice uses', async () => {
+    pool.query.mockResolvedValueOnce({ rows: [{ team_id: 7 }] });
+    mockIsAdmin.mockResolvedValueOnce(true);
+
+    await postSuspend({ userId: 1, id: 'authentik-id-1', is_global_manager: false });
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    const [sql, params] = pool.query.mock.calls[0];
+    expect(sql).toContain('team_memberships');
+    expect(sql).toContain('inherited_from_team_id IS NULL');
+    expect(String(params[0])).toBe(String(TARGET_USER_ID));
+  });
+
+  it('denies when the target account has no Direct_Membership row at all, without calling Team.isAdmin', async () => {
+    pool.query.mockResolvedValueOnce({ rows: [] });
+
+    const res = await postSuspend({ userId: 1, id: 'authentik-id-1', is_global_manager: false });
+
+    expect(res.status).toBe(403);
+    expect(mockIsAdmin).not.toHaveBeenCalled();
+  });
+
+  it('denies an unrelated admin (Team.isAdmin resolves false)', async () => {
+    pool.query.mockResolvedValueOnce({ rows: [{ team_id: 7 }] });
+    mockIsAdmin.mockResolvedValueOnce(false);
+
+    const res = await postSuspend({ userId: 99, id: 'authentik-id-99', is_global_manager: false });
+
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: 'Forbidden' });
+    expect(mockWarn).toHaveBeenCalledTimes(1);
+    const [payload] = mockWarn.mock.calls[0];
+    expect(payload).toEqual({
+      ip: TEST_IP,
+      route: `/api/users/${TARGET_USER_ID}/suspend`,
+      reason: 'permission_denied'
+    });
+  });
+
+  it('passes req.user.userId (the LOCAL users.id) to Team.isAdmin, never req.user.id (the Authentik id)', async () => {
+    pool.query.mockResolvedValueOnce({ rows: [{ team_id: 7 }] });
+    mockIsAdmin.mockResolvedValueOnce(true);
+
+    const res = await postSuspend({ userId: 555, id: 'authentik-uuid-does-not-match', is_global_manager: false });
+
+    expect(res.status).toBe(200);
+    expect(mockIsAdmin).toHaveBeenCalledWith(7, 555);
+    expect(mockIsAdmin).not.toHaveBeenCalledWith(7, 'authentik-uuid-does-not-match');
+  });
+
+  it('fails closed (403) when Team.isAdmin throws, without a resolver-local try/catch', async () => {
+    pool.query.mockResolvedValueOnce({ rows: [{ team_id: 7 }] });
+    mockIsAdmin.mockRejectedValueOnce(new Error('db connection lost'));
+
+    const res = await postSuspend({ userId: 1, id: 'authentik-id-1', is_global_manager: false });
+
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: 'Forbidden' });
+    expect(mockError).toHaveBeenCalledTimes(1);
+    expect(mockError.mock.calls[0][0]).toMatchObject({
+      errorCategory: 'authorization_check_exception',
+      permission: 'user:suspend'
+    });
+  });
+
+  it('fails closed (403) when the Direct_Membership lookup itself throws', async () => {
+    pool.query.mockRejectedValueOnce(new Error('db connection lost'));
+
+    const res = await postSuspend({ userId: 1, id: 'authentik-id-1', is_global_manager: false });
+
+    expect(res.status).toBe(403);
+    expect(mockIsAdmin).not.toHaveBeenCalled();
+  });
+
+  it('the unsuspend route shares the identical grant/deny behaviour as suspend', async () => {
+    pool.query.mockResolvedValueOnce({ rows: [{ team_id: 7 }] });
+    mockIsAdmin.mockResolvedValueOnce(false);
+
+    const res = await postUnsuspend({ userId: 99, id: 'authentik-id-99', is_global_manager: false });
+
+    expect(res.status).toBe(403);
   });
 });

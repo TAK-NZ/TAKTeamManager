@@ -193,7 +193,8 @@ describe('RequestApprovalService.approveRequest - new_account', () => {
       teamId: 7,
       callsign_suffix: 'New-User',
       createdBy: 9,
-      claimId: null
+      claimId: null,
+      reclaimedUserId: null
     });
     expect(mockClient.query).toHaveBeenCalledWith('COMMIT');
     expect(mockClient.release).toHaveBeenCalledTimes(1);
@@ -482,6 +483,147 @@ describe('RequestApprovalService.approveRequest - new_account', () => {
       },
       expect.any(String)
     );
+  });
+});
+
+/**
+ * account-lifecycle-management Requirement 5.2/5.3 (task 11.1, 11.5):
+ * the Reclaimable_Account lookup `approveRequest`'s Phase 1 now performs
+ * for a `new_account` request, before `createAuthentikUserForNewAccount`.
+ * `resolvedReclaimedUserId` is threaded through `processApprovedRequest`
+ * into `UserProvisioningService.createAndAddUser` as `reclaimedUserId`,
+ * mutually exclusive with `claimId` (the pseudonymous Claim_Row
+ * mechanism, an unrelated, different reason a `new_account` approval can
+ * adopt an existing row rather than inserting a fresh one).
+ */
+describe('RequestApprovalService.approveRequest - Account_Reclaim lookup (account-lifecycle-management)', () => {
+  let service;
+  let originalFetch;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    service = new RequestApprovalService();
+    service.emailService.sendApprovalEmail = jest.fn().mockResolvedValue(true);
+    originalFetch = global.fetch;
+    UserProvisioningService.resolveNewUserIdentity.mockResolvedValue({
+      username: 'newuser@example.com',
+      callsignSuffix: 'New-User',
+      pseudonymous: false,
+      claimId: null
+    });
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  function mockClientFor() {
+    return {
+      query: jest.fn().mockImplementation((sql) => {
+        if (sql.includes('SELECT ar.*, t.name as team_name')) {
+          return Promise.resolve({
+            rows: [{
+              ...PENDING_NEW_ACCOUNT_REQUEST,
+              team_name: 'Alpha Team',
+              admin_first_name: 'Admin',
+              admin_last_name: 'Istrator'
+            }]
+          });
+        }
+        if (sql.includes('SELECT 1 FROM teams')) {
+          return Promise.resolve({ rows: [{}] });
+        }
+        return Promise.resolve({ rows: [] });
+      }),
+      release: jest.fn()
+    };
+  }
+
+  it('looks up an orphaned users row by the request\'s email, before creating the Authentik user, and passes its id through as reclaimedUserId', async () => {
+    mockAuthentikSuccess();
+
+    let reclaimLookupCalledBeforeAuthentikFetch = false;
+    pool.query.mockImplementation((sql, params) => {
+      if (sql.includes('SELECT * FROM access_requests WHERE id = $1 AND status = $2')) {
+        return Promise.resolve({ rows: [PENDING_NEW_ACCOUNT_REQUEST] });
+      }
+      if (sql.includes("account_status = 'orphaned'")) {
+        reclaimLookupCalledBeforeAuthentikFetch = global.fetch.mock.calls.length === 0;
+        expect(params).toEqual(['newuser@example.com']);
+        return Promise.resolve({ rows: [{ id: 777 }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const mockClient = mockClientFor();
+    pool.connect.mockResolvedValue(mockClient);
+    UserProvisioningService.createAndAddUser.mockResolvedValue({ localUserId: 777, queuedGroups: 0 });
+
+    await service.approveRequest(1, 9);
+
+    expect(reclaimLookupCalledBeforeAuthentikFetch).toBe(true);
+    expect(UserProvisioningService.createAndAddUser).toHaveBeenCalledWith(mockClient, expect.objectContaining({
+      claimId: null,
+      reclaimedUserId: 777
+    }));
+  });
+
+  it('passes reclaimedUserId: null when no orphaned row matches the email', async () => {
+    mockAuthentikSuccess();
+
+    pool.query.mockImplementation((sql) => {
+      if (sql.includes('SELECT * FROM access_requests WHERE id = $1 AND status = $2')) {
+        return Promise.resolve({ rows: [PENDING_NEW_ACCOUNT_REQUEST] });
+      }
+      if (sql.includes("account_status = 'orphaned'")) {
+        return Promise.resolve({ rows: [] }); // no match
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const mockClient = mockClientFor();
+    pool.connect.mockResolvedValue(mockClient);
+    UserProvisioningService.createAndAddUser.mockResolvedValue({ localUserId: 55, queuedGroups: 0 });
+
+    await service.approveRequest(1, 9);
+
+    expect(UserProvisioningService.createAndAddUser).toHaveBeenCalledWith(mockClient, expect.objectContaining({
+      reclaimedUserId: null
+    }));
+  });
+
+  it('never performs the reclaim lookup when a Claim_Row was already resolved (mutually exclusive with pseudonymous claimId)', async () => {
+    mockAuthentikSuccess();
+    UserProvisioningService.resolveNewUserIdentity.mockResolvedValue({
+      username: 'minted-username',
+      callsignSuffix: 'Badge1',
+      pseudonymous: true,
+      claimId: 321
+    });
+
+    const reclaimQuerySpy = jest.fn();
+    pool.query.mockImplementation((sql) => {
+      if (sql.includes('SELECT * FROM access_requests WHERE id = $1 AND status = $2')) {
+        return Promise.resolve({ rows: [PENDING_NEW_ACCOUNT_REQUEST] });
+      }
+      if (sql.includes("account_status = 'orphaned'")) {
+        reclaimQuerySpy();
+        return Promise.resolve({ rows: [{ id: 999 }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const mockClient = mockClientFor();
+    pool.connect.mockResolvedValue(mockClient);
+    UserProvisioningService.createAndAddUser.mockResolvedValue({ localUserId: 321, queuedGroups: 0 });
+
+    await service.approveRequest(1, 9);
+
+    expect(reclaimQuerySpy).not.toHaveBeenCalled();
+    expect(UserProvisioningService.createAndAddUser).toHaveBeenCalledWith(mockClient, expect.objectContaining({
+      claimId: 321,
+      reclaimedUserId: null
+    }));
   });
 });
 

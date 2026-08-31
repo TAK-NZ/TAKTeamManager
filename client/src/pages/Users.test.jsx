@@ -538,6 +538,65 @@ describe('Users row actions (Users-page-action-parity)', () => {
 
     expect(usersAPI.removeFromTeam).toHaveBeenCalledWith(7, 42)
   })
+
+  // Bugfix (silent Authentik-delete failure): the local account is gone
+  // either way, but the two outcomes read very differently to the admin
+  // -- a plain success toast when Authentik's own delete succeeded (or
+  // the field is absent, the pre-existing shape), versus a distinct
+  // error toast naming the queued-for-retry cleanup when it didn't.
+  it('shows a plain success toast when authentikAccountDeleted is true (or absent)', async () => {
+    usersAPI.removeFromTeam.mockResolvedValue({ data: { authentikAccountDeleted: true } })
+    await mountWith([userRowWithTeam()])
+
+    const removeButton = Array.from(actionButtons()).find((b) => b.getAttribute('aria-label') === 'Delete user (permanently removes their account)')
+    await act(async () => {
+      removeButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    const dialog = container.querySelector('[role="dialog"][aria-labelledby="delete-user-title"]')
+    const input = dialog.querySelector('input[type="text"]')
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+    await act(async () => {
+      setter.call(input, 'ada@example.com')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const confirmButton = Array.from(dialog.querySelectorAll('button')).find((b) => b.textContent.includes('Delete User Permanently'))
+    await act(async () => {
+      confirmButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(toast.success).toHaveBeenCalledWith('User permanently deleted')
+    expect(toast.error).not.toHaveBeenCalled()
+  })
+
+  it('shows a distinct error toast, not the plain success one, when authentikAccountDeleted is false', async () => {
+    usersAPI.removeFromTeam.mockResolvedValue({ data: { authentikAccountDeleted: false } })
+    await mountWith([userRowWithTeam()])
+
+    const removeButton = Array.from(actionButtons()).find((b) => b.getAttribute('aria-label') === 'Delete user (permanently removes their account)')
+    await act(async () => {
+      removeButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    const dialog = container.querySelector('[role="dialog"][aria-labelledby="delete-user-title"]')
+    const input = dialog.querySelector('input[type="text"]')
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+    await act(async () => {
+      setter.call(input, 'ada@example.com')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const confirmButton = Array.from(dialog.querySelectorAll('button')).find((b) => b.textContent.includes('Delete User Permanently'))
+    await act(async () => {
+      confirmButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(toast.error).toHaveBeenCalledWith(expect.stringContaining('queued for retry'))
+    expect(toast.success).not.toHaveBeenCalled()
+  })
 })
 
 // ══════════════════════════════════════════════════════════════════════════

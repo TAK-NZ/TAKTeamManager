@@ -6,6 +6,7 @@ const { paginationParams } = require('../middleware/pagination');
 const User = require('../models/User');
 const Team = require('../models/Team');
 const authentikService = require('../services/authentik');
+const { isIgnoredAuthentikUsername } = require('../config/authentikSyncIgnore');
 const UserAttributesService = require('../services/userAttributes');
 const TeamMembershipService = require('../services/TeamMembershipService');
 const UserProvisioningService = require('../services/UserProvisioningService');
@@ -23,7 +24,21 @@ const {
 } = require('../services/TeamTransferService');
 const EventPublisher = require('../services/EventPublisher');
 const EmailService = require('../services/EmailService');
+// AccountLifecycleService exports the class itself as the default export
+// (module.exports = AccountLifecycleService), with its error classes
+// attached as properties on it -- the same shape VendorChannelService and
+// DeviceEnrollmentService already use -- rather than TeamTransferService's
+// plain-object-of-named-exports shape, so this is a single require, not a
+// destructure.
+const AccountLifecycleService = require('../services/AccountLifecycleService');
+const {
+  AccountAlreadySuspendedError,
+  AccountOrphanedError,
+  AccountNotSuspendedError,
+  TargetUserNotFoundError
+} = AccountLifecycleService;
 const { isCloudTakEnabled } = require('../config/cloudtak');
+const { isDeviceMgmtRevokeEnabled } = require('../config/deviceMgmt');
 const pool = require('../config/database');
 const { getLogger } = require('../middleware/requestContext');
 const router = express.Router();
@@ -239,7 +254,23 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
     // absent from the map (no corresponding local `users` row at all)
     // defaults to `false` via the `=== true` comparison above and is
     // therefore never excluded on that basis alone.
+    // Bugfix: reuses the SAME `AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES`
+    // predicate `authentikSync.js` already applies to decide which
+    // Authentik accounts get materialized locally (ETL/service accounts,
+    // and now also admin accounts like `akadmin`/`ckadmin` an operator
+    // configures) -- this is the SAME class of "administrative/service
+    // account that should never appear as a manageable TAK Team Manager
+    // user" the sync-skip already exists for, and this route was the one
+    // remaining place such an account was still visible: it fetches
+    // directly from Authentik's `/core/users/?type=internal` and does
+    // not consult the local `users` table's rows for exclusion (only for
+    // the `is_team_device` cross-reference below, which is a different
+    // condition). Filtering here, in-memory over the current page (like
+    // the `is_team_device` filter immediately below it), is therefore the
+    // only way to keep this account out of the Users view -- there is no
+    // Authentik-side query parameter for "exclude these usernames".
     const usersWithTeams = authentikUsers
+      .filter((user) => !isIgnoredAuthentikUsername(user.username))
       .filter((user) => !isTeamDeviceByAuthentikUserId.get(user.pk))
       .map((user) => ({
         ...user,
@@ -1569,22 +1600,69 @@ router.delete('/remove-from-team/:userId', authenticateToken, authorize, [
     // add-to-team route above.
     const requestingUserId = req.user.userId;
     
-    // Use new service layer for team removal
+    // Use new service layer for team removal. `removeUserFromTeam`
+    // unconditionally deletes EVERY team_memberships row for this user
+    // (no team_id filter), and this app enforces at most one direct team
+    // per user, so this call always leaves the user with zero teams --
+    // its "no teams left" branch always fires here, meaning a
+    // `revoke_tak_certificates` operation is always enqueued for this
+    // delete (never skipped because the user "still had another team").
     const result = await TeamMembershipService.removeUserFromTeam(userId, requestingUserId);
-    
+
+    // Bugfix (silent revoke-disarmed outcome): the certificate revoke
+    // enqueued above is always processed ASYNCHRONOUSLY by the sync
+    // worker, and -- independent of that -- completes as a no-op
+    // Revoke_Dry_Run whenever DEVICE_MGMT_REVOKE_ENABLED is not the exact
+    // string 'true' (per that flag's own arming contract). Neither of
+    // those facts changes what THIS route does (the account is deleted
+    // either way), but an admin who just permanently deleted a user has
+    // no way to know their TAK Server certificates were never actually
+    // revoked unless that outcome is recorded somewhere inspectable.
+    // Recorded here, at enqueue time, rather than waiting on the worker,
+    // since the flag's value is already fully known now and doesn't
+    // change between enqueue and drain.
+    const certificateRevocationDryRun = !isDeviceMgmtRevokeEnabled();
+
     // Clear TAK attributes in Authentik and deactivate the user
     await UserAttributesService.clearUserAttributes(authentikUserId);
 
-    // Delete user from Authentik entirely
+    // Bugfix (silent Authentik-delete failure): a failed/unreachable
+    // delete call previously only got logged, and local rows were
+    // deleted anyway -- leaving a fully intact, loginable Authentik
+    // account with no record that anything went wrong. Mirrors the
+    // create-and-add route's own compensating-action pattern: a
+    // non-2xx/non-404 response (404 means the account is already gone,
+    // not a failure) falls back to enqueueing `cleanup_orphaned_authentik_user`
+    // so the Sync_Worker retries the delete asynchronously, and the
+    // outcome is recorded rather than silently assumed.
+    let authentikAccountDeleted = true;
     try {
-      await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
+      const deleteResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
         method: 'DELETE',
         headers: {
           'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`
         }
       });
+
+      if (!deleteResponse.ok && deleteResponse.status !== 404) {
+        throw new Error(`Authentik delete responded with status ${deleteResponse.status}`);
+      }
     } catch (deleteErr) {
       getLogger().error({ err: deleteErr }, 'Failed to delete user from Authentik');
+      authentikAccountDeleted = false;
+
+      try {
+        await EventPublisher.publishOperation(
+          'cleanup_orphaned_authentik_user',
+          { authentik_user_id: authentikUserId },
+          req.user.userId
+        );
+      } catch (enqueueErr) {
+        getLogger().error(
+          { err: enqueueErr, authentikUserId },
+          'Failed to enqueue cleanup_orphaned_authentik_user compensating operation'
+        );
+      }
     }
 
     // Delete user from local system entirely
@@ -1594,7 +1672,13 @@ router.delete('/remove-from-team/:userId', authenticateToken, authorize, [
     try {
       await pool.query(
         'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
-        [req.user.userId, 'user.remove_from_team', 'user', parseInt(req.params.userId, 10), null]
+        [
+          req.user.userId,
+          'user.remove_from_team',
+          'user',
+          parseInt(req.params.userId, 10),
+          JSON.stringify({ authentikAccountDeleted, certificateRevocationDryRun })
+        ]
       );
     } catch (auditErr) {
       getLogger().error({ err: auditErr }, 'Failed to write audit log');
@@ -1602,7 +1686,9 @@ router.delete('/remove-from-team/:userId', authenticateToken, authorize, [
     
     res.json({ 
       message: 'User removed from team successfully',
-      operationsQueued: result.groupsQueued
+      operationsQueued: result.groupsQueued,
+      authentikAccountDeleted,
+      certificateRevocationDryRun
     });
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to remove user from team');
@@ -2011,6 +2097,70 @@ router.post('/:userId/transfer', authenticateToken, authorize, [
   }
 });
 
+/**
+ * account-lifecycle-management Requirement 1 Criteria 1-5: suspend an
+ * `account_status = 'active'` account (human or Team_Owned_Device).
+ * Authorization is the `user:suspend` row-scoped resolver (Global_Manager,
+ * or an admin of the target's Direct_Membership team) -- see that
+ * resolver's doc comment in `server/middleware/authorize.js`.
+ *
+ * Thin route: all business logic (the row lock, the state-transition
+ * validation, the Revoke_Operation enqueue, the audit write, and the
+ * post-commit Authentik PATCH) lives in `AccountLifecycleService
+ * .suspendAccount`. This handler's only job is mapping that call's named
+ * errors to the response shape Requirement 1 specifies.
+ */
+router.post('/:userId/suspend', authenticateToken, authorize, async (req, res) => {
+  const targetUserId = Number(req.params.userId);
+
+  if (!Number.isInteger(targetUserId) || targetUserId < 1) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  try {
+    const result = await AccountLifecycleService.suspendAccount(targetUserId, req.user);
+    return res.json(result);
+  } catch (error) {
+    if (error instanceof TargetUserNotFoundError) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    if (error instanceof AccountAlreadySuspendedError || error instanceof AccountOrphanedError) {
+      return res.status(400).json({ error: error.message });
+    }
+
+    getLogger().error({ err: error, targetUserId }, 'Failed to suspend account');
+    return res.status(500).json({ error: 'Failed to suspend account' });
+  }
+});
+
+/**
+ * account-lifecycle-management Requirement 1 Criteria 6-10: unsuspend an
+ * `account_status = 'suspended'` account. Same authorization rule and
+ * thin-route shape as the suspend route above; business logic lives in
+ * `AccountLifecycleService.unsuspendAccount`.
+ */
+router.post('/:userId/unsuspend', authenticateToken, authorize, async (req, res) => {
+  const targetUserId = Number(req.params.userId);
+
+  if (!Number.isInteger(targetUserId) || targetUserId < 1) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  try {
+    const result = await AccountLifecycleService.unsuspendAccount(targetUserId, req.user);
+    return res.json(result);
+  } catch (error) {
+    if (error instanceof TargetUserNotFoundError) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    if (error instanceof AccountOrphanedError || error instanceof AccountNotSuspendedError) {
+      return res.status(400).json({ error: error.message });
+    }
+
+    getLogger().error({ err: error, targetUserId }, 'Failed to unsuspend account');
+    return res.status(500).json({ error: 'Failed to unsuspend account' });
+  }
+});
 
 // Resend welcome/approval email to user
 router.post('/:userId/resend-welcome', authenticateToken, authorize, async (req, res) => {

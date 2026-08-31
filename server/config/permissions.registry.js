@@ -159,10 +159,48 @@ const routes = {
   // user the ability to move any member between teams.
   'POST /api/users/:userId/transfer': ['user:team:transfer'],
 
+  // account-lifecycle-management Requirement 1 Criteria 1, 6: suspend and
+  // unsuspend an account (human or Team_Owned_Device). One identifier
+  // covers both actions -- mirroring `device:manage`'s single identifier
+  // for create/edit/delete -- since they are the same authorization
+  // question ("is this caller an admin of this account's team") asked
+  // twice, not two different capabilities. The `user:suspend` row-scoped
+  // resolver (server/middleware/authorize.js) permits a Global_Manager, or
+  // an admin (per `Team.isAdmin`) of the target account's Direct_Membership
+  // team. Deliberately NOT added to `roleDefaults.authenticated_user`
+  // below, for the same reason `user:team:transfer` immediately above is
+  // not: a statically-held identifier would bypass the row-scoped resolver
+  // entirely and let every authenticated user suspend/unsuspend any
+  // account.
+  'POST /api/users/:userId/suspend': ['user:suspend'],
+  'POST /api/users/:userId/unsuspend': ['user:suspend'],
+
   // --- /api/channels (server/routes/channels.js) ---
   'GET /api/channels/descriptions': ['channel:read'],
   'POST /api/channels/custom': ['channel:create:custom'],
   'GET /api/channels/team/:teamId': ['channel:read'],
+
+  // Bugfix (Channels tab had no delete-channel or manage-members
+  // action): 'channel:manage' is a row-scoped identifier -- Global_Manager,
+  // OR a Team_Admin (per Team.isAdmin, so an admin of any ancestor also
+  // qualifies) of the :channelId route param's OWNING team, resolved via
+  // its `channels.team_id` column. NOT in `roleDefaults.authenticated_user`
+  // (a statically-held identifier would satisfy `resolveAccess` outright
+  // and bypass the row-scoped resolver entirely, matching every other
+  // Team_Admin-scoped identifier's own comment in this file). The
+  // members-list GET reuses the existing 'channel:read' identifier
+  // instead, since it is read-only and 'channel:read' already sits in
+  // `roleDefaults.authenticated_user`.
+  'GET /api/channels/:channelId/members': ['channel:read'],
+  'POST /api/channels/:channelId/members': ['channel:manage'],
+  'DELETE /api/channels/:channelId/members/:userId': ['channel:manage'],
+  // Bugfix (Channels tab has no edit action, and no way to add/edit a
+  // custom channel's Authentik/LDAP description): reuses 'channel:manage'
+  // unchanged -- editing a channel's description is the same
+  // authorization boundary as deleting it or managing its members, all
+  // resolved by the same row-scoped resolver keyed on :channelId.
+  'PUT /api/channels/:channelId': ['channel:manage'],
+  'DELETE /api/channels/:channelId': ['channel:manage'],
 
   // --- /api/requests (server/routes/requests.js) ---
   // `POST /api/requests/team-access` runs without `authenticateToken`

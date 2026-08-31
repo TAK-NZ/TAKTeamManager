@@ -698,6 +698,43 @@ const rowScopedResolvers = {
   },
 
   /**
+   * Bugfix (Channels tab had no delete-channel or manage-members
+   * action): `channel:manage` — satisfied if the requesting user is a
+   * Global_Manager OR is an admin (per `Team.isAdmin`, so an admin of
+   * any ancestor also qualifies) of the `:channelId` route param's
+   * OWNING team, resolved via that channel's `channels.team_id` column.
+   * Mirrors `channel_request:process`'s exact shape immediately above
+   * (resolve the row, then delegate to `Team.isAdmin` on the team it
+   * names).
+   *
+   * A channel id that does not resolve to an existing `channels` row is
+   * treated as denied here rather than throwing -- the route handlers
+   * themselves are the authoritative source for a 404 in that case;
+   * this resolver only needs to know whether this requester may act on
+   * whichever team the row (if any) names.
+   *
+   * @param {import('express').Request} req
+   * @returns {Promise<boolean>}
+   */
+  'channel:manage': async (req) => {
+    if (req.user && req.user.is_global_manager) {
+      return true;
+    }
+
+    const channelId = req.params && req.params.channelId;
+    const result = await pool.query(
+      'SELECT team_id FROM channels WHERE id = $1',
+      [channelId]
+    );
+
+    if (result.rows.length === 0) {
+      return false;
+    }
+
+    return Team.isAdmin(result.rows[0].team_id, req.user && req.user.userId);
+  },
+
+  /**
    * `team:read` — Requirement 6 (Organisation-Scoped and
    * Private-Branch-Cascading Visibility): satisfied only if the `:teamId`
    * route param names a Team that is a Visible_Branch for the requesting
@@ -889,6 +926,60 @@ const rowScopedResolvers = {
     }
 
     return DeviceManagementService.sameUserId(device.user_id, targetUserId);
+  },
+
+  /**
+   * `user:suspend` — account-lifecycle-management Requirement 1 Criteria
+   * 1, 6: backs both `POST /api/users/:userId/suspend` and
+   * `POST /api/users/:userId/unsuspend`. Satisfied if the requesting user
+   * is a Global_Manager OR is an admin (per `Team.isAdmin`, so an admin
+   * anywhere in the target's Ancestor_Chain qualifies) of the target
+   * account's Direct_Membership team.
+   *
+   * One identifier covers both actions, mirroring how `device:manage`
+   * covers create/edit/delete under one identifier elsewhere in this
+   * registry: suspend and unsuspend are the same authorization question
+   * ("is this caller an admin of this account's team") asked twice, not
+   * two different capabilities.
+   *
+   * The target's Direct_Membership team is resolved with the SAME query
+   * `DeviceEnrollmentService.deleteDevice` already uses (a
+   * `team_memberships` row with `inherited_from_team_id IS NULL`) rather
+   * than re-implemented, so a device account (no `is_team_device`
+   * distinction needed here — the query shape is identical for both) and
+   * a human account resolve identically. A target with no Direct_Membership
+   * row at all (already teamless, or `:userId` names no row) denies —
+   * there is no team for the caller to be an admin OF, and
+   * `AccountLifecycleService`'s own `TargetUserNotFoundError`/state
+   * checks are the right place to report which of those it actually was,
+   * not this resolver.
+   *
+   * Per this module's contract a throw propagates to
+   * `isSatisfiedWithRowScopedChecks`, which logs it and fails closed.
+   *
+   * @param {import('express').Request} req
+   * @returns {Promise<boolean>}
+   */
+  'user:suspend': async (req) => {
+    if (req.user && req.user.is_global_manager) {
+      return true;
+    }
+
+    const targetUserId = req.params && req.params.userId;
+    if (!targetUserId) {
+      return false;
+    }
+
+    const membershipResult = await pool.query(
+      'SELECT team_id FROM team_memberships WHERE user_id = $1 AND inherited_from_team_id IS NULL',
+      [targetUserId]
+    );
+    const teamId = membershipResult.rows[0]?.team_id;
+    if (teamId === undefined) {
+      return false;
+    }
+
+    return Team.isAdmin(teamId, req.user && req.user.userId);
   },
 
   /**

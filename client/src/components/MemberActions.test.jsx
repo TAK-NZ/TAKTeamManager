@@ -134,3 +134,113 @@ describe('MemberActions (mounted)', () => {
     })
   })
 })
+
+// account-lifecycle-management Requirement 1.11: the Suspend/Unsuspend
+// action icon. Omitted entirely (no `onSuspend` prop passed) is the
+// existing default in every test above, confirming a caller that doesn't
+// wire this up (or a row with no valid suspend/unsuspend action, e.g. an
+// orphaned account) renders nothing extra.
+describe('MemberActions (mounted) -- Suspend/Unsuspend action', () => {
+  let container
+  let root
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  const noop = () => {}
+
+  const mount = async (props = {}) => {
+    root = createRoot(container)
+    await act(async () => {
+      root.render(
+        <MemberActions
+          member={MEMBER}
+          roleLabel="member"
+          devicesEnabled={true}
+          onEdit={noop}
+          onResendWelcome={noop}
+          onTransfer={noop}
+          onViewDevices={noop}
+          onRemove={noop}
+          {...props}
+        />
+      )
+    })
+  }
+
+  const buttonByLabel = (label) => container.querySelector(`[aria-label="${label}"]`)
+
+  it('renders nothing when onSuspend is not passed (the pre-existing default for every other test in this file)', async () => {
+    await mount()
+
+    expect(buttonByLabel('Suspend account')).toBeFalsy()
+    expect(buttonByLabel('Unsuspend account')).toBeFalsy()
+  })
+
+  it('renders a "Suspend account" closed-lock button when accountStatus is "active" (the default)', async () => {
+    const onSuspend = vi.fn()
+    await mount({ onSuspend })
+
+    const button = buttonByLabel('Suspend account')
+    expect(button).toBeTruthy()
+    expect(buttonByLabel('Unsuspend account')).toBeFalsy()
+
+    await act(async () => {
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(onSuspend).toHaveBeenCalledWith(MEMBER)
+  })
+
+  it('renders an "Unsuspend account" open-lock button when accountStatus is "suspended"', async () => {
+    const onSuspend = vi.fn()
+    await mount({ onSuspend, accountStatus: 'suspended' })
+
+    const button = buttonByLabel('Unsuspend account')
+    expect(button).toBeTruthy()
+    expect(buttonByLabel('Suspend account')).toBeFalsy()
+
+    await act(async () => {
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(onSuspend).toHaveBeenCalledWith(MEMBER)
+  })
+
+  it('is disabled, with the no-team title, when hasTeam is false', async () => {
+    const onSuspend = vi.fn()
+    await mount({ onSuspend, hasTeam: false })
+
+    const button = buttonByLabel('This user has no team assignment')
+    // Two buttons now share that exact fallback label (Edit and Suspend),
+    // so scope to the disabled ones specifically rather than assuming
+    // there's only one match.
+    const candidates = [...container.querySelectorAll('[aria-label="This user has no team assignment"]')]
+    expect(candidates.length).toBeGreaterThanOrEqual(2)
+    expect(candidates.every((el) => el.disabled)).toBe(true)
+    expect(button).toBeTruthy()
+  })
+
+  it('applies the card variant\u2019s button-box treatment identically to the other neutral actions', async () => {
+    const onSuspend = vi.fn()
+    await mount({ onSuspend, variant: 'card' })
+
+    const button = buttonByLabel('Suspend account')
+    expect(button.className).toContain('p-2')
+    expect(button.className).toContain('rounded-lg')
+    expect(button.className).toContain('bg-gray-100')
+    expect(button.querySelector('svg').getAttribute('class')).toContain('h-5 w-5')
+  })
+})

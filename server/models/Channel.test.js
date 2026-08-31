@@ -32,7 +32,16 @@ jest.mock('../config/logger', () => ({
   createLogger: jest.fn(() => mockLoggerInstance)
 }));
 
+// Bugfix (silent Authentik sync gap): `insertCustomChannelAndMembers`'s
+// member loop, and the new `removeMember`/`deleteCustomChannel` methods,
+// enqueue Sync_Operations via `EventPublisher.publishOperation` -- mocked
+// here so no real `sync_operations` INSERT is attempted.
+jest.mock('../services/EventPublisher', () => ({
+  publishOperation: jest.fn()
+}));
+
 const pool = require('../config/database');
+const EventPublisher = require('../services/EventPublisher');
 const Channel = require('./Channel');
 
 const TEAM_ROW = {
@@ -65,7 +74,23 @@ function buildMockClient(existingCount) {
       return Promise.resolve({ rows: [{ count: String(existingCount) }] });
     }
     if (typeof sql === 'string' && sql.startsWith('INSERT INTO channels')) {
-      return Promise.resolve({ rows: [{ id: 501, name: 'teams-alpha-radio', team_id: 7 }] });
+      // Bugfix (silent Authentik sync gap): the fabricated channel row
+      // now carries the same three group ids `prepareCustomChannelCreation`
+      // resolves in these tests (grp-rw/grp-read/grp-write), so
+      // `resolveGroupIdForPermission` -- and therefore the
+      // `add_user_to_group` enqueue -- has real values to resolve
+      // against, matching what the real INSERT (which selects these
+      // same values straight through) actually returns.
+      return Promise.resolve({
+        rows: [{
+          id: 501,
+          name: 'teams-alpha-radio',
+          team_id: 7,
+          authentik_group_id: 'grp-rw',
+          authentik_read_group_id: 'grp-read',
+          authentik_write_group_id: 'grp-write'
+        }]
+      });
     }
     // BEGIN / COMMIT / ROLLBACK / channel_memberships INSERT all just
     // need to resolve.
@@ -229,5 +254,429 @@ describe('Channel.createCustomChannel', () => {
     pool.query.mockResolvedValue({ rows: [] }); // no team found
     await expect(Channel.createCustomChannel(999, 'Radio', [])).rejects.toThrow('Team not found');
     expect(pool.connect).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Bugfix (silent Authentik sync gap): `Channel.addMember` alone never
+ * enqueued an `add_user_to_group` Sync_Operation, so a member added to a
+ * custom channel at creation time never actually appeared in the
+ * channel's Authentik group. `insertCustomChannelAndMembers`'s member
+ * loop now enqueues `add_user_to_group` (on the same transactional
+ * client) alongside each `addMember` call, resolving the target group
+ * id via `resolveGroupIdForPermission`.
+ */
+describe('Channel.resolveGroupIdForPermission', () => {
+  const channel = {
+    authentik_group_id: 'grp-rw',
+    authentik_read_group_id: 'grp-read',
+    authentik_write_group_id: 'grp-write'
+  };
+
+  it('maps read_write to authentik_group_id (the "main" RW group)', () => {
+    expect(Channel.resolveGroupIdForPermission(channel, 'read_write')).toBe('grp-rw');
+  });
+
+  it('maps read to authentik_read_group_id', () => {
+    expect(Channel.resolveGroupIdForPermission(channel, 'read')).toBe('grp-read');
+  });
+
+  it('maps write to authentik_write_group_id', () => {
+    expect(Channel.resolveGroupIdForPermission(channel, 'write')).toBe('grp-write');
+  });
+
+  it('returns null for an unrecognized permission value', () => {
+    expect(Channel.resolveGroupIdForPermission(channel, 'admin')).toBeNull();
+  });
+
+  it('returns null when the channel has no group of the resolved kind', () => {
+    expect(Channel.resolveGroupIdForPermission({ authentik_group_id: null }, 'read_write')).toBeNull();
+  });
+});
+
+describe('Channel.createCustomChannel: add_user_to_group enqueue (bugfix: silent Authentik sync gap)', () => {
+  let originalFetch;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    originalFetch = global.fetch;
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('WITH RECURSIVE root_team')) {
+        return Promise.resolve({ rows: [TEAM_ROW] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it('enqueues add_user_to_group on the transactional client for each member, targeting the group matching their permission', async () => {
+    mockAuthentikGroupCreationSuccess();
+    const client = buildMockClient(0);
+    pool.connect.mockResolvedValue(client);
+
+    await Channel.createCustomChannel(7, 'Radio', [
+      { userId: 42, permission: 'read' },
+      { userId: 43, permission: 'write' },
+      { userId: 44, permission: 'read_write' }
+    ]);
+
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'add_user_to_group',
+      { target_user_id: 42, target_group_id: 'grp-read' },
+      null,
+      client
+    );
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'add_user_to_group',
+      { target_user_id: 43, target_group_id: 'grp-write' },
+      null,
+      client
+    );
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'add_user_to_group',
+      { target_user_id: 44, target_group_id: 'grp-rw' },
+      null,
+      client
+    );
+    expect(EventPublisher.publishOperation).toHaveBeenCalledTimes(3);
+  });
+
+  it('adds the channel_memberships row via addMember AND enqueues add_user_to_group for the SAME member -- neither happens without the other', async () => {
+    mockAuthentikGroupCreationSuccess();
+    const client = buildMockClient(0);
+    pool.connect.mockResolvedValue(client);
+
+    await Channel.createCustomChannel(7, 'Radio', [{ userId: 42, permission: 'read' }]);
+
+    const memberInsertCall = client.query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO channel_memberships')
+    );
+    expect(memberInsertCall).toBeDefined();
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'add_user_to_group',
+      expect.objectContaining({ target_user_id: 42 }),
+      null,
+      client
+    );
+  });
+
+  it('skips the enqueue (without failing the whole creation) when no matching group id can be resolved', async () => {
+    mockAuthentikGroupCreationSuccess();
+    const client = buildMockClient(0);
+    // Override the channels INSERT to return a channel with NO group ids
+    // at all -- resolveGroupIdForPermission returns null for every
+    // permission, so the enqueue must be skipped rather than sending an
+    // invalid target_group_id.
+    client.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('SELECT COUNT(*) as count FROM channels WHERE team_id')) {
+        return Promise.resolve({ rows: [{ count: '0' }] });
+      }
+      if (typeof sql === 'string' && sql.startsWith('INSERT INTO channels')) {
+        return Promise.resolve({ rows: [{ id: 501, team_id: 7 }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    pool.connect.mockResolvedValue(client);
+
+    const channel = await Channel.createCustomChannel(7, 'Radio', [{ userId: 42, permission: 'read' }]);
+
+    expect(channel.id).toBe(501);
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+    expect(mockLoggerInstance.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ channelId: 501, userId: 42, permission: 'read' }),
+      expect.stringContaining('Skipped add_user_to_group enqueue')
+    );
+  });
+});
+
+describe('Channel.removeMember (bugfix: Channels tab had no manage-members action)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('deletes the channel_memberships row and enqueues remove_user_from_group targeting the group matching the REMOVED permission', async () => {
+    const client = {
+      query: jest.fn()
+    };
+    client.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('SELECT authentik_group_id')) {
+        return Promise.resolve({
+          rows: [{ authentik_group_id: 'grp-rw', authentik_read_group_id: 'grp-read', authentik_write_group_id: 'grp-write' }]
+        });
+      }
+      if (typeof sql === 'string' && sql.startsWith('DELETE FROM channel_memberships')) {
+        return Promise.resolve({ rows: [{ permission: 'write' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const removed = await Channel.removeMember(10, 42, client);
+
+    expect(removed).toBe(true);
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'remove_user_from_group',
+      { target_user_id: 42, target_group_id: 'grp-write' },
+      null,
+      client
+    );
+  });
+
+  it('returns false and enqueues nothing when no matching membership row exists', async () => {
+    const client = {
+      query: jest.fn().mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT authentik_group_id')) {
+          return Promise.resolve({ rows: [{ authentik_group_id: 'grp-rw' }] });
+        }
+        if (typeof sql === 'string' && sql.startsWith('DELETE FROM channel_memberships')) {
+          return Promise.resolve({ rows: [] });
+        }
+        return Promise.resolve({ rows: [] });
+      })
+    };
+
+    const removed = await Channel.removeMember(10, 999, client);
+
+    expect(removed).toBe(false);
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the shared pool when no client is supplied', async () => {
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('SELECT authentik_group_id')) {
+        return Promise.resolve({ rows: [{ authentik_group_id: 'grp-rw' }] });
+      }
+      if (typeof sql === 'string' && sql.startsWith('DELETE FROM channel_memberships')) {
+        return Promise.resolve({ rows: [{ permission: 'read_write' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const removed = await Channel.removeMember(10, 42);
+
+    expect(removed).toBe(true);
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'remove_user_from_group',
+      { target_user_id: 42, target_group_id: 'grp-rw' },
+      null,
+      null
+    );
+  });
+});
+
+describe('Channel.deleteCustomChannel (bugfix: Channels tab had no delete-channel action)', () => {
+  function buildDeleteMockClient(channelRow) {
+    const client = { query: jest.fn(), release: jest.fn() };
+    client.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.startsWith('SELECT * FROM channels WHERE id')) {
+        return Promise.resolve({ rows: channelRow ? [channelRow] : [] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    return client;
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('deletes channel_memberships then the channels row, enqueues remove_team_channel_group with only the non-null group ids, then commits', async () => {
+    const channelRow = {
+      id: 10,
+      team_id: 7,
+      is_primary: false,
+      authentik_group_id: 'grp-rw',
+      authentik_read_group_id: 'grp-read',
+      authentik_write_group_id: null
+    };
+    const client = buildDeleteMockClient(channelRow);
+    pool.connect.mockResolvedValue(client);
+
+    const deleted = await Channel.deleteCustomChannel(10, 9);
+
+    expect(deleted).toEqual(channelRow);
+    const sqlCalls = client.query.mock.calls.map(([sql]) => sql);
+    const membershipDeleteIndex = sqlCalls.findIndex((sql) => typeof sql === 'string' && sql.startsWith('DELETE FROM channel_memberships'));
+    const channelDeleteIndex = sqlCalls.findIndex((sql) => typeof sql === 'string' && sql === 'DELETE FROM channels WHERE id = $1');
+    expect(membershipDeleteIndex).toBeGreaterThan(-1);
+    expect(channelDeleteIndex).toBeGreaterThan(membershipDeleteIndex);
+    expect(sqlCalls).toContain('COMMIT');
+
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'remove_team_channel_group',
+      { channel_id: 10, authentik_group_id: 'grp-rw', authentik_read_group_id: 'grp-read' },
+      9,
+      client
+    );
+  });
+
+  it('returns null and rolls back without deleting anything when the channel is a PRIMARY channel', async () => {
+    // The lookup query itself filters `is_primary = false`, so a primary
+    // channel's row never comes back at all.
+    const client = buildDeleteMockClient(null);
+    pool.connect.mockResolvedValue(client);
+
+    const deleted = await Channel.deleteCustomChannel(11, 9);
+
+    expect(deleted).toBeNull();
+    const sqlCalls = client.query.mock.calls.map(([sql]) => sql);
+    expect(sqlCalls).toContain('ROLLBACK');
+    expect(sqlCalls.some((sql) => typeof sql === 'string' && sql.startsWith('DELETE FROM channels'))).toBe(false);
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+    expect(client.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns null when no channel with this id exists at all', async () => {
+    const client = buildDeleteMockClient(null);
+    pool.connect.mockResolvedValue(client);
+
+    const deleted = await Channel.deleteCustomChannel(999, 9);
+
+    expect(deleted).toBeNull();
+  });
+
+  it('rolls back and rethrows when a delete step fails', async () => {
+    const channelRow = { id: 10, team_id: 7, is_primary: false, authentik_group_id: 'grp-rw' };
+    const client = { query: jest.fn(), release: jest.fn() };
+    client.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.startsWith('SELECT * FROM channels WHERE id')) {
+        return Promise.resolve({ rows: [channelRow] });
+      }
+      if (typeof sql === 'string' && sql.startsWith('DELETE FROM channel_memberships')) {
+        return Promise.reject(new Error('membership delete failed'));
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    pool.connect.mockResolvedValue(client);
+
+    await expect(Channel.deleteCustomChannel(10, 9)).rejects.toThrow('membership delete failed');
+
+    const sqlCalls = client.query.mock.calls.map(([sql]) => sql);
+    expect(sqlCalls).toContain('ROLLBACK');
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+    expect(client.release).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Bugfix (Channels tab has no edit action, and no way to add/edit a
+// custom channel's Authentik/LDAP description).
+describe('Channel.updateCustomChannel (bugfix: no edit action / no way to set a custom channel description)', () => {
+  function buildUpdateMockClient(existingRow, updatedRow) {
+    const client = { query: jest.fn(), release: jest.fn() };
+    client.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.startsWith('SELECT * FROM channels WHERE id')) {
+        return Promise.resolve({ rows: existingRow ? [existingRow] : [] });
+      }
+      if (typeof sql === 'string' && sql.startsWith('UPDATE channels SET description')) {
+        return Promise.resolve({ rows: updatedRow ? [updatedRow] : [] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    return client;
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('updates description, enqueues update_channel_group with every non-null group id, then commits', async () => {
+    const existingRow = {
+      id: 10,
+      team_id: 7,
+      is_primary: false,
+      description: 'Old description',
+      authentik_group_id: 'grp-rw',
+      authentik_read_group_id: 'grp-read',
+      authentik_write_group_id: null
+    };
+    const updatedRow = { ...existingRow, description: 'New description' };
+    const client = buildUpdateMockClient(existingRow, updatedRow);
+    pool.connect.mockResolvedValue(client);
+
+    const updated = await Channel.updateCustomChannel(10, { description: 'New description' }, 9);
+
+    expect(updated).toEqual(updatedRow);
+    const sqlCalls = client.query.mock.calls.map(([sql]) => sql);
+    expect(sqlCalls).toContain('COMMIT');
+
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'update_channel_group',
+      {
+        channel_id: 10,
+        description: 'New description',
+        authentik_group_id: 'grp-rw',
+        authentik_read_group_id: 'grp-read'
+      },
+      9,
+      client
+    );
+  });
+
+  it('normalizes a falsy description to an empty string, both in the UPDATE and the enqueued payload', async () => {
+    const existingRow = { id: 10, team_id: 7, is_primary: false, authentik_group_id: 'grp-rw' };
+    const updatedRow = { ...existingRow, description: '' };
+    const client = buildUpdateMockClient(existingRow, updatedRow);
+    pool.connect.mockResolvedValue(client);
+
+    await Channel.updateCustomChannel(10, { description: null }, 9);
+
+    const updateCall = client.query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.startsWith('UPDATE channels SET description')
+    );
+    expect(updateCall[1]).toEqual(['', 10]);
+
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'update_channel_group',
+      expect.objectContaining({ description: '' }),
+      9,
+      client
+    );
+  });
+
+  it('returns null and rolls back without updating anything when the channel is a PRIMARY channel', async () => {
+    const client = buildUpdateMockClient(null, null);
+    pool.connect.mockResolvedValue(client);
+
+    const updated = await Channel.updateCustomChannel(11, { description: 'x' }, 9);
+
+    expect(updated).toBeNull();
+    const sqlCalls = client.query.mock.calls.map(([sql]) => sql);
+    expect(sqlCalls).toContain('ROLLBACK');
+    expect(sqlCalls.some((sql) => typeof sql === 'string' && sql.startsWith('UPDATE channels'))).toBe(false);
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+    expect(client.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns null when no channel with this id exists at all', async () => {
+    const client = buildUpdateMockClient(null, null);
+    pool.connect.mockResolvedValue(client);
+
+    const updated = await Channel.updateCustomChannel(999, { description: 'x' }, 9);
+
+    expect(updated).toBeNull();
+  });
+
+  it('rolls back and rethrows when the UPDATE fails', async () => {
+    const existingRow = { id: 10, team_id: 7, is_primary: false, authentik_group_id: 'grp-rw' };
+    const client = { query: jest.fn(), release: jest.fn() };
+    client.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.startsWith('SELECT * FROM channels WHERE id')) {
+        return Promise.resolve({ rows: [existingRow] });
+      }
+      if (typeof sql === 'string' && sql.startsWith('UPDATE channels SET description')) {
+        return Promise.reject(new Error('update failed'));
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    pool.connect.mockResolvedValue(client);
+
+    await expect(Channel.updateCustomChannel(10, { description: 'x' }, 9)).rejects.toThrow('update failed');
+
+    const sqlCalls = client.query.mock.calls.map(([sql]) => sql);
+    expect(sqlCalls).toContain('ROLLBACK');
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+    expect(client.release).toHaveBeenCalledTimes(1);
   });
 });

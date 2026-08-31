@@ -4,6 +4,8 @@ const db = require('../config/database');
 const { createLogger } = require('../config/logger');
 const { normaliseAuthentikEmail } = require('../utils/authentikEmail');
 const { isIgnoredAuthentikUsername } = require('../config/authentikSyncIgnore');
+const EventPublisher = require('./EventPublisher');
+const { SYSTEM_USER_ID } = require('./VendorChannelService');
 
 const logger = createLogger('authentikSync');
 
@@ -116,6 +118,17 @@ class AuthentikSyncService {
         logger.debug({ syncedCount, totalUsers: allUsers.length }, 'Synced a batch of users');
       }
 
+      // account-lifecycle-management Requirement 2 (task 6.2): the
+      // Reconciliation_Sweep runs only on this success path -- after the
+      // batch-processing loop above has fully completed, still inside
+      // this `try` block -- never when the paginated fetch itself failed
+      // (that already returns early via the fetchGroupMap catch above,
+      // or throws into the outer catch below before reaching here).
+      // `allUsers` is exactly the set this run's fetch returned; passing
+      // anything less than the complete set would orphan every row this
+      // run happened not to see.
+      await this.reconcileOrphanedAccounts(allUsers.map(u => String(u.pk)));
+
       // Update sync status
       await db.query(
         'UPDATE sync_status SET status = $1, records_synced = $2, error_message = NULL WHERE sync_type = $3',
@@ -168,6 +181,130 @@ class AuthentikSyncService {
     });
 
     return groupMap;
+  }
+
+  /**
+   * account-lifecycle-management Requirements 2, 3 (tasks 6.1, 7.1-7.5):
+   * the Reconciliation_Sweep. Called exactly once per successful
+   * `syncUsers` run (see that method's own call site, gated to the
+   * success path only), with `fetchedAuthentikIds` being the exact set
+   * of `authentik_id` values THIS run's paginated fetch returned.
+   *
+   * Finds every local `users` row whose `authentik_user_id` is absent
+   * from that set and is not already `'orphaned'` -- i.e. a row this
+   * Authentik instance no longer has an account for -- and, for each:
+   * enqueues a certificate Revoke_Operation, clears the cached TAK
+   * identity (human rows only), marks the row `'orphaned'`, and writes
+   * an audit log attributed to the system rather than an admin.
+   *
+   * No `is_team_device` branch in the SELECT itself (Requirement 2
+   * Criterion 4): a Team_Owned_Device row is found identically to a
+   * human one; the per-type difference (skipping the cache-clear step)
+   * is handled per-row below, not by excluding device rows from
+   * detection.
+   *
+   * Runs against the bare `pool`/`db`, never an explicit transaction --
+   * there is no caller-held transaction to share (this runs on the
+   * periodic sync's own timer, not inside a request), matching how
+   * every other write in this file already uses `db.query` directly.
+   * Each row's four steps (enqueue, clear-cache, mark-orphaned,
+   * audit-log) are wrapped in their own try/catch (Requirement 3
+   * Criterion 1's robustness note) so one row's failure cannot prevent
+   * the rest of the sweep from running -- mirroring `processBatch`'s own
+   * "one user's failure must not abort or delay the others" discipline.
+   *
+   * @param {string[]} fetchedAuthentikIds - every `authentik_id` (as a
+   *   string) this run's fetch returned. An empty array here is only
+   *   ever reachable when `syncUsers` legitimately fetched zero users
+   *   (Authentik returned no accounts at all) -- a partial/failed fetch
+   *   never reaches this call site per `syncUsers`'s own success-path
+   *   gating, so this method applies no additional guard of its own
+   *   against an empty set (Requirement 2 Criterion 3 is enforced by the
+   *   CALLER, not here).
+   */
+  async reconcileOrphanedAccounts(fetchedAuthentikIds) {
+    let candidates;
+    try {
+      const result = await db.query(
+        `SELECT id, authentik_user_id, is_team_device, username
+           FROM users
+          WHERE authentik_user_id::text <> ALL($1::text[])
+            AND account_status <> 'orphaned'`,
+        [fetchedAuthentikIds]
+      );
+      candidates = result.rows;
+    } catch (error) {
+      logger.error({ err: error }, 'Reconciliation_Sweep: failed to query candidate rows; skipping this run\'s sweep');
+      return;
+    }
+
+    if (candidates.length === 0) {
+      return;
+    }
+
+    logger.info({ candidateCount: candidates.length }, 'Reconciliation_Sweep: orphaning accounts with no matching Authentik identity');
+
+    for (const row of candidates) {
+      try {
+        // Step 1 (Requirement 3 Criterion 1): enqueue the Revoke_Operation,
+        // the exact same client_uid/tak_usernames branch
+        // AccountLifecycleService.suspendAccount uses, on the bare pool
+        // (no open transaction to share here).
+        const revokePayload = row.is_team_device
+          ? { client_uid: row.username }
+          : { tak_usernames: [row.username] };
+        await EventPublisher.publishOperation('revoke_tak_certificates', revokePayload, SYSTEM_USER_ID);
+
+        // Step 2 (Requirement 3 Criterion 2): clear the cached TAK
+        // identity for a human row only -- a Team_Owned_Device carries
+        // no tak_callsign/tak_color cache fields to clear. The exact
+        // statement UserAttributesService.clearTeamAttributes issues,
+        // reused directly rather than re-derived, keyed on
+        // authentik_user_id since that (not the local id) is
+        // user_cache's own key.
+        if (!row.is_team_device && row.authentik_user_id) {
+          await db.query(
+            'UPDATE user_cache SET tak_callsign = $1, tak_color = $2 WHERE authentik_id = $3',
+            ['None', 'None', String(row.authentik_user_id)]
+          );
+        }
+
+        // Step 3 (Requirement 3 Criterion 3): mark the row orphaned and
+        // deactivate it, mirroring AccountLifecycleService.suspendAccount's
+        // own users/user_cache pair.
+        await db.query(
+          `UPDATE users SET account_status = 'orphaned', is_active = false WHERE id = $1`,
+          [row.id]
+        );
+        if (row.authentik_user_id) {
+          await db.query(
+            'UPDATE user_cache SET is_active = false WHERE authentik_id = $1',
+            [String(row.authentik_user_id)]
+          );
+        }
+
+        // Step 4 (Requirement 3 Criterion 4): the audit row, attributed
+        // to the system (not an admin) via the shared SYSTEM_USER_ID
+        // sentinel -- distinct from an admin-initiated suspend's own
+        // 'user.suspend' audit action.
+        await db.query(
+          `INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [
+            SYSTEM_USER_ID,
+            'user.orphaned',
+            'user',
+            row.id,
+            JSON.stringify({ reason: 'authentik_account_missing' })
+          ]
+        );
+      } catch (rowError) {
+        logger.error(
+          { err: rowError, userId: row.id },
+          'Reconciliation_Sweep: failed to orphan one candidate row; continuing with the rest of the sweep'
+        );
+      }
+    }
   }
 
   async processBatch(users, groupMap) {

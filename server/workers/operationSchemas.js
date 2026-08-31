@@ -244,6 +244,29 @@ module.exports = {
     }
   },
 
+  // Bugfix (Channels tab has no edit action, and no way to add/edit a
+  // custom channel's Authentik/LDAP description): enqueued by
+  // Channel.updateCustomChannel after updating the local `channels` row.
+  // `description` is required (never nullable -- Channel.updateCustomChannel
+  // normalizes a cleared field to '' before enqueueing, mirroring
+  // update_bch_channel_group/update_region_channel_group's own required,
+  // non-nullable `description` field above). Every group-id field is
+  // OPTIONAL, exactly like remove_team_channel_group immediately above and
+  // for the same reason: a custom channel always has all three at creation
+  // (Channel.createCustomChannel), but declaring them required here would
+  // be needlessly brittle against that assumption ever changing.
+  update_channel_group: {
+    requiredFields: {
+      channel_id: 'number',
+      description: 'string'
+    },
+    optionalFields: {
+      authentik_group_id: 'string',
+      authentik_read_group_id: 'string',
+      authentik_write_group_id: 'string'
+    }
+  },
+
   // Requirement 21.10 (task 40.1): enqueued by
   // `VendorChannelService.createVendorChannel` after inserting the
   // singleton `vendor_channels` row. `vendor_channel_id` is the newly

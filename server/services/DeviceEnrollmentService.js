@@ -568,7 +568,7 @@ class DeviceEnrollmentService {
    *
    * @param {number|string} teamId
    * @param {{userId?: number, is_global_manager?: boolean}} actingUser
-   * @returns {Promise<{devices: Array<{deviceUserId: number, username: string, deviceLabel: string|null, callsignSuffix: string|null, takRole: string, callsign: string|null, teamId: number|string, createdAt: string, liveCertificateCount: number}>}>}
+   * @returns {Promise<{devices: Array<{deviceUserId: number, username: string, deviceLabel: string|null, callsignSuffix: string|null, takRole: string, callsign: string|null, teamId: number|string, createdAt: string, accountStatus: 'active'|'suspended'|'orphaned', liveCertificateCount: number}>}>}
    * @throws {DeviceEnrollmentAuthorizationError}
    */
   static async listTeamDevices(teamId, actingUser) {
@@ -581,6 +581,7 @@ class DeviceEnrollmentService {
               u.callsign_suffix AS callsign_suffix,
               u.tak_role AS tak_role,
               u.created_at AS created_at,
+              u.account_status AS account_status,
               COALESCE(certs.live_certificate_count, 0) AS live_certificate_count
        FROM users u
        JOIN team_memberships tm ON tm.user_id = u.id AND tm.inherited_from_team_id IS NULL
@@ -632,6 +633,7 @@ class DeviceEnrollmentService {
         : null,
       teamId,
       createdAt: row.created_at,
+      accountStatus: row.account_status,
       liveCertificateCount: row.live_certificate_count
     }));
 

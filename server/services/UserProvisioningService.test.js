@@ -220,6 +220,132 @@ describe('UserProvisioningService.createAndAddUser', () => {
   });
 });
 
+// account-lifecycle-management Requirement 5.3, 5.4, 5.5 (task 11.2, 11.5):
+// the reclaimedUserId branch of createAndAddUser -- Account_Reclaim.
+describe('UserProvisioningService.createAndAddUser reclaimedUserId (account-lifecycle-management)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    EventPublisher.publishOperation.mockResolvedValue('op-id');
+  });
+
+  it('adopts the reclaimed row by id via UPDATE, setting account_status = \'active\', rather than the generic upsert', async () => {
+    const client = buildMockClient((sql) => {
+      if (sql.includes("UPDATE users SET authentik_user_id")) {
+        return Promise.resolve({ rows: [{ id: 42 }] });
+      }
+      if (sql.includes('WITH RECURSIVE parent_teams')) {
+        return Promise.resolve({ rows: [] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const result = await UserProvisioningService.createAndAddUser(client, {
+      authentikUserId: 9001,
+      username: 'reclaimed.user',
+      email: 'reclaimed@example.com',
+      firstName: 'Reclaimed',
+      lastName: 'Person',
+      teamId: 7,
+      callsign_suffix: 'ReUser',
+      createdBy: 3,
+      reclaimedUserId: 42
+    });
+
+    expect(result.localUserId).toBe(42);
+
+    const sqlCalls = client.query.mock.calls.map(([sql]) => sql);
+    // Requirement 5.5: the row's id survives -- adopted by UPDATE ... WHERE
+    // id = $reclaimedUserId, never the generic INSERT ... ON CONFLICT upsert.
+    expect(sqlCalls.some((sql) => sql.includes('UPDATE users SET authentik_user_id'))).toBe(true);
+    expect(sqlCalls.some((sql) => sql.includes('INSERT INTO users ('))).toBe(false);
+
+    const [reclaimSql, reclaimParams] = client.query.mock.calls.find(
+      ([sql]) => sql.includes('UPDATE users SET authentik_user_id')
+    );
+    expect(reclaimSql).toContain("account_status = 'active'");
+    expect(reclaimSql).toContain('WHERE id = $7');
+    expect(reclaimParams).toEqual([9001, 'reclaimed.user', 'reclaimed@example.com', 'Reclaimed', 'Person', 'ReUser', 42]);
+  });
+
+  it('throws when reclaimedUserId names no existing row', async () => {
+    const client = buildMockClient((sql) => {
+      if (sql.includes('UPDATE users SET authentik_user_id')) {
+        return Promise.resolve({ rows: [] }); // no matching row
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await expect(
+      UserProvisioningService.createAndAddUser(client, {
+        authentikUserId: 9002,
+        username: 'ghost.user',
+        email: 'ghost@example.com',
+        firstName: 'Ghost',
+        lastName: 'User',
+        teamId: 7,
+        reclaimedUserId: 999
+      })
+    ).rejects.toThrow('Cannot reclaim account: no users row with id 999');
+  });
+
+  it('never reads team_memberships history off the reclaimed row before assigning the fresh team (Requirement 5.4: no automatic restoration)', async () => {
+    const client = buildMockClient((sql) => {
+      if (sql.includes('UPDATE users SET authentik_user_id')) {
+        return Promise.resolve({ rows: [{ id: 42 }] });
+      }
+      if (sql.includes('WITH RECURSIVE parent_teams')) {
+        return Promise.resolve({ rows: [] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await UserProvisioningService.createAndAddUser(client, {
+      authentikUserId: 9003,
+      username: 'reclaimed.user2',
+      email: 'reclaimed2@example.com',
+      firstName: 'Reclaimed',
+      lastName: 'Two',
+      teamId: 7,
+      reclaimedUserId: 42
+    });
+
+    const sqlCalls = client.query.mock.calls.map(([sql]) => sql);
+    // No SELECT of the reclaimed row's own prior team_memberships occurs --
+    // only the shared DELETE-stale-inherited + fresh direct INSERT every
+    // branch already performs.
+    expect(sqlCalls.some((sql) => sql.startsWith('SELECT') && sql.includes('team_memberships') && sql.includes('user_id'))).toBe(false);
+    expect(sqlCalls.some((sql) => sql.includes('DELETE FROM team_memberships WHERE user_id = $1 AND inherited_from_team_id = $2'))).toBe(true);
+    expect(sqlCalls.some((sql) => sql.includes('INSERT INTO team_memberships (team_id, user_id, role) VALUES'))).toBe(true);
+  });
+
+  it('does not touch origin_org_id at all for a reclaimed row (contrast with the claimId branch\'s COALESCE)', async () => {
+    const client = buildMockClient((sql) => {
+      if (sql.includes('UPDATE users SET authentik_user_id')) {
+        return Promise.resolve({ rows: [{ id: 42 }] });
+      }
+      if (sql.includes('WITH RECURSIVE parent_teams')) {
+        return Promise.resolve({ rows: [] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await UserProvisioningService.createAndAddUser(client, {
+      authentikUserId: 9004,
+      username: 'reclaimed.user3',
+      email: 'reclaimed3@example.com',
+      firstName: 'Reclaimed',
+      lastName: 'Three',
+      teamId: 7,
+      reclaimedUserId: 42
+    });
+
+    const [reclaimSql] = client.query.mock.calls.find(
+      ([sql]) => sql.includes('UPDATE users SET authentik_user_id')
+    );
+    expect(reclaimSql).not.toContain('origin_org_id');
+  });
+});
+
 /**
  * Unit tests for `UserProvisioningService.resolveNewUserIdentity`
  * (takserver-enrollment Requirements 6.3, 6.5, 6.7, 6.8, 9.1, 9.2, 9.3, 9.4,

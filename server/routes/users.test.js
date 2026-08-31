@@ -247,6 +247,115 @@ describe('GET /api/users excludes Team_Owned_Device rows (Requirement 27.9)', ()
 });
 
 /**
+ * Bugfix: `GET /api/users` now ALSO filters out any Authentik user whose
+ * `username` matches `AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES` (the SAME
+ * predicate `authentikSync.js` already uses to decide which accounts
+ * never get materialized into the local `users` table -- ETL/service
+ * accounts, and administrative accounts like `akadmin`/`ckadmin`). This
+ * route fetches directly from Authentik's `/core/users/?type=internal`
+ * and, unlike the `is_team_device` exclusion above, has no local-table
+ * cross-reference to lean on -- the filter runs on `user.username` alone,
+ * entirely independent of the batched query's rows.
+ */
+describe('GET /api/users excludes AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES matches (bugfix)', () => {
+  let app;
+  const originalEnv = process.env.AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    app = buildApp();
+  });
+
+  afterEach(() => {
+    if (originalEnv === undefined) {
+      delete process.env.AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES;
+    } else {
+      process.env.AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES = originalEnv;
+    }
+  });
+
+  it('excludes a user whose username exactly matches a configured entry (akadmin/ckadmin), even with no local users row at all', async () => {
+    process.env.AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES = 'akadmin,ckadmin';
+    authentikService.getUsers.mockResolvedValue({
+      results: [
+        { pk: 1, username: 'alice' },
+        { pk: 2, username: 'akadmin' },
+        { pk: 3, username: 'ckadmin' }
+      ],
+      count: 3
+    });
+    // No local users rows for any of these -- the filter must not depend
+    // on the batched query's result at all.
+    pool.query.mockResolvedValue({ rows: [] });
+
+    const res = await request(app).get('/api/users');
+
+    expect(res.status).toBe(200);
+    expect(res.body.users).toHaveLength(1);
+    expect(res.body.users[0].pk).toBe(1);
+  });
+
+  it('excludes a genuine prefix match (etl-) exactly like the sync-skip predicate does', async () => {
+    process.env.AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES = 'etl-';
+    authentikService.getUsers.mockResolvedValue({
+      results: [
+        { pk: 1, username: 'etl-earthquakes' },
+        { pk: 2, username: 'alice' }
+      ],
+      count: 2
+    });
+    pool.query.mockResolvedValue({ rows: [] });
+
+    const res = await request(app).get('/api/users');
+
+    expect(res.status).toBe(200);
+    expect(res.body.users).toHaveLength(1);
+    expect(res.body.users[0].pk).toBe(2);
+  });
+
+  it('excludes nothing when the variable is unset (preserves existing behavior)', async () => {
+    delete process.env.AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES;
+    authentikService.getUsers.mockResolvedValue({
+      results: [
+        { pk: 1, username: 'alice' },
+        { pk: 2, username: 'akadmin' }
+      ],
+      count: 2
+    });
+    pool.query.mockResolvedValue({ rows: [] });
+
+    const res = await request(app).get('/api/users');
+
+    expect(res.status).toBe(200);
+    expect(res.body.users).toHaveLength(2);
+  });
+
+  it('composes with the is_team_device exclusion -- both filters can remove rows from the same response', async () => {
+    process.env.AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES = 'akadmin';
+    authentikService.getUsers.mockResolvedValue({
+      results: [
+        { pk: 1, username: 'alice' },
+        { pk: 2, username: 'akadmin' },
+        { pk: 3, username: 'device-abc123' }
+      ],
+      count: 3
+    });
+    pool.query.mockResolvedValue({
+      rows: [
+        { authentik_user_id: 1, team_name: 'Alpha Team', is_team_device: false },
+        { authentik_user_id: 3, team_name: 'Alpha Team', is_team_device: true }
+      ]
+    });
+
+    const res = await request(app).get('/api/users');
+
+    expect(res.status).toBe(200);
+    expect(res.body.users).toHaveLength(1);
+    expect(res.body.users[0].pk).toBe(1);
+  });
+});
+
+/**
  * takserver-enrollment Requirement 13.2/13.6: `GET /api/users` projects
  * `live_certificate_count`, derived from a `certs` derived-table LEFT JOIN
  * added to the SAME batched team-name query -- never a second query --

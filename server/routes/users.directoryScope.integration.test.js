@@ -310,6 +310,33 @@ describe('GET /api/users/available Organisation scoping against a real Postgres 
   // Retained existing filters — only teamless, active, non-empty email/first
   // name candidates appear (in addition to the scoping).
   // ──────────────────────────────────────────────────────────────────────────
+  // account-lifecycle-management Requirement 3.7 (task 8.4): documents, as a
+  // targeted test, that GET /api/users/available needs no code change for
+  // an orphaned account -- once the Reconciliation_Sweep sets
+  // `user_cache.is_active = false` on an orphaned row (design.md's "Why
+  // GET /api/users/available needs no code change"), the EXISTING
+  // `uc.is_active = true` clause this route already had before this
+  // feature already excludes it, with zero changes to this route's own
+  // query. This is the SAME underlying clause the generic
+  // "retains the existing filters" test below already exercises; this
+  // test is additive, specifically framed around the orphaning scenario,
+  // so the connection to Requirement 3.7 is verified rather than assumed.
+  it('Req 3.7: a user_cache row with is_active=false (as the Reconciliation_Sweep sets on an orphaned account) is excluded, with no route change needed', async () => {
+    await addAllowedDomain(orgTeam.id, allowedDomain);
+
+    const stillActive = await seedCandidate({ domain: allowedDomain, firstName: 'StillActive' });
+    // Mirrors exactly what AuthentikSyncService.reconcileOrphanedAccounts
+    // writes to user_cache for an orphaned row: is_active = false.
+    const orphaned = await seedCandidate({ domain: allowedDomain, firstName: 'Orphaned', isActive: false });
+
+    const res = await request(app).get('/api/users/available');
+    expect(res.status).toBe(200);
+
+    const returnedEmails = res.body.users.map((u) => u.email);
+    expect(returnedEmails).toContain(stillActive.email);
+    expect(returnedEmails).not.toContain(orphaned.email);
+  });
+
   it('retains the existing filters: an inactive candidate at an allowed domain is excluded', async () => {
     await addAllowedDomain(orgTeam.id, allowedDomain);
 

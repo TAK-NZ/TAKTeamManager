@@ -23,7 +23,9 @@ import MemberEditRow, {
   CALLSIGN_SUFFIX_PATTERN
 } from '../components/MemberEditRow'
 import MemberActions from '../components/MemberActions'
+import SuspendAccountDialog from '../components/SuspendAccountDialog'
 import AdminActions from '../components/AdminActions'
+import ChannelMembersDialog from '../components/ChannelMembersDialog'
 import EnrollmentView from './EnrollmentView'
 import {
   newUserFormReducer,
@@ -34,6 +36,7 @@ import {
 } from '../utils/callsignSuffixPreview'
 import { describeEmptyAvailableUsers } from '../utils/directoryScopeMessage'
 import { isValidNewUserEmail, extractCallsignSuffixServerError } from '../utils/newUserForm'
+import { describeAccountStatusBadge } from '../utils/accountStatusBadge'
 
 // Requirement 5's two new `callsign_name_format` values need example
 // strings alongside the three existing ones, matching the "J Doe"/"John D"
@@ -105,6 +108,14 @@ export function formatCallsignNameFormatExample(callsignNameFormat) {
 const TEAM_SUMMARY_BADGE_CLASS = 'px-2 py-1 text-xs font-medium rounded-full bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200'
 const TEAM_SUMMARY_BADGE_POSITIVE_CLASS = 'px-2 py-1 text-xs font-medium rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
 const TEAM_SUMMARY_BADGE_NEGATIVE_CLASS = 'px-2 py-1 text-xs font-medium rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200'
+
+// account-lifecycle-management Requirement 4.1-4.3 (task 8.2):
+// `describeAccountStatusBadge` now lives in `../utils/accountStatusBadge.js`
+// (shared with `TeamDeviceList.jsx`'s Team Devices tab -- a plain
+// re-import from here would be circular, since that component is itself
+// imported BY this file), re-exported here under its ORIGINAL name so
+// this file's own JSX and existing tests keep working unchanged.
+export { describeAccountStatusBadge }
 
 export function formatCallsignLevels(callsignLevelSelection) {
   if (!Array.isArray(callsignLevelSelection) || callsignLevelSelection.length === 0) {
@@ -270,6 +281,39 @@ export default function TeamDetail({ user, refreshUser }) {
   })
   const [creatingSubTeam, setCreatingSubTeam] = useState(false)
   const [deleteSubTeamId, setDeleteSubTeamId] = useState(null)
+  // Bugfix (Sub-teams tab missing Edit/Delete parity with /teams):
+  // holds the whole sub-team row being edited (not just an id, since
+  // TeamFormDialog needs the full object), or null when the dialog is
+  // closed. This is a SEPARATE TeamFormDialog instance/state pair from
+  // `showEditDialog` above -- that one always edits THIS page's own
+  // `team`, whereas a sub-team row is a different team object entirely.
+  const [editingSubTeam, setEditingSubTeam] = useState(null)
+  // Bugfix (Channels tab had no delete-channel or manage-members
+  // action; consistency bugfix: deleting a channel now requires typing
+  // its name to confirm, matching "Permanently Delete User"'s own
+  // type-to-confirm pattern -- a plain Cancel/Confirm dialog understated
+  // how disruptive losing a channel's Authentik group is for its
+  // members). `deletingChannel` holds the whole channel row (not just
+  // an id), since the dialog needs its display_name both to show the
+  // prompt and as the value the admin must type. `managingMembersChannel`
+  // holds the whole channel row too, for the same reason (its
+  // display_name is needed for the ChannelMembersDialog title).
+  const [deletingChannel, setDeletingChannel] = useState(null)
+  const [deleteChannelConfirmInput, setDeleteChannelConfirmInput] = useState('')
+  const [deletingChannelInFlight, setDeletingChannelInFlight] = useState(false)
+  const [managingMembersChannel, setManagingMembersChannel] = useState(null)
+  // Bugfix (Channels tab has no edit action, and no way to add/edit a
+  // custom channel's Authentik/LDAP description): `editingChannel` holds
+  // the whole channel row (not just an id), same reasoning as
+  // `deletingChannel`/`managingMembersChannel` above -- the dialog needs
+  // its display_name for the title. `editChannelDescription` is the
+  // form's own controlled input value, seeded from
+  // `channel.description` by the button's own onClick (not read from
+  // `editingChannel` directly), so typing doesn't mutate the channels
+  // list until Save is actually clicked.
+  const [editingChannel, setEditingChannel] = useState(null)
+  const [editChannelDescription, setEditChannelDescription] = useState('')
+  const [savingChannelEdit, setSavingChannelEdit] = useState(false)
   const [deletingSubTeam, setDeletingSubTeam] = useState(false)
   const [allTeams, setAllTeams] = useState([])
   // Bugfix: Edit Team is now the same shared `TeamFormDialog` component
@@ -405,6 +449,13 @@ export default function TeamDetail({ user, refreshUser }) {
   // SAME component `Users.jsx` attaches (Requirement 6.4), so the device list
   // is defined once and reused by both surfaces.
   const [devicesForMember, setDevicesForMember] = useState(null)
+  // account-lifecycle-management Requirement 1.11: the Member_List/Team
+  // Admins row whose Suspend/Unsuspend confirmation is open, or null when
+  // closed. `{ member, mode }` rather than just the member, since the same
+  // dialog serves both directions (SuspendAccountDialog's own `mode` prop)
+  // and the row's current `account_status` decides which one this action
+  // opens.
+  const [suspendingMember, setSuspendingMember] = useState(null)
   // The device surfaces exist only WHILE the server-side DEVICE_MGMT_ENABLED
   // flag is on, and that flag is never exposed through /api/config/public
   // (Requirement 1.4), so the affordance is gated on the reachability probe.
@@ -467,17 +518,99 @@ export default function TeamDetail({ user, refreshUser }) {
     }
   }
 
+  // Bugfix (Channels tab had no delete-channel action; consistency
+  // bugfix: now requires typing the channel's name to confirm, matching
+  // "Permanently Delete User"'s own type-to-confirm pattern rather than
+  // "Delete Sub-Team"'s plain Cancel/Confirm). Server-side rejects a
+  // primary/team channel with a 404 (it has no standalone delete path
+  // of its own -- it's deleted only as part of deleting the team), so
+  // the delete action is only ever rendered for a channel_type !==
+  // 'primary' row (see the Channels tab's per-row actions below).
+  const handleDeleteChannel = async () => {
+    if (!deletingChannel) return
+
+    setDeletingChannelInFlight(true)
+    try {
+      await channelsAPI.delete(deletingChannel.id)
+      setChannels(channels.filter(channel => channel.id !== deletingChannel.id))
+      setDeletingChannel(null)
+      setDeleteChannelConfirmInput('')
+      toast.success('Channel deleted')
+    } catch (error) {
+      console.error('Failed to delete channel:', error)
+      toast.error('Failed to delete channel: ' + (error.response?.data?.error || error.message))
+    } finally {
+      setDeletingChannelInFlight(false)
+    }
+  }
+
+  // Bugfix (Channels tab has no edit action, and no way to add/edit a
+  // custom channel's Authentik/LDAP description): updates a custom
+  // channel's description. Server-side rejects a primary/team channel
+  // with a 404 (same reasoning as handleDeleteChannel above), so the
+  // edit action is only ever rendered for a channel_type !== 'primary'
+  // row (see the Channels tab's per-row actions below). Refetches via
+  // channelsAPI.getByTeam after a successful save, matching
+  // refreshChannelMemberCount's own refresh-after-mutation pattern,
+  // rather than merging the response into local state -- the response
+  // is the raw UPDATE ... RETURNING row, which carries no member_count
+  // field (the same reasoning handleCreateChannel's own fix documents
+  // below).
+  const handleEditChannel = async (e) => {
+    e.preventDefault()
+    if (!editingChannel) return
+
+    setSavingChannelEdit(true)
+    try {
+      await channelsAPI.update(editingChannel.id, { description: editChannelDescription })
+      const channelsResponse = await channelsAPI.getByTeam(team.id)
+      setChannels(channelsResponse.data.channels || [])
+      setEditingChannel(null)
+      toast.success('Channel updated')
+    } catch (error) {
+      console.error('Failed to update channel:', error)
+      toast.error('Failed to update channel: ' + (error.response?.data?.error || error.message))
+    } finally {
+      setSavingChannelEdit(false)
+    }
+  }
+
+  // Bugfix (Channels tab had no manage-members action): refreshes this
+  // channel's member_count after ChannelMembersDialog changes its
+  // membership, matching the refresh-after-mutation pattern used
+  // elsewhere on this page (e.g. handleTransferCompleted).
+  const refreshChannelMemberCount = async () => {
+    try {
+      const channelsResponse = await channelsAPI.getByTeam(team.id)
+      setChannels(channelsResponse.data.channels || [])
+    } catch (error) {
+      console.error('Failed to refresh channels:', error)
+    }
+  }
+
   const handleCreateChannel = async (e) => {
     e.preventDefault()
     setCreatingChannel(true)
     try {
-      const response = await channelsAPI.createCustom(
+      await channelsAPI.createCustom(
         team.id, 
         channelFormData.customSuffix, 
         channelFormData.memberPermissions
       )
-      
-      setChannels([...channels, response.data.channel])
+
+      // Bugfix (Channels tab showed "0 members" right after creating a
+      // channel with members): `POST /channels/custom`'s response is
+      // the raw INSERTed `channels` row, which carries no
+      // `member_count` field at all -- that field only exists on
+      // `GET /channels/team/:teamId`'s response (a LEFT JOIN COUNT).
+      // Appending the raw creation response therefore always rendered
+      // 0 regardless of how many members were actually added. Refetch
+      // the team's channel list instead, matching the refresh-after-
+      // mutation pattern used everywhere else on this page (e.g.
+      // `refreshChannelMemberCount`).
+      const channelsResponse = await channelsAPI.getByTeam(team.id)
+      setChannels(channelsResponse.data.channels || [])
+
       setChannelFormData({ customSuffix: '', memberPermissions: [] })
       setShowChannelDialog(false)
     } catch (error) {
@@ -780,6 +913,34 @@ export default function TeamDetail({ user, refreshUser }) {
     }
   }, [showAddMemberDialog, addMemberTab, userSearch, addMemberRole, members, admins])
 
+  // account-lifecycle-management Requirement 1.11: opens the Suspend/
+  // Unsuspend confirmation for a Members/Team Admins row. `mode` is
+  // derived from the row's OWN `account_status` (falling back to
+  // 'active' -- i.e. offer Suspend -- for a row that doesn't carry the
+  // field yet), never from a caller-supplied value, so this can never
+  // drift from what `MemberActions`' own icon/label chose to show.
+  const handleSuspendClick = (member) => {
+    setSuspendingMember({
+      member,
+      mode: member.account_status === 'suspended' ? 'unsuspend' : 'suspend'
+    })
+  }
+
+  // Refetches the Members/Team Admins lists after a suspend/unsuspend
+  // completes, mirroring `confirmRemoveUser`'s own refresh -- but without
+  // its channel-member-count refetch, since suspending/unsuspending
+  // changes no channel membership at all (unlike a full removal).
+  const refreshMembersAfterSuspend = async () => {
+    try {
+      const teamResponse = await teamsAPI.getById(team.id)
+      const allMembers = teamResponse.data.members || []
+      setMembers(allMembers.filter(m => m.role === 'member' || m.role === 'inherited' || m.role === 'admin'))
+      setAdmins(allMembers.filter(m => m.role === 'admin'))
+    } catch (error) {
+      console.error('Failed to refresh team members after suspend/unsuspend:', error)
+    }
+  }
+
   const handleRemoveUser = (userId, role) => {
     setRemoveUserId(userId)
     setRemoveUserRole(role)
@@ -877,7 +1038,7 @@ export default function TeamDetail({ user, refreshUser }) {
     
     setRemovingUser(true)
     try {
-      await usersAPI.removeFromTeam(removeUserId, team.id)
+      const response = await usersAPI.removeFromTeam(removeUserId, team.id)
       
       // Refresh team data
       const teamResponse = await teamsAPI.getById(team.id)
@@ -891,6 +1052,19 @@ export default function TeamDetail({ user, refreshUser }) {
       
       // Notify Dashboard to refresh
       window.dispatchEvent(new CustomEvent('userAssignmentChanged'))
+
+      // Bugfix (silent Authentik-delete failure): the local account is
+      // gone either way, but if Authentik's own account delete failed,
+      // that Authentik identity may still exist (cleanup has been
+      // queued for retry) -- worth a distinct toast, unlike the
+      // certificate-revocation dry-run outcome (a static, deliberate
+      // deployment setting, not a per-request failure), which is
+      // recorded in the audit log rather than surfaced here every time.
+      if (response?.data?.authentikAccountDeleted === false) {
+        toast.error('User removed, but their Authentik account could not be deleted immediately. Cleanup has been queued for retry.')
+      } else {
+        toast.success('User permanently deleted')
+      }
       
       setRemoveUserId(null)
       setRemoveUserRole('')
@@ -1645,6 +1819,16 @@ export default function TeamDetail({ user, refreshUser }) {
                           </span>
                         )}
                       </div>
+                      {/* account-lifecycle-management Requirement 4.1-4.3
+                          (task 8.2): a text badge for a suspended/orphaned
+                          account, rendered only when there's something to
+                          say (describeAccountStatusBadge returns null for
+                          'active'). */}
+                      {describeAccountStatusBadge(member.account_status) && (
+                        <span className={describeAccountStatusBadge(member.account_status).className}>
+                          {describeAccountStatusBadge(member.account_status).label}
+                        </span>
+                      )}
                       {/* Bugfix (list-width reduction): "TAK Callsign & Role"
                           -- the callsign shown at normal size, the TAK_Role
                           shown small and without color underneath it
@@ -1665,6 +1849,8 @@ export default function TeamDetail({ user, refreshUser }) {
                           onTransfer={setTransferringMember}
                           onViewDevices={setDevicesForMember}
                           onRemove={handleRemoveUser}
+                          onSuspend={member.account_status !== 'orphaned' ? handleSuspendClick : undefined}
+                          accountStatus={member.account_status}
                           variant="card"
                         />
                       )}
@@ -1718,6 +1904,19 @@ export default function TeamDetail({ user, refreshUser }) {
                       <tr key={member.id} className="hover:bg-gray-50 dark:hover:bg-gray-800">
                         <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">
                           {member.first_name} {member.last_name}
+                          {/* account-lifecycle-management Requirement
+                              4.1-4.3 (task 8.2): a text badge for a
+                              suspended/orphaned account, alongside the
+                              name -- there is no dedicated status column
+                              in this table, matching how the mobile card
+                              places it too. */}
+                          {describeAccountStatusBadge(member.account_status) && (
+                            <div className="mt-1">
+                              <span className={describeAccountStatusBadge(member.account_status).className}>
+                                {describeAccountStatusBadge(member.account_status).label}
+                              </span>
+                            </div>
+                          )}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400 font-mono">
                           {member.username}
@@ -1748,6 +1947,8 @@ export default function TeamDetail({ user, refreshUser }) {
                               onTransfer={setTransferringMember}
                               onViewDevices={setDevicesForMember}
                               onRemove={handleRemoveUser}
+                              onSuspend={member.account_status !== 'orphaned' ? handleSuspendClick : undefined}
+                              accountStatus={member.account_status}
                             />
                           )}
                         </td>
@@ -1803,6 +2004,14 @@ export default function TeamDetail({ user, refreshUser }) {
                           </span>
                         )}
                       </div>
+                      {/* account-lifecycle-management Requirement 4.1-4.3
+                          (task 8.2): mirrors the Members card's identical
+                          badge treatment above. */}
+                      {describeAccountStatusBadge(admin.account_status) && (
+                        <span className={describeAccountStatusBadge(admin.account_status).className}>
+                          {describeAccountStatusBadge(admin.account_status).label}
+                        </span>
+                      )}
                       <div>
                         <p className="text-gray-900 dark:text-gray-100">{admin.tak_callsign || '-'}</p>
                         <p className="text-xs text-gray-500 dark:text-gray-400">{admin.tak_role || 'Team Member'}</p>
@@ -1811,6 +2020,8 @@ export default function TeamDetail({ user, refreshUser }) {
                         <AdminActions
                           member={admin}
                           onRemoveAdmin={handleRemoveAdminClick}
+                          onSuspend={admin.account_status !== 'orphaned' ? handleSuspendClick : undefined}
+                          accountStatus={admin.account_status}
                           variant="card"
                         />
                       )}
@@ -1864,6 +2075,16 @@ export default function TeamDetail({ user, refreshUser }) {
                       <tr key={admin.id} className="hover:bg-gray-50 dark:hover:bg-gray-800">
                         <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">
                           {admin.first_name} {admin.last_name}
+                          {/* account-lifecycle-management Requirement
+                              4.1-4.3 (task 8.2): mirrors the Members
+                              table's identical badge treatment above. */}
+                          {describeAccountStatusBadge(admin.account_status) && (
+                            <div className="mt-1">
+                              <span className={describeAccountStatusBadge(admin.account_status).className}>
+                                {describeAccountStatusBadge(admin.account_status).label}
+                              </span>
+                            </div>
+                          )}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400 font-mono">
                           {admin.username}
@@ -1888,6 +2109,8 @@ export default function TeamDetail({ user, refreshUser }) {
                             <AdminActions
                               member={admin}
                               onRemoveAdmin={handleRemoveAdminClick}
+                              onSuspend={admin.account_status !== 'orphaned' ? handleSuspendClick : undefined}
+                              accountStatus={admin.account_status}
                             />
                           )}
                         </td>
@@ -1901,9 +2124,14 @@ export default function TeamDetail({ user, refreshUser }) {
           )}
 
           {/* Bugfix: same sm:hidden card / hidden sm:block table
-              pairing as Members/Team Admins above. This tab is
-              read-only (no per-row actions), so its card is just the
-              same three facts as the table row. */}
+              pairing as Members/Team Admins above. Bugfix (Channels tab
+              had no delete-channel or manage-members action): this tab
+              is no longer read-only -- Manage Members is offered for
+              every channel, Delete only for a Custom (non-primary) one,
+              since a primary/team channel has no standalone delete path
+              of its own (it's deleted only as part of deleting the
+              team). Both actions are gated on canManageTeam, matching
+              every other action on this page. */}
           {activeTab === 'channels' && (
             <>
               <div className="sm:hidden divide-y divide-gray-200 dark:divide-gray-700">
@@ -1917,6 +2145,16 @@ export default function TeamDetail({ user, refreshUser }) {
                         {channel.custom_suffix && (
                           <p className="text-xs text-gray-500 dark:text-gray-400">
                             Suffix: {channel.custom_suffix}
+                          </p>
+                        )}
+                        {/* Bugfix (Channels tab has no way to view/edit a
+                            custom channel's Authentik/LDAP description):
+                            shown here read-only, matching Sub-teams' own
+                            Description text on its card. Editing happens
+                            via the "Edit channel" action below. */}
+                        {channel.description && (
+                          <p className="text-xs text-gray-500 dark:text-gray-400 break-words">
+                            {channel.description}
                           </p>
                         )}
                       </div>
@@ -1949,6 +2187,40 @@ export default function TeamDetail({ user, refreshUser }) {
                       </span>
                       <span className="text-gray-500 dark:text-gray-400">{channel.member_count || 0} members</span>
                     </div>
+                    {canManageTeam && (
+                      <div className="flex items-center justify-end space-x-3">
+                        {channel.channel_type !== 'primary' && (
+                          <button
+                            onClick={() => { setEditingChannel(channel); setEditChannelDescription(channel.description || '') }}
+                            className="p-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-600 dark:bg-gray-700 dark:hover:bg-gray-600 dark:text-gray-300"
+                            title="Edit channel"
+                            aria-label={`Edit ${channel.display_name}`}
+                          >
+                            <PencilIcon className="h-5 w-5" />
+                          </button>
+                        )}
+                        {channel.channel_type !== 'primary' && (
+                          <button
+                            onClick={() => setManagingMembersChannel(channel)}
+                            className="p-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-600 dark:bg-gray-700 dark:hover:bg-gray-600 dark:text-gray-300"
+                            title="Manage channel members"
+                            aria-label={`Manage members for ${channel.display_name}`}
+                          >
+                            <UsersIcon className="h-5 w-5" />
+                          </button>
+                        )}
+                        {channel.channel_type !== 'primary' && (
+                          <button
+                            onClick={() => setDeletingChannel(channel)}
+                            className="p-2 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 dark:bg-red-950/40 dark:hover:bg-red-900/60 dark:text-red-400"
+                            title="Delete channel"
+                            aria-label={`Delete ${channel.display_name}`}
+                          >
+                            <TrashIcon className="h-5 w-5" />
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -1975,6 +2247,9 @@ export default function TeamDetail({ user, refreshUser }) {
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                       Authentik Group
                     </th>
+                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                      Actions
+                    </th>
                   </tr>
                 </thead>
                 <tbody className="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
@@ -1985,6 +2260,13 @@ export default function TeamDetail({ user, refreshUser }) {
                         {channel.custom_suffix && (
                           <div className="text-xs text-gray-500 dark:text-gray-400">
                             Suffix: {channel.custom_suffix}
+                          </div>
+                        )}
+                        {/* Bugfix (Channels tab has no way to view/edit a
+                            custom channel's Authentik/LDAP description). */}
+                        {channel.description && (
+                          <div className="text-xs text-gray-500 dark:text-gray-400 whitespace-normal max-w-xs">
+                            {channel.description}
                           </div>
                         )}
                       </td>
@@ -2008,6 +2290,42 @@ export default function TeamDetail({ user, refreshUser }) {
                         }`}>
                           {channel.authentik_group_id ? 'Synced' : 'Not Synced'}
                         </span>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                        {canManageTeam && (
+                          <div className="flex items-center justify-end space-x-3">
+                            {channel.channel_type !== 'primary' && (
+                              <button
+                                onClick={() => { setEditingChannel(channel); setEditChannelDescription(channel.description || '') }}
+                                className="text-gray-600 hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300"
+                                title="Edit channel"
+                                aria-label={`Edit ${channel.display_name}`}
+                              >
+                                <PencilIcon className="h-4 w-4" />
+                              </button>
+                            )}
+                            {channel.channel_type !== 'primary' && (
+                              <button
+                                onClick={() => setManagingMembersChannel(channel)}
+                                className="text-gray-600 hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300"
+                                title="Manage channel members"
+                                aria-label={`Manage members for ${channel.display_name}`}
+                              >
+                                <UsersIcon className="h-4 w-4" />
+                              </button>
+                            )}
+                            {channel.channel_type !== 'primary' && (
+                              <button
+                                onClick={() => setDeletingChannel(channel)}
+                                className="text-red-600 hover:text-red-500 dark:text-red-400 dark:hover:text-red-300"
+                                title="Delete channel"
+                                aria-label={`Delete ${channel.display_name}`}
+                              >
+                                <TrashIcon className="h-4 w-4" />
+                              </button>
+                            )}
+                          </div>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -2088,7 +2406,34 @@ export default function TeamDetail({ user, refreshUser }) {
                         this pair of actions was never extracted into a
                         shared component (only 2 icons), so the same
                         p-2/rounded-lg/h-5 w-5 shapes are applied inline
-                        here instead. */}
+                        here instead.
+
+                        Bugfix (Sub-teams tab missing Edit/Delete parity
+                        with /teams): Teams.jsx's own overview list
+                        offers Edit and Delete for every row a
+                        Global_Manager can act on (`TeamRowActions`,
+                        gated on `isGlobalAdmin`); this tab previously
+                        had no Edit action at all, and Delete was
+                        unconditional (no admin gate on the client -- the
+                        server's own `team:delete:global` resolver was
+                        the only thing stopping a non-admin, which is a
+                        confusing UX: a visible, clickable button that
+                        silently 403s). Both actions are gated on
+                        `canManageTeam` now, matching every other action
+                        on this page (Add Member, Delete Channel, etc)
+                        -- NOT `isGlobalAdmin` alone like Teams.jsx's own
+                        gate, since a Team_Admin of this Organisation can
+                        also manage its own sub-teams (`Team.isAdmin`'s
+                        ancestor-inclusive walk already grants that), and
+                        `DELETE /:teamId` has no such restriction either
+                        (its own `team:delete:global` permission IS
+                        Global_Manager-only server-side, so a Team_Admin
+                        who is not also a Global_Manager will still see
+                        the button here but get a 403 on submit -- same
+                        as any other `canManageTeam`-gated action on this
+                        page that has no Team_Admin path server-side,
+                        e.g. Response/Support channel-tier flags in the
+                        Edit dialog itself). */}
                     <div className="flex items-center justify-end space-x-3">
                       <Link
                         to={`/teams/${subTeam.id}`}
@@ -2097,7 +2442,27 @@ export default function TeamDetail({ user, refreshUser }) {
                       >
                         <MagnifyingGlassIcon className="h-5 w-5" />
                       </Link>
-                      {(subTeam.sub_teams_count || 0) === 0 && (
+                      {canManageTeam && (
+                        <button
+                          onClick={() => setEditingSubTeam(subTeam)}
+                          className="p-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-600 dark:bg-gray-700 dark:hover:bg-gray-600 dark:text-gray-300"
+                          title="Edit sub-team"
+                        >
+                          <PencilIcon className="h-5 w-5" />
+                        </button>
+                      )}
+                      {/* Bugfix: pg returns COUNT(*) (sub_teams_count) as
+                          a STRING (Postgres bigint -> string, to avoid JS
+                          precision loss), never a number. `"0" === 0` is
+                          always false, so the old `(x || 0) === 0` check
+                          never matched a genuinely childless sub-team --
+                          neither this button nor the disabled one below it
+                          ever rendered, leaving Delete entirely missing.
+                          `Number(...)` coerces first, matching how `> 0`
+                          happened to already work by relying on JS's
+                          numeric coercion in relational (but not strict
+                          equality) operators. */}
+                      {canManageTeam && Number(subTeam.sub_teams_count || 0) === 0 && (
                         <button
                           onClick={() => setDeleteSubTeamId(subTeam.id)}
                           className="p-2 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 dark:bg-red-950/40 dark:hover:bg-red-900/60 dark:text-red-400"
@@ -2106,7 +2471,7 @@ export default function TeamDetail({ user, refreshUser }) {
                           <TrashIcon className="h-5 w-5" />
                         </button>
                       )}
-                      {(subTeam.sub_teams_count || 0) > 0 && (
+                      {canManageTeam && Number(subTeam.sub_teams_count || 0) > 0 && (
                         <button
                           disabled
                           className="p-2 rounded-lg bg-gray-100 text-gray-400 dark:bg-gray-700 dark:text-gray-600 cursor-not-allowed"
@@ -2235,7 +2600,16 @@ export default function TeamDetail({ user, refreshUser }) {
                           >
                             <MagnifyingGlassIcon className="h-4 w-4" />
                           </Link>
-                          {(subTeam.sub_teams_count || 0) === 0 && (
+                          {canManageTeam && (
+                            <button
+                              onClick={() => setEditingSubTeam(subTeam)}
+                              className="text-gray-600 hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300"
+                              title="Edit sub-team"
+                            >
+                              <PencilIcon className="h-4 w-4" />
+                            </button>
+                          )}
+                          {canManageTeam && Number(subTeam.sub_teams_count || 0) === 0 && (
                             <button
                               onClick={() => setDeleteSubTeamId(subTeam.id)}
                               className="text-red-600 hover:text-red-500 dark:text-red-400 dark:hover:text-red-300"
@@ -2244,7 +2618,7 @@ export default function TeamDetail({ user, refreshUser }) {
                               <TrashIcon className="h-4 w-4" />
                             </button>
                           )}
-                          {(subTeam.sub_teams_count || 0) > 0 && (
+                          {canManageTeam && Number(subTeam.sub_teams_count || 0) > 0 && (
                             <button
                               disabled
                               className="text-gray-400 dark:text-gray-600 cursor-not-allowed"
@@ -2513,6 +2887,75 @@ export default function TeamDetail({ user, refreshUser }) {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Delete Channel Confirmation Dialog. Consistency bugfix: now
+          requires typing the channel's own display_name to confirm,
+          matching "Permanently Delete User"'s own type-to-confirm
+          pattern -- a plain Cancel/Confirm dialog (this one's original
+          shape, mirroring "Delete Sub-Team") understated how disruptive
+          losing a channel's Authentik group is for every one of its
+          members. */}
+      {deletingChannel && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-channel-title"
+            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full"
+          >
+            <div className="p-6">
+              <h3 id="delete-channel-title" className="text-lg font-medium text-red-600 dark:text-red-400 mb-4">
+                Delete Channel
+              </h3>
+              <p className="text-gray-600 dark:text-gray-400 mb-4">
+                Are you sure you want to delete <span className="font-medium text-gray-900 dark:text-gray-100">{deletingChannel.display_name}</span>? Its members will lose access and this action cannot be undone.
+              </p>
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Type "<span className="font-mono font-bold text-gray-900 dark:text-gray-100">{deletingChannel.display_name}</span>" to confirm:
+                </label>
+                <input
+                  type="text"
+                  className="input w-full"
+                  value={deleteChannelConfirmInput}
+                  onChange={(e) => setDeleteChannelConfirmInput(e.target.value)}
+                  placeholder={deletingChannel.display_name}
+                  autoComplete="off"
+                />
+              </div>
+              <div className="flex justify-end space-x-3">
+                <button
+                  onClick={() => {
+                    setDeletingChannel(null)
+                    setDeleteChannelConfirmInput('')
+                  }}
+                  className="btn-secondary"
+                  disabled={deletingChannelInFlight}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleDeleteChannel}
+                  disabled={deletingChannelInFlight || deleteChannelConfirmInput !== deletingChannel.display_name}
+                  className="btn-danger disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {deletingChannelInFlight ? 'Deleting...' : 'Delete Channel'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bugfix (Channels tab had no manage-members action). */}
+      {managingMembersChannel && (
+        <ChannelMembersDialog
+          channel={managingMembersChannel}
+          teamMembers={members}
+          onClose={() => setManagingMembersChannel(null)}
+          onMembershipChanged={refreshChannelMemberCount}
+        />
       )}
 
       {/* Remove as Admin Confirmation Dialog. Mirrors "Delete Sub-Team"
@@ -3141,6 +3584,77 @@ export default function TeamDetail({ user, refreshUser }) {
         </div>
       )}
 
+      {/* Edit Channel Dialog. Bugfix (Channels tab has no edit action,
+          and no way to add/edit a custom channel's Authentik/LDAP
+          description). Scoped to description only -- no rename support,
+          since renaming would mean renaming all three of a custom
+          channel's Authentik groups (rw/read/write), a materially larger
+          change than what was asked for here. Only ever opened for a
+          channel_type !== 'primary' row (see the per-row Edit action
+          above); the server also refuses a primary channel with a 404,
+          matching the Delete dialog's own scoping. */}
+      {editingChannel && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center sm:p-4 z-50">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="edit-channel-title"
+            className="bg-white dark:bg-gray-800 shadow-xl w-full h-full sm:rounded-lg sm:max-w-lg sm:h-auto sm:max-h-[90vh] overflow-y-auto"
+          >
+            <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
+              <h3 id="edit-channel-title" className="text-xl font-semibold text-gray-900 dark:text-gray-100">
+                Edit {editingChannel.display_name}
+              </h3>
+              <button
+                onClick={() => setEditingChannel(null)}
+                className="text-gray-400 hover:text-gray-500 dark:hover:text-gray-300"
+                aria-label="Close"
+              >
+                <XMarkIcon className="h-6 w-6" />
+              </button>
+            </div>
+
+            <form onSubmit={handleEditChannel} className="p-6">
+              <div>
+                <label htmlFor="editChannelDescription" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                  Description
+                </label>
+                <textarea
+                  id="editChannelDescription"
+                  value={editChannelDescription}
+                  onChange={(e) => setEditChannelDescription(e.target.value)}
+                  className="input w-full"
+                  rows={3}
+                  maxLength={500}
+                  placeholder="Describe this channel's purpose"
+                />
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                  Shown in Authentik/LDAP as this channel's group description.
+                </p>
+              </div>
+
+              <div className="flex justify-end space-x-3 pt-6 mt-6 border-t border-gray-200 dark:border-gray-700">
+                <button
+                  type="button"
+                  onClick={() => setEditingChannel(null)}
+                  className="btn-secondary px-6 py-2"
+                  disabled={savingChannelEdit}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingChannelEdit}
+                  className="btn-primary px-6 py-2"
+                >
+                  {savingChannelEdit ? 'Saving...' : 'Save Changes'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Remove User Confirmation Dialog */}
       {removeUserId && (() => {
         const removeTarget = [...members, ...admins].find(m => m.id === removeUserId)
@@ -3226,6 +3740,20 @@ export default function TeamDetail({ user, refreshUser }) {
           userId={devicesForMember.id}
           userName={`${devicesForMember.first_name || ''} ${devicesForMember.last_name || ''}`.trim() || devicesForMember.email}
           onClose={() => setDevicesForMember(null)}
+        />
+      )}
+
+      {/* account-lifecycle-management Requirement 1.11: the Suspend/
+          Unsuspend confirmation dialog, shared by the Members and Team
+          Admins tabs (mirroring the Transfer/Devices dialogs' own
+          single-shared-instance pattern above). */}
+      {suspendingMember && (
+        <SuspendAccountDialog
+          mode={suspendingMember.mode}
+          targetUserId={suspendingMember.member.id}
+          targetName={`${suspendingMember.member.first_name || ''} ${suspendingMember.member.last_name || ''}`.trim() || suspendingMember.member.username}
+          onClose={() => setSuspendingMember(null)}
+          onCompleted={refreshMembersAfterSuspend}
         />
       )}
 
@@ -3335,6 +3863,32 @@ export default function TeamDetail({ user, refreshUser }) {
               setParentTeam(null)
             }
           }
+        }}
+      />
+
+      {/* Edit Sub-Team Dialog (shared with Teams.jsx/the Edit Team dialog
+          above). Bugfix (Sub-teams tab missing Edit/Delete parity with
+          /teams): a SEPARATE `TeamFormDialog` instance/state pair
+          (`editingSubTeam`) from the one above, since that one always
+          edits THIS page's own `team` -- a sub-team row is a different
+          team object entirely. `isAdmin`/`isGlobalManager` mirror the
+          main Edit Team dialog's own gating exactly (both nested tabs --
+          Allowed Email Domains and Channel Access -- only ever render
+          for an Organisation anyway, i.e. never for a sub-team being
+          edited here, since `parentTeamId` is always present; the props
+          are passed for consistency regardless). */}
+      <TeamFormDialog
+        mode="edit"
+        team={editingSubTeam}
+        teams={allTeams}
+        maxTeamDepth={maxTeamDepth}
+        colorMappings={colorMappings}
+        isOpen={!!editingSubTeam}
+        onClose={() => setEditingSubTeam(null)}
+        isAdmin={canManageTeam}
+        isGlobalManager={isGlobalAdmin}
+        onSaved={(updatedSubTeam) => {
+          setSubTeams(subTeams.map((t) => t.id === updatedSubTeam.id ? { ...t, ...updatedSubTeam } : t))
         }}
       />
     </div>

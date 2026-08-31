@@ -871,6 +871,175 @@ describe('GET /api/requests/pending effective_callsign_suffix (Requirements 11.1
 });
 
 /**
+ * account-lifecycle-management Requirement 5.2 (task 11.3): the additive
+ * `reclaimableAccount: { userId, previousTeamId }` field on a
+ * `new_account` row whose `requester_email` matches an
+ * `account_status = 'orphaned'` `users` row.
+ */
+describe('GET /api/requests/pending reclaimableAccount (account-lifecycle-management)', () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    app = buildApp();
+  });
+
+  function mockAdminTeams(teamIds) {
+    Team.isAdmin.mockImplementation((teamId) => Promise.resolve(teamIds.includes(teamId)));
+  }
+
+  const NEW_ACCOUNT_ROW = {
+    id: 500,
+    request_type: 'new_account',
+    target_team_id: 1,
+    team_name: 'Team A',
+    callsign_suffix: 'Badge1',
+    requester_email: 'reclaim-candidate@example.com',
+    requester_first_name: 'Re',
+    requester_last_name: 'Claim'
+  };
+
+  it('sets reclaimableAccount to {userId, previousTeamId} when the email matches an orphaned row with a still-existing direct membership', async () => {
+    mockAdminTeams([1]);
+    pool.query.mockImplementation((sql, params) => {
+      if (sql.includes('FROM access_requests ar')) {
+        return Promise.resolve({ rows: [NEW_ACCOUNT_ROW] });
+      }
+      if (sql.includes("account_status = 'orphaned'")) {
+        expect(params).toEqual([['reclaim-candidate@example.com']]);
+        return Promise.resolve({
+          rows: [{ id: 777, email: 'reclaim-candidate@example.com', previous_team_id: 42 }]
+        });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    Team.getAncestorChain.mockResolvedValue([{ id: 1, name: 'Team A', callsign_prefix: null, callsign_name_format: 'full_name' }]);
+
+    const res = await request(app).get('/api/requests/pending');
+
+    expect(res.status).toBe(200);
+    expect(res.body.requests[0].reclaimableAccount).toEqual({ userId: 777, previousTeamId: 42 });
+  });
+
+  it('sets previousTeamId to null when the orphaned row has no surviving direct membership', async () => {
+    mockAdminTeams([1]);
+    pool.query.mockImplementation((sql) => {
+      if (sql.includes('FROM access_requests ar')) {
+        return Promise.resolve({ rows: [NEW_ACCOUNT_ROW] });
+      }
+      if (sql.includes("account_status = 'orphaned'")) {
+        return Promise.resolve({
+          rows: [{ id: 777, email: 'reclaim-candidate@example.com', previous_team_id: null }]
+        });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    Team.getAncestorChain.mockResolvedValue([{ id: 1, callsign_name_format: 'full_name' }]);
+
+    const res = await request(app).get('/api/requests/pending');
+
+    expect(res.body.requests[0].reclaimableAccount).toEqual({ userId: 777, previousTeamId: null });
+  });
+
+  it('sets reclaimableAccount to null (not absent) when no orphaned row matches the email', async () => {
+    mockAdminTeams([1]);
+    pool.query.mockImplementation((sql) => {
+      if (sql.includes('FROM access_requests ar')) {
+        return Promise.resolve({ rows: [NEW_ACCOUNT_ROW] });
+      }
+      if (sql.includes("account_status = 'orphaned'")) {
+        return Promise.resolve({ rows: [] }); // no match
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    Team.getAncestorChain.mockResolvedValue([{ id: 1, callsign_name_format: 'full_name' }]);
+
+    const res = await request(app).get('/api/requests/pending');
+
+    expect(res.body.requests[0].reclaimableAccount).toBeNull();
+  });
+
+  it('never performs the reclaim lookup at all for a team_change/role_change/name_change row (no requester_email to key on)', async () => {
+    mockAdminTeams([2]);
+    const reclaimQuerySpy = jest.fn();
+    pool.query.mockImplementation((sql) => {
+      if (sql.includes('FROM access_requests ar')) {
+        return Promise.resolve({
+          rows: [{
+            id: 501,
+            request_type: 'team_change',
+            approval_team_id: 2,
+            target_team_id: 2,
+            current_team_id: 3,
+            callsign_suffix: null,
+            requester_email: 'irrelevant@example.com'
+          }]
+        });
+      }
+      if (sql.includes("account_status = 'orphaned'")) {
+        reclaimQuerySpy();
+        return Promise.resolve({ rows: [] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    Team.getAncestorChain.mockResolvedValue([{ id: 2, callsign_name_format: 'full_name' }]);
+
+    const res = await request(app).get('/api/requests/pending');
+
+    expect(reclaimQuerySpy).not.toHaveBeenCalled();
+    expect(res.body.requests[0]).not.toHaveProperty('reclaimableAccount');
+  });
+
+  it('batches the reclaim lookup into one query for multiple new_account rows, keyed by distinct email', async () => {
+    mockAdminTeams([1]);
+    pool.query.mockImplementation((sql, params) => {
+      if (sql.includes('FROM access_requests ar')) {
+        return Promise.resolve({
+          rows: [
+            { ...NEW_ACCOUNT_ROW, id: 600, requester_email: 'a@example.com' },
+            { ...NEW_ACCOUNT_ROW, id: 601, requester_email: 'b@example.com' },
+            // A duplicate email should not appear twice in the batched lookup.
+            { ...NEW_ACCOUNT_ROW, id: 602, requester_email: 'a@example.com' }
+          ]
+        });
+      }
+      if (sql.includes("account_status = 'orphaned'")) {
+        expect(params[0].sort()).toEqual(['a@example.com', 'b@example.com']);
+        return Promise.resolve({ rows: [{ id: 1, email: 'a@example.com', previous_team_id: null }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    Team.getAncestorChain.mockResolvedValue([{ id: 1, callsign_name_format: 'full_name' }]);
+
+    const res = await request(app).get('/api/requests/pending');
+
+    const reclaimQueryCalls = pool.query.mock.calls.filter(([sql]) => sql.includes("account_status = 'orphaned'"));
+    expect(reclaimQueryCalls).toHaveLength(1);
+    expect(res.body.requests.find((r) => r.id === 600).reclaimableAccount).toEqual({ userId: 1, previousTeamId: null });
+    expect(res.body.requests.find((r) => r.id === 602).reclaimableAccount).toEqual({ userId: 1, previousTeamId: null });
+    expect(res.body.requests.find((r) => r.id === 601).reclaimableAccount).toBeNull();
+  });
+
+  it('never issues the reclaim lookup query when there are no new_account rows at all', async () => {
+    mockAdminTeams([2]);
+    const reclaimQuerySpy = jest.fn();
+    pool.query.mockImplementation((sql) => {
+      if (sql.includes('FROM access_requests ar')) {
+        return Promise.resolve({ rows: [] });
+      }
+      if (sql.includes("account_status = 'orphaned'")) {
+        reclaimQuerySpy();
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await request(app).get('/api/requests/pending');
+
+    expect(reclaimQuerySpy).not.toHaveBeenCalled();
+  });
+});
+
+/**
  * Feature: team-member-transfer, task 12.1.
  *
  * Examples for the shared `enrichPendingRequests` helper on

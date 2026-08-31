@@ -17,13 +17,26 @@ class SignupFlowService {
    */
   async determineEmailState(email) {
     // Check for active account (must have a direct team membership to be considered active)
+    //
+    // account-lifecycle-management Requirement 5.1 (task 10.1): also reads
+    // `account_status`, and only classifies 'active' when it equals
+    // 'active'. A match whose `account_status = 'orphaned'` falls through
+    // to the existing access_requests-based checks below and, finding
+    // none (an orphaned account by definition predates this NEW sign-up
+    // attempt), returns 'new' -- the SAME code path an entirely-unseen
+    // email already takes. This keeps this method's own contract simple:
+    // it answers "should I treat this email as new," not "does this
+    // email have history" -- Account_Reclaim itself is detected later, at
+    // approval time (RequestApprovalService), not here.
     const userResult = await pool.query(
-      `SELECT u.id FROM users u
+      `SELECT u.id, u.account_status FROM users u
        JOIN team_memberships tm ON u.id = tm.user_id AND tm.inherited_from_team_id IS NULL
        WHERE u.email = $1 LIMIT 1`,
       [email]
     );
-    if (userResult.rows.length > 0) return 'active';
+    if (userResult.rows.length > 0 && userResult.rows[0].account_status === 'active') {
+      return 'active';
+    }
 
     // Check access_requests for this email — most recent first
     const requestResult = await pool.query(

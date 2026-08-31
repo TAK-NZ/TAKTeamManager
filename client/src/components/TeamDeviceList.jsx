@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback } from 'react'
-import { DeviceTabletIcon, MagnifyingGlassIcon, PencilIcon, ArrowRightCircleIcon, QrCodeIcon, TrashIcon, XMarkIcon } from '@heroicons/react/24/outline'
+import { DeviceTabletIcon, MagnifyingGlassIcon, PencilIcon, ArrowRightCircleIcon, QrCodeIcon, TrashIcon, XMarkIcon, LockClosedIcon, LockOpenIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import { devicesAPI } from '../services/api'
 import FormattedDate, { DATE_PRECISION } from './FormattedDate'
 import MultipleCertificateWarning from './MultipleCertificateWarning'
 import TransferMemberDialog from './TransferMemberDialog'
+import SuspendAccountDialog from './SuspendAccountDialog'
+import { describeAccountStatusBadge } from '../utils/accountStatusBadge'
 
 /**
  * takserver-enrollment Requirements 5.9, 5.10, 14.7 (task 11.2), extended by
@@ -295,7 +297,7 @@ function DeviceEditRow({ colSpan, form, setForm, saving, error, onSave, onCancel
  * `MemberActions.jsx`'s identical `variant` prop for the fuller
  * rationale -- both components were fixed together for consistency.
  */
-function DeviceActions({ device, onEdit, onTransfer, onEnroll, onDelete, variant = 'table' }) {
+function DeviceActions({ device, onEdit, onTransfer, onEnroll, onDelete, onSuspend, accountStatus = 'active', variant = 'table' }) {
   const isCard = variant === 'card'
   const iconSizeClass = isCard ? 'h-5 w-5' : 'h-4 w-4'
   const boxClass = isCard ? 'p-2 rounded-lg' : ''
@@ -335,6 +337,28 @@ function DeviceActions({ device, onEdit, onTransfer, onEnroll, onDelete, variant
       >
         <QrCodeIcon className={iconSizeClass} aria-hidden="true" />
       </button>
+      {/* account-lifecycle-management Requirement 1.11: a closed-lock
+          "Suspend" action for an active device account, an open-lock
+          "Unsuspend" for a suspended one -- never rendered at all for an
+          orphaned device account (Requirement 4.1), which the caller
+          expresses by simply not passing `onSuspend`. Mirrors
+          `MemberActions.jsx`'s identical `onSuspend`/`accountStatus`
+          convention exactly. */}
+      {onSuspend && (
+        <button
+          type="button"
+          onClick={() => onSuspend(device)}
+          className={`${boxClass} ${neutralClass}`}
+          title={accountStatus === 'suspended' ? 'Unsuspend device account' : 'Suspend device account'}
+          aria-label={accountStatus === 'suspended' ? `Unsuspend device account ${deviceDisplayName(device)}` : `Suspend device account ${deviceDisplayName(device)}`}
+        >
+          {accountStatus === 'suspended' ? (
+            <LockOpenIcon className={iconSizeClass} aria-hidden="true" />
+          ) : (
+            <LockClosedIcon className={iconSizeClass} aria-hidden="true" />
+          )}
+        </button>
+      )}
       <button
         type="button"
         onClick={() => onDelete(device)}
@@ -360,6 +384,13 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
   const [transferringDevice, setTransferringDevice] = useState(null)
   const [deletingDevice, setDeletingDevice] = useState(null)
   const [deleting, setDeleting] = useState(false)
+  // account-lifecycle-management Requirement 1.11: the Team Devices row
+  // whose Suspend/Unsuspend confirmation is open, or null when closed.
+  // `{ device, mode }` mirrors `TeamDetail.jsx`'s own `suspendingMember`
+  // shape exactly -- same reasoning: one shared dialog serves both
+  // directions, and the row's current `accountStatus` decides which one
+  // this action opens.
+  const [suspendingDevice, setSuspendingDevice] = useState(null)
 
   const fetchDevices = useCallback(async () => {
     if (!teamId) {
@@ -455,6 +486,17 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
     }
   }
 
+  // account-lifecycle-management Requirement 1.11: opens the Suspend/
+  // Unsuspend confirmation for a device row, deriving `mode` from the
+  // row's own `accountStatus` -- mirrors `TeamDetail.jsx`'s
+  // `handleSuspendClick` exactly.
+  const handleSuspendClick = (device) => {
+    setSuspendingDevice({
+      device,
+      mode: device.accountStatus === 'suspended' ? 'unsuspend' : 'suspend'
+    })
+  }
+
   // TransferMemberDialog is generic over any `{id, first_name, last_name,
   // email, role}`-shaped object -- mechanically, a device is just another
   // `users.id` to it and to the server route it calls
@@ -540,6 +582,14 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
                     </p>
                   </div>
                 </div>
+                {/* account-lifecycle-management Requirement 4.1-4.3
+                    (task 8.2): mirrors TeamDetail.jsx's own Members/
+                    Team Admins badge treatment. */}
+                {describeAccountStatusBadge(device.accountStatus) && (
+                  <span className={describeAccountStatusBadge(device.accountStatus).className}>
+                    {describeAccountStatusBadge(device.accountStatus).label}
+                  </span>
+                )}
                 <div>
                   <p className="text-gray-900 dark:text-gray-100">{device.callsign || '-'}</p>
                   <p className="text-xs text-gray-500 dark:text-gray-400">{device.takRole || 'Team Member'}</p>
@@ -554,6 +604,8 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
                   onTransfer={setTransferringDevice}
                   onEnroll={onEnroll}
                   onDelete={setDeletingDevice}
+                  onSuspend={device.accountStatus !== 'orphaned' ? handleSuspendClick : undefined}
+                  accountStatus={device.accountStatus}
                   variant="card"
                 />
               </div>
@@ -611,6 +663,13 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
                           <span className="break-all">{deviceDisplayName(device)}</span>
                         </div>
                         <p className="text-xs text-gray-500 dark:text-gray-400 font-mono break-all ml-6">{device.username}</p>
+                        {describeAccountStatusBadge(device.accountStatus) && (
+                          <div className="ml-6 mt-1">
+                            <span className={describeAccountStatusBadge(device.accountStatus).className}>
+                              {describeAccountStatusBadge(device.accountStatus).label}
+                            </span>
+                          </div>
+                        )}
                         <MultipleCertificateWarning count={device.liveCertificateCount} className="mt-1" />
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm">
@@ -627,6 +686,8 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
                           onTransfer={setTransferringDevice}
                           onEnroll={onEnroll}
                           onDelete={setDeletingDevice}
+                          onSuspend={device.accountStatus !== 'orphaned' ? handleSuspendClick : undefined}
+                          accountStatus={device.accountStatus}
                         />
                       </td>
                     </tr>
@@ -651,6 +712,23 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
             setTransferringDevice(null)
             fetchDevices()
           }}
+        />
+      )}
+
+      {/* account-lifecycle-management Requirement 1.11: the same shared
+          SuspendAccountDialog TeamDetail.jsx's Members/Team Admins tabs
+          use. On completion, refetches this tab's own device list so the
+          row reflects its new account_status without a full page
+          reload -- this component owns its own fetch (see the doc
+          comment above), so there is no parent-level refresh to lean on
+          the way TeamDetail.jsx's `refreshMembersAfterSuspend` does. */}
+      {suspendingDevice && (
+        <SuspendAccountDialog
+          mode={suspendingDevice.mode}
+          targetUserId={suspendingDevice.device.deviceUserId}
+          targetName={deviceDisplayName(suspendingDevice.device)}
+          onClose={() => setSuspendingDevice(null)}
+          onCompleted={fetchDevices}
         />
       )}
 

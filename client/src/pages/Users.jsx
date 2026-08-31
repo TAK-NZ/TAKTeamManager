@@ -228,9 +228,21 @@ export default function Users({ user }) {
 
     setRemovingUser(true)
     try {
-      await usersAPI.removeFromTeam(removeUserId, removeTarget?.team_id ?? null)
+      const response = await usersAPI.removeFromTeam(removeUserId, removeTarget?.team_id ?? null)
       setUsers((prev) => prev.filter((u) => u.local_user_id !== removeUserId))
       window.dispatchEvent(new CustomEvent('userAssignmentChanged'))
+      // Bugfix (silent Authentik-delete failure): the local account is
+      // gone either way, but if Authentik's own account delete failed,
+      // that Authentik identity may still exist (cleanup has been
+      // queued for retry) -- worth a distinct toast, unlike the
+      // certificate-revocation dry-run outcome (a static, deliberate
+      // deployment setting, not a per-request failure), which is
+      // recorded in the audit log rather than surfaced here every time.
+      if (response?.data?.authentikAccountDeleted === false) {
+        toast.error('User removed, but their Authentik account could not be deleted immediately. Cleanup has been queued for retry.')
+      } else {
+        toast.success('User permanently deleted')
+      }
       setRemoveUserId(null)
       setRemoveConfirmInput('')
     } catch (error) {

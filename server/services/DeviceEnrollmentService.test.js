@@ -711,6 +711,7 @@ describe('DeviceEnrollmentService.listTeamDevices', () => {
         callsign_suffix: 'Tanker1',
         tak_role: 'Team Member',
         created_at: '2024-01-01T00:00:00.000Z',
+        account_status: 'active',
         live_certificate_count: 0
       }
     ]);
@@ -729,12 +730,39 @@ describe('DeviceEnrollmentService.listTeamDevices', () => {
           callsign: 'AUK-Tanker1',
           teamId: 5,
           createdAt: '2024-01-01T00:00:00.000Z',
+          accountStatus: 'active',
           liveCertificateCount: 0
         }
       ]
     });
     expect(result.devices[0]).not.toHaveProperty('email');
     expect(JSON.stringify(result)).not.toContain('"email"');
+  });
+
+  // account-lifecycle-management Requirement 4.1 (task 8.1): account_status
+  // is added to this query's SELECT column list and threaded through to
+  // the returned shape as accountStatus, additive on the same query --
+  // no new query, matching the requirement's own framing.
+  it('threads account_status through as accountStatus for a suspended device', async () => {
+    Team.isAdmin.mockResolvedValue(true);
+    mockDevicesQuery([
+      {
+        device_user_id: 43,
+        username: 'AUK-D9Q2WXY',
+        device_label: 'Spare Tablet',
+        callsign_suffix: null,
+        tak_role: 'Team Member',
+        created_at: '2024-03-01T00:00:00.000Z',
+        account_status: 'suspended',
+        live_certificate_count: 0
+      }
+    ]);
+
+    const result = await DeviceEnrollmentService.listTeamDevices(5, { userId: 1, is_global_manager: false });
+
+    expect(result.devices[0].accountStatus).toBe('suspended');
+    const [sql] = pool.query.mock.calls[0];
+    expect(sql).toContain('u.account_status AS account_status');
   });
 
   it('lists a team\'s devices for a Global_Manager, without checking Team.isAdmin', async () => {

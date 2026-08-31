@@ -134,9 +134,37 @@ class UserProvisioningService {
    *   explicit `UPDATE ... WHERE id = $claimId` sidesteps `ON CONFLICT`
    *   entirely, so it adopts the exact row by primary key regardless of
    *   what `authentik_user_id` currently holds.
+   * @param {number|null} [params.reclaimedUserId] - account-lifecycle-
+   *   management Requirement 5.3/5.5 (task 11.2): the `users.id` of an
+   *   EXISTING `account_status = 'orphaned'` row whose `email` matched
+   *   this new sign-up's verified email (a Reclaimable_Account,
+   *   resolved by `RequestApprovalService.approveRequest`'s Phase 1).
+   *   When supplied, that EXACT row is adopted via `UPDATE ... WHERE id
+   *   = $reclaimedUserId` -- setting `account_status = 'active'` in the
+   *   same statement -- instead of the generic upsert below, mirroring
+   *   the `claimId` branch's adoption shape but for the opposite
+   *   direction: `claimId` adopts a row THIS SAME sign-up flow just
+   *   inserted (a fresh Claim_Row with `authentik_user_id IS NULL`);
+   *   `reclaimedUserId` adopts an UNRELATED, pre-existing row from a
+   *   PAST account whose Authentik identity has since disappeared. The
+   *   two are mutually exclusive by construction (the caller only ever
+   *   resolves one or the other -- see `RequestApprovalService`'s own
+   *   comment) and this method does not itself validate that; passing
+   *   both together is a caller programming error, not a state this
+   *   method is designed to detect.
+   *
+   *   Deliberately does NOT touch `origin_org_id` at all (contrast with
+   *   the `claimId` branch's `COALESCE`): the reclaimed row's existing
+   *   provenance is left exactly as it was, since Account_Reclaim is
+   *   adopting a past identity, not reclassifying where it originated.
+   *   Also deliberately reads no `team_memberships` history off the
+   *   reclaimed row before this -- the shared team-assignment logic
+   *   below this branch already performs a FRESH `INSERT`, which is
+   *   what Requirement 5.4 (no automatic restoration of the previous
+   *   team/role) requires.
    * @returns {Promise<{localUserId: number, queuedGroups: number}>}
    */
-  static async createAndAddUser(client, { authentikUserId, username, email, firstName, lastName, teamId, callsign_suffix = null, createdBy = null, claimId = null }) {
+  static async createAndAddUser(client, { authentikUserId, username, email, firstName, lastName, teamId, callsign_suffix = null, createdBy = null, claimId = null, reclaimedUserId = null }) {
     // Requirement 13.3/13.4/13.5: resolve the target Team's Organisation
     // (the root of its Ancestor_Chain) on the caller's transaction client
     // and record it as the user's provenance.
@@ -144,7 +172,23 @@ class UserProvisioningService {
 
     let localUserId;
 
-    if (claimId != null) {
+    if (reclaimedUserId != null) {
+      // account-lifecycle-management Requirement 5.3/5.5 (task 11.2):
+      // Account_Reclaim -- adopt the existing orphaned row by primary
+      // key, resetting account_status to 'active' in the same
+      // statement. See the `reclaimedUserId` param doc above for why
+      // this is a separate branch from `claimId`'s Claim_Row adoption.
+      const reclaimResult = await client.query(
+        `UPDATE users SET authentik_user_id = $1, username = $2, email = $3, first_name = $4, last_name = $5, is_active = true, account_status = 'active', callsign_suffix = $6 WHERE id = $7 RETURNING id`,
+        [authentikUserId, username, email, firstName, lastName, callsign_suffix, reclaimedUserId]
+      );
+
+      if (reclaimResult.rows.length === 0) {
+        throw new Error(`Cannot reclaim account: no users row with id ${reclaimedUserId}`);
+      }
+
+      localUserId = reclaimResult.rows[0].id;
+    } else if (claimId != null) {
       // Claim_Row adoption (see the `claimId` param doc above for why
       // this cannot go through the generic upsert below). `origin_org_id`
       // keeps the same write-once guarantee via COALESCE, just expressed

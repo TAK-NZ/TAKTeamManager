@@ -256,12 +256,41 @@ describe('SignupFlowService.determineEmailState', () => {
     service = new SignupFlowService();
   });
 
-  it('returns "active" when user exists in users table', async () => {
+  it('returns "active" when user exists in users table with account_status = "active"', async () => {
     pool.query
-      .mockResolvedValueOnce({ rows: [{ id: 1 }] }); // user found
+      .mockResolvedValueOnce({ rows: [{ id: 1, account_status: 'active' }] }); // user found
 
     const state = await service.determineEmailState('user@example.com');
     expect(state).toBe('active');
+  });
+
+  // account-lifecycle-management Requirement 5.1 (task 10.2): a matching
+  // row whose account_status is 'orphaned' must NOT classify as 'active'
+  // -- an orphaned account has no reachable Authentik identity, so
+  // directing that email to "you already have an account" is a dead
+  // end. It falls through to the existing access_requests-based checks
+  // and, finding none, lands on 'new' -- the same path an entirely
+  // unseen email takes.
+  it('returns "new" (not "active") when the matching row has account_status = "orphaned" and no access_request exists', async () => {
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ id: 1, account_status: 'orphaned' }] }) // orphaned match
+      .mockResolvedValueOnce({ rows: [] }); // no access_request
+
+    const state = await service.determineEmailState('user@example.com');
+    expect(state).toBe('new');
+  });
+
+  // Per design.md's own framing ("only returned when account_status =
+  // 'active'"), a 'suspended' match also does not classify as 'active' --
+  // it falls through to the same access_requests-based checks.
+  it('does not classify as "active" when the matching row has account_status = "suspended"', async () => {
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ id: 1, account_status: 'suspended' }] }) // suspended match
+      .mockResolvedValueOnce({ rows: [] }); // no access_request
+
+    const state = await service.determineEmailState('user@example.com');
+    expect(state).not.toBe('active');
+    expect(state).toBe('new');
   });
 
   it('returns "pending_approval" when email_verified and status=pending', async () => {

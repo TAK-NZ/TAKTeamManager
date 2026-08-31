@@ -1,4 +1,4 @@
-import { PencilIcon, EnvelopeIcon, ArrowRightCircleIcon, DevicePhoneMobileIcon, TrashIcon } from '@heroicons/react/24/outline'
+import { PencilIcon, EnvelopeIcon, ArrowRightCircleIcon, DevicePhoneMobileIcon, TrashIcon, LockClosedIcon, LockOpenIcon } from '@heroicons/react/24/outline'
 
 /**
  * Users-page-action-parity: the Edit/Resend welcome/Transfer/View
@@ -84,6 +84,19 @@ import { PencilIcon, EnvelopeIcon, ArrowRightCircleIcon, DevicePhoneMobileIcon, 
  * @param {(member: object) => void} props.onTransfer
  * @param {(member: object) => void} props.onViewDevices
  * @param {(userId: number, roleLabel: string) => void} props.onRemove
+ * @param {(member: object) => void} [props.onSuspend] account-lifecycle-
+ *   management Requirement 1.11: opens the Suspend/Unsuspend confirmation
+ *   for this row. Omitted entirely (no button rendered at all, matching
+ *   how `onViewDevices`' button is gated on `devicesEnabled` rather than
+ *   rendered-then-disabled) when the caller has no suspend action to
+ *   offer -- e.g. `Users.jsx`, which does not yet wire this up, or a row
+ *   whose `account_status` is already `'orphaned'` (Requirement 4.1: no
+ *   Authentik identity exists for a suspend/unsuspend action to reach).
+ * @param {'active'|'suspended'|'orphaned'} [props.accountStatus] selects
+ *   which icon/label `onSuspend` renders -- a closed-lock "Suspend" button
+ *   for `'active'`, an open-lock "Unsuspend" button for `'suspended'`.
+ *   Defaults to `'active'` so an existing call site that never passes this
+ *   prop (and therefore never passes `onSuspend` either) is unaffected.
  * @param {'table'|'card'} [props.variant] bugfix (mobile tap targets too
  *   small): `'table'` (the default, matching every existing call site's
  *   prior behaviour unchanged) renders bare `h-4 w-4` icons in a
@@ -110,6 +123,8 @@ export default function MemberActions({
   onTransfer,
   onViewDevices,
   onRemove,
+  onSuspend,
+  accountStatus = 'active',
   variant = 'table'
 }) {
   const noTeamTitle = disabledReason
@@ -175,6 +190,26 @@ export default function MemberActions({
           aria-label={hasTeam ? 'View member devices' : noTeamTitle}
         >
           <DevicePhoneMobileIcon className={iconSizeClass} aria-hidden="true" />
+        </button>
+      )}
+      {/* account-lifecycle-management Requirement 1.11: a closed-lock
+          "Suspend" action for an active account, an open-lock "Unsuspend"
+          for a suspended one -- never rendered at all for an orphaned
+          account (Requirement 4.1), which the caller expresses by simply
+          not passing `onSuspend`. */}
+      {onSuspend && (
+        <button
+          onClick={() => hasTeam && onSuspend(member)}
+          disabled={!hasTeam}
+          className={`${boxClass} ${hasTeam ? neutralClass : neutralDisabledClass}`}
+          title={hasTeam ? (accountStatus === 'suspended' ? 'Unsuspend account' : 'Suspend account') : noTeamTitle}
+          aria-label={hasTeam ? (accountStatus === 'suspended' ? 'Unsuspend account' : 'Suspend account') : noTeamTitle}
+        >
+          {accountStatus === 'suspended' ? (
+            <LockOpenIcon className={iconSizeClass} aria-hidden="true" />
+          ) : (
+            <LockClosedIcon className={iconSizeClass} aria-hidden="true" />
+          )}
         </button>
       )}
       {hasTeam ? (

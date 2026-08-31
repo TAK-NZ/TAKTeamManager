@@ -91,11 +91,52 @@ async function enrichPendingRequests(rows) {
     teamPathByTeamId.set(teamId, path);
   }));
 
+  // account-lifecycle-management Requirement 5.2 (task 11.3): a batched
+  // Reclaimable_Account lookup over the distinct `requester_email` values
+  // of every `new_account` row in this response -- mirrors this
+  // function's own existing "resolve distinct ids in one pass" batching
+  // instinct (the ancestor-chain resolution above), rather than a
+  // per-row query. Keyed by email since that's the only identifier a
+  // `new_account` row and an orphaned `users` row can share.
+  const distinctNewAccountEmails = [...new Set(
+    rows
+      .filter((row) => row.request_type === 'new_account')
+      .map((row) => row.requester_email)
+      .filter(Boolean)
+  )];
+
+  const reclaimableAccountByEmail = new Map();
+  if (distinctNewAccountEmails.length > 0) {
+    const orphanedResult = await pool.query(
+      `SELECT u.id, u.email, tm.team_id AS previous_team_id
+         FROM users u
+         LEFT JOIN team_memberships tm
+           ON tm.user_id = u.id AND tm.inherited_from_team_id IS NULL
+        WHERE u.account_status = 'orphaned' AND u.email = ANY($1::text[])`,
+      [distinctNewAccountEmails]
+    );
+    for (const orphanedRow of orphanedResult.rows) {
+      reclaimableAccountByEmail.set(orphanedRow.email, {
+        userId: orphanedRow.id,
+        previousTeamId: orphanedRow.previous_team_id ?? null
+      });
+    }
+  }
+
   return rows.map((row) => {
     const base = {
       ...row,
       team_path: teamPathByTeamId.get(row.target_team_id) || row.team_name || '',
-      source_team_path: teamPathByTeamId.get(row.current_team_id) || row.source_team_name || ''
+      source_team_path: teamPathByTeamId.get(row.current_team_id) || row.source_team_name || '',
+      // account-lifecycle-management Requirement 5.2: additive, and only
+      // ever present for a `new_account` row -- `undefined` for every
+      // other request type (JSON.stringify drops an `undefined` value,
+      // so the key is simply absent from the response for those rows,
+      // matching the design's "additive field" framing rather than a
+      // `null` that would need its own documented meaning).
+      reclaimableAccount: row.request_type === 'new_account'
+        ? (reclaimableAccountByEmail.get(row.requester_email) ?? null)
+        : undefined
     };
 
     if (row.callsign_suffix) {
