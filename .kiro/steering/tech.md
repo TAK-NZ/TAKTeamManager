@@ -29,4 +29,4 @@ Client: React 18, Vite, Tailwind, React Router, Vitest + fast-check, jsdom.
 
 - Security-critical deps (`jsonwebtoken`, `helmet`, `express-rate-limit`, `node-forge`) are pinned to exact versions and enforced in CI. New client deps are pinned exactly too.
 - Every environment variable the code reads must be documented in `.env.example` with a safe default.
-- Add new schema as a `node-pg-migrate` `.cjs` migration. Never hand-edit `schema.sql` as a source of truth. Pre-existing migration history is squashed into `1786596755665_baseline-schema.cjs`; migrations since then are added incrementally alongside it (currently two device-management ones).
+- Add new schema as a `node-pg-migrate` `.cjs` migration. Never hand-edit `schema.sql` as a source of truth. Pre-existing migration history is squashed into `1786596755665_baseline-schema.cjs`; migrations since then are added incrementally alongside it (currently seven: device management, an email-nullable device invariant, pseudonymous usernames, region channel tiers/org access flags, BCH channel category, and an email-template footer fix).

@@ -90,8 +90,8 @@ fileMatchPattern: 'server/**/*.js'
 - Compute target depth and reject BEFORE any INSERT, with the guard outside any try/catch that has a fallback path.
 - Admin inheritance is computed at check time by `Team.isAdmin`, never materialised.
   - A persisted copy goes stale on re-parenting.
-- `callsign_prefix` accepts `[A-Za-z0-9]*` only — never `-`, which would be indistinguishable from a segment boundary.
-  - `callsign_suffix` also allows `-` and `.`. Both patterns live in `server/utils/callsignValidation.js`.
+- `callsign_prefix` accepts one or more `-`-separated alphanumeric segments (e.g. `FENZ`, or `AUS-FIRE` for a foreign-partner prefix) — no leading/trailing/doubled `-`, and no individual segment may itself have the exact shape of a `Managed_Identifier`'s marker+body suffix (`[DU]` + 7 Identifier_Alphabet characters), which would make `managedIdentifier.js`'s right-anchored parse ambiguous.
+  - `callsign_suffix` also allows `-` and `.`, with no segment restriction. Both patterns live in `server/utils/callsignValidation.js`.
 - A private Team hides its WHOLE branch regardless of descendants' own visibility.
   - `TeamVisibilityService`'s order is fixed: Global_Manager bypass, then absolute cross-Organisation exclusion, then private-ancestor cascade with a membership escape.
   - Reordering lets a membership row defeat Organisation isolation.
