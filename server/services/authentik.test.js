@@ -202,3 +202,66 @@ describe('AuthentikService.createAppPasswordToken', () => {
     expect(enrollmentConfig.headers.Authorization).toBe('Bearer enrollment-admin-token-value');
   });
 });
+
+/**
+ * device-management follow-up: `AuthentikService.createUser` defaults to
+ * `type: 'internal'` when the caller passes no `type` (every EXISTING
+ * caller -- `routes/users.js`, `RequestApprovalService.js`,
+ * `BulkImportService.js`), and sends the caller-supplied `type` verbatim
+ * otherwise (`DeviceEnrollmentService.createDevice`, which passes
+ * `type: 'service_account'`). Verified live against account.test.tak.nz
+ * (see this file's git history / the task's chat record) that Authentik's
+ * `POST /core/users/` accepts `type: 'service_account'` directly and that
+ * a subsequent `app_password` token mint against that user succeeds
+ * identically to an `internal` user.
+ */
+describe('AuthentikService.createUser', () => {
+  let mockClient;
+  let authentikService;
+  const ORIGINAL_ENV = { ...process.env };
+
+  beforeEach(() => {
+    jest.resetModules();
+    jest.clearAllMocks();
+    mockClient = {
+      post: jest.fn(),
+      get: jest.fn(),
+      delete: jest.fn()
+    };
+    const axios = require('axios');
+    axios.create = jest.fn(() => mockClient);
+    authentikService = require('./authentik');
+  });
+
+  afterEach(() => {
+    process.env = { ...ORIGINAL_ENV };
+  });
+
+  it("defaults to type: 'internal' when no type is supplied", async () => {
+    mockClient.post.mockResolvedValue({ data: { pk: 1, type: 'internal' } });
+
+    await authentikService.createUser({ username: 'jdoe', name: 'Jane Doe', email: 'jdoe@example.com' });
+
+    expect(mockClient.post).toHaveBeenCalledWith('/core/users/', {
+      username: 'jdoe',
+      name: 'Jane Doe',
+      email: 'jdoe@example.com',
+      is_active: true,
+      type: 'internal'
+    });
+  });
+
+  it('sends a caller-supplied type verbatim (e.g. service_account for a Team_Owned_Device)', async () => {
+    mockClient.post.mockResolvedValue({ data: { pk: 2, type: 'service_account' } });
+
+    await authentikService.createUser({ username: 'AUK-D1', name: 'Engine 4 Tablet', type: 'service_account' });
+
+    expect(mockClient.post).toHaveBeenCalledWith('/core/users/', {
+      username: 'AUK-D1',
+      name: 'Engine 4 Tablet',
+      email: undefined,
+      is_active: true,
+      type: 'service_account'
+    });
+  });
+});

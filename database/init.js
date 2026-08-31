@@ -105,9 +105,7 @@ Get started: <a href="{{password_reset_url}}">Set a password</a>, or sign in wit
 
 Login at: {{login_url}}
 
-If you have questions, contact your team administrator.
-
-<span style="font-size: 12px; color: #999;">If you did not expect this email, you can safely ignore it.</span>$tpl$,
+If you have questions, contact your team administrator.$tpl$,
       'Notification when access request is approved'),
       
       ('access_request_denied', 'Your TAK Team Manager access request has been denied',

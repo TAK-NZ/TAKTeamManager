@@ -19,4 +19,23 @@ function isCloudTakEnabled(env = process.env) {
   return env.CLOUDTAK_ENABLED === 'true';
 }
 
-module.exports = { isCloudTakEnabled };
+/**
+ * The Authentik group-name prefix used for every CloudTAK_Group
+ * (`<prefix><teams.id>`, see `CloudTakAgencyGroup.groupName`).
+ *
+ * Read from `CLOUDTAK_AGENCY_GROUP_PREFIX`, defaulting to `CloudTAKAgency`
+ * (the pre-existing hardcoded value) so an unset/empty variable preserves
+ * current behavior exactly. This exists to match CloudTAK's own
+ * `OIDC_AGENCY_ADMIN_GROUP_PREFIX` (default also `CloudTAKAgency`) when a
+ * deployment has changed that value away from its default -- the two
+ * projects have no shared config source, so the prefix must be kept in
+ * sync manually across both.
+ *
+ * @param {NodeJS.ProcessEnv} [env=process.env] Environment source; injectable for testing.
+ * @returns {string} the configured prefix, or `CloudTAKAgency` when unset/empty.
+ */
+function getCloudTakAgencyGroupPrefix(env = process.env) {
+  return env.CLOUDTAK_AGENCY_GROUP_PREFIX || 'CloudTAKAgency';
+}
+
+module.exports = { isCloudTakEnabled, getCloudTakAgencyGroupPrefix };

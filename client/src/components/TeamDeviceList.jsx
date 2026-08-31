@@ -24,6 +24,18 @@ import TransferMemberDialog from './TransferMemberDialog'
  *
  * ## Consistency with the Members/Team Admins tabs (bug #4)
  *
+ * Bugfix (list-width reduction pass): the desktop table's column set is
+ * now Device (name + username, stacked) / TAK Callsign & Role (computed
+ * `callsign` + `takRole`, stacked, the role small and uncolored) / Added
+ * / Actions -- collapsing the old separate Device/Username two-column
+ * header, mirroring EXACTLY how the same pass collapsed the Members/Team
+ * Admins tables' Name/Email/Role/TAK Role/Callsign/Actions header down to
+ * Name/Username/Role/"TAK Callsign & Role"/Actions. `callsign`/`takRole`
+ * are new fields on the `listTeamDevices`/`updateDevice` response shapes
+ * (`DeviceEnrollmentService.js`), computed the same way a human member's
+ * `tak_callsign` is (`CallsignService.assembleCallsign`), since a device
+ * has no `user_cache` row to read a stored one off.
+ *
  * This surface now renders as a table (desktop, `sm:` and up) plus a
  * divided card list (mobile, below `sm:`) -- the same table+card pairing
  * `DeviceListRow.jsx`/`DeviceListCard` established and `UserDevicesModal.jsx`
@@ -506,22 +518,31 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
         <>
           {/* Bug #9: mobile card fallback below `sm:`, matching
               `DeviceListCard`'s pattern -- a divided list, never the
-              table, on a narrow viewport. */}
+              table, on a narrow viewport.
+              Bugfix (list-width reduction, consistency with the
+              Members/Team Admins tabs' own card): device name +
+              username stacked (matching the member card's name +
+              username stacking), and "TAK Callsign & Role" -- the
+              callsign at normal size, the TAK_Role small and without
+              color underneath it -- replacing the old separate
+              Device/Username-only shape. */}
           <div className="sm:hidden divide-y divide-gray-200 dark:divide-gray-700">
             {filteredDevices.map((device) => (
-              <div key={device.deviceUserId} className="p-4 space-y-3 text-sm">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex items-start gap-3 min-w-0">
-                    <DeviceTabletIcon className="h-5 w-5 mt-0.5 text-gray-400 dark:text-gray-500 flex-shrink-0" aria-hidden="true" />
-                    <div className="min-w-0">
-                      <p className="font-medium text-gray-900 dark:text-gray-100 break-all">
-                        {deviceDisplayName(device)}
-                      </p>
-                      <p className="text-xs text-gray-500 dark:text-gray-400 font-mono break-all">
-                        {device.username}
-                      </p>
-                    </div>
+              <div key={device.deviceUserId} className="p-4 space-y-2 text-sm">
+                <div className="flex items-start gap-3 min-w-0">
+                  <DeviceTabletIcon className="h-5 w-5 mt-0.5 text-gray-400 dark:text-gray-500 flex-shrink-0" aria-hidden="true" />
+                  <div className="min-w-0">
+                    <p className="font-medium text-gray-900 dark:text-gray-100 break-all">
+                      {deviceDisplayName(device)}
+                    </p>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 font-mono break-all">
+                      {device.username}
+                    </p>
                   </div>
+                </div>
+                <div>
+                  <p className="text-gray-900 dark:text-gray-100">{device.callsign || '-'}</p>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">{device.takRole || 'Team Member'}</p>
                 </div>
                 <p className="text-xs text-gray-500 dark:text-gray-400">
                   Added <FormattedDate value={device.createdAt} fallback="Unknown" precision={DATE_PRECISION.DATE} />
@@ -541,7 +562,16 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
 
           {/* Bug #4/#9: desktop table, matching the Members/Team Admins
               tabs' own table structure -- `overflow-x-auto` wrapper,
-              same header cell classes, same Actions column alignment. */}
+              same header cell classes, same Actions column alignment.
+              Bugfix (list-width reduction, consistency with the
+              Members/Team Admins tabs): "Device" now shows the device
+              name AND its username (stacked, matching a member's
+              name+username stacking) in ONE column instead of two
+              separate Device/Username columns, and "TAK Callsign &
+              Role" replaces the plain "Added" being the only other
+              informational column -- Added moves to its own column
+              after it, matching this tab's requested Device+username /
+              Callsign+Role / Added / Actions column order. */}
           <div className="hidden sm:block overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
               <thead className="bg-gray-50 dark:bg-gray-800">
@@ -550,7 +580,7 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
                     Device
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                    Username
+                    TAK Callsign & Role
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     Added
@@ -580,10 +610,12 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
                           <DeviceTabletIcon className="h-4 w-4 text-gray-400 dark:text-gray-500 flex-shrink-0" aria-hidden="true" />
                           <span className="break-all">{deviceDisplayName(device)}</span>
                         </div>
+                        <p className="text-xs text-gray-500 dark:text-gray-400 font-mono break-all ml-6">{device.username}</p>
                         <MultipleCertificateWarning count={device.liveCertificateCount} className="mt-1" />
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400 font-mono">
-                        {device.username}
+                      <td className="px-6 py-4 whitespace-nowrap text-sm">
+                        <p className="text-gray-900 dark:text-gray-100">{device.callsign || '-'}</p>
+                        <p className="text-xs text-gray-500 dark:text-gray-400">{device.takRole || 'Team Member'}</p>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                         <FormattedDate value={device.createdAt} fallback="Unknown" precision={DATE_PRECISION.DATE} />

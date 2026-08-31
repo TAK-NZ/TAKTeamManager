@@ -1,4 +1,5 @@
 const pool = require('../config/database');
+const { getCloudTakAgencyGroupPrefix } = require('../config/cloudtak');
 
 /**
  * Pure, side-effect-free helpers for the CloudTAK agency-group integration
@@ -9,15 +10,16 @@ const pool = require('../config/database');
  */
 
 /**
- * The Authentik group name for a Team, exactly `CloudTAKAgency<id>` with no
- * additional prefix (Requirement 2.2). `<id>` is the Team's numeric
- * `teams.id`.
+ * The Authentik group name for a Team, `<prefix><id>` with no separator
+ * (Requirement 2.2), where `<id>` is the Team's numeric `teams.id` and
+ * `<prefix>` is `getCloudTakAgencyGroupPrefix()` -- `CloudTAKAgency` unless
+ * overridden via `CLOUDTAK_AGENCY_GROUP_PREFIX`.
  *
  * @param {number|string} teamId
  * @returns {string}
  */
 function groupName(teamId) {
-  return `CloudTAKAgency${teamId}`;
+  return `${getCloudTakAgencyGroupPrefix()}${teamId}`;
 }
 
 /**

@@ -19,8 +19,14 @@ import { tabAria } from './Tabs'
 // be duplicated between Teams.jsx and TeamDetail.jsx and had drifted out
 // of sync -- this component is now the single source of truth for both
 // pages).
-const CALLSIGN_PREFIX_PATTERN = '[A-Za-z0-9]*'
-const CALLSIGN_PREFIX_REGEX = /^[A-Za-z0-9]*$/
+// Foreign-partner-prefix extension: mirrors server/utils/callsignValidation.js's
+// widened CALLSIGN_PREFIX_PATTERN -- one or more `-`-separated alphanumeric
+// segments (e.g. "AUS-FIRE"), not just a single hyphen-free run. The
+// marker+body-shape rejection (`isValidCallsignPrefix`'s other new check)
+// is server-side only; this HTML pattern is a first-pass UX guard, not the
+// authoritative validator.
+const CALLSIGN_PREFIX_PATTERN = '[A-Za-z0-9]+(-[A-Za-z0-9]+)*'
+const CALLSIGN_PREFIX_REGEX = /^[A-Za-z0-9]+(-[A-Za-z0-9]+)*$/
 
 // Pure validation helper for this dialog's `callsignPrefix` input,
 // mirroring TeamDetail.jsx's `isValidSubTeamCallsignPrefix` convention --
@@ -83,6 +89,44 @@ export function buildTeamSubmitPayload(formData) {
   delete payload.callsignLevelSelection
   delete payload.pseudonymousUsernames
   return payload
+}
+
+// Bugfix (re-parent authorization gap, client-side follow-up): the
+// "Parent Team" dropdown's candidate list. The SERVER now rejects a
+// re-parent onto a destination the caller does not administer
+// (`team:update`'s row-scoped resolver in authorize.js), but leaving the
+// dropdown itself unfiltered would let a Team_Admin pick an option that
+// silently 403s on submit -- a bad experience even though nothing unsafe
+// would actually happen. This filters the dropdown to teams the caller
+// could ACTUALLY move something onto:
+//   - A Global_Manager sees every candidate, unfiltered (their `team:
+//     update` re-parent check has no destination restriction at all).
+//   - Anyone else sees only teams carrying `can_manage: true` -- the
+//     field `GET /api/teams/my-teams` now annotates on every row
+//     (mirroring `GET /api/users`' own `can_manage`, both ultimately
+//     `Team.getManagedTeamIds`-backed), i.e. exactly the teams
+//     `Team.isAdmin` would say yes to for this caller.
+//
+// The team currently being edited is excluded either way -- a team can
+// never be its own parent -- matching this dropdown's pre-existing
+// behaviour (unchanged from before this fix).
+//
+// A `can_manage` value that is missing entirely (e.g. a caller on an
+// older cached response, or a test fixture that predates this field) is
+// treated as NOT manageable (`t.can_manage === true` only, never a loose
+// truthy check) -- failing closed is the safe default for a dropdown
+// feeding an authorization-sensitive action, consistent with every
+// server-side fail-closed convention this app already follows
+// (`Team.isAdmin`'s own catch block, `DirectoryScopeService`, etc.).
+//
+// Exported for direct unit testing, matching this file's convention of
+// testing extracted pure logic without rendering the component.
+export function parentTeamCandidates(teams, editingTeam, isGlobalManager) {
+  const withoutSelf = (teams || []).filter(t => t.id !== (editingTeam ? editingTeam.id : undefined))
+  if (isGlobalManager) {
+    return withoutSelf
+  }
+  return withoutSelf.filter(t => t.can_manage === true)
 }
 
 // Small inline indicator shown next to a form field's label, making it
@@ -546,7 +590,7 @@ export default function TeamFormDialog({
                   // is not disabled.
                   required={!formData.parentTeamId}
                   pattern={CALLSIGN_PREFIX_PATTERN}
-                  title="Only letters and digits are allowed (no -)"
+                  title="Letters and digits, optionally split into segments with a single hyphen (e.g. AUS-FIRE)"
                   placeholder={formData.parentTeamId ? "STL, CHC, etc." : "FENZ, DOC, etc."}
                 />
                 {!isValidCallsignPrefixInput(formData.callsignPrefix) && (
@@ -606,7 +650,7 @@ export default function TeamFormDialog({
                   className="input w-full"
                 >
                   <option value="">No parent (Top-level team)</option>
-                  {teams.filter(t => t.id !== (editingTeam ? editingTeam.id : undefined)).map(t => (
+                  {parentTeamCandidates(teams, editingTeam, isGlobalManager).map(t => (
                     <option key={t.id} value={t.id}>
                       {t.name}
                     </option>
@@ -880,10 +924,26 @@ export default function TeamFormDialog({
                     onChange={(e) => setFormData({ ...formData, pseudonymousUsernames: e.target.checked })}
                     className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded mt-1 disabled:opacity-50"
                   />
-                  <span
-                    className={`ml-3 text-sm font-medium text-gray-700 dark:text-gray-300 ${editingTeam ? 'opacity-50' : ''}`}
-                  >
-                    Give new members usernames that carry no personal information
+                  <span className="ml-3 text-sm font-medium text-gray-700 dark:text-gray-300">
+                    {/* Bugfix (tooltip see-through): `opacity-50` used to
+                        sit on this whole <span>, ancestor of the
+                        InfoTooltip's popup below -- CSS opacity compounds
+                        through descendants, so the popup's own
+                        `opacity-100` on disclosure was really rendering
+                        at 50% (0.5 * 1.0), letting the "Allow join
+                        requests" row behind it show through, unlike
+                        every other InfoTooltip on this page (none of
+                        which sit inside an opacity-reduced ancestor).
+                        The disabled-look dimming now applies to ONLY the
+                        label text span below, leaving the icon/tooltip
+                        span at full, unreduced opacity so its disclosed
+                        popup is solid like the others -- appropriate
+                        anyway, since the padlock icon states a fixed
+                        fact ("cannot be changed") that doesn't itself
+                        become less true while editing. */}
+                    <span className={editingTeam ? 'opacity-50' : ''}>
+                      Give new members usernames that carry no personal information
+                    </span>
                     {/* Bugfix: same click.stopPropagation() reasoning as
                         the "Allow join requests" checkbox above -- these
                         two disclosure-only icons must not toggle the

@@ -5,6 +5,7 @@ import { createRoot } from 'react-dom/client'
 import Users from './Users.jsx'
 import { usersAPI, teamsAPI, configAPI, deviceManagementAPI } from '../services/api'
 import { setDisplayTimezone, DEFAULT_DISPLAY_TIMEZONE } from '../utils/dateFormat'
+import toast from 'react-hot-toast'
 
 // Validates: Requirements 2.3, 2.4, 3.1, 3.5, 3.7, 3.11
 //
@@ -442,7 +443,11 @@ describe('Users row actions (Users-page-action-parity)', () => {
     expect(Array.from(container.querySelectorAll('button')).some((b) => b.textContent === 'Save')).toBe(false)
   })
 
-  it('calls usersAPI.resendWelcome with the local_user_id and the row\'s own team_id', async () => {
+  // Bugfix (Resend welcome email was the only action with no
+  // confirmation): the action icon now opens a confirmation dialog
+  // rather than firing the request immediately; confirming inside it
+  // is what actually calls usersAPI.resendWelcome.
+  it('opens a confirmation dialog on Resend welcome, and calls usersAPI.resendWelcome with the local_user_id and the row\'s own team_id only after confirming', async () => {
     usersAPI.resendWelcome.mockResolvedValue({ data: {} })
     await mountWith([userRowWithTeam()])
 
@@ -450,11 +455,40 @@ describe('Users row actions (Users-page-action-parity)', () => {
     await act(async () => {
       resendButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
+
+    expect(usersAPI.resendWelcome).not.toHaveBeenCalled()
+    const dialog = container.querySelector('[role="dialog"][aria-labelledby="resend-welcome-title"]')
+    expect(dialog).not.toBeNull()
+    expect(dialog.textContent).toContain('ada@example.com')
+
+    const confirmButton = Array.from(dialog.querySelectorAll('button')).find((b) => b.textContent === 'Resend Email')
+    await act(async () => {
+      confirmButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
     await act(async () => {
       await Promise.resolve()
     })
 
     expect(usersAPI.resendWelcome).toHaveBeenCalledWith(7, 42)
+    expect(container.querySelector('[role="dialog"][aria-labelledby="resend-welcome-title"]')).toBeNull()
+  })
+
+  it('does not call usersAPI.resendWelcome when the confirmation dialog is cancelled', async () => {
+    await mountWith([userRowWithTeam()])
+
+    const resendButton = Array.from(actionButtons()).find((b) => b.getAttribute('aria-label') === 'Resend welcome email')
+    await act(async () => {
+      resendButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+
+    const dialog = container.querySelector('[role="dialog"][aria-labelledby="resend-welcome-title"]')
+    const cancelButton = Array.from(dialog.querySelectorAll('button')).find((b) => b.textContent === 'Cancel')
+    await act(async () => {
+      cancelButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+
+    expect(usersAPI.resendWelcome).not.toHaveBeenCalled()
+    expect(container.querySelector('[role="dialog"][aria-labelledby="resend-welcome-title"]')).toBeNull()
   })
 
   it('opens the shared TransferMemberDialog on Transfer, pre-populated with the row\'s own team as the source', async () => {
@@ -638,6 +672,86 @@ describe('Users "Create User" dialog (Users-page-action-parity, fixes BUG-026)',
     })
 
     expect(usersAPI.createAndAdd).toHaveBeenCalledWith('new.user@example.test', 'New', 'User', '5')
+    expect(container.querySelector('[role="dialog"][aria-labelledby="create-user-title"]')).toBeNull()
+  })
+
+  // Bugfix (silent welcome-email failures): the account is created
+  // either way, but `welcomeEmailSent: false` in the response now gets
+  // its own toast.error naming the target email, rather than the
+  // ordinary success toast -- and NOT both, since layering a success
+  // toast plus a separate warning for one action would read as
+  // contradictory.
+  it('shows toast.success (not toast.error) on a normal create where welcomeEmailSent is absent/true', async () => {
+    teamsAPI.getMyTeams.mockResolvedValue({ data: { teams: [{ id: 5, name: 'Bravo Team' }] } })
+    usersAPI.createAndAdd.mockResolvedValue({ data: { user: { callsign_suffix: null } } })
+    await mount({ isAdmin: false })
+    await openDialog()
+
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+    const emailInput = container.querySelector('#create-user-email')
+    const firstNameInput = container.querySelector('#create-user-first-name')
+    const lastNameInput = container.querySelector('#create-user-last-name')
+    const teamSelect = container.querySelector('#create-user-team')
+
+    await act(async () => {
+      setter.call(emailInput, 'new.user@example.test')
+      emailInput.dispatchEvent(new Event('input', { bubbles: true }))
+      setter.call(firstNameInput, 'New')
+      firstNameInput.dispatchEvent(new Event('input', { bubbles: true }))
+      setter.call(lastNameInput, 'User')
+      lastNameInput.dispatchEvent(new Event('input', { bubbles: true }))
+      const selectSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set
+      selectSetter.call(teamSelect, '5')
+      teamSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+
+    const form = container.querySelector('form')
+    await act(async () => {
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(toast.success).toHaveBeenCalledWith('User created and added to the selected team')
+    expect(toast.error).not.toHaveBeenCalled()
+  })
+
+  it('shows a single toast.error naming the email, and no toast.success, when welcomeEmailSent is false', async () => {
+    teamsAPI.getMyTeams.mockResolvedValue({ data: { teams: [{ id: 5, name: 'Bravo Team' }] } })
+    usersAPI.createAndAdd.mockResolvedValue({ data: { user: { callsign_suffix: null }, welcomeEmailSent: false } })
+    await mount({ isAdmin: false })
+    await openDialog()
+
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+    const emailInput = container.querySelector('#create-user-email')
+    const firstNameInput = container.querySelector('#create-user-first-name')
+    const lastNameInput = container.querySelector('#create-user-last-name')
+    const teamSelect = container.querySelector('#create-user-team')
+
+    await act(async () => {
+      setter.call(emailInput, 'new.user@example.test')
+      emailInput.dispatchEvent(new Event('input', { bubbles: true }))
+      setter.call(firstNameInput, 'New')
+      firstNameInput.dispatchEvent(new Event('input', { bubbles: true }))
+      setter.call(lastNameInput, 'User')
+      lastNameInput.dispatchEvent(new Event('input', { bubbles: true }))
+      const selectSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set
+      selectSetter.call(teamSelect, '5')
+      teamSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+
+    const form = container.querySelector('form')
+    await act(async () => {
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(toast.error).toHaveBeenCalledWith(expect.stringContaining('new.user@example.test'))
+    expect(toast.success).not.toHaveBeenCalled()
+    // The dialog still closes -- the account WAS created.
     expect(container.querySelector('[role="dialog"][aria-labelledby="create-user-title"]')).toBeNull()
   })
 

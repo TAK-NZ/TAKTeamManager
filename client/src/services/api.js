@@ -227,7 +227,14 @@ export const usersAPI = {
   // and no suffix was supplied, and `conflict` is non-null when the resolved
   // value collides case-insensitively with an existing member of that team.
   previewCallsignSuffix: (data) => api.post('/users/callsign-suffix-preview', data),
-  addToTeam: (userId, teamId) => api.post('/users/add-to-team', { userId, teamId }),
+  // `firstName`/`lastName`/`callsignSuffix` are optional corrections
+  // reviewed on the "Add Existing User" tab -- this is the step that
+  // turns a user who exists only in Authentik into a TAK Team Manager
+  // -managed user, so a correction made here PERSISTS to the user's
+  // account (not just this one team add). Omitted (or unchanged)
+  // preserves the server's pre-existing behavior exactly.
+  addToTeam: (userId, teamId, corrections = {}) =>
+    api.post('/users/add-to-team', { userId, teamId, ...corrections }),
   removeFromTeam: (userId, teamId) => api.delete(`/users/remove-from-team/${userId}`, { data: { teamId } }),
   resendWelcome: (userId, teamId) => api.post(`/users/${userId}/resend-welcome`, { teamId }),
   // data: { targetTeamId, justification?, callsignSuffix? }. Resolves 200 with

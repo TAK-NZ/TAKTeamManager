@@ -31,8 +31,16 @@ jest.mock('./requestContext', () => ({
 }));
 
 const mockIsAdmin = jest.fn();
+// Bugfix (re-parent authorization gap): `team:update`'s resolver now also
+// calls `Team.findById` to compare a submitted `parentTeamId` against the
+// team's CURRENT stored parent. Defaults to a root team (`parent_team_id:
+// null`) so every PRE-EXISTING `team:update` test in this file -- none of
+// which send a `parentTeamId` body at all -- is unaffected; only the new
+// describe block below overrides it per-test.
+const mockFindById = jest.fn().mockResolvedValue({ id: 42, parent_team_id: null });
 jest.mock('../models/Team', () => ({
-  isAdmin: (...args) => mockIsAdmin(...args)
+  isAdmin: (...args) => mockIsAdmin(...args),
+  findById: (...args) => mockFindById(...args)
 }));
 
 jest.mock('../config/database', () => ({ query: jest.fn() }));
@@ -152,7 +160,12 @@ function buildApp(user) {
   });
   app.get('/api/no-such-route-entry', authorize, (req, res) => res.status(200).json({ ok: true }));
   app.get('/api/widgets', authorize, (req, res) => res.status(200).json({ ok: true }));
-  app.put('/api/teams/:teamId', authorize, (req, res) => res.status(200).json({ ok: true }));
+  // Bugfix (re-parent authorization gap): `express.json()` mounted here
+  // (matching the transfer/create-and-add routes' own per-route pattern
+  // above) so the new `team:update` re-parent check can read
+  // `req.body.parentTeamId`. Production runs `express.json()` before any
+  // route middleware, so this matches that ordering.
+  app.put('/api/teams/:teamId', express.json(), authorize, (req, res) => res.status(200).json({ ok: true }));
   app.post('/api/teams/:teamId/members', authorize, (req, res) => res.status(200).json({ ok: true }));
   app.patch('/api/teams/:teamId/members/:userId', authorize, (req, res) => res.status(200).json({ ok: true }));
   app.get('/api/teams/:teamId', authorize, (req, res) => res.status(200).json({ ok: true }));
@@ -304,6 +317,136 @@ describe('authorize (Requirement 13.7 logging)', () => {
 
     expect(res.status).toBe(200);
     expect(mockWarn).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Bugfix (re-parent authorization gap): `team:update`'s resolver used to
+ * check ONLY `Team.isAdmin(:teamId, userId)` -- the team being edited --
+ * with no check at all against a DESTINATION named by a supplied
+ * `parentTeamId`. That let a Team_Admin move their own team (and its
+ * whole subtree) under any other team system-wide, including one they
+ * hold no admin relationship to. This suite exercises the extended
+ * resolver directly through the middleware, mirroring the file's
+ * existing `team:update`/`team:members:add` coverage style.
+ */
+describe('authorize (bugfix: team:update re-parent requires admin of the destination too)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockFindById.mockResolvedValue({ id: 42, parent_team_id: null });
+  });
+
+  it('permits an ordinary field edit (no parentTeamId key in the body at all) for an admin of :teamId, without calling Team.findById', async () => {
+    mockIsAdmin.mockResolvedValueOnce(true);
+    const app = buildApp({ userId: 1, is_global_manager: false });
+
+    const res = await request(app).put('/api/teams/42').send({ name: 'New name' });
+
+    expect(res.status).toBe(200);
+    expect(mockIsAdmin).toHaveBeenCalledTimes(1);
+    expect(mockIsAdmin).toHaveBeenCalledWith('42', 1);
+    expect(mockFindById).not.toHaveBeenCalled();
+  });
+
+  it('permits a resubmission of the SAME (unchanged) parentTeamId -- the common "just editing a field" case every real edit sends', async () => {
+    mockIsAdmin.mockResolvedValueOnce(true);
+    mockFindById.mockResolvedValue({ id: 42, parent_team_id: 7 });
+    const app = buildApp({ userId: 1, is_global_manager: false });
+
+    const res = await request(app).put('/api/teams/42').send({ name: 'New name', parentTeamId: 7 });
+
+    expect(res.status).toBe(200);
+    // Only the source-team check runs -- the destination is never
+    // queried, since nothing is actually moving.
+    expect(mockIsAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  it('permits a resubmission of an unchanged NULL parentTeamId (an already-root team\'s ordinary edit)', async () => {
+    mockIsAdmin.mockResolvedValueOnce(true);
+    mockFindById.mockResolvedValue({ id: 42, parent_team_id: null });
+    const app = buildApp({ userId: 1, is_global_manager: false });
+
+    const res = await request(app).put('/api/teams/42').send({ name: 'New name', parentTeamId: null });
+
+    expect(res.status).toBe(200);
+    expect(mockIsAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  it('permits a real re-parent when the caller administers BOTH the source team and the destination', async () => {
+    mockIsAdmin.mockImplementation(async (teamId) => teamId === '42' || teamId === 99);
+    mockFindById.mockResolvedValue({ id: 42, parent_team_id: 7 });
+    const app = buildApp({ userId: 1, is_global_manager: false });
+
+    const res = await request(app).put('/api/teams/42').send({ parentTeamId: 99 });
+
+    expect(res.status).toBe(200);
+    expect(mockIsAdmin).toHaveBeenCalledWith('42', 1);
+    expect(mockIsAdmin).toHaveBeenCalledWith(99, 1);
+  });
+
+  it('denies (403) a real re-parent when the caller administers the source team but NOT the destination', async () => {
+    mockIsAdmin.mockImplementation(async (teamId) => teamId === '42');
+    mockFindById.mockResolvedValue({ id: 42, parent_team_id: 7 });
+    const app = buildApp({ userId: 1, is_global_manager: false });
+
+    const res = await request(app).put('/api/teams/42').send({ parentTeamId: 99 });
+
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: 'Forbidden' });
+  });
+
+  it('denies (403) a real re-parent, without ever checking the destination, when the caller does not administer the source team at all', async () => {
+    mockIsAdmin.mockResolvedValueOnce(false);
+    const app = buildApp({ userId: 1, is_global_manager: false });
+
+    const res = await request(app).put('/api/teams/42').send({ parentTeamId: 99 });
+
+    expect(res.status).toBe(403);
+    // Short-circuits on the source-team check -- the destination
+    // (and Team.findById) is never even queried.
+    expect(mockIsAdmin).toHaveBeenCalledTimes(1);
+    expect(mockFindById).not.toHaveBeenCalled();
+  });
+
+  it('permits a Global_Manager to re-parent onto any destination, without calling Team.isAdmin or Team.findById at all', async () => {
+    const app = buildApp({ userId: 1, is_global_manager: true });
+
+    const res = await request(app).put('/api/teams/42').send({ parentTeamId: 99 });
+
+    expect(res.status).toBe(200);
+    expect(mockIsAdmin).not.toHaveBeenCalled();
+    expect(mockFindById).not.toHaveBeenCalled();
+  });
+
+  it('denies (403) a Team_Admin explicitly detaching :teamId (currently a Sub_Team) to become a top-level Organisation (parentTeamId: null)', async () => {
+    mockIsAdmin.mockResolvedValueOnce(true);
+    mockFindById.mockResolvedValue({ id: 42, parent_team_id: 7 });
+    const app = buildApp({ userId: 1, is_global_manager: false });
+
+    const res = await request(app).put('/api/teams/42').send({ parentTeamId: null });
+
+    expect(res.status).toBe(403);
+  });
+
+  it('permits a Global_Manager to detach :teamId to become a top-level Organisation (parentTeamId: null)', async () => {
+    const app = buildApp({ userId: 1, is_global_manager: true });
+
+    const res = await request(app).put('/api/teams/42').send({ parentTeamId: null });
+
+    expect(res.status).toBe(200);
+    expect(mockIsAdmin).not.toHaveBeenCalled();
+  });
+
+  it('treats a missing/not-found :teamId (Team.findById resolves undefined) as a root team (parent_team_id null) for the comparison', async () => {
+    mockIsAdmin.mockResolvedValueOnce(true);
+    mockFindById.mockResolvedValue(undefined);
+    const app = buildApp({ userId: 1, is_global_manager: false });
+
+    // Resubmitting null against a not-found team's fallback null parent
+    // is treated as unchanged -- permitted.
+    const res = await request(app).put('/api/teams/42').send({ parentTeamId: null });
+
+    expect(res.status).toBe(200);
   });
 });
 

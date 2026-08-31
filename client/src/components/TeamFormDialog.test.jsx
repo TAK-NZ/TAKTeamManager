@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { isValidCallsignPrefixInput, isOrganisationCallsignPrefixMissing, buildTeamSubmitPayload } from './TeamFormDialog.jsx';
+import { isValidCallsignPrefixInput, isOrganisationCallsignPrefixMissing, buildTeamSubmitPayload, parentTeamCandidates } from './TeamFormDialog.jsx';
 
 // Bugfix (#10): "Failed to update team: callsignLevelSelection can only be
 // set on an Organisation" thrown on every edit of an existing Sub_Team, even
@@ -46,6 +46,48 @@ describe('buildTeamSubmitPayload (bug #10: Sub_Team edit-with-no-changes regress
     buildTeamSubmitPayload(formData)
     expect(formData).toHaveProperty('callsignLevelSelection')
     expect(formData).toHaveProperty('pseudonymousUsernames')
+  })
+});
+
+// Bugfix (re-parent authorization gap, client-side follow-up): the
+// "Parent Team" dropdown must not offer a destination the server would
+// reject -- `team:update`'s row-scoped resolver now requires admin
+// rights on the destination too (authorize.js), for anyone who isn't a
+// Global_Manager.
+describe('parentTeamCandidates (bugfix: re-parent dropdown filtering)', () => {
+  const teamA = { id: 1, name: 'Alpha', can_manage: true }
+  const teamB = { id: 2, name: 'Bravo', can_manage: false }
+  const teamC = { id: 3, name: 'Charlie' } // can_manage entirely absent
+
+  it('returns every candidate, unfiltered, for a Global_Manager', () => {
+    expect(parentTeamCandidates([teamA, teamB, teamC], null, true)).toEqual([teamA, teamB, teamC])
+  })
+
+  it('filters to only can_manage: true candidates for a non-Global_Manager', () => {
+    expect(parentTeamCandidates([teamA, teamB, teamC], null, false)).toEqual([teamA])
+  })
+
+  it('treats a MISSING can_manage field as not manageable (fail closed), for a non-Global_Manager', () => {
+    expect(parentTeamCandidates([teamC], null, false)).toEqual([])
+  })
+
+  it('treats a truthy-but-not-strictly-true can_manage value as not manageable (strict === true check)', () => {
+    expect(parentTeamCandidates([{ id: 4, name: 'Delta', can_manage: 1 }], null, false)).toEqual([])
+  })
+
+  it('excludes the team currently being edited, for both a Global_Manager and a non-Global_Manager', () => {
+    const editingTeam = { id: 1 }
+    expect(parentTeamCandidates([teamA, teamB], editingTeam, true)).toEqual([teamB])
+    expect(parentTeamCandidates([teamA, teamB], editingTeam, false)).toEqual([])
+  })
+
+  it('does not exclude any team when creating (editingTeam is null)', () => {
+    expect(parentTeamCandidates([teamA, teamB], null, true)).toEqual([teamA, teamB])
+  })
+
+  it('handles a null/undefined teams array without throwing', () => {
+    expect(parentTeamCandidates(null, null, false)).toEqual([])
+    expect(parentTeamCandidates(undefined, null, true)).toEqual([])
   })
 });
 
@@ -100,8 +142,21 @@ describe('TeamFormDialog — isValidCallsignPrefixInput', () => {
     expect(isValidCallsignPrefixInput('ABC123')).toBe(true);
   });
 
-  it('returns false for input with dashes or special chars', () => {
-    expect(isValidCallsignPrefixInput('NZ-POL')).toBe(false);
+  // Foreign-partner-prefix extension: a single internal hyphen (one or
+  // more `-`-separated alphanumeric segments, e.g. "AUS-FIRE") is now
+  // accepted by this CLIENT-SIDE check, mirroring
+  // server/utils/callsignValidation.js's widened CALLSIGN_PREFIX_PATTERN.
+  // The Managed_Identifier marker+body-shape rejection is server-side
+  // only (see callsignValidation.js) and is not duplicated here.
+  it('returns true for a single internal hyphen (a two-segment prefix)', () => {
+    expect(isValidCallsignPrefixInput('NZ-POL')).toBe(true);
+    expect(isValidCallsignPrefixInput('AUS-FIRE')).toBe(true);
+  });
+
+  it('returns false for a leading, trailing, or doubled hyphen, or other special chars', () => {
+    expect(isValidCallsignPrefixInput('-NZ')).toBe(false);
+    expect(isValidCallsignPrefixInput('NZ-')).toBe(false);
+    expect(isValidCallsignPrefixInput('NZ--POL')).toBe(false);
     expect(isValidCallsignPrefixInput('NZ POL')).toBe(false);
     expect(isValidCallsignPrefixInput('NZ.POL')).toBe(false);
   });
@@ -205,7 +260,7 @@ describe('TeamFormDialog — Pseudonymous_Username_Policy control (takserver-enr
   // for Prefix/TAK Color already, which would pass vacuously).
   it('is locked unconditionally (locked={true}), never keyed to editingTeam, on its FieldLockIndicator', () => {
     const controlIndex = dialogSource.indexOf('id="pseudonymousUsernames"')
-    const nearbyBlock = dialogSource.slice(controlIndex, controlIndex + 1200)
+    const nearbyBlock = dialogSource.slice(controlIndex, controlIndex + 2600)
     const fieldLockIndicatorIndex = nearbyBlock.indexOf('<FieldLockIndicator')
     expect(fieldLockIndicatorIndex).toBeGreaterThan(-1)
     const indicatorBlock = nearbyBlock.slice(fieldLockIndicatorIndex, fieldLockIndicatorIndex + 200)
@@ -261,7 +316,7 @@ describe('TeamFormDialog — Pseudonymous_Username_Policy control (takserver-enr
     // ordinary text beside the control (now inside InfoTooltip's `text`
     // node), not only in the icon's title.
     const controlIndex = dialogSource.indexOf('id="pseudonymousUsernames"')
-    const nearbyText = dialogSource.slice(controlIndex, controlIndex + 2000)
+    const nearbyText = dialogSource.slice(controlIndex, controlIndex + 3200)
     expect(nearbyText).toContain('This cannot be changed once the Organisation is created.')
   })
 })
@@ -338,8 +393,41 @@ describe('TeamFormDialog — checkbox rows are fully clickable <label>s (mobile 
 
   it('"pseudonymousUsernames": stops click propagation on its FieldLockIndicator/InfoTooltip icons', () => {
     const controlIndex = dialogSource.indexOf('id="pseudonymousUsernames"')
-    const nearbyBlock = dialogSource.slice(controlIndex, controlIndex + 1200)
+    const nearbyBlock = dialogSource.slice(controlIndex, controlIndex + 2600)
     expect(nearbyBlock).toContain('onClick={(e) => e.stopPropagation()}')
+  })
+
+  // Bugfix (tooltip see-through): the disabled-look dimming
+  // (`opacity-50` while editingTeam, matching the checkbox `input`'s own
+  // `disabled:opacity-50`) must apply to ONLY the label text, never to
+  // an ancestor of the FieldLockIndicator/InfoTooltip icons -- CSS
+  // opacity compounds through descendants, so an opacity-reduced
+  // ancestor would make the InfoTooltip's disclosed popup translucent
+  // too (letting whatever sits behind it, e.g. the "Allow join
+  // requests" row above, show through), unlike every other InfoTooltip
+  // on this page.
+  it('"pseudonymousUsernames": the opacity-50 dimming wraps only the label text, not the icon/tooltip span (tooltip see-through bugfix)', () => {
+    const controlIndex = dialogSource.indexOf('id="pseudonymousUsernames"')
+    const labelTextSpanIndex = dialogSource.indexOf('Give new members usernames that carry no personal information', controlIndex)
+    const dimmedSpanStart = dialogSource.lastIndexOf('<span className={editingTeam', labelTextSpanIndex)
+    expect(dimmedSpanStart).toBeGreaterThan(controlIndex)
+    const dimmedSpanEnd = dialogSource.indexOf('</span>', labelTextSpanIndex)
+    const dimmedSpanBlock = dialogSource.slice(dimmedSpanStart, dimmedSpanEnd)
+
+    // The dimmed span closes (its own </span>) BEFORE the icon/tooltip
+    // span opens -- i.e. FieldLockIndicator/InfoTooltip are siblings of
+    // the dimmed span, not descendants of it.
+    const iconSpanIndex = dialogSource.indexOf('<span onClick={(e) => e.stopPropagation()}', dimmedSpanEnd)
+    expect(iconSpanIndex).toBeGreaterThan(dimmedSpanEnd)
+    expect(dimmedSpanBlock).not.toContain('FieldLockIndicator')
+    expect(dimmedSpanBlock).not.toContain('InfoTooltip')
+
+    // The outer wrapping <span> around the whole label+icons group no
+    // longer itself carries the opacity toggle -- only the inner one does.
+    const outerSpanIndex = dialogSource.lastIndexOf('<span className="ml-3 text-sm font-medium', dimmedSpanStart)
+    expect(outerSpanIndex).toBeGreaterThan(controlIndex)
+    const outerSpanTagEnd = dialogSource.indexOf('>', outerSpanIndex)
+    expect(dialogSource.slice(outerSpanIndex, outerSpanTagEnd)).not.toContain('opacity-50')
   })
 })
 

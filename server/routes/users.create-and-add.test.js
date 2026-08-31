@@ -22,6 +22,18 @@ jest.mock('../config/database', () => ({
   query: jest.fn()
 }));
 
+// Bugfix (silent welcome-email failures): the `welcomeEmailSent: true`
+// case below needs `EmailService.sendEmail` to reach its
+// `transporter.sendMail` call successfully -- mocked here the same way
+// `EmailService.test.js` mocks it, so no real SMTP connection is
+// attempted. Every OTHER test in this file (which never sets up an
+// `email_templates` row) never reaches this call at all, since
+// `sendEmail` throws at the template lookup first.
+const mockSendMail = jest.fn().mockResolvedValue({ messageId: 'msg-123' });
+jest.mock('nodemailer', () => ({
+  createTransport: jest.fn().mockImplementation(() => ({ sendMail: mockSendMail }))
+}));
+
 jest.mock('../services/authentik', () => ({
   getUsers: jest.fn()
 }));
@@ -946,5 +958,90 @@ describe('POST /api/users/create-and-add CloudTAK admin-promotion enqueue (Requi
       expect.anything(),
       expect.anything()
     );
+  });
+});
+
+/**
+ * Bugfix (silent welcome-email failures): `sendApprovalEmail` is called
+ * post-COMMIT (Phase 3), wrapped in its own try/catch. Previously that
+ * catch only logged; the account was created either way and the caller
+ * had no way to know the invite never went out. `welcomeEmailSent` now
+ * rides along on the same 201 response so the admin gets a chance to
+ * notice and follow up (see `client/src/pages/TeamDetail.jsx`'s and
+ * `Users.jsx`'s own toast handling).
+ *
+ * These tests use the REAL `EmailService` (not mocked) the same way the
+ * rest of this file already does -- `sendApprovalEmail` -> `sendEmail`
+ * looks up an `email_templates` row via the mocked `pool.query`, which
+ * every other describe block in this file leaves returning `{ rows: [] }`
+ * by default; a template lookup returning no rows is exactly what makes
+ * `sendEmail` throw (`Email template not found: ...`), which is why the
+ * existing "success" tests above already log (and swallow, pre-fix) an
+ * email failure without asserting on it one way or the other. That
+ * default behavior is now the FALSE case below; the TRUE case stubs a
+ * matching `email_templates` row instead of mocking `EmailService`
+ * itself, so the assertion exercises the real send path rather than a
+ * mock that could drift from it.
+ */
+describe('POST /api/users/create-and-add welcomeEmailSent (bugfix: silent welcome-email failures)', () => {
+  let app;
+  let originalFetch;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    app = buildApp();
+    originalFetch = global.fetch;
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  function buildMockClient() {
+    return {
+      query: jest.fn().mockImplementation((sql) => {
+        if (sql.includes('SELECT id FROM users WHERE authentik_user_id')) {
+          return Promise.resolve({ rows: [{ id: 55 }] });
+        }
+        return Promise.resolve({ rows: [] });
+      }),
+      release: jest.fn()
+    };
+  }
+
+  it('reports welcomeEmailSent: false, without failing the request or affecting the created user, when the email template lookup fails', async () => {
+    mockAuthentikSuccess();
+    pool.connect.mockResolvedValue(buildMockClient());
+    // No `email_templates` row for `access_request_approved` -- the
+    // default `{ rows: [] }` every other describe block in this file
+    // already relies on, making `EmailService.sendEmail` throw
+    // `Email template not found: access_request_approved`.
+    pool.query.mockResolvedValue({ rows: [] });
+
+    const res = await request(app).post('/api/users/create-and-add').send(VALID_BODY);
+
+    expect(res.status).toBe(201);
+    expect(res.body.welcomeEmailSent).toBe(false);
+    // The account was still created -- a failed send is never grounds
+    // to roll back the already-committed local/Authentik writes.
+    expect(res.body.user.email).toBe(VALID_BODY.email);
+  });
+
+  it('reports welcomeEmailSent: true when the email template lookup and send both succeed', async () => {
+    mockAuthentikSuccess();
+    pool.connect.mockResolvedValue(buildMockClient());
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('FROM email_templates')) {
+        return Promise.resolve({
+          rows: [{ subject_template: 'Welcome', body_template: 'Hello {{first_name}}' }]
+        });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const res = await request(app).post('/api/users/create-and-add').send(VALID_BODY);
+
+    expect(res.status).toBe(201);
+    expect(res.body.welcomeEmailSent).toBe(true);
   });
 });

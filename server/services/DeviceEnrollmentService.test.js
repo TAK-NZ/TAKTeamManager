@@ -178,6 +178,14 @@ describe('DeviceEnrollmentService.createDevice', () => {
     expect('email' in createUserArgs).toBe(false);
     expect(JSON.stringify(createUserArgs)).not.toContain('"email"');
 
+    // device-management follow-up: a Team_Owned_Device is created as an
+    // Authentik service_account, not the createUser default of
+    // 'internal' -- a device has no email and never interactively logs
+    // in; it authenticates only via the app-password token
+    // `generateEnrollmentQrCode`/`generateSelfEnrollment` mint for it
+    // later, exactly the shape `service_account` is for.
+    expect(createUserArgs.type).toBe('service_account');
+
     // Phase 2: one client, one transaction, adopting the Claim_Row and
     // attaching team membership on the SAME client.
     expect(mockClient.query).toHaveBeenCalledWith('BEGIN');
@@ -671,8 +679,17 @@ describe('DeviceEnrollmentService.generateSelfEnrollment', () => {
 });
 
 describe('DeviceEnrollmentService.listTeamDevices', () => {
+  const ORG_ANCESTOR_CHAIN = [{ id: 5, parent_team_id: null, callsign_prefix: 'AUK', callsign_level_selection: null, depth: 0 }];
+
   beforeEach(() => {
     jest.clearAllMocks();
+    // Bugfix (Members/Team Admins/Team Devices tab consistency): every
+    // test below that returns >= 1 device row now also triggers ONE
+    // Team.getAncestorChain call to compute each device's callsign --
+    // default to a simple single-level Organisation chain so existing
+    // assertions about the OTHER fields don't have to care about this
+    // one unless a test is specifically about it.
+    Team.getAncestorChain.mockResolvedValue(ORG_ANCESTOR_CHAIN);
   });
 
   function mockDevicesQuery(rows) {
@@ -691,6 +708,8 @@ describe('DeviceEnrollmentService.listTeamDevices', () => {
         device_user_id: 42,
         username: 'AUK-D7K3QMX',
         device_label: 'Engine 4 Tablet',
+        callsign_suffix: 'Tanker1',
+        tak_role: 'Team Member',
         created_at: '2024-01-01T00:00:00.000Z',
         live_certificate_count: 0
       }
@@ -705,6 +724,9 @@ describe('DeviceEnrollmentService.listTeamDevices', () => {
           deviceUserId: 42,
           username: 'AUK-D7K3QMX',
           deviceLabel: 'Engine 4 Tablet',
+          callsignSuffix: 'Tanker1',
+          takRole: 'Team Member',
+          callsign: 'AUK-Tanker1',
           teamId: 5,
           createdAt: '2024-01-01T00:00:00.000Z',
           liveCertificateCount: 0
@@ -721,6 +743,8 @@ describe('DeviceEnrollmentService.listTeamDevices', () => {
         device_user_id: 7,
         username: 'AUK-D2M4XYZ',
         device_label: null,
+        callsign_suffix: null,
+        tak_role: 'Team Lead',
         created_at: '2024-02-02T00:00:00.000Z',
         live_certificate_count: 3
       }
@@ -734,6 +758,9 @@ describe('DeviceEnrollmentService.listTeamDevices', () => {
         deviceUserId: 7,
         username: 'AUK-D2M4XYZ',
         deviceLabel: null,
+        callsignSuffix: null,
+        takRole: 'Team Lead',
+        callsign: 'AUK',
         teamId: 9,
         createdAt: '2024-02-02T00:00:00.000Z',
         liveCertificateCount: 3
@@ -752,29 +779,32 @@ describe('DeviceEnrollmentService.listTeamDevices', () => {
     expect(pool.query).not.toHaveBeenCalled();
   });
 
-  it('returns an empty array for a team with zero Team_Owned_Devices', async () => {
+  it('returns an empty array for a team with zero Team_Owned_Devices, without resolving an Ancestor_Chain at all', async () => {
     Team.isAdmin.mockResolvedValue(true);
     mockDevicesQuery([]);
 
     const result = await DeviceEnrollmentService.listTeamDevices(5, { userId: 1, is_global_manager: false });
 
     expect(result).toEqual({ devices: [] });
+    expect(Team.getAncestorChain).not.toHaveBeenCalled();
   });
 
   it('resolves liveCertificateCount for devices with 0, 1 and 2+ live (non-revoked) certificates via ONE derived-table join, in a single query call for the whole listing', async () => {
     Team.isAdmin.mockResolvedValue(true);
     mockDevicesQuery([
-      { device_user_id: 1, username: 'AUK-D0000AA', device_label: null, created_at: '2024-01-01T00:00:00.000Z', live_certificate_count: 0 },
-      { device_user_id: 2, username: 'AUK-D0000BB', device_label: null, created_at: '2024-01-02T00:00:00.000Z', live_certificate_count: 1 },
-      { device_user_id: 3, username: 'AUK-D0000CC', device_label: null, created_at: '2024-01-03T00:00:00.000Z', live_certificate_count: 2 }
+      { device_user_id: 1, username: 'AUK-D0000AA', device_label: null, callsign_suffix: null, tak_role: 'Team Member', created_at: '2024-01-01T00:00:00.000Z', live_certificate_count: 0 },
+      { device_user_id: 2, username: 'AUK-D0000BB', device_label: null, callsign_suffix: null, tak_role: 'Team Member', created_at: '2024-01-02T00:00:00.000Z', live_certificate_count: 1 },
+      { device_user_id: 3, username: 'AUK-D0000CC', device_label: null, callsign_suffix: null, tak_role: 'Team Member', created_at: '2024-01-03T00:00:00.000Z', live_certificate_count: 2 }
     ]);
 
     const result = await DeviceEnrollmentService.listTeamDevices(5, { userId: 1, is_global_manager: false });
 
     expect(result.devices.map((d) => d.liveCertificateCount)).toEqual([0, 1, 2]);
     // No N+1: exactly one pool.query call resolves the whole list,
-    // independent of how many devices it returns.
+    // independent of how many devices it returns (Team.getAncestorChain
+    // is a separate, ALSO single call per listing -- not per row).
     expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(Team.getAncestorChain).toHaveBeenCalledTimes(1);
 
     const [sql] = pool.query.mock.calls[0];
     expect(sql).toContain('LEFT JOIN');
@@ -796,7 +826,7 @@ describe('DeviceEnrollmentService.listTeamDevices', () => {
   it('scopes the listing to direct membership and Team_Owned_Devices only, echoing back the teamId parameter rather than re-deriving it per row', async () => {
     Team.isAdmin.mockResolvedValue(true);
     mockDevicesQuery([
-      { device_user_id: 42, username: 'AUK-D7K3QMX', device_label: 'Engine 4 Tablet', created_at: '2024-01-01T00:00:00.000Z', live_certificate_count: 0 }
+      { device_user_id: 42, username: 'AUK-D7K3QMX', device_label: 'Engine 4 Tablet', callsign_suffix: 'Tanker1', tak_role: 'Team Member', created_at: '2024-01-01T00:00:00.000Z', live_certificate_count: 0 }
     ]);
 
     const result = await DeviceEnrollmentService.listTeamDevices(5, { userId: 1, is_global_manager: false });
@@ -806,6 +836,57 @@ describe('DeviceEnrollmentService.listTeamDevices', () => {
     expect(sql).toContain('is_team_device = true');
     expect(params).toEqual([5]);
     expect(result.devices.every((d) => d.teamId === 5)).toBe(true);
+  });
+
+  // Bugfix (Members/Team Admins/Team Devices tab consistency): the new
+  // `callsign` field assembles the SAME way a human member's
+  // `tak_callsign` does (`CallsignService.assembleCallsign`), reusing
+  // ONE `Team.getAncestorChain` resolution for the whole device list
+  // rather than re-querying it per device.
+  describe('computed callsign field', () => {
+    it('assembles Organisation + Team segments + the device\'s own callsign_suffix as the Name segment', async () => {
+      Team.isAdmin.mockResolvedValue(true);
+      Team.getAncestorChain.mockResolvedValue([
+        { id: 1, parent_team_id: null, callsign_prefix: 'AUK', callsign_level_selection: null, depth: 0 },
+        { id: 5, parent_team_id: 1, callsign_prefix: 'STL', callsign_level_selection: null, depth: 1 }
+      ]);
+      mockDevicesQuery([
+        { device_user_id: 42, username: 'AUK-D7K3QMX', device_label: 'Engine 4', callsign_suffix: 'Tanker1', tak_role: 'Team Member', created_at: '2024-01-01T00:00:00.000Z', live_certificate_count: 0 }
+      ]);
+
+      const result = await DeviceEnrollmentService.listTeamDevices(5, { userId: 1, is_global_manager: false });
+
+      expect(Team.getAncestorChain).toHaveBeenCalledWith(5);
+      expect(result.devices[0].callsign).toBe('AUK-STL-Tanker1');
+    });
+
+    it('omits the Name segment entirely when the device carries no callsign_suffix', async () => {
+      Team.isAdmin.mockResolvedValue(true);
+      mockDevicesQuery([
+        { device_user_id: 42, username: 'AUK-D7K3QMX', device_label: null, callsign_suffix: null, tak_role: 'Team Member', created_at: '2024-01-01T00:00:00.000Z', live_certificate_count: 0 }
+      ]);
+
+      const result = await DeviceEnrollmentService.listTeamDevices(5, { userId: 1, is_global_manager: false });
+
+      expect(result.devices[0].callsign).toBe('AUK');
+    });
+
+    it('respects the Organisation\'s Callsign_Level_Selection, skipping a Team_Depth not selected', async () => {
+      Team.isAdmin.mockResolvedValue(true);
+      Team.getAncestorChain.mockResolvedValue([
+        { id: 1, parent_team_id: null, callsign_prefix: 'AUK', callsign_level_selection: [2], depth: 0 },
+        { id: 5, parent_team_id: 1, callsign_prefix: 'STL', callsign_level_selection: null, depth: 1 }
+      ]);
+      mockDevicesQuery([
+        { device_user_id: 42, username: 'AUK-D7K3QMX', device_label: null, callsign_suffix: 'Tanker1', tak_role: 'Team Member', created_at: '2024-01-01T00:00:00.000Z', live_certificate_count: 0 }
+      ]);
+
+      const result = await DeviceEnrollmentService.listTeamDevices(5, { userId: 1, is_global_manager: false });
+
+      // depth 1 (STL) is NOT in the selection [2], so the Team segment
+      // is omitted entirely.
+      expect(result.devices[0].callsign).toBe('AUK-Tanker1');
+    });
   });
 });
 
@@ -829,6 +910,14 @@ describe('DeviceEnrollmentService.updateDevice', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     Team.getFullMemberList.mockResolvedValue([]);
+    // Bugfix (Members/Team Admins/Team Devices tab consistency):
+    // updateDevice now also resolves an Ancestor_Chain (to recompute the
+    // returned `callsign`) after the write -- default to a simple
+    // single-level Organisation chain, mirroring listTeamDevices' own
+    // tests, unless a specific test needs a deeper one.
+    Team.getAncestorChain.mockResolvedValue([
+      { id: 5, parent_team_id: null, callsign_prefix: 'AUK', callsign_level_selection: null, depth: 0 }
+    ]);
   });
 
   it('updates deviceLabel and callsignSuffix for an authorized team admin, returning the updated row', async () => {
@@ -838,7 +927,8 @@ describe('DeviceEnrollmentService.updateDevice', () => {
       id: 42,
       username: 'AUK-D7K3QMX',
       device_label: 'Renamed Tablet',
-      callsign_suffix: 'Tanker1'
+      callsign_suffix: 'Tanker1',
+      tak_role: 'Team Member'
     });
 
     const result = await DeviceEnrollmentService.updateDevice(
@@ -849,11 +939,14 @@ describe('DeviceEnrollmentService.updateDevice', () => {
 
     expect(Team.isAdmin).toHaveBeenCalledWith(5, 1);
     expect(User.update).toHaveBeenCalledWith(42, { device_label: 'Renamed Tablet', callsign_suffix: 'Tanker1' });
+    expect(Team.getAncestorChain).toHaveBeenCalledWith(5);
     expect(result).toEqual({
       deviceUserId: 42,
       username: 'AUK-D7K3QMX',
       deviceLabel: 'Renamed Tablet',
       callsignSuffix: 'Tanker1',
+      takRole: 'Team Member',
+      callsign: 'AUK-Tanker1',
       teamId: 5
     });
   });
@@ -861,7 +954,7 @@ describe('DeviceEnrollmentService.updateDevice', () => {
   it('leaves a field untouched (no key in the User.update call) when it is not supplied', async () => {
     Team.isAdmin.mockResolvedValue(true);
     mockDeviceLookup();
-    User.update.mockResolvedValue({ id: 42, username: 'AUK-D7K3QMX', device_label: 'Old Label', callsign_suffix: null });
+    User.update.mockResolvedValue({ id: 42, username: 'AUK-D7K3QMX', device_label: 'Old Label', callsign_suffix: null, tak_role: 'Team Member' });
 
     await DeviceEnrollmentService.updateDevice(42, { deviceLabel: 'New Label' }, { userId: 1, is_global_manager: false });
 
@@ -872,7 +965,7 @@ describe('DeviceEnrollmentService.updateDevice', () => {
     Team.isAdmin.mockResolvedValue(true);
     mockDeviceLookup();
     Team.getFullMemberList.mockResolvedValue([{ id: 42, callsign_suffix: 'Tanker1' }]);
-    User.update.mockResolvedValue({ id: 42, username: 'AUK-D7K3QMX', device_label: null, callsign_suffix: 'Tanker1' });
+    User.update.mockResolvedValue({ id: 42, username: 'AUK-D7K3QMX', device_label: null, callsign_suffix: 'Tanker1', tak_role: 'Team Member' });
 
     await DeviceEnrollmentService.updateDevice(42, { callsignSuffix: 'Tanker1' }, { userId: 1, is_global_manager: false });
 

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import React from 'react'
-import { useParams, Link } from 'react-router-dom'
+import { useParams, useSearchParams, Link } from 'react-router-dom'
 import { PlusIcon, UsersIcon, UserPlusIcon, ShieldCheckIcon, BuildingOfficeIcon, FolderPlusIcon, SignalIcon, XMarkIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, TrashIcon, PencilIcon, CheckIcon, ArrowLeftOnRectangleIcon, ArrowPathIcon, DevicePhoneMobileIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import { teamsAPI, channelsAPI, usersAPI, configAPI, devicesAPI } from '../services/api'
@@ -23,6 +23,7 @@ import MemberEditRow, {
   CALLSIGN_SUFFIX_PATTERN
 } from '../components/MemberEditRow'
 import MemberActions from '../components/MemberActions'
+import AdminActions from '../components/AdminActions'
 import EnrollmentView from './EnrollmentView'
 import {
   newUserFormReducer,
@@ -46,6 +47,37 @@ const CALLSIGN_NAME_FORMAT_EXAMPLES = {
   first_last_initial: 'John D',
   first_initial_dot_last: 'J.Doe',
   user_defined: 'Custom'
+}
+
+// Bugfix (Orgs & Teams overview -> tab deep link): the whole-page allow-list
+// for `?tab=` -- matches the tab `id`s the tab bar itself renders (see the
+// `tabs` array built just before that `<nav>`). 'devices' is included even
+// though that tab only renders while `devicesEnabled` is true: a `?tab=
+// devices` link with the feature off still resolves to a VALID id here (so
+// it doesn't fall back to 'members'), and simply renders nothing extra in
+// the tab bar or body, the same as manually clicking a tab that isn't
+// there would be a no-op for -- there being no matching tab body block. It
+// is Teams.jsx's own device-count link, from the SAME table this page's
+// own device count is read from, that would otherwise land on a
+// nonexistent-looking tab for exactly the users allowed to see it.
+const VALID_TAB_IDS = ['members', 'devices', 'admins', 'channels', 'subteams']
+
+/**
+ * Bugfix (Orgs & Teams overview -> tab deep link): resolves the tab this
+ * page should open on from a `?tab=` query param, defaulting to 'members'
+ * (the page's original, pre-fix behaviour) for anything not on
+ * `VALID_TAB_IDS` -- missing, misspelled, or a value from an unrelated
+ * query param a caller happened to also name `tab`. Exported and pulled out
+ * of the `useState` initializer as its own pure function, per this file's
+ * established convention of testing extracted decision logic directly
+ * (`formatCallsignLevels`, `computeTeamDepth`, etc., above) rather than via
+ * a mount harness.
+ *
+ * @param {string|null} tabParam `searchParams.get('tab')`'s raw value.
+ * @returns {string} a member of `VALID_TAB_IDS`.
+ */
+export function resolveInitialTab(tabParam) {
+  return VALID_TAB_IDS.includes(tabParam) ? tabParam : 'members'
 }
 
 export function formatCallsignNameFormatExample(callsignNameFormat) {
@@ -96,13 +128,19 @@ export { computeTeamDepth }
 export { getInitialMemberEditForm, isValidMemberCallsignSuffix }
 
 // Requirement 3.10 (task 33.3): mirrors server/utils/callsignValidation.js's
-// `isValidCallsignPrefix` character class (letters and digits only, no `-`
-// -- stricter than `callsign_suffix` above, per Requirement 3.8) as an
-// HTML `pattern`, applied to the Create Sub-Team Dialog's own "Prefix"
-// input (`subTeamFormData.callsignPrefix`), the same treatment task 32.6
-// applies to the equivalent input in Teams.jsx.
-const CALLSIGN_PREFIX_PATTERN = '[A-Za-z0-9]*'
-const CALLSIGN_PREFIX_REGEX = /^[A-Za-z0-9]*$/
+// `isValidCallsignPrefix` character class as an HTML `pattern`, applied to
+// the Create Sub-Team Dialog's own "Prefix" input
+// (`subTeamFormData.callsignPrefix`), the same treatment task 32.6 applies
+// to the equivalent input in Teams.jsx.
+//
+// Foreign-partner-prefix extension: widened to one or more `-`-separated
+// alphanumeric segments (e.g. "AUS-FIRE"), matching
+// server/utils/callsignValidation.js's widened CALLSIGN_PREFIX_PATTERN. The
+// marker+body-shape rejection (`isValidCallsignPrefix`'s other new check)
+// is server-side only; this HTML pattern is a first-pass UX guard, not the
+// authoritative validator.
+const CALLSIGN_PREFIX_PATTERN = '[A-Za-z0-9]+(-[A-Za-z0-9]+)*'
+const CALLSIGN_PREFIX_REGEX = /^[A-Za-z0-9]+(-[A-Za-z0-9]+)*$/
 
 // Pure validation helper for the Create Sub-Team Dialog's `callsignPrefix`
 // input, mirroring `isValidMemberCallsignSuffix` below's convention -- an
@@ -178,6 +216,17 @@ export { isValidNewUserEmail, extractCallsignSuffixServerError }
 
 export default function TeamDetail({ user, refreshUser }) {
   const { teamId } = useParams()
+  // Bugfix (Orgs & Teams overview -> tab deep link): a Members/Team
+  // Devices/Team Admins/Sub-teams count on the overview page links here
+  // as `?tab=<id>`, and the initial tab should land on whichever count
+  // was clicked rather than always defaulting to Members.
+  // `VALID_TAB_IDS` is the whole-page allow-list -- an unrecognised or
+  // missing `?tab=` (including 'devices' before `devicesEnabled` below
+  // has resolved true, e.g. a stale link into a deployment where the
+  // flag is off) falls back to the pre-existing 'members' default rather
+  // than landing on a tab that doesn't exist.
+  const [searchParams] = useSearchParams()
+  const [activeTab, setActiveTab] = useState(resolveInitialTab(searchParams.get('tab')))
   const [team, setTeam] = useState(null)
   const [members, setMembers] = useState([])
   const [admins, setAdmins] = useState([])
@@ -186,7 +235,6 @@ export default function TeamDetail({ user, refreshUser }) {
   const [parentTeam, setParentTeam] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
-  const [activeTab, setActiveTab] = useState('members')
   const [searchTerms, setSearchTerms] = useState({
     members: '',
     admins: '',
@@ -308,6 +356,28 @@ export default function TeamDetail({ user, refreshUser }) {
   const [removeUserRole, setRemoveUserRole] = useState('')
   const [removeConfirmInput, setRemoveConfirmInput] = useState('')
   const [removingUser, setRemovingUser] = useState(false)
+  // Bugfix (Team Admins tab action-set mismatch): the Team Admins tab's
+  // own confirmation state for "Remove as admin" -- deliberately
+  // SEPARATE from removeUserId/removeUserRole above, which drive the
+  // Members tab's unrelated, much more severe "Permanently Delete User"
+  // dialog. `removingAdmin` holds the admin row itself (not just an id)
+  // since the confirmation dialog needs their name/email to address the
+  // prompt, mirroring how removeUserId's own dialog looks the target row
+  // up from `members`/`admins` by id -- storing the row directly here
+  // avoids that same lookup.
+  const [removingAdmin, setRemovingAdmin] = useState(null)
+  const [removingAdminInFlight, setRemovingAdminInFlight] = useState(false)
+  // Bugfix (Resend welcome email was the only action with no
+  // confirmation): mirrors removingAdmin's own shape -- holds the
+  // target member row itself (not just an id), since the confirmation
+  // dialog needs their email to address the prompt. Same plain
+  // Cancel/Confirm DIALOG SHAPE as "Delete Sub-Team"/"Remove as Admin"
+  // (no type-to-confirm input), but the Confirm button itself uses
+  // btn-primary rather than btn-danger -- resending an email is not
+  // destructive and touches no account/membership state, so the red
+  // "danger" framing those other two dialogs use would overstate it.
+  const [resendingWelcomeTo, setResendingWelcomeTo] = useState(null)
+  const [resendingWelcomeInFlight, setResendingWelcomeInFlight] = useState(false)
   // Requirements 11.13, 13.1, 13.2, 13.3, 13.5 (task 33.2): per-row inline
   // Member_List edit state. `editingMemberId` tracks which member/admin row
   // (by user id) currently has its inline edit form open -- at most one row
@@ -454,8 +524,63 @@ export default function TeamDetail({ user, refreshUser }) {
     }
   }
 
+  // Feature (Add Existing User onboarding review): when a candidate is
+  // picked in the member-role "Add Existing User" tab, pre-fill the
+  // shared Create-New-User form state (`newUserFormState`) with that
+  // candidate's current First Name/Last Name/Callsign Suffix -- reusing
+  // the SAME reducer/preview machinery the "Create New User" tab already
+  // uses, so this tab's name/suffix fields get the identical
+  // collision-checked-preview behaviour for free. `reset` runs first so a
+  // stale value from a previously selected candidate (or a previous
+  // dialog session) is never carried over. A candidate with no stored
+  // callsign_suffix yet gets an immediate default-suffix preview request
+  // (`trigger: 'names'`), exactly as blurring the name fields on the
+  // Create New User tab would -- so the field is never left simply blank
+  // for a candidate onboarding for the first time.
+  //
+  // This is a review/correction step for turning an Authentik-only user
+  // into a TAK Team Manager-managed one (see `POST /api/users/add-to-team`);
+  // it is intentionally NOT run for the admin-role candidate picker
+  // (`addMemberRole === 'admin'`, sourced from current team members, a
+  // completely different, already-managed-user promotion workflow left
+  // unchanged).
+  const selectExistingUserCandidate = (user) => {
+    setSelectedUserId(String(user.id))
+    if (addMemberRole !== 'member') return
+
+    dispatchNewUserForm({ type: 'reset' })
+    dispatchNewUserForm({ type: 'fieldChanged', field: 'firstName', value: user.first_name || '' })
+    dispatchNewUserForm({ type: 'fieldChanged', field: 'lastName', value: user.last_name || '' })
+    if (user.callsign_suffix) {
+      dispatchNewUserForm({ type: 'suffixEdited', value: user.callsign_suffix })
+    } else if (user.first_name && user.last_name) {
+      dispatchNewUserForm({ type: 'previewRequested', trigger: 'names', teamId: team?.id })
+    }
+  }
+
   const handleAddExistingUser = async () => {
     if (!selectedUserId) return
+
+    // Feature (Add Existing User onboarding review): client-side
+    // pre-submit checks for the member-role path only -- the admin-role
+    // path (`teamsAPI.addMember`) has no such fields and is unchanged.
+    // This tab renders no <form>, so there is no native HTML5 validation
+    // to lean on the way the Create New User tab's `required`/`pattern`
+    // attributes get; these checks are the equivalent explicit guards.
+    if (addMemberRole === 'member') {
+      if (!newUserFormState.firstName.trim() || !newUserFormState.lastName.trim()) {
+        toast.error('First name and last name are required.')
+        return
+      }
+      if (!isValidMemberCallsignSuffix(newUserFormState.suffix)) {
+        dispatchNewUserForm({ type: 'submitRejected', message: 'Callsign suffix may only contain letters, digits, "-", and "."' })
+        return
+      }
+      if (pseudonymousTarget && !newUserFormState.suffix.trim()) {
+        dispatchNewUserForm({ type: 'submitRejected', message: "A callsign suffix is required for this Organisation's pseudonymous usernames." })
+        return
+      }
+    }
     
     setAddingMember(true)
     try {
@@ -465,13 +590,21 @@ export default function TeamDetail({ user, refreshUser }) {
       // adding as an admin, use teamsAPI.addMember (POST
       // /teams/:teamId/members) instead, which does accept role:
       // 'admin'|'member' (server/routes/teams.js). The plain-member path
-      // keeps using usersAPI.addToTeam unchanged, to avoid altering its
-      // existing behavior (e.g. the "already a member of another team"
-      // check and channel/group assignment it performs).
+      // keeps using usersAPI.addToTeam, now passing the reviewed
+      // First Name/Last Name/Callsign Suffix as PERSISTED corrections
+      // (Add Existing User onboarding review) -- this route is the one
+      // step that turns an Authentik-only user into a TAK Team Manager
+      // -managed one, so a correction made here is a real, permanent
+      // change to the user's account, not a one-off override for this
+      // team add alone.
       if (addMemberRole === 'admin') {
         await teamsAPI.addMember(team.id, { userId: selectedUserId, role: 'admin' })
       } else {
-        await usersAPI.addToTeam(selectedUserId, team.id)
+        await usersAPI.addToTeam(selectedUserId, team.id, {
+          firstName: newUserFormState.firstName.trim(),
+          lastName: newUserFormState.lastName.trim(),
+          callsignSuffix: newUserFormState.suffix.trim() || undefined
+        })
       }
       
       // Refresh team data
@@ -487,9 +620,21 @@ export default function TeamDetail({ user, refreshUser }) {
       setSelectedUserId('')
       setUserSearch('')
       setAddMemberRole('member')
+      dispatchNewUserForm({ type: 'reset' })
     } catch (error) {
       console.error('Failed to add user:', error)
-      toast.error('Failed to add user: ' + (error.response?.data?.error || error.message))
+      // A 400 carrying the server's own message is either the
+      // pattern-validation rejection or a per-team callsign_suffix
+      // collision -- both belong against the Callsign Suffix field, with
+      // the dialog left open to correct, rather than in a generic toast
+      // (same treatment the Create New User tab already gives this exact
+      // error shape).
+      const inlineError = addMemberRole === 'member' ? extractCallsignSuffixServerError(error) : null
+      if (inlineError) {
+        dispatchNewUserForm({ type: 'submitRejected', message: inlineError })
+      } else {
+        toast.error('Failed to add user: ' + (error.response?.data?.error || error.message))
+      }
     } finally {
       setAddingMember(false)
     }
@@ -561,11 +706,25 @@ export default function TeamDetail({ user, refreshUser }) {
       // Report the Callsign_Suffix the server actually assigned (the admin's
       // own value, or the Organisation's computed default they never typed).
       const assignedSuffix = response?.data?.user?.callsign_suffix
-      toast.success(
-        assignedSuffix
-          ? `User created with callsign suffix ${assignedSuffix}`
-          : 'User created and added to this team'
-      )
+
+      // Bugfix (silent welcome-email failures): the account was created
+      // either way -- `welcomeEmailSent === false` is a single,
+      // deliberately combined toast (account created BUT the email
+      // failed), not a second toast layered on top of the success one,
+      // since showing both at once for one action would read as
+      // contradictory. This app's toasts are binary (success/error, no
+      // third "warning" variant), and the actionable part of this
+      // outcome -- go check/resend the email -- is closer to an error
+      // than a success, even though the account itself is fine.
+      if (response?.data?.welcomeEmailSent === false) {
+        toast.error(`User created, but the welcome email to ${newUserFormState.email} could not be sent. You may need to resend it manually.`)
+      } else {
+        toast.success(
+          assignedSuffix
+            ? `User created with callsign suffix ${assignedSuffix}`
+            : 'User created and added to this team'
+        )
+      }
 
       setShowAddMemberDialog(false)
       dispatchNewUserForm({ type: 'reset' })
@@ -631,13 +790,28 @@ export default function TeamDetail({ user, refreshUser }) {
   // edit form for a single Member_List row, seeded from that row's
   // current values via `getInitialMemberEditForm`.
 
-  // Resend the welcome/approval email to a team member
-  const handleResendWelcome = async (member) => {
+  // Bugfix (Resend welcome email was the only action with no
+  // confirmation): opens the confirmation dialog for a single member/
+  // admin row, kept separate from handleRemoveAdminClick/handleRemoveUser
+  // above -- unrelated dialogs.
+  const handleResendWelcomeClick = (member) => {
+    setResendingWelcomeTo(member)
+  }
+
+  // Resend the welcome email to a team member, now behind the
+  // confirmation dialog opened by handleResendWelcomeClick.
+  const confirmResendWelcome = async () => {
+    if (!resendingWelcomeTo) return
+
+    setResendingWelcomeInFlight(true)
     try {
-      await usersAPI.resendWelcome(member.id, team.id)
-      toast.success(`Welcome email resent to ${member.email}`)
+      await usersAPI.resendWelcome(resendingWelcomeTo.id, team.id)
+      toast.success(`Welcome email resent to ${resendingWelcomeTo.email}`)
+      setResendingWelcomeTo(null)
     } catch (err) {
       toast.error('Failed to resend welcome email')
+    } finally {
+      setResendingWelcomeInFlight(false)
     }
   }
 
@@ -725,6 +899,47 @@ export default function TeamDetail({ user, refreshUser }) {
       toast.error('Failed to remove user: ' + (error.response?.data?.error || error.message))
     } finally {
       setRemovingUser(false)
+    }
+  }
+
+  // Bugfix (Team Admins tab action-set mismatch): opens the "Remove as
+  // admin" confirmation for a single admin row. Kept separate from
+  // `handleRemoveUser` above -- that one opens the unrelated, far more
+  // severe "Permanently Delete User" dialog (removeUserId/removeUserRole).
+  const handleRemoveAdminClick = (admin) => {
+    setRemovingAdmin(admin)
+  }
+
+  // Demotes an admin back to plain member via the SAME upsert
+  // `teamsAPI.addMember` already uses to promote (see
+  // `handleAddExistingUser` above), just with `role: 'member'`. This
+  // reuses `Team.addMember`'s `ON CONFLICT (user_id, team_id) DO UPDATE
+  // SET role = 'member'` -- their account, team membership and channel
+  // access are all left untouched; only `team_memberships.role` changes.
+  const confirmRemoveAdmin = async () => {
+    if (!removingAdmin) return
+
+    setRemovingAdminInFlight(true)
+    try {
+      await teamsAPI.addMember(team.id, { userId: removingAdmin.id, role: 'member' })
+
+      // Refresh team data
+      const teamResponse = await teamsAPI.getById(team.id)
+      const allMembers = teamResponse.data.members || []
+      setMembers(allMembers.filter(m => m.role === 'member' || m.role === 'inherited' || m.role === 'admin'))
+      setAdmins(allMembers.filter(m => m.role === 'admin'))
+
+      // Notify Dashboard to refresh
+      window.dispatchEvent(new CustomEvent('userAssignmentChanged'))
+
+      const removedAdminLabel = `${removingAdmin.first_name || ''} ${removingAdmin.last_name || ''}`.trim() || removingAdmin.email
+      toast.success(`${removedAdminLabel} is no longer an admin of this team`)
+      setRemovingAdmin(null)
+    } catch (error) {
+      console.error('Failed to remove admin:', error)
+      toast.error('Failed to remove admin: ' + (error.response?.data?.error || error.message))
+    } finally {
+      setRemovingAdminInFlight(false)
     }
   }
 
@@ -1407,9 +1622,19 @@ export default function TeamDetail({ user, refreshUser }) {
                   ) : (
                     <div key={member.id} className="p-4 space-y-2 text-sm">
                       <div className="flex items-start justify-between gap-2">
-                        <p className="font-medium text-gray-900 dark:text-gray-100 break-words">
-                          {member.first_name} {member.last_name}
-                        </p>
+                        <div className="min-w-0">
+                          <p className="font-medium text-gray-900 dark:text-gray-100 break-words">
+                            {member.first_name} {member.last_name}
+                          </p>
+                          {/* Bugfix (list-width reduction): username shown
+                              underneath the name, matching Users.jsx's own
+                              name/username stacking -- and, for an
+                              Organisation using pseudonymous usernames,
+                              the username itself is the only per-member
+                              identifier this card carries at all now that
+                              email is gone from it. */}
+                          <p className="text-xs text-gray-500 dark:text-gray-400 font-mono break-all">{member.username}</p>
+                        </div>
                         {member.inherited_from_team_name ? (
                           <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-blue-100 text-blue-800 dark:bg-blue-600 dark:text-blue-200 flex-shrink-0">
                             Member of <Link to={`/teams/${member.inherited_from_team_id}`} className="underline hover:no-underline">{member.inherited_from_team_name}</Link>
@@ -1420,14 +1645,15 @@ export default function TeamDetail({ user, refreshUser }) {
                           </span>
                         )}
                       </div>
-                      <p className="text-gray-500 dark:text-gray-400 break-words">{member.email}</p>
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-teal-100 text-teal-800 dark:bg-teal-900 dark:text-teal-200">
-                          {member.tak_role || 'Team Member'}
-                        </span>
-                        {member.tak_callsign && (
-                          <span className="text-xs text-gray-500 dark:text-gray-400">{member.tak_callsign}</span>
-                        )}
+                      {/* Bugfix (list-width reduction): "TAK Callsign & Role"
+                          -- the callsign shown at normal size, the TAK_Role
+                          shown small and without color underneath it
+                          (was a colored pill), matching the tighter,
+                          less card-like treatment the rest of this pass
+                          applies. */}
+                      <div>
+                        <p className="text-gray-900 dark:text-gray-100">{member.tak_callsign || '-'}</p>
+                        <p className="text-xs text-gray-500 dark:text-gray-400">{member.tak_role || 'Team Member'}</p>
                       </div>
                       {canManageTeam && (
                         <MemberActions
@@ -1435,7 +1661,7 @@ export default function TeamDetail({ user, refreshUser }) {
                           roleLabel="member"
                           devicesEnabled={devicesEnabled}
                           onEdit={handleStartEditMember}
-                          onResendWelcome={handleResendWelcome}
+                          onResendWelcome={handleResendWelcomeClick}
                           onTransfer={setTransferringMember}
                           onViewDevices={setDevicesForMember}
                           onRemove={handleRemoveUser}
@@ -1457,20 +1683,17 @@ export default function TeamDetail({ user, refreshUser }) {
                         {getSortIcon('first_name')}
                       </div>
                     </th>
-                    <th onClick={() => handleSort('email')} className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700">
+                    <th onClick={() => handleSort('username')} className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700">
                       <div className="flex items-center space-x-1">
-                        <span>Email</span>
-                        {getSortIcon('email')}
+                        <span>Username</span>
+                        {getSortIcon('username')}
                       </div>
                     </th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                       Role
                     </th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                      TAK Role
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                      Callsign
+                      TAK Callsign & Role
                     </th>
                     <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                       Actions
@@ -1482,7 +1705,7 @@ export default function TeamDetail({ user, refreshUser }) {
                     editingMemberId === member.id ? (
                       <MemberEditRow
                         key={member.id}
-                        colSpan={6}
+                        colSpan={5}
                         form={memberEditForm}
                         setForm={setMemberEditForm}
                         takRoleValues={takRoleValues}
@@ -1496,8 +1719,8 @@ export default function TeamDetail({ user, refreshUser }) {
                         <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">
                           {member.first_name} {member.last_name}
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                          {member.email}
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400 font-mono">
+                          {member.username}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
                           {member.inherited_from_team_name ? (
@@ -1510,13 +1733,9 @@ export default function TeamDetail({ user, refreshUser }) {
                             </span>
                           )}
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          <span className="px-2 py-1 text-xs font-medium rounded-full bg-teal-100 text-teal-800 dark:bg-teal-900 dark:text-teal-200">
-                            {member.tak_role || 'Team Member'}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                          {member.tak_callsign || '-'}
+                        <td className="px-6 py-4 whitespace-nowrap text-sm">
+                          <p className="text-gray-900 dark:text-gray-100">{member.tak_callsign || '-'}</p>
+                          <p className="text-xs text-gray-500 dark:text-gray-400">{member.tak_role || 'Team Member'}</p>
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                           {canManageTeam && (
@@ -1525,7 +1744,7 @@ export default function TeamDetail({ user, refreshUser }) {
                               roleLabel="member"
                               devicesEnabled={devicesEnabled}
                               onEdit={handleStartEditMember}
-                              onResendWelcome={handleResendWelcome}
+                              onResendWelcome={handleResendWelcomeClick}
                               onTransfer={setTransferringMember}
                               onViewDevices={setDevicesForMember}
                               onRemove={handleRemoveUser}
@@ -1568,9 +1787,12 @@ export default function TeamDetail({ user, refreshUser }) {
                   ) : (
                     <div key={admin.id} className="p-4 space-y-2 text-sm">
                       <div className="flex items-start justify-between gap-2">
-                        <p className="font-medium text-gray-900 dark:text-gray-100 break-words">
-                          {admin.first_name} {admin.last_name}
-                        </p>
+                        <div className="min-w-0">
+                          <p className="font-medium text-gray-900 dark:text-gray-100 break-words">
+                            {admin.first_name} {admin.last_name}
+                          </p>
+                          <p className="text-xs text-gray-500 dark:text-gray-400 font-mono break-all">{admin.username}</p>
+                        </div>
                         {admin.inherited_from_team_name ? (
                           <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-purple-100 text-purple-800 dark:bg-purple-600 dark:text-purple-200 flex-shrink-0">
                             Admin of <Link to={`/teams/${admin.inherited_from_team_id}`} className="underline hover:no-underline">{admin.inherited_from_team_name}</Link>
@@ -1581,25 +1803,14 @@ export default function TeamDetail({ user, refreshUser }) {
                           </span>
                         )}
                       </div>
-                      <p className="text-gray-500 dark:text-gray-400 break-words">{admin.email}</p>
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-teal-100 text-teal-800 dark:bg-teal-900 dark:text-teal-200">
-                          {admin.tak_role || 'Team Member'}
-                        </span>
-                        {admin.tak_callsign && (
-                          <span className="text-xs text-gray-500 dark:text-gray-400">{admin.tak_callsign}</span>
-                        )}
+                      <div>
+                        <p className="text-gray-900 dark:text-gray-100">{admin.tak_callsign || '-'}</p>
+                        <p className="text-xs text-gray-500 dark:text-gray-400">{admin.tak_role || 'Team Member'}</p>
                       </div>
                       {canManageTeam && (
-                        <MemberActions
+                        <AdminActions
                           member={admin}
-                          roleLabel="admin"
-                          devicesEnabled={devicesEnabled}
-                          onEdit={handleStartEditMember}
-                          onResendWelcome={handleResendWelcome}
-                          onTransfer={setTransferringMember}
-                          onViewDevices={setDevicesForMember}
-                          onRemove={handleRemoveUser}
+                          onRemoveAdmin={handleRemoveAdminClick}
                           variant="card"
                         />
                       )}
@@ -1618,20 +1829,17 @@ export default function TeamDetail({ user, refreshUser }) {
                         {getSortIcon('first_name')}
                       </div>
                     </th>
-                    <th onClick={() => handleSort('email')} className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700">
+                    <th onClick={() => handleSort('username')} className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700">
                       <div className="flex items-center space-x-1">
-                        <span>Email</span>
-                        {getSortIcon('email')}
+                        <span>Username</span>
+                        {getSortIcon('username')}
                       </div>
                     </th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                       Role
                     </th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                      TAK Role
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                      Callsign
+                      TAK Callsign & Role
                     </th>
                     <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                       Actions
@@ -1643,7 +1851,7 @@ export default function TeamDetail({ user, refreshUser }) {
                     editingMemberId === admin.id ? (
                       <MemberEditRow
                         key={admin.id}
-                        colSpan={6}
+                        colSpan={5}
                         form={memberEditForm}
                         setForm={setMemberEditForm}
                         takRoleValues={takRoleValues}
@@ -1657,8 +1865,8 @@ export default function TeamDetail({ user, refreshUser }) {
                         <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">
                           {admin.first_name} {admin.last_name}
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                          {admin.email}
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400 font-mono">
+                          {admin.username}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
                           {admin.inherited_from_team_name ? (
@@ -1671,25 +1879,15 @@ export default function TeamDetail({ user, refreshUser }) {
                             </span>
                           )}
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          <span className="px-2 py-1 text-xs font-medium rounded-full bg-teal-100 text-teal-800 dark:bg-teal-900 dark:text-teal-200">
-                            {admin.tak_role || 'Team Member'}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                          {admin.tak_callsign || '-'}
+                        <td className="px-6 py-4 whitespace-nowrap text-sm">
+                          <p className="text-gray-900 dark:text-gray-100">{admin.tak_callsign || '-'}</p>
+                          <p className="text-xs text-gray-500 dark:text-gray-400">{admin.tak_role || 'Team Member'}</p>
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                           {canManageTeam && (
-                            <MemberActions
+                            <AdminActions
                               member={admin}
-                              roleLabel="admin"
-                              devicesEnabled={devicesEnabled}
-                              onEdit={handleStartEditMember}
-                              onResendWelcome={handleResendWelcome}
-                              onTransfer={setTransferringMember}
-                              onViewDevices={setDevicesForMember}
-                              onRemove={handleRemoveUser}
+                              onRemoveAdmin={handleRemoveAdminClick}
                             />
                           )}
                         </td>
@@ -1722,11 +1920,24 @@ export default function TeamDetail({ user, refreshUser }) {
                           </p>
                         )}
                       </div>
-                      {channel.authentik_group_id && (
-                        <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200 flex-shrink-0">
-                          Synced
-                        </span>
-                      )}
+                      {/* Bugfix (Channels tab Status column): state must be
+                          carried in text, not colour/presence alone -- the
+                          negative case previously rendered nothing at all.
+                          Green marks the affirmative/created state
+                          (matching this page's other positive badges,
+                          e.g. Visibility's "Public"); grey is the neutral
+                          "nothing wrong to flag, just not there yet" state,
+                          not a warning -- Team.createTeamChannel's silent
+                          fallback (no retry path exists yet) means this can
+                          persist, so it should read as informational, not
+                          alarming. */}
+                      <span className={`px-2 py-0.5 text-xs font-medium rounded-full flex-shrink-0 ${
+                        channel.authentik_group_id
+                          ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
+                          : 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200'
+                      }`}>
+                        {channel.authentik_group_id ? 'Synced' : 'Not Synced'}
+                      </span>
                     </div>
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${
@@ -1762,7 +1973,7 @@ export default function TeamDetail({ user, refreshUser }) {
                       Members
                     </th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                      Status
+                      Authentik Group
                     </th>
                   </tr>
                 </thead>
@@ -1790,11 +2001,13 @@ export default function TeamDetail({ user, refreshUser }) {
                         {channel.member_count || 0} members
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
-                        {channel.authentik_group_id && (
-                          <span className="px-2 py-1 text-xs font-medium rounded-full bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200">
-                            Synced
-                          </span>
-                        )}
+                        <span className={`px-2 py-1 text-xs font-medium rounded-full ${
+                          channel.authentik_group_id
+                            ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
+                            : 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200'
+                        }`}>
+                          {channel.authentik_group_id ? 'Synced' : 'Not Synced'}
+                        </span>
                       </td>
                     </tr>
                   ))}
@@ -1824,14 +2037,43 @@ export default function TeamDetail({ user, refreshUser }) {
                     {subTeam.description && (
                       <p className="text-gray-500 dark:text-gray-400">{subTeam.description}</p>
                     )}
+                    {/* Bugfix (Sub-teams tab consistency with /teams
+                        overview): Team Devices/Team Admins/Channels
+                        join Members/Sub-teams here, and every stat
+                        links to that sub-team's own corresponding tab
+                        (`?tab=<id>`, resolved by TeamDetail.jsx's own
+                        `resolveInitialTab`), exactly matching Teams.jsx's
+                        overview card's stat links. */}
                     <div className="grid grid-cols-2 gap-x-4 gap-y-1">
                       <div className="flex items-baseline gap-1">
                         <span className="text-xs text-gray-500 dark:text-gray-400">Members:</span>
-                        <span className="text-gray-900 dark:text-gray-100">{subTeam.member_count || 0}</span>
+                        <Link to={`/teams/${subTeam.id}?tab=members`} className="text-gray-900 dark:text-gray-100 hover:text-primary-600 dark:hover:text-primary-400 hover:underline">
+                          {subTeam.member_count || 0}
+                        </Link>
+                      </div>
+                      <div className="flex items-baseline gap-1">
+                        <span className="text-xs text-gray-500 dark:text-gray-400">Team Devices:</span>
+                        <Link to={`/teams/${subTeam.id}?tab=devices`} className="text-gray-900 dark:text-gray-100 hover:text-primary-600 dark:hover:text-primary-400 hover:underline">
+                          {subTeam.device_count || 0}
+                        </Link>
+                      </div>
+                      <div className="flex items-baseline gap-1">
+                        <span className="text-xs text-gray-500 dark:text-gray-400">Team Admins:</span>
+                        <Link to={`/teams/${subTeam.id}?tab=admins`} className="text-gray-900 dark:text-gray-100 hover:text-primary-600 dark:hover:text-primary-400 hover:underline">
+                          {subTeam.admin_count || 0}
+                        </Link>
+                      </div>
+                      <div className="flex items-baseline gap-1">
+                        <span className="text-xs text-gray-500 dark:text-gray-400">Channels:</span>
+                        <Link to={`/teams/${subTeam.id}?tab=channels`} className="text-gray-900 dark:text-gray-100 hover:text-primary-600 dark:hover:text-primary-400 hover:underline">
+                          {subTeam.channel_count || 0}
+                        </Link>
                       </div>
                       <div className="flex items-baseline gap-1">
                         <span className="text-xs text-gray-500 dark:text-gray-400">Sub-teams:</span>
-                        <span className="text-gray-900 dark:text-gray-100">{subTeam.sub_teams_count || 0}</span>
+                        <Link to={`/teams/${subTeam.id}?tab=subteams`} className="text-gray-900 dark:text-gray-100 hover:text-primary-600 dark:hover:text-primary-400 hover:underline">
+                          {subTeam.sub_teams_count || 0}
+                        </Link>
                       </div>
                       {subTeam.callsign_prefix && (
                         <div className="flex items-baseline gap-1">
@@ -1900,6 +2142,28 @@ export default function TeamDetail({ user, refreshUser }) {
                         {getSortIcon('member_count')}
                       </div>
                     </th>
+                    {/* Bugfix (Sub-teams tab consistency with /teams
+                        overview): Team Devices/Team Admins/Channels,
+                        between Members and Sub-teams, matching
+                        Teams.jsx's own column order exactly. */}
+                    <th onClick={() => handleSort('device_count')} className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700">
+                      <div className="flex items-center space-x-1">
+                        <span>Team Devices</span>
+                        {getSortIcon('device_count')}
+                      </div>
+                    </th>
+                    <th onClick={() => handleSort('admin_count')} className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700">
+                      <div className="flex items-center space-x-1">
+                        <span>Team Admins</span>
+                        {getSortIcon('admin_count')}
+                      </div>
+                    </th>
+                    <th onClick={() => handleSort('channel_count')} className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700">
+                      <div className="flex items-center space-x-1">
+                        <span>Channels</span>
+                        {getSortIcon('channel_count')}
+                      </div>
+                    </th>
                     <th onClick={() => handleSort('sub_teams_count')} className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700">
                       <div className="flex items-center space-x-1">
                         <span>Sub-teams</span>
@@ -1938,10 +2202,29 @@ export default function TeamDetail({ user, refreshUser }) {
                         {subTeam.callsign_prefix || '-'}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                        {subTeam.member_count || 0}
+                        <Link to={`/teams/${subTeam.id}?tab=members`} className="hover:text-primary-600 dark:hover:text-primary-400 hover:underline">
+                          {subTeam.member_count || 0}
+                        </Link>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                        {subTeam.sub_teams_count || 0}
+                        <Link to={`/teams/${subTeam.id}?tab=devices`} className="hover:text-primary-600 dark:hover:text-primary-400 hover:underline">
+                          {subTeam.device_count || 0}
+                        </Link>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+                        <Link to={`/teams/${subTeam.id}?tab=admins`} className="hover:text-primary-600 dark:hover:text-primary-400 hover:underline">
+                          {subTeam.admin_count || 0}
+                        </Link>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+                        <Link to={`/teams/${subTeam.id}?tab=channels`} className="hover:text-primary-600 dark:hover:text-primary-400 hover:underline">
+                          {subTeam.channel_count || 0}
+                        </Link>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+                        <Link to={`/teams/${subTeam.id}?tab=subteams`} className="hover:text-primary-600 dark:hover:text-primary-400 hover:underline">
+                          {subTeam.sub_teams_count || 0}
+                        </Link>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                         <div className="flex items-center justify-end space-x-3">
@@ -2117,7 +2400,7 @@ export default function TeamDetail({ user, refreshUser }) {
                     onChange={(e) => setSubTeamFormData({...subTeamFormData, callsignPrefix: e.target.value})}
                     className="input w-full"
                     pattern={CALLSIGN_PREFIX_PATTERN}
-                    title="Only letters and digits are allowed (no -)"
+                    title="Letters and digits, optionally split into segments with a single hyphen (e.g. AUS-FIRE)"
                     placeholder="STL, AKL, etc."
                   />
                   <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
@@ -2232,6 +2515,92 @@ export default function TeamDetail({ user, refreshUser }) {
         </div>
       )}
 
+      {/* Remove as Admin Confirmation Dialog. Mirrors "Delete Sub-Team"
+          above (plain Cancel/Confirm, no type-to-confirm text input) --
+          unlike "Permanently Delete User" below, demoting an admin back
+          to a plain member is reversible (they can simply be re-promoted)
+          and leaves their account and team membership untouched. */}
+      {removingAdmin && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="remove-admin-title"
+            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full"
+          >
+            <div className="p-6">
+              <h3 id="remove-admin-title" className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
+                Remove as Admin
+              </h3>
+              <p className="text-gray-600 dark:text-gray-400 mb-6">
+                Remove {`${removingAdmin.first_name || ''} ${removingAdmin.last_name || ''}`.trim() || removingAdmin.email} as an admin of this team? They will remain a member of this team.
+              </p>
+              <div className="flex justify-end space-x-3">
+                <button
+                  type="button"
+                  onClick={() => setRemovingAdmin(null)}
+                  className="btn-secondary"
+                  disabled={removingAdminInFlight}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmRemoveAdmin}
+                  disabled={removingAdminInFlight}
+                  className="btn-danger disabled:opacity-50"
+                >
+                  {removingAdminInFlight ? 'Removing...' : 'Remove as Admin'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Resend Welcome Email Confirmation Dialog. Same plain
+          Cancel/Confirm dialog shape as "Delete Sub-Team"/"Remove as
+          Admin" above -- but btn-primary, not btn-danger, on Confirm:
+          resending an email is not destructive, so it does not get the
+          red "danger" framing those two use. */}
+      {resendingWelcomeTo && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="resend-welcome-title"
+            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full"
+          >
+            <div className="p-6">
+              <h3 id="resend-welcome-title" className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
+                Resend Welcome Email
+              </h3>
+              <p className="text-gray-600 dark:text-gray-400 mb-6">
+                Send a new welcome email to {resendingWelcomeTo.email}?
+              </p>
+              <div className="flex justify-end space-x-3">
+                <button
+                  type="button"
+                  onClick={() => setResendingWelcomeTo(null)}
+                  className="btn-secondary"
+                  disabled={resendingWelcomeInFlight}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmResendWelcome}
+                  disabled={resendingWelcomeInFlight}
+                  className="btn-primary disabled:opacity-50"
+                >
+                  {resendingWelcomeInFlight ? 'Sending...' : 'Resend Email'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Add Member Dialog. Bugfix: full-bleed on mobile, same treatment
           as Create Sub-Team above -- its "Create New User" tab alone
           (5 fields/blocks plus 2 info panels) never fits a phone
@@ -2324,7 +2693,7 @@ export default function TeamDetail({ user, refreshUser }) {
                                 name="selectedUser"
                                 value={user.id}
                                 checked={selectedUserId === String(user.id)}
-                                onChange={(e) => setSelectedUserId(e.target.value)}
+                                onChange={() => selectExistingUserCandidate(user)}
                                 className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300"
                               />
                               <div className="ml-3">
@@ -2341,6 +2710,117 @@ export default function TeamDetail({ user, refreshUser }) {
                       )}
                     </div>
                   </div>
+
+                  {/* Feature (Add Existing User onboarding review): once a
+                      candidate is selected, the admin can review and
+                      correct their First Name/Last Name and Callsign
+                      Suffix before adding -- this is the ONLY step that
+                      turns a user who exists only in Authentik into a TAK
+                      Team Manager-managed one, so a correction made here
+                      PERSISTS to the user's account (never just a one-off
+                      override for this team add). Reuses the identical
+                      `newUserFormState` reducer/preview machinery the
+                      Create New User tab below uses, so the two tabs
+                      cannot drift on how a Callsign Suffix is computed,
+                      previewed, or collision-checked. Only rendered for
+                      the member-role picker -- the admin-role picker
+                      (`addMemberRole === 'admin'`) promotes an
+                      already-managed team member and has nothing to
+                      review here. */}
+                  {addMemberRole === 'member' && selectedUserId && (
+                    <div className="space-y-4 pt-2 border-t border-gray-200 dark:border-gray-700">
+                      <p className="text-xs text-gray-500 dark:text-gray-400">
+                        Review and correct this user's name and callsign suffix before adding them -- these changes are saved to their account.
+                      </p>
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <label htmlFor="existing-user-first-name" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                            First Name *
+                          </label>
+                          <input
+                            id="existing-user-first-name"
+                            type="text"
+                            required
+                            value={newUserFormState.firstName}
+                            onChange={(e) => dispatchNewUserForm({ type: 'fieldChanged', field: 'firstName', value: e.target.value })}
+                            onBlur={() => dispatchNewUserForm({ type: 'previewRequested', trigger: 'names', teamId: team?.id })}
+                            className="input w-full"
+                            placeholder="Joe"
+                          />
+                        </div>
+                        <div>
+                          <label htmlFor="existing-user-last-name" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                            Last Name *
+                          </label>
+                          <input
+                            id="existing-user-last-name"
+                            type="text"
+                            required
+                            value={newUserFormState.lastName}
+                            onChange={(e) => dispatchNewUserForm({ type: 'fieldChanged', field: 'lastName', value: e.target.value })}
+                            onBlur={() => dispatchNewUserForm({ type: 'previewRequested', trigger: 'names', teamId: team?.id })}
+                            className="input w-full"
+                            placeholder="Bloggs"
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <label htmlFor="existing-user-callsign-suffix" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                          Callsign Suffix {(newUserFormState.required || pseudonymousTarget) ? '*' : ''}
+                        </label>
+                        <div className="flex items-center gap-2">
+                          <input
+                            id="existing-user-callsign-suffix"
+                            type="text"
+                            value={newUserFormState.suffix}
+                            onChange={(e) => dispatchNewUserForm({ type: 'suffixEdited', value: e.target.value })}
+                            onBlur={() => dispatchNewUserForm({ type: 'previewRequested', trigger: 'suffix', teamId: team?.id })}
+                            className="input w-full"
+                            pattern={CALLSIGN_SUFFIX_PATTERN}
+                            title="Only letters, digits, - and . are allowed"
+                            placeholder="Filled in automatically"
+                            required={newUserFormState.required || pseudonymousTarget}
+                            aria-invalid={newUserFormState.error ? 'true' : undefined}
+                            aria-describedby={newUserFormState.error ? 'existing-user-callsign-suffix-error' : ((newUserFormState.required || pseudonymousTarget) ? 'existing-user-callsign-suffix-help' : undefined)}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => dispatchNewUserForm({ type: 'previewRequested', trigger: 'recompute', teamId: team?.id })}
+                            disabled={isRecomputeDisabled(newUserFormState)}
+                            aria-label="Recompute callsign suffix from the entered names"
+                            title="Recompute callsign suffix from the entered names"
+                            className="btn-secondary px-3 disabled:opacity-50"
+                          >
+                            <ArrowPathIcon className="h-4 w-4" aria-hidden="true" />
+                          </button>
+                        </div>
+                        {selectSuffixBusy(newUserFormState) && (
+                          <span role="status" aria-live="polite" className="text-xs text-gray-500 dark:text-gray-400 mt-1 inline-block">
+                            Checking callsign suffix…
+                          </span>
+                        )}
+                        {pseudonymousTarget ? (
+                          !newUserFormState.error && (
+                            <p id="existing-user-callsign-suffix-help" className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                              Required because this Organisation uses pseudonymous usernames: the username is generated automatically and carries no personal information, so it cannot stand in for a callsign the way a name-derived one would.
+                            </p>
+                          )
+                        ) : (
+                          newUserFormState.required && !newUserFormState.error && (
+                            <p id="existing-user-callsign-suffix-help" className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                              This Organisation requires a manually chosen callsign suffix.
+                            </p>
+                          )
+                        )}
+                        {newUserFormState.error && (
+                          <p id="existing-user-callsign-suffix-error" role="alert" className="text-red-600 text-sm mt-1">
+                            {newUserFormState.error}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
                   
                   <div className="flex justify-end space-x-3 pt-4">
                     <button

@@ -24,8 +24,11 @@
  *
  * 3. NO SECOND ORGANISATION_PREFIX REGEX (Criterion 2.5). No second
  *    Organisation_Prefix-shaped regex -- a pattern equivalent to
- *    `[A-Za-z0-9]*` used for prefix validation -- exists in any non-test
- *    file under `server/utils/` besides `callsignValidation.js`.
+ *    `[A-Za-z0-9]*`, `[A-Za-z0-9]+`, or (per the foreign-partner-prefix
+ *    extension) the current canonical multi-segment shape
+ *    `[A-Za-z0-9]+(-[A-Za-z0-9]+)*` used for prefix validation -- exists
+ *    in any non-test file under `server/utils/` besides
+ *    `callsignValidation.js`.
  *
  * DECISIONS, recorded because they define what this guard does and does
  * not catch:
@@ -59,9 +62,11 @@
  *    with `new RegExp(...)`) whose pattern text, after stripping the `/`
  *    delimiters and any flags, is EXACTLY `^[A-Za-z0-9]*$` or
  *    `^[A-Za-z0-9]+$`. Two consequences of that choice, both deliberate:
- *      - `callsignValidation.js`'s `CALLSIGN_PREFIX_PATTERN = /^[A-Za-z0-9]*$/`
- *        matches, because it IS a regex literal whose whole pattern is
- *        exactly that text.
+ *      - `callsignValidation.js`'s `CALLSIGN_PREFIX_PATTERN =
+ *        /^[A-Za-z0-9]+(-[A-Za-z0-9]+)*$/` (updated by the
+ *        foreign-partner-prefix extension to allow internal `-` segment
+ *        separators) matches, because it IS a regex literal whose whole
+ *        pattern is exactly that text.
  *      - `managedIdentifier.js`'s `MANAGED_IDENTIFIER_PATTERN` does NOT
  *        match, even though its SOURCE TEXT contains the substring
  *        `[A-Za-z0-9]+`: it is built with `new RegExp(` over a TEMPLATE
@@ -101,9 +106,17 @@ const ALPHABET_LITERAL = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 
 const FORBIDDEN_EXTERNAL_MODULES = ['express', 'pg', 'axios', 'pdfkit', 'qrcode'];
 
-// The two Organisation_Prefix-shaped regex patterns (Criterion 2.5), as the
+// The Organisation_Prefix-shaped regex patterns (Criterion 2.5), as the
 // exact pattern text a matching regex LITERAL's body must equal (decision C).
-const PREFIX_SHAPED_PATTERNS = ['^[A-Za-z0-9]*$', '^[A-Za-z0-9]+$'];
+// The third entry is the current canonical pattern, added by the
+// foreign-partner-prefix extension; the first two remain listed so a REVERT
+// to either historical shape is still caught as a duplicate rather than
+// silently passing because the heuristic only knows the newest shape.
+const PREFIX_SHAPED_PATTERNS = [
+  '^[A-Za-z0-9]*$',
+  '^[A-Za-z0-9]+$',
+  '^[A-Za-z0-9]+(-[A-Za-z0-9]+)*$'
+];
 
 // ---------------------------------------------------------------------------
 // Shared helpers: which files count, and how comments are stripped.

@@ -26,6 +26,26 @@ describe('Property 3: Group name is exactly CloudTAKAgency<id>', () => {
   // `CloudTAKAgency<id>`
   //
   // Validates: Requirements 2.2
+  //
+  // `groupName` now reads its prefix from `getCloudTakAgencyGroupPrefix()`
+  // (server/config/cloudtak.js), which defaults to "CloudTAKAgency" when
+  // `CLOUDTAK_AGENCY_GROUP_PREFIX` is unset. This test runs with that
+  // variable deliberately unset/restored, so it exercises the default --
+  // the pre-existing hardcoded behavior -- unchanged.
+  const originalPrefixEnv = process.env.CLOUDTAK_AGENCY_GROUP_PREFIX;
+
+  beforeEach(() => {
+    delete process.env.CLOUDTAK_AGENCY_GROUP_PREFIX;
+  });
+
+  afterEach(() => {
+    if (originalPrefixEnv === undefined) {
+      delete process.env.CLOUDTAK_AGENCY_GROUP_PREFIX;
+    } else {
+      process.env.CLOUDTAK_AGENCY_GROUP_PREFIX = originalPrefixEnv;
+    }
+  });
+
   test.prop([fc.integer()], { numRuns: 100 })(
     'groupName(id) equals the literal "CloudTAKAgency" concatenated with the id, with no extra prefix (in particular no "tak_")',
     (id) => {
@@ -35,6 +55,30 @@ describe('Property 3: Group name is exactly CloudTAKAgency<id>', () => {
       expect(name).not.toContain('tak_');
     }
   );
+});
+
+describe('Property 3b: Group name honors a configured CLOUDTAK_AGENCY_GROUP_PREFIX override', () => {
+  // Feature: cloudtak-agency-groups, extension: env-configurable agency
+  // group prefix. Validates that `groupName` is exactly `<prefix><id>`
+  // for ANY non-empty configured prefix, with no separator inserted.
+  const originalPrefixEnv = process.env.CLOUDTAK_AGENCY_GROUP_PREFIX;
+
+  afterEach(() => {
+    if (originalPrefixEnv === undefined) {
+      delete process.env.CLOUDTAK_AGENCY_GROUP_PREFIX;
+    } else {
+      process.env.CLOUDTAK_AGENCY_GROUP_PREFIX = originalPrefixEnv;
+    }
+  });
+
+  test.prop(
+    [fc.string({ minLength: 1 }).filter((s) => s.length > 0), fc.integer()],
+    { numRuns: 100 }
+  )('groupName(id) equals the configured prefix concatenated with the id when the env var is set', (prefix, id) => {
+    process.env.CLOUDTAK_AGENCY_GROUP_PREFIX = prefix;
+    const name = groupName(id);
+    expect(name).toBe(`${prefix}${String(id)}`);
+  });
 });
 
 describe('Property 4: Agency attributes map exactly to the Team fields', () => {

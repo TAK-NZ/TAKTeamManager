@@ -526,7 +526,9 @@ function parseRowCallsignPrefix(row) {
     return null;
   }
   if (!isValidCallsignPrefix(value)) {
-    throw new BulkImportRowError(`Invalid callsignPrefix: ${value} (letters and digits only)`);
+    throw new BulkImportRowError(
+      `Invalid callsignPrefix: ${value} (letters and digits only, optionally split into segments with a single hyphen, e.g. AUS-FIRE)`
+    );
   }
   return value;
 }

@@ -619,6 +619,58 @@ describe('Team.getSubTeamsForCallsignLevel (Requirement 5.8-5.11)', () => {
 });
 
 /**
+ * Bugfix (Sub-teams tab consistency with the /teams overview):
+ * `Team.getSubTeams` now returns `admin_count`/`device_count`/
+ * `channel_count` alongside its pre-existing `member_count`/
+ * `sub_teams_count`, mirroring `getOrganisationTeams`/`getAllTeams`'s
+ * own subquery shapes for the first two, plus a new `channel_count`.
+ */
+describe('Team.getSubTeams admin_count/device_count/channel_count (bugfix)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('selects admin_count via a direct, non-device, role=\'admin\' membership count', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+
+    await Team.getSubTeams(1);
+
+    const [sql, params] = pool.query.mock.calls[0];
+    expect(sql).toContain("tm.role = 'admin' AND u.is_team_device IS NOT TRUE) as admin_count");
+    expect(params).toEqual([1]);
+  });
+
+  it('selects device_count via a direct (non-inherited), is_team_device membership count', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+
+    await Team.getSubTeams(1);
+
+    const [sql] = pool.query.mock.calls[0];
+    expect(sql).toContain('tm.inherited_from_team_id IS NULL AND u.is_team_device = true) as device_count');
+  });
+
+  it('selects channel_count via COUNT(*) FROM channels scoped to the same team row', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+
+    await Team.getSubTeams(1);
+
+    const [sql] = pool.query.mock.calls[0];
+    expect(sql).toContain('FROM channels c WHERE c.team_id = t.id) as channel_count');
+  });
+
+  it('returns every row exactly as the query yields it, including the new columns', async () => {
+    const rows = [
+      { id: 2, parent_team_id: 1, member_count: '3', admin_count: '1', device_count: '2', channel_count: '3', sub_teams_count: '0' }
+    ];
+    pool.query.mockResolvedValue({ rows });
+
+    const result = await Team.getSubTeams(1);
+
+    expect(result).toEqual(rows);
+  });
+});
+
+/**
  * Unit tests for `Team.isAdmin` (Requirement 4.1-4.4, task 3.1).
  *
  * `isAdmin` must walk the Ancestor_Chain via a recursive CTE, matching

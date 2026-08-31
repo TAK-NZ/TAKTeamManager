@@ -10,7 +10,7 @@
 const fc = require('fast-check');
 const { test } = require('@fast-check/jest');
 
-const { isCloudTakEnabled } = require('./cloudtak');
+const { isCloudTakEnabled, getCloudTakAgencyGroupPrefix } = require('./cloudtak');
 
 // Feature: cloudtak-agency-groups, Property 1: Enablement flag predicate
 // Validates: Requirements 1.1, 1.2
@@ -50,5 +50,37 @@ describe('Property 1: Enablement flag predicate', () => {
 
   it('is false when the variable is unset (empty env)', () => {
     expect(isCloudTakEnabled({})).toBe(false);
+  });
+});
+
+// Feature: cloudtak-agency-groups, Property 2: Agency group prefix defaulting
+// Validates: env-configurable CLOUDTAK_AGENCY_GROUP_PREFIX (server-config-only extension)
+describe('Property 2: Agency group prefix defaulting', () => {
+  // For ANY non-empty string, a set CLOUDTAK_AGENCY_GROUP_PREFIX is returned
+  // verbatim; for ANY "empty" value (unset, undefined, or the empty string),
+  // the "CloudTAKAgency" default is returned instead.
+  test.prop(
+    [
+      fc.oneof(
+        fc.string({ minLength: 1 }).filter((s) => s.length > 0),
+        fc.constantFrom('', undefined)
+      )
+    ],
+    { numRuns: 200 }
+  )('returns the configured prefix verbatim when non-empty, otherwise "CloudTAKAgency"', (value) => {
+    const result = getCloudTakAgencyGroupPrefix({ CLOUDTAK_AGENCY_GROUP_PREFIX: value });
+    if (value) {
+      expect(result).toBe(value);
+    } else {
+      expect(result).toBe('CloudTAKAgency');
+    }
+  });
+
+  it('defaults to "CloudTAKAgency" when unset (empty env)', () => {
+    expect(getCloudTakAgencyGroupPrefix({})).toBe('CloudTAKAgency');
+  });
+
+  it('returns a custom configured prefix verbatim', () => {
+    expect(getCloudTakAgencyGroupPrefix({ CLOUDTAK_AGENCY_GROUP_PREFIX: 'CustomPrefix' })).toBe('CustomPrefix');
   });
 });

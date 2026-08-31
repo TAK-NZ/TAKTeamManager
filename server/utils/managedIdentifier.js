@@ -6,6 +6,18 @@
  * Identifier_Type_Marker character, and a seven-character body drawn from the
  * Identifier_Alphabet. Example: `AUK-D7K3QMX`.
  *
+ * Foreign-partner-prefix extension: `organisationPrefix` may itself contain
+ * internal `-` separators (e.g. `AUS-FIRE`, validated by
+ * `callsignValidation.js`'s `isValidCallsignPrefix`), producing an identifier
+ * like `AUS-FIRE-D7K3QMX`. This stays unambiguous because
+ * `isValidCallsignPrefix` independently rejects any `-`-separated
+ * `organisationPrefix` segment that itself has the exact marker+body shape
+ * (`[DU]` followed by exactly 7 Identifier_Alphabet characters) -- so the
+ * FINAL `-<marker><7-char-body>` run in a Managed_Identifier string is always
+ * the real one, never a coincidental prefix segment. `MANAGED_IDENTIFIER_PATTERN`
+ * below matches the prefix as one-or-more `-`-joined alphanumeric segments
+ * for this reason.
+ *
  * This module imports `crypto`, `./identifierAlphabet` and
  * `./callsignValidation` ONLY -- no framework, no database -- so a property
  * test can load it bare (takserver-enrollment Criterion 1.5). All three are
@@ -41,8 +53,17 @@ const VALID_TYPE_MARKERS = Object.freeze(Object.values(IDENTIFIER_TYPE_MARKERS))
 // Built from the imported alphabet and marker set rather than re-typed, so
 // the alphabet literal continues to appear in exactly one non-test module
 // (identifierAlphabet.js) per the structural guard (Criterion 1.4).
+//
+// The prefix group, `[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*`, matches one or more
+// `-`-joined alphanumeric segments (the foreign-partner-prefix extension --
+// see this file's header comment), rather than a single hyphen-free run.
+// Regex alternation is greedy left-to-right but backtracks, so this pattern
+// still anchors correctly on the FINAL `-<marker><7-char-body>` run even
+// when the prefix itself contains `-`: `isValidCallsignPrefix` guarantees no
+// earlier segment can match `[DU][alphabet]{7}` exactly, so there is only
+// ever one place in the string this suffix can match.
 const MANAGED_IDENTIFIER_PATTERN = new RegExp(
-  `^[A-Za-z0-9]+${escapeForCharClass(IDENTIFIER_SEPARATOR)}[${VALID_TYPE_MARKERS.join('')}][${AMBIGUITY_FREE_ALPHABET}]{${IDENTIFIER_BODY_LENGTH}}$`
+  `^[A-Za-z0-9]+(?:${escapeForCharClass(IDENTIFIER_SEPARATOR)}[A-Za-z0-9]+)*${escapeForCharClass(IDENTIFIER_SEPARATOR)}[${VALID_TYPE_MARKERS.join('')}][${AMBIGUITY_FREE_ALPHABET}]{${IDENTIFIER_BODY_LENGTH}}$`
 );
 
 /**
@@ -90,14 +111,16 @@ function generateIdentifierBody(randomInt = crypto.randomInt) {
  *
  * Total on the random source; deliberately NOT total on its configuration
  * arguments (Criterion 2.9): an `organisationPrefix` that is absent, empty,
- * or carries a character outside `[A-Za-z0-9]` is a caller defect and throws
- * a `TypeError` naming the offending value, and the same is true for a
- * `typeMarker` that is not one of `IDENTIFIER_TYPE_MARKERS`' values.
- * `organisationPrefix` is validated with the existing `isValidCallsignPrefix`
- * (Criterion 2.5) rather than a second regex -- that function alone treats an
- * empty/null/undefined value as VALID (it exists to validate an optional
- * field), so emptiness is checked separately here, since a Managed_Identifier
- * always needs a real prefix.
+ * or fails `isValidCallsignPrefix` (which, per the foreign-partner-prefix
+ * extension, now also rejects a `-`-separated segment shaped like a
+ * marker+body suffix) is a caller defect and throws a `TypeError` naming the
+ * offending value, and the same is true for a `typeMarker` that is not one
+ * of `IDENTIFIER_TYPE_MARKERS`' values. `organisationPrefix` is validated
+ * with the existing `isValidCallsignPrefix` (Criterion 2.5) rather than a
+ * second regex -- that function alone treats an empty/null/undefined value
+ * as VALID (it exists to validate an optional field), so emptiness is
+ * checked separately here, since a Managed_Identifier always needs a real
+ * prefix.
  *
  * No runtime cross-type collision check is performed, deliberately
  * (Criterion 1.6): the Identifier_Type_Marker occupies the fixed index

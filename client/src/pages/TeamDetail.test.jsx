@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { formatCallsignLevels, formatCallsignNameFormatExample, computeTeamDepth, getInitialMemberEditForm, isValidMemberCallsignSuffix, isValidSubTeamCallsignPrefix, extractCallsignSuffixServerError, isValidNewUserEmail, isPseudonymousOrganisation } from './TeamDetail.jsx';
+import { formatCallsignLevels, formatCallsignNameFormatExample, computeTeamDepth, getInitialMemberEditForm, isValidMemberCallsignSuffix, isValidSubTeamCallsignPrefix, extractCallsignSuffixServerError, isValidNewUserEmail, isPseudonymousOrganisation, resolveInitialTab } from './TeamDetail.jsx';
 
 // Validates: Requirements 1.1, 1.2, 2.4, 2.5
 //
@@ -17,6 +17,31 @@ import { formatCallsignLevels, formatCallsignNameFormatExample, computeTeamDepth
 // all test extracted pure logic rather than rendering a component -- so
 // this file follows that same convention and tests the pure helpers
 // TeamDetail.jsx uses to compute its depth-disable state and badge text.
+
+// Bugfix (Orgs & Teams overview -> tab deep link): Teams.jsx's Members/Team
+// Devices/Team Admins/Sub-teams counts each link here as `?tab=<id>`; this
+// page should open directly on that tab rather than always defaulting to
+// Members.
+describe('resolveInitialTab (bugfix: Orgs & Teams overview count links to a tab)', () => {
+  it.each(['members', 'devices', 'admins', 'channels', 'subteams'])(
+    'accepts %s as a valid tab id',
+    (tabId) => {
+      expect(resolveInitialTab(tabId)).toBe(tabId)
+    }
+  )
+
+  it('defaults to members when the param is missing (null)', () => {
+    expect(resolveInitialTab(null)).toBe('members')
+  })
+
+  it('defaults to members for an unrecognised value', () => {
+    expect(resolveInitialTab('not-a-real-tab')).toBe('members')
+  })
+
+  it('defaults to members for an empty string', () => {
+    expect(resolveInitialTab('')).toBe('members')
+  })
+})
 
 describe('formatCallsignLevels', () => {
   it('renders a sorted, comma-separated "Levels: ..." summary', () => {
@@ -176,13 +201,14 @@ describe('isValidMemberCallsignSuffix (Req 11.3)', () => {
 // Validates: Requirement 3.10
 //
 // The Create Sub-Team Dialog's own "Prefix" input
-// (`subTeamFormData.callsignPrefix`) gains the same stricter
-// letters+digits-only pattern validation as Teams.jsx's `callsignPrefix`
-// input (task 32.6), per design.md's "Sub-team creation dialog:
-// `callsignPrefix` gains the same stricter pattern validation as
-// Teams.jsx." `isValidSubTeamCallsignPrefix` mirrors
-// server/utils/callsignValidation.js's `isValidCallsignPrefix` character
-// class (letters and digits only, no `-`).
+// (`subTeamFormData.callsignPrefix`) gains the same stricter pattern
+// validation as Teams.jsx's `callsignPrefix` input (task 32.6), per
+// design.md's "Sub-team creation dialog: `callsignPrefix` gains the same
+// stricter pattern validation as Teams.jsx." `isValidSubTeamCallsignPrefix`
+// mirrors server/utils/callsignValidation.js's `isValidCallsignPrefix`
+// character class. Foreign-partner-prefix extension: this now allows one
+// or more `-`-separated alphanumeric segments, rather than a single
+// hyphen-free run.
 
 describe('isValidSubTeamCallsignPrefix (Req 3.10)', () => {
   it('accepts an empty value', () => {
@@ -195,8 +221,20 @@ describe('isValidSubTeamCallsignPrefix (Req 3.10)', () => {
     expect(isValidSubTeamCallsignPrefix('STL123')).toBe(true)
   })
 
-  it('rejects a value containing a "-" (stricter than callsign_suffix)', () => {
-    expect(isValidSubTeamCallsignPrefix('NZ-POL')).toBe(false)
+  // Foreign-partner-prefix extension: a single internal hyphen (one or
+  // more `-`-separated alphanumeric segments) is now accepted by this
+  // CLIENT-SIDE check, mirroring server/utils/callsignValidation.js's
+  // widened CALLSIGN_PREFIX_PATTERN. The Managed_Identifier
+  // marker+body-shape rejection is server-side only and is not
+  // duplicated here.
+  it('accepts a value containing a single internal hyphen (a two-segment prefix)', () => {
+    expect(isValidSubTeamCallsignPrefix('NZ-POL')).toBe(true)
+  })
+
+  it('rejects a value with a leading, trailing, or doubled hyphen', () => {
+    expect(isValidSubTeamCallsignPrefix('-NZ')).toBe(false)
+    expect(isValidSubTeamCallsignPrefix('NZ-')).toBe(false)
+    expect(isValidSubTeamCallsignPrefix('NZ--POL')).toBe(false)
   })
 
   it('rejects a value containing any other disallowed character', () => {
@@ -299,14 +337,20 @@ describe('transfer action placement in TeamDetail.jsx (Req 15.1)', () => {
   // is passed through as a prop (`setTransferringMember`) rather than the
   // button calling `setTransferringMember(member)`/`setTransferringMember(admin)`
   // directly, so these checks now target `MemberActions`'s own definition
-  // (the single source of truth) plus each of its 4 call sites (Members
-  // card, Members table, Team Admins card, Team Admins table).
+  // (the single source of truth) plus each of its 2 call sites (Members
+  // card, Members table).
+  //
+  // Bugfix (Team Admins tab action-set mismatch): the Team Admins tab's
+  // 2 call sites no longer render `MemberActions` at all -- Transfer,
+  // along with Edit/Resend welcome/View devices/Delete, is a MEMBER
+  // action and this tab is scoped to managing admin STATUS only. See the
+  // `AdminActions.jsx` describe block below.
   //
   // Users-page-action-parity: `MemberActions` itself moved out of
   // `TeamDetail.jsx` into the shared `components/MemberActions.jsx` (also
   // used by `Users.jsx`), so the button-definition assertion reads THAT
   // file; the call-site assertions below stay against `TeamDetail.jsx`'s
-  // own source, since the 4 usages are still there.
+  // own source, since the 2 usages are still there.
   const memberActionsSource = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), '..', 'components', 'MemberActions.jsx'),
     'utf8'
@@ -325,19 +369,19 @@ describe('transfer action placement in TeamDetail.jsx (Req 15.1)', () => {
     expect(button).toContain("aria-label={hasTeam ? 'Transfer member to another team' : noTeamTitle}")
   })
 
-  it('passes onTransfer={setTransferringMember} from all 4 MemberActions call sites (Members card+table, Team Admins card+table)', () => {
+  it('passes onTransfer={setTransferringMember} from both MemberActions call sites (Members card+table only -- Team Admins no longer has a transfer action)', () => {
     const occurrences = source.split('onTransfer={setTransferringMember}').length - 1
-    expect(occurrences).toBe(4)
+    expect(occurrences).toBe(2)
   })
 
-  it('renders MemberActions exactly 4 times (Members card, Members table, Team Admins card, Team Admins table), each gated on canManageTeam alone', () => {
+  it('renders MemberActions exactly 2 times (Members card, Members table), each gated on canManageTeam alone', () => {
     const usages = [...source.matchAll(/\{canManageTeam && \(\s*<MemberActions/g)]
-    expect(usages.length).toBe(4)
+    expect(usages.length).toBe(2)
   })
 
-  it('passes roleLabel="member" from the Members tab\'s 2 call sites and roleLabel="admin" from the Team Admins tab\'s 2 call sites', () => {
+  it('passes roleLabel="member" from the Members tab\'s 2 call sites (AdminActions, used by Team Admins, has no roleLabel prop)', () => {
     expect(source.split('roleLabel="member"').length - 1).toBe(2)
-    expect(source.split('roleLabel="admin"').length - 1).toBe(2)
+    expect(source.split('roleLabel="admin"').length - 1).toBe(0)
   })
 
   it('renders the transfer dialog only while a member has been selected for transfer', () => {
@@ -559,12 +603,29 @@ describe('Email inline validation wiring in the Create New User tab (Defect 2)',
   const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
 
   it('validates the email inline before the suffix check in handleCreateNewUser', () => {
-    const emailIdx = source.indexOf('if (!isValidNewUserEmail(newUserFormState.email)) {')
-    const suffixIdx = source.indexOf('if (!isValidMemberCallsignSuffix(newUserFormState.suffix)) {')
+    // Scoped to handleCreateNewUser's own body: the "Add Existing User"
+    // tab's onboarding-review submit path (handleAddExistingUser, defined
+    // earlier in the file) now ALSO calls isValidMemberCallsignSuffix, so
+    // an unscoped source.indexOf would find that earlier, unrelated call
+    // site instead of handleCreateNewUser's -- scoping to the function
+    // body keeps this assertion pinned to the one function it actually
+    // describes. Bounded at the end by the next top-level function
+    // declaration (`// The single request-issuing effect...` precedes it
+    // today), matched loosely via the next `React.useEffect(` after the
+    // function's own preview-issuing effect reference, to stay robust to
+    // reordering elsewhere in the file.
+    const fnStart = source.indexOf('const handleCreateNewUser = async (e) => {')
+    expect(fnStart).toBeGreaterThan(-1)
+    const fnEnd = source.indexOf('\n  // Fetch available users when dialog opens', fnStart)
+    expect(fnEnd).toBeGreaterThan(fnStart)
+    const fnBody = source.slice(fnStart, fnEnd)
+
+    const emailIdx = fnBody.indexOf('if (!isValidNewUserEmail(newUserFormState.email)) {')
+    const suffixIdx = fnBody.indexOf('if (!isValidMemberCallsignSuffix(newUserFormState.suffix)) {')
     expect(emailIdx).toBeGreaterThan(-1)
     expect(suffixIdx).toBeGreaterThan(-1)
     expect(emailIdx).toBeLessThan(suffixIdx)
-    const block = source.slice(emailIdx, source.indexOf('return', emailIdx))
+    const block = fnBody.slice(emailIdx, fnBody.indexOf('return', emailIdx))
     expect(block).toContain("setNewUserEmailError('Please enter a valid email address.')")
   })
 
@@ -613,7 +674,7 @@ describe('Members list includes admins (Defect 1)', () => {
 
   it('includes admin rows in every setMembers filter', () => {
     const matches = source.match(/setMembers\(allMembers\.filter\([^)]*\)\)/g) || []
-    expect(matches.length).toBe(5)
+    expect(matches.length).toBe(6)
     for (const m of matches) {
       expect(m).toContain("m.role === 'admin'")
       expect(m).toContain("m.role === 'member'")
@@ -623,10 +684,152 @@ describe('Members list includes admins (Defect 1)', () => {
 
   it('keeps the Team Admins list admin-only', () => {
     const matches = source.match(/setAdmins\(allMembers\.filter\([^)]*\)\)/g) || []
-    expect(matches.length).toBe(5)
+    expect(matches.length).toBe(6)
     for (const m of matches) {
       expect(m).toBe("setAdmins(allMembers.filter(m => m.role === 'admin'))")
     }
+  })
+})
+
+// Bugfix (Team Admins tab action-set mismatch): "Remove as admin" is the
+// ONE action on the Team Admins tab -- it demotes a direct admin row
+// back to 'member' via the same upsert `teamsAPI.addMember` already
+// uses to promote (see `handleAddExistingUser`), leaving the account,
+// team membership and channel access untouched. Kept entirely separate
+// from `handleRemoveUser`'s "Permanently Delete User" flow
+// (removeUserId/removeUserRole), which is unrelated and far more
+// severe. Source-contract tests only, per this file's established
+// convention (no @testing-library/react in this project).
+describe('Remove as Admin flow (bugfix: Team Admins tab action-set mismatch)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  it('imports AdminActions from the shared component, distinct from MemberActions', () => {
+    expect(source).toContain("import AdminActions from '../components/AdminActions'")
+  })
+
+  it('opens the confirmation with the clicked admin row via handleRemoveAdminClick, kept separate from handleRemoveUser', () => {
+    expect(source).toContain('const handleRemoveAdminClick = (admin) => {')
+    const index = source.indexOf('const handleRemoveAdminClick = (admin) => {')
+    const block = source.slice(index, source.indexOf('}', index) + 1)
+    expect(block).toContain('setRemovingAdmin(admin)')
+  })
+
+  it('both AdminActions call sites (Team Admins card+table) pass onRemoveAdmin={handleRemoveAdminClick}', () => {
+    const occurrences = source.split('onRemoveAdmin={handleRemoveAdminClick}').length - 1
+    expect(occurrences).toBe(2)
+  })
+
+  it('demotes via teamsAPI.addMember(team.id, { userId, role: "member" }) -- the same upsert used to promote, not a new/different endpoint', () => {
+    expect(source).toContain('const confirmRemoveAdmin = async () => {')
+    const index = source.indexOf('const confirmRemoveAdmin = async () => {')
+    const block = source.slice(index, source.indexOf('\n  }', index))
+    expect(block).toContain("await teamsAPI.addMember(team.id, { userId: removingAdmin.id, role: 'member' })")
+  })
+
+  it('refreshes members/admins from teamsAPI.getById after demoting, matching the refresh pattern used by every other mutation on this page', () => {
+    const index = source.indexOf('const confirmRemoveAdmin = async () => {')
+    const block = source.slice(index, source.indexOf('\n  }', index))
+    expect(block).toContain('const teamResponse = await teamsAPI.getById(team.id)')
+    expect(block).toContain("setMembers(allMembers.filter(m => m.role === 'member' || m.role === 'inherited' || m.role === 'admin'))")
+    expect(block).toContain("setAdmins(allMembers.filter(m => m.role === 'admin'))")
+  })
+
+  it('never calls usersAPI.removeFromTeam (the destructive account-deletion path) from confirmRemoveAdmin', () => {
+    const index = source.indexOf('const confirmRemoveAdmin = async () => {')
+    const block = source.slice(index, source.indexOf('\n  }', index))
+    expect(block).not.toContain('usersAPI.removeFromTeam')
+  })
+
+  it('renders a plain Cancel/Confirm "Remove as Admin" dialog (no type-to-confirm input), gated on removingAdmin', () => {
+    expect(source).toContain('{removingAdmin && (')
+    const index = source.indexOf('{removingAdmin && (')
+    const dialogEnd = source.indexOf('\n      )}', index)
+    const block = source.slice(index, dialogEnd)
+    expect(block).toContain('Remove as Admin')
+    expect(block).toContain('onClick={() => setRemovingAdmin(null)}')
+    expect(block).toContain('onClick={confirmRemoveAdmin}')
+    expect(block).toContain('disabled={removingAdminInFlight}')
+    // No type-to-confirm text input, unlike the "Permanently Delete User" dialog.
+    expect(block).not.toContain('removeConfirmInput')
+  })
+})
+
+// Bugfix (silent welcome-email failures): `POST /create-and-add`'s
+// welcome-email send was previously wrapped in a try/catch that only
+// logged on failure -- the account was created either way, but the
+// admin (who may have fat-fingered the address) had no way to know the
+// invite never went out. The route now rides `welcomeEmailSent` on the
+// same 201 response, and this Create New User submit handler reads it
+// to show a single combined toast.error (not toast.success) rather than
+// layering a second toast on top of the normal success one.
+// Source-contract tests only, per this file's established convention.
+describe('Create New User: welcomeEmailSent toast (bugfix: silent welcome-email failures)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  it('branches on response?.data?.welcomeEmailSent === false, naming the target email in the error toast, rather than always calling toast.success', () => {
+    expect(source).toContain("if (response?.data?.welcomeEmailSent === false) {")
+    const index = source.indexOf('if (response?.data?.welcomeEmailSent === false) {')
+    const block = source.slice(index, source.indexOf('\n      }', index) + '\n      }'.length)
+    expect(block).toContain('toast.error(`User created, but the welcome email to ${newUserFormState.email} could not be sent. You may need to resend it manually.`)')
+    // A single combined toast: this branch must not ALSO call
+    // toast.success for the same outcome.
+    expect(block).not.toContain('toast.success')
+  })
+
+  it('keeps the existing toast.success (with the assigned callsign suffix) in the else branch, unchanged from before this bugfix', () => {
+    const index = source.indexOf('if (response?.data?.welcomeEmailSent === false) {')
+    const elseIndex = source.indexOf('} else {', index)
+    const block = source.slice(elseIndex, source.indexOf('\n      }', elseIndex))
+    expect(block).toContain('toast.success(')
+    expect(block).toContain('User created with callsign suffix ${assignedSuffix}')
+    expect(block).toContain("'User created and added to this team'")
+  })
+})
+
+// Bugfix (Resend welcome email was the only action with no
+// confirmation): every other action on the Members/Team Admins tabs
+// (Delete Sub-Team, Remove as Admin, Permanently Delete User) already
+// confirms before acting; Resend welcome email fired the request
+// immediately on click. It now opens a plain Cancel/Confirm dialog
+// first, matching "Delete Sub-Team"'s non-destructive framing
+// (btn-primary Confirm, not btn-danger) since resending an email is not
+// destructive. Source-contract tests only, per this file's established
+// convention.
+describe('Resend Welcome Email confirmation (bugfix: only action with no confirmation)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  it('opens the confirmation with the clicked row via handleResendWelcomeClick, kept separate from handleRemoveAdminClick/handleRemoveUser', () => {
+    expect(source).toContain('const handleResendWelcomeClick = (member) => {')
+    const index = source.indexOf('const handleResendWelcomeClick = (member) => {')
+    const block = source.slice(index, source.indexOf('}', index) + 1)
+    expect(block).toContain('setResendingWelcomeTo(member)')
+  })
+
+  it('both MemberActions call sites (Members card+table) pass onResendWelcome={handleResendWelcomeClick}, not the API-calling function directly', () => {
+    const occurrences = source.split('onResendWelcome={handleResendWelcomeClick}').length - 1
+    expect(occurrences).toBe(2)
+    expect(source).not.toContain('onResendWelcome={handleResendWelcome}')
+  })
+
+  it('sends the email via usersAPI.resendWelcome(resendingWelcomeTo.id, team.id) only from confirmResendWelcome', () => {
+    expect(source).toContain('const confirmResendWelcome = async () => {')
+    const index = source.indexOf('const confirmResendWelcome = async () => {')
+    const block = source.slice(index, source.indexOf('\n  }', index))
+    expect(block).toContain('await usersAPI.resendWelcome(resendingWelcomeTo.id, team.id)')
+  })
+
+  it('renders a plain Cancel/Confirm "Resend Welcome Email" dialog (no type-to-confirm input), using btn-primary rather than btn-danger since this is not destructive', () => {
+    expect(source).toContain('{resendingWelcomeTo && (')
+    const index = source.indexOf('{resendingWelcomeTo && (')
+    const dialogEnd = source.indexOf('\n      )}', index)
+    const block = source.slice(index, dialogEnd)
+    expect(block).toContain('Resend Welcome Email')
+    expect(block).toContain('onClick={() => setResendingWelcomeTo(null)}')
+    expect(block).toContain('onClick={confirmResendWelcome}')
+    expect(block).toContain('disabled={resendingWelcomeInFlight}')
+    expect(block).toContain('btn-primary')
+    expect(block).not.toContain('btn-danger')
+    expect(block).not.toContain('removeConfirmInput')
   })
 })
 
@@ -684,20 +887,34 @@ describe('Create-user form under a Pseudonymous_Organisation target (takserver-e
   const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
 
   it('renders the pseudonymous-required explanation as visible <p> text tied to the field via aria-describedby, not only as a validation error', () => {
+    // Scoped to the "Create New User" tab's own <form> block: the "Add
+    // Existing User" tab's onboarding-review section now renders the
+    // IDENTICAL help text (by design -- it reuses the same
+    // newUserFormState reducer/preview machinery) against its own
+    // "existing-user-callsign-suffix-help" id, so an unscoped
+    // source.indexOf would match that earlier block instead of this
+    // tab's. Matches the same scoping convention the sibling
+    // "renders no username <input>..." test below already uses.
+    const formStart = source.indexOf("{addMemberTab === 'new' && (")
+    expect(formStart).toBeGreaterThan(-1)
+    const formEnd = source.indexOf('</form>', formStart)
+    expect(formEnd).toBeGreaterThan(formStart)
+    const createUserFormBlock = source.slice(formStart, formEnd)
+
     // The help text is rendered unconditionally whenever pseudonymousTarget
     // is true and there is no error yet -- i.e. before any submit attempt,
     // as visible text rather than something surfaced only on rejection.
-    const helpIndex = source.indexOf('Required because this Organisation uses pseudonymous usernames')
+    const helpIndex = createUserFormBlock.indexOf('Required because this Organisation uses pseudonymous usernames')
     expect(helpIndex).toBeGreaterThan(-1)
-    const helpBlockStart = source.lastIndexOf('<p ', helpIndex)
-    const helpBlock = source.slice(helpBlockStart, source.indexOf('</p>', helpIndex))
+    const helpBlockStart = createUserFormBlock.lastIndexOf('<p ', helpIndex)
+    const helpBlock = createUserFormBlock.slice(helpBlockStart, createUserFormBlock.indexOf('</p>', helpIndex))
     expect(helpBlock).toContain('id="new-user-callsign-suffix-help"')
 
     // The Suffix_Field points aria-describedby at this same id whenever
     // pseudonymousTarget is true (and there's no error), so the text is
     // actually wired to the field rather than being orphaned prose.
-    const suffixInputIndex = source.indexOf('id="new-user-callsign-suffix"')
-    const suffixInputBlock = source.slice(suffixInputIndex, source.indexOf('/>', suffixInputIndex))
+    const suffixInputIndex = createUserFormBlock.indexOf('id="new-user-callsign-suffix"')
+    const suffixInputBlock = createUserFormBlock.slice(suffixInputIndex, createUserFormBlock.indexOf('/>', suffixInputIndex))
     expect(suffixInputBlock).toContain("aria-describedby={newUserFormState.error ? 'new-user-callsign-suffix-error' : ((newUserFormState.required || pseudonymousTarget) ? 'new-user-callsign-suffix-help' : undefined)}")
   })
 
@@ -1285,28 +1502,41 @@ describe('TeamDetail.jsx: Members/Team Admins/Channels/Sub-teams tabs render sm:
     }
   })
 
-  it('shares MemberActions between the Members card and table (2 usages) and between the Team Admins card and table (2 usages)', () => {
-    const usages = source.split('<MemberActions').length - 1
-    expect(usages).toBe(4)
+  it('shares MemberActions between the Members card and table (2 usages); the Team Admins tab uses AdminActions instead (2 usages)', () => {
+    const memberActionsUsages = source.split('<MemberActions').length - 1
+    expect(memberActionsUsages).toBe(2)
+    const adminActionsUsages = source.split('<AdminActions').length - 1
+    expect(adminActionsUsages).toBe(2)
   })
 
-  // Bugfix (mobile tap targets too small): the two CARD usages (Members
-  // card, Team Admins card) pass variant="card" for a real ~36px tap
-  // target; the two TABLE usages default to variant="table" (unchanged)
-  // since a desktop table row has no tap-target problem.
-  it('passes variant="card" from exactly the 2 mobile-card MemberActions usages, and no card variant from the 2 table usages', () => {
-    // Locate each <MemberActions usage and confirm exactly 2 of the 4
-    // carry variant="card" -- the sm:hidden card ones, not the table
-    // ones. Scoped to each usage's own JSX block (not a whole-file
+  // Bugfix (mobile tap targets too small): the CARD usage (Members
+  // card) passes variant="card" for a real ~36px tap target; the TABLE
+  // usage defaults to variant="table" (unchanged) since a desktop table
+  // row has no tap-target problem. Same convention applies to
+  // AdminActions' card vs. table usage on the Team Admins tab.
+  it('passes variant="card" from exactly the mobile-card MemberActions usage, and no card variant from the table usage', () => {
+    // Locate each <MemberActions usage and confirm exactly 1 of the 2
+    // carries variant="card" -- the sm:hidden card one, not the table
+    // one. Scoped to each usage's own JSX block (not a whole-file
     // string count) so a doc comment elsewhere mentioning
     // `variant="card"` in prose can't skew the count.
     const usageIndices = [...source.matchAll(/<MemberActions/g)].map((m) => m.index)
-    expect(usageIndices.length).toBe(4)
+    expect(usageIndices.length).toBe(2)
     const withCardVariant = usageIndices.filter((index) => {
       const usageBlock = source.slice(index, source.indexOf('/>', index))
       return usageBlock.includes('variant="card"')
     })
-    expect(withCardVariant.length).toBe(2)
+    expect(withCardVariant.length).toBe(1)
+  })
+
+  it('passes variant="card" from exactly the mobile-card AdminActions usage, and no card variant from the table usage', () => {
+    const usageIndices = [...source.matchAll(/<AdminActions/g)].map((m) => m.index)
+    expect(usageIndices.length).toBe(2)
+    const withCardVariant = usageIndices.filter((index) => {
+      const usageBlock = source.slice(index, source.indexOf('/>', index))
+      return usageBlock.includes('variant="card"')
+    })
+    expect(withCardVariant.length).toBe(1)
   })
 
   // Bugfix: the Sub-teams tab's inline view/delete actions were never
@@ -1336,6 +1566,56 @@ describe('TeamDetail.jsx: Members/Team Admins/Channels/Sub-teams tabs render sm:
     expect(cardBlock).toContain('flex items-baseline gap-1')
   })
 
+  // Bugfix (Sub-teams tab consistency with the /teams overview): Team
+  // Devices/Team Admins/Channels join Members/Sub-teams, and every one
+  // of the five stats -- in BOTH the card and the desktop table -- links
+  // to that sub-team's own corresponding tab, exactly like Teams.jsx's
+  // own overview stats do.
+  describe('Sub-teams tab: Team Devices/Team Admins/Channels columns, all five stats clickable (bugfix)', () => {
+    const subteamsGateIndex = source.indexOf("activeTab === 'subteams' && (")
+    const cardIndex = source.indexOf('sm:hidden divide-y', subteamsGateIndex)
+    const tableIndex = source.indexOf('hidden sm:block overflow-x-auto', subteamsGateIndex)
+    const nextTabGateIndex = source.indexOf("activeTab !== 'devices' && paginatedData.length === 0", tableIndex)
+    const cardBlock = source.slice(cardIndex, tableIndex)
+    const tableBlock = source.slice(tableIndex, nextTabGateIndex > -1 ? nextTabGateIndex : source.length)
+
+    it('adds Team Devices, Team Admins and Channels column headers, positioned between Members and Sub-teams', () => {
+      const membersIndex = tableBlock.indexOf("handleSort('member_count')")
+      const devicesIndex = tableBlock.indexOf("handleSort('device_count')")
+      const adminsIndex = tableBlock.indexOf("handleSort('admin_count')")
+      const channelsIndex = tableBlock.indexOf("handleSort('channel_count')")
+      const subTeamsIndex = tableBlock.indexOf("handleSort('sub_teams_count')")
+      expect(membersIndex).toBeGreaterThan(-1)
+      expect(devicesIndex).toBeGreaterThan(membersIndex)
+      expect(adminsIndex).toBeGreaterThan(devicesIndex)
+      expect(channelsIndex).toBeGreaterThan(adminsIndex)
+      expect(subTeamsIndex).toBeGreaterThan(channelsIndex)
+      expect(tableBlock).toContain('<span>Team Devices</span>')
+      expect(tableBlock).toContain('<span>Team Admins</span>')
+      expect(tableBlock).toContain('<span>Channels</span>')
+    })
+
+    it.each([
+      ['Members', 'members', '{subTeam.member_count || 0}'],
+      ['Team Devices', 'devices', '{subTeam.device_count || 0}'],
+      ['Team Admins', 'admins', '{subTeam.admin_count || 0}'],
+      ['Channels', 'channels', '{subTeam.channel_count || 0}'],
+      ['Sub-teams', 'subteams', '{subTeam.sub_teams_count || 0}']
+    ])('%s stat is a Link to ?tab=%s, in both the card and the table', (_label, tabId, countExpr) => {
+      const linkPrefix = `<Link to={\`/teams/${'$'}{subTeam.id}?tab=${tabId}\`}`
+
+      for (const [blockName, block] of [['card', cardBlock], ['table', tableBlock]]) {
+        expect(block, `${blockName} block should contain a ?tab=${tabId} Link`).toContain(linkPrefix)
+        const linkIndex = block.indexOf(linkPrefix)
+        const countIndex = block.indexOf(countExpr, linkIndex)
+        expect(countIndex, `${blockName} block: ${countExpr} should appear inside the ?tab=${tabId} Link`).toBeGreaterThan(linkIndex)
+        const closingLinkIndex = block.indexOf('</Link>', linkIndex)
+        expect(closingLinkIndex).toBeGreaterThan(-1)
+        expect(countIndex).toBeLessThan(closingLinkIndex)
+      }
+    })
+  })
+
   it('renders the Channels card with the channel_type badge and member count, and no action icons (read-only tab)', () => {
     const channelsGateIndex = source.indexOf("activeTab === 'channels' && (")
     const cardIndex = source.indexOf('sm:hidden divide-y', channelsGateIndex)
@@ -1344,6 +1624,86 @@ describe('TeamDetail.jsx: Members/Team Admins/Channels/Sub-teams tabs render sm:
     expect(cardBlock).toContain('{channel.channel_type === \'primary\' ? \'Primary\' : \'Custom\'}')
     expect(cardBlock).toContain('{channel.member_count || 0} members')
     expect(cardBlock).not.toContain('<button')
+  })
+})
+
+// Bugfix (list-width reduction): Members and Team Admins tabs show
+// Username instead of Email (matching Users.jsx's own username-shown
+// convention, and making more sense for an Organisation using
+// pseudonymous usernames), the username stacked underneath the name
+// (matching Users.jsx), and a combined "TAK Callsign & Role" column
+// where the TAK_Role renders small and without color underneath the
+// callsign -- replacing the old wide five/six-column
+// Name/Email/Role/TAK Role/Callsign/Actions layout.
+describe('TeamDetail.jsx: Members/Team Admins tabs show Username (not Email) and "TAK Callsign & Role" (bugfix)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+  const tabGates = ["activeTab === 'members' && (", "activeTab === 'admins' && ("]
+
+  function tabBlock(gate) {
+    const gateIndex = source.indexOf(gate)
+    expect(gateIndex).toBeGreaterThan(-1)
+    const otherGateIndex = tabGates
+      .filter((g) => g !== gate)
+      .map((g) => source.indexOf(g, gateIndex + gate.length))
+      .filter((i) => i > -1)
+      .sort((a, b) => a - b)[0] ?? source.length
+    return source.slice(gateIndex, otherGateIndex)
+  }
+
+  it.each(tabGates)('%s: the desktop table header reads "Username" and "TAK Callsign & Role", never "Email"/"TAK Role"/"Callsign" as separate headers', (gate) => {
+    const block = tabBlock(gate)
+    expect(block).toContain('<span>Username</span>')
+    expect(block).toContain('TAK Callsign & Role')
+    expect(block).not.toContain('<span>Email</span>')
+    // The OLD separate "TAK Role" and "Callsign" <th> labels are gone --
+    // only the combined header remains. (Role and TAK Callsign & Role
+    // literally are what remain; TAK Role/Callsign alone must not.)
+    expect(block).not.toMatch(/<th[^>]*>\s*TAK Role\s*<\/th>/)
+    expect(block).not.toMatch(/<th[^>]*>\s*Callsign\s*<\/th>/)
+  })
+
+  it.each(tabGates)('%s: the table row renders member.username (not member.email) and the combined callsign+role stack', (gate) => {
+    const block = tabBlock(gate)
+    const rowVar = gate.includes('members') ? 'member' : 'admin'
+    expect(block).toContain(`{${rowVar}.username}`)
+    expect(block).not.toContain(`{${rowVar}.email}`)
+    expect(block).toContain(`{${rowVar}.tak_callsign || '-'}`)
+    expect(block).toContain(`{${rowVar}.tak_role || 'Team Member'}`)
+  })
+
+  it.each(tabGates)('%s: the mobile card shows the username under the name, and the callsign+role stack with the role small and uncolored', (gate) => {
+    const block = tabBlock(gate)
+    const cardIndex = block.indexOf('sm:hidden divide-y')
+    const tableIndex = block.indexOf('hidden sm:block overflow-x-auto')
+    expect(cardIndex).toBeGreaterThan(-1)
+    expect(tableIndex).toBeGreaterThan(cardIndex)
+    const cardBlock = block.slice(cardIndex, tableIndex)
+
+    const rowVar = gate.includes('members') ? 'member' : 'admin'
+    expect(cardBlock).toContain(`{${rowVar}.username}`)
+    expect(cardBlock).not.toContain(`{${rowVar}.email}`)
+    expect(cardBlock).toContain(`{${rowVar}.tak_callsign || '-'}`)
+    // The role text sits in its own <p className="text-xs ...">, not a
+    // colored pill (bg-teal-100 etc.) the way it used to.
+    const roleLineIndex = cardBlock.indexOf(`{${rowVar}.tak_role || 'Team Member'}`)
+    expect(roleLineIndex).toBeGreaterThan(-1)
+    const roleLineStart = cardBlock.lastIndexOf('<p ', roleLineIndex)
+    const roleLine = cardBlock.slice(roleLineStart, roleLineIndex)
+    expect(roleLine).toContain('text-xs')
+    expect(roleLine).not.toContain('bg-teal-100')
+    expect(roleLine).not.toContain('rounded-full')
+  })
+
+  it('MemberEditRow colSpan is 5 in both tabs\' tables (one fewer column now that Email/TAK Role/Callsign collapsed to Username/TAK Callsign & Role)', () => {
+    const matches = [...source.matchAll(/<MemberEditRow[\s\S]*?colSpan=\{(\d+)\}/g)]
+    // 4 desktop-table MemberEditRow usages total across this file
+    // (Members table, Team Admins table) -- the two mobile-card usages
+    // pass colSpan={1} unrelated to this column count and are excluded
+    // by requiring colSpan 5 or 6 specifically wouldn't be safe, so
+    // instead assert every desktop usage (colSpan > 1) is exactly 5.
+    const desktopColSpans = matches.map((m) => Number(m[1])).filter((n) => n > 1)
+    expect(desktopColSpans.length).toBeGreaterThan(0)
+    expect(desktopColSpans.every((n) => n === 5)).toBe(true)
   })
 })
 
@@ -1383,5 +1743,122 @@ describe('TeamDetail.jsx: large dialogs are full-bleed on mobile (bugfix)', () =
     const overlayLine = source.slice(overlayIndex, source.indexOf('>', overlayIndex))
     expect(overlayLine).toContain('sm:p-4')
     expect(overlayLine).not.toMatch(/(?<!sm:)p-4/)
+  })
+})
+
+// Feature (Add Existing User onboarding review): selecting a candidate in
+// the member-role "Add Existing User" tab pre-fills, and lets an admin
+// review/correct, that user's First Name/Last Name/Callsign Suffix before
+// they're added -- this is the ONLY step that turns a user who exists in
+// Authentik but has never been touched by TAK Team Manager into a
+// TAK Team Manager-managed one, so a correction made here PERSISTS to the
+// user's account (server: POST /api/users/add-to-team). Reuses the SAME
+// newUserFormState reducer/preview machinery the Create New User tab
+// already uses, so both tabs cannot drift on how a Callsign Suffix is
+// computed, previewed, or collision-checked.
+describe('Add Existing User tab: name/callsign-suffix onboarding review (member role only)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  it('selectExistingUserCandidate resets the form, seeds firstName/lastName from the candidate, and only runs for the member-role picker', () => {
+    const fnStart = source.indexOf('const selectExistingUserCandidate = (user) => {')
+    expect(fnStart).toBeGreaterThan(-1)
+    const fnEnd = source.indexOf('\n  }', fnStart)
+    const fnBody = source.slice(fnStart, fnEnd)
+
+    expect(fnBody).toContain("if (addMemberRole !== 'member') return")
+    expect(fnBody).toContain("dispatchNewUserForm({ type: 'reset' })")
+    expect(fnBody).toContain("dispatchNewUserForm({ type: 'fieldChanged', field: 'firstName', value: user.first_name || '' })")
+    expect(fnBody).toContain("dispatchNewUserForm({ type: 'fieldChanged', field: 'lastName', value: user.last_name || '' })")
+    // A stored suffix is loaded via suffixEdited (TYPED origin, no extra
+    // preview round trip needed); a candidate with none gets a 'names'
+    // preview request instead, matching what blurring the name fields on
+    // the Create New User tab would trigger.
+    expect(fnBody).toContain("dispatchNewUserForm({ type: 'suffixEdited', value: user.callsign_suffix })")
+    expect(fnBody).toContain("dispatchNewUserForm({ type: 'previewRequested', trigger: 'names', teamId: team?.id })")
+  })
+
+  it('the radio input calls selectExistingUserCandidate(user), not a bare setSelectedUserId', () => {
+    const radioIndex = source.indexOf('name="selectedUser"')
+    expect(radioIndex).toBeGreaterThan(-1)
+    const onChangeIndex = source.indexOf('onChange=', radioIndex)
+    const onChangeEnd = source.indexOf('\n', onChangeIndex)
+    expect(source.slice(onChangeIndex, onChangeEnd)).toContain('selectExistingUserCandidate(user)')
+  })
+
+  it('renders the review fields only for the member-role picker, gated on selectedUserId, inside the existing tab', () => {
+    const tabStart = source.indexOf("{addMemberTab === 'existing' && (")
+    expect(tabStart).toBeGreaterThan(-1)
+    const gateIndex = source.indexOf("{addMemberRole === 'member' && selectedUserId && (", tabStart)
+    expect(gateIndex).toBeGreaterThan(tabStart)
+  })
+
+  it('the review block\'s First Name/Last Name inputs dispatch fieldChanged and re-run the names preview on blur, exactly like the Create New User tab', () => {
+    const fieldStart = source.indexOf('id="existing-user-first-name"')
+    expect(fieldStart).toBeGreaterThan(-1)
+    const fieldBlock = source.slice(fieldStart, source.indexOf('/>', fieldStart))
+    expect(fieldBlock).toContain("onChange={(e) => dispatchNewUserForm({ type: 'fieldChanged', field: 'firstName', value: e.target.value })}")
+    expect(fieldBlock).toContain("onBlur={() => dispatchNewUserForm({ type: 'previewRequested', trigger: 'names', teamId: team?.id })}")
+
+    const lastFieldStart = source.indexOf('id="existing-user-last-name"')
+    expect(lastFieldStart).toBeGreaterThan(-1)
+    const lastFieldBlock = source.slice(lastFieldStart, source.indexOf('/>', lastFieldStart))
+    expect(lastFieldBlock).toContain("onChange={(e) => dispatchNewUserForm({ type: 'fieldChanged', field: 'lastName', value: e.target.value })}")
+  })
+
+  it('the review block\'s Callsign Suffix field uses the shared pattern, recompute control, and required/error wiring', () => {
+    const fieldStart = source.indexOf('id="existing-user-callsign-suffix"')
+    expect(fieldStart).toBeGreaterThan(-1)
+    const fieldBlock = source.slice(fieldStart, source.indexOf('/>', fieldStart))
+    expect(fieldBlock).toContain('pattern={CALLSIGN_SUFFIX_PATTERN}')
+    expect(fieldBlock).toContain('required={newUserFormState.required || pseudonymousTarget}')
+    expect(fieldBlock).toContain("onChange={(e) => dispatchNewUserForm({ type: 'suffixEdited', value: e.target.value })}")
+
+    const recomputeIndex = source.indexOf("trigger: 'recompute'", fieldStart)
+    expect(recomputeIndex).toBeGreaterThan(fieldStart)
+    const recomputeBlockStart = source.lastIndexOf('<button', recomputeIndex)
+    const recomputeBlock = source.slice(recomputeBlockStart, source.indexOf('</button>', recomputeIndex))
+    expect(recomputeBlock).toContain('disabled={isRecomputeDisabled(newUserFormState)}')
+  })
+
+  it('handleAddExistingUser rejects (client-side, no toast-only path) a blank first/last name for the member-role picker before calling the API', () => {
+    const fnStart = source.indexOf('const handleAddExistingUser = async () => {')
+    expect(fnStart).toBeGreaterThan(-1)
+    const fnEnd = source.indexOf('\n  const ', fnStart + 10)
+    const fnBody = source.slice(fnStart, fnEnd)
+
+    expect(fnBody).toContain("if (!newUserFormState.firstName.trim() || !newUserFormState.lastName.trim()) {")
+    expect(fnBody).toContain("if (!isValidMemberCallsignSuffix(newUserFormState.suffix)) {")
+    expect(fnBody).toContain('if (pseudonymousTarget && !newUserFormState.suffix.trim()) {')
+    // These guards are scoped to the member-role path only -- the
+    // admin-role promotion path has none of these fields.
+    expect(fnBody).toContain("if (addMemberRole === 'member') {")
+  })
+
+  it('handleAddExistingUser passes the reviewed firstName/lastName/callsignSuffix to usersAPI.addToTeam for the member-role path, and calls teamsAPI.addMember unchanged for the admin-role path', () => {
+    const fnStart = source.indexOf('const handleAddExistingUser = async () => {')
+    const fnEnd = source.indexOf('\n  const ', fnStart + 10)
+    const fnBody = source.slice(fnStart, fnEnd)
+
+    expect(fnBody).toContain("await teamsAPI.addMember(team.id, { userId: selectedUserId, role: 'admin' })")
+    expect(fnBody).toContain('await usersAPI.addToTeam(selectedUserId, team.id, {')
+    expect(fnBody).toContain('firstName: newUserFormState.firstName.trim(),')
+    expect(fnBody).toContain('lastName: newUserFormState.lastName.trim(),')
+    expect(fnBody).toContain("callsignSuffix: newUserFormState.suffix.trim() || undefined")
+  })
+
+  it('handleAddExistingUser surfaces a callsign_suffix server error inline against the reducer, only for the member-role path, and resets the form on success', () => {
+    const fnStart = source.indexOf('const handleAddExistingUser = async () => {')
+    const fnEnd = source.indexOf('\n  const ', fnStart + 10)
+    const fnBody = source.slice(fnStart, fnEnd)
+
+    expect(fnBody).toContain("const inlineError = addMemberRole === 'member' ? extractCallsignSuffixServerError(error) : null")
+    expect(fnBody).toContain("dispatchNewUserForm({ type: 'submitRejected', message: inlineError })")
+    // Success path resets the shared reducer alongside the existing
+    // dialog/search-state resets, so a stale reviewed value from this
+    // add never leaks into the next dialog open.
+    const successIndex = fnBody.indexOf("setAddMemberRole('member')")
+    expect(successIndex).toBeGreaterThan(-1)
+    const successBlock = fnBody.slice(fnBody.lastIndexOf('setShowAddMemberDialog(false)', successIndex), successIndex + 200)
+    expect(successBlock).toContain("dispatchNewUserForm({ type: 'reset' })")
   })
 })

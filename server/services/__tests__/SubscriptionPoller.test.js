@@ -1643,6 +1643,66 @@ describe('mergeSubscriptionFreshness', () => {
     expect(() => mergeSubscriptionFreshness(reportedByUid, [entry])).not.toThrow();
   });
 
+  /**
+   * Bugfix (Connection_Status disagreement between TAK Server's two views).
+   * Presence in this view is itself proof of an open session -- verified
+   * live, a CloudTAK session's live-subscription entry reported every few
+   * seconds while its clientEndPoints entry sat at `lastStatus:
+   * "Disconnected"` throughout, leaving the "Currently Connected" badge
+   * absent for a session that plainly was connected. This is the OR this
+   * fix adds: a uid the live-subscriptions table names is marked connected
+   * REGARDLESS of what ClientEndpoint.lastStatus said for it, and
+   * regardless of whether this call also finds a usable
+   * lastReportMilliseconds to freshen the timestamp with.
+   */
+  it('marks a reported uid connected on PRESENCE alone, even when the primary source reported it disconnected (Connection_Status bugfix)', () => {
+    const reportedByUid = new Map([
+      ['uid-1', { lastEventTime: new Date('2026-08-25T04:00:00.000Z'), connected: false }]
+    ]);
+
+    const freshened = mergeSubscriptionFreshness(reportedByUid, [
+      subscriptionInfo({ clientUid: 'uid-1', lastReportMilliseconds: Date.parse('2026-08-25T04:26:26.181Z') })
+    ]);
+
+    expect(freshened).toBe(1);
+    expect(reportedByUid.get('uid-1').connected).toBe(true);
+  });
+
+  it('marks a reported uid connected on presence alone even without a usable lastReportMilliseconds (Connection_Status bugfix)', () => {
+    const reportedByUid = new Map([
+      ['uid-1', { lastEventTime: new Date('2026-08-25T04:00:00.000Z'), connected: false }]
+    ]);
+
+    const freshened = mergeSubscriptionFreshness(reportedByUid, [
+      subscriptionInfo({ clientUid: 'uid-1', lastReportMilliseconds: null })
+    ]);
+
+    // The timestamp effect declines (nothing usable to advance with)...
+    expect(freshened).toBe(0);
+    // ...but the connected effect does not depend on it at all.
+    expect(reportedByUid.get('uid-1').connected).toBe(true);
+  });
+
+  it('never turns an already-true connected value false (OR, never AND/overwrite)', () => {
+    const reportedByUid = new Map([['uid-1', { lastEventTime: null, connected: true }]]);
+
+    mergeSubscriptionFreshness(reportedByUid, [
+      subscriptionInfo({ clientUid: 'uid-1', lastReportMilliseconds: Date.now() })
+    ]);
+
+    expect(reportedByUid.get('uid-1').connected).toBe(true);
+  });
+
+  it('leaves connected untouched for a uid this view does not name (additive only)', () => {
+    const reportedByUid = new Map([['uid-1', { lastEventTime: null, connected: false }]]);
+
+    mergeSubscriptionFreshness(reportedByUid, [
+      subscriptionInfo({ clientUid: 'uid-other', lastReportMilliseconds: Date.now() })
+    ]);
+
+    expect(reportedByUid.get('uid-1').connected).toBe(false);
+  });
+
   it('freshens multiple reported uids independently in one call, counting only those it actually advances', () => {
     const reportedByUid = new Map([
       ['uid-a', { lastEventTime: new Date('2026-01-01T00:00:00Z'), connected: true }],
@@ -1773,6 +1833,28 @@ describe('SubscriptionPoller.run live-subscriptions freshening', () => {
       expect.stringContaining('malformed')
     );
     expect(mockLoggerInstance.error).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Bugfix (Connection_Status disagreement between TAK Server's two views),
+   * at the `run()` level: the exact live scenario that motivated it. The
+   * primary source reports the uid `lastStatus: "Disconnected"`; the
+   * live-subscriptions table reports that SAME uid as an open session. The
+   * fix ORs the two, so the write and the run summary both land connected
+   * -- previously this scenario landed `connected: false` because the
+   * freshening merge touched only the timestamp.
+   */
+  it('writes connected when the primary source says Disconnected but the live subscriptions table names the same uid (Connection_Status bugfix)', async () => {
+    const takServerService = createTakServerService(
+      [clientEndpoint({ uid: 'uid-1', lastEventTime: '2026-08-25T04:22:16.383Z', lastStatus: 'Disconnected' })],
+      [{ clientUid: 'uid-1', lastReportMilliseconds: Date.parse('2026-08-25T04:40:50.553Z') }]
+    );
+    const poller = new SubscriptionPoller({ takServerService, pool });
+
+    const summary = await poller.run();
+
+    expect(lastSeenUpdateCalls()[0][1]).toEqual([['uid-1'], new Date('2026-08-25T04:40:50.553Z'), true]);
+    expect(summary).toMatchObject({ connected: 1, disconnected: 0 });
   });
 
   it('freshening failure does not prevent the per-uid write or the unreported sweep from running', async () => {

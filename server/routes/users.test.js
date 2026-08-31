@@ -181,13 +181,16 @@ describe('GET /api/users batched team-name lookup (Requirement 11.3)', () => {
 /**
  * Requirement 27.9 (task 49.5): `GET /api/users` excludes every
  * Team_Owned_Device (`users.is_team_device = true`) from its response,
- * even though Authentik itself returns that device's user unchanged
- * (a Team_Owned_Device's Authentik user is created with
- * `type: 'internal'`, identical to a human user, so
+ * even though Authentik itself can return that device's user unchanged.
+ * A Team_Owned_Device created BEFORE the device-management follow-up
+ * (`DeviceEnrollmentService.createDevice` now creates a device's
+ * Authentik user with `type: 'service_account'`) is still `type:
+ * 'internal'` in Authentik, identical to a human user, so
  * `authentikService.getUsers({page, pageSize})` -- which filters on
- * `?type=internal` -- includes it). The exclusion must therefore happen
- * locally, by cross-referencing `users.is_team_device` via the same
- * batched query already used for team-name resolution.
+ * `?type=internal` -- still includes it. This test mocks `getUsers` to
+ * return exactly that pre-existing-device shape, and the exclusion must
+ * therefore happen locally, by cross-referencing `users.is_team_device`
+ * via the same batched query already used for team-name resolution.
  */
 describe('GET /api/users excludes Team_Owned_Device rows (Requirement 27.9)', () => {
   let app;

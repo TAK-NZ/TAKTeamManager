@@ -13,6 +13,7 @@ const ManagedIdentifierService = require('../services/ManagedIdentifierService')
 const DirectoryScopeService = require('../services/DirectoryScopeService');
 const { buildEmailDomainLikePatterns, partitionCandidates } = require('../utils/directoryScope');
 const { CallsignSuffixConflictError, checkCallsignSuffixUniqueness } = require('../services/CallsignSuffixUniquenessService');
+const { isValidCallsignSuffix } = require('../utils/callsignValidation');
 const {
   TeamTransferService,
   NoCurrentTeamError,
@@ -62,36 +63,42 @@ const router = express.Router();
 // Requirement 27.9 (task 49.5): excludes every Team_Owned_Device
 // (`users.is_team_device = true`) from the response. The primary user
 // list here is sourced from AUTHENTIK (`authentikService.getUsers`), not
-// the local `users` table -- and a Team_Owned_Device's Authentik user IS
-// included in that Authentik-side result: `DeviceEnrollmentService
-// .createDevice` creates it via the same `authentikService.createUser`
-// path used for human users, which always sets `type: 'internal'`
-// (`server/services/authentik.js`), and `getUsers({page, pageSize})`
-// filters on `?type=internal` -- so a device is indistinguishable from a
-// human user on the Authentik side. `is_team_device` is a LOCAL-only flag
-// (added to `users`/`user_cache` by task 49.1's migration), so exclusion
-// must happen here, after the Authentik fetch, by cross-referencing the
-// local `users` table. The SAME single batched query already used for
-// team-name resolution above is extended to additionally select
-// `u.is_team_device`, keyed by `authentik_user_id`, avoiding a third
-// database round trip (Requirement 11.3's "1-2 queries" allowance).
+// the local `users` table.
 //
-// `pagination.total` is INTENTIONALLY left as Authentik's own
-// `count` (from its `type=internal` pagination envelope) rather than
-// adjusted downward by the number of excluded devices. Getting an
-// exactly-accurate adjusted total would require either (a) an additional,
-// page-independent `COUNT(*) FROM users WHERE is_team_device = true`
-// query run on every request regardless of page contents (a real, if
-// small, cost for a field that's advisory at best), or (b) filtering
-// Authentik's OWN result set by a criterion Authentik has no concept of.
-// Since a Team_Owned_Device is created with `type: 'internal'` (confirmed
-// above), there is no Authentik-side query parameter that could exclude
-// it upstream. Per this task's explicit allowance for a documented
-// compromise, `pagination.total` may therefore over-count by the number
-// of Team_Owned_Devices that exist; the returned `users` array itself is
-// always correctly filtered, which is the requirement's primary concern
-// (Requirement 27.9's "excludes every Team_Owned_Device from any
-// user-facing ... count").
+// device-management follow-up: `DeviceEnrollmentService.createDevice` now
+// creates a device's Authentik user with `type: 'service_account'`
+// (`server/services/authentik.js`'s `createUser`), so a NEWLY created
+// device is already excluded upstream by `getUsers({page, pageSize})`'s
+// `?type=internal` filter -- it never reaches `authentikUsers` at all.
+// This local filter is kept anyway, and remains load-bearing, because a
+// Team_Owned_Device created BEFORE this change is still `type: 'internal'`
+// in Authentik (confirmed live against account.test.tak.nz: an existing
+// device's Authentik user was not retroactively changed) and has no
+// scheduled backfill migration -- so a device is indistinguishable from a
+// human user on the Authentik side for any row created under the old
+// behavior. `is_team_device` is a LOCAL-only flag (added to `users`/
+// `user_cache` by task 49.1's migration), so exclusion must happen here,
+// after the Authentik fetch, by cross-referencing the local `users`
+// table. The SAME single batched query already used for team-name
+// resolution above is extended to additionally select `u.is_team_device`,
+// keyed by `authentik_user_id`, avoiding a third database round trip
+// (Requirement 11.3's "1-2 queries" allowance).
+//
+// `pagination.total` is INTENTIONALLY left as Authentik's own `count`
+// (from its `type=internal` pagination envelope) rather than adjusted
+// downward by the number of excluded devices. Getting an exactly-accurate
+// adjusted total would require either (a) an additional, page-independent
+// `COUNT(*) FROM users WHERE is_team_device = true` query run on every
+// request regardless of page contents (a real, if small, cost for a field
+// that's advisory at best), or (b) filtering Authentik's OWN result set
+// by a criterion Authentik has no concept of for a pre-existing,
+// still-`internal`-typed device row. Per this task's explicit allowance
+// for a documented compromise, `pagination.total` may therefore
+// over-count by the number of still-`internal`-typed Team_Owned_Devices
+// that exist; the returned `users` array itself is always correctly
+// filtered, which is the requirement's primary concern (Requirement
+// 27.9's "excludes every Team_Owned_Device from any user-facing ...
+// count").
 router.get('/', authenticateToken, authorize, paginationParams, async (req, res) => {
   try {
     const { page, pageSize } = req.pagination;
@@ -678,8 +685,18 @@ router.get('/available', authenticateToken, authorize, async (req, res) => {
     const scope = await DirectoryScopeService.resolveScope(req.user);
 
     if (scope === DirectoryScopeService.UNSCOPED) {
+      // Bugfix (Add Existing User onboarding): `u.callsign_suffix` is
+      // projected alongside the existing name/email fields so the Client
+      // can pre-fill the Callsign Suffix field for review/correction
+      // before adding this user to a team -- this is the first time a
+      // pre-Authentik-only-user is being brought under TAK Team Manager
+      // management, so their existing local `users` row (if any) may
+      // carry no suffix, or one computed before their name was corrected.
+      // `u` may be NULL (no local `users` row yet), in which case this is
+      // NULL too -- exactly the "nothing to prefill" case the Client
+      // already treats as "compute a default".
       let query = `
-        SELECT uc.authentik_id as id, uc.email, uc.first_name, uc.last_name
+        SELECT uc.authentik_id as id, uc.email, uc.first_name, uc.last_name, u.callsign_suffix
         FROM user_cache uc
         LEFT JOIN users u ON uc.authentik_id::text = u.authentik_user_id::text
         LEFT JOIN team_memberships tm ON u.id = tm.user_id AND tm.inherited_from_team_id IS NULL
@@ -740,10 +757,13 @@ router.get('/available', authenticateToken, authorize, async (req, res) => {
     // avoid SQLSTATE 42P18) is removed; the disjunct's `$1::int[]` cast makes
     // the parameter's type unambiguous. `origin_org_id` is projected only for
     // the predicate and is never returned in the response body.
+    // Bugfix (Add Existing User onboarding): `u.callsign_suffix` is
+    // projected here too, for the same pre-fill reason as the unscoped
+    // branch above.
     const candidatesCte = `
       WITH candidates AS (
         SELECT uc.authentik_id AS id, uc.email, uc.first_name, uc.last_name,
-               u.origin_org_id,
+               u.origin_org_id, u.callsign_suffix,
                (COALESCE(u.origin_org_id = ANY($1::int[]), false)
                 OR COALESCE(lower(uc.email) LIKE ANY($2::text[]), false)) AS in_scope
         FROM user_cache uc
@@ -758,7 +778,7 @@ router.get('/available', authenticateToken, authorize, async (req, res) => {
         SELECT c.*, COUNT(*) FILTER (WHERE NOT c.in_scope) OVER () AS excluded_count
         FROM candidates c
       )
-      SELECT id, email, first_name, last_name, origin_org_id, excluded_count
+      SELECT id, email, first_name, last_name, callsign_suffix, origin_org_id, excluded_count
       FROM counted
       WHERE in_scope
       ORDER BY first_name, last_name
@@ -812,6 +832,7 @@ router.get('/available', authenticateToken, authorize, async (req, res) => {
       email: row.email,
       first_name: row.first_name,
       last_name: row.last_name,
+      callsign_suffix: row.callsign_suffix,
     }));
 
     DirectoryScopeService.logScopedResponse('GET /api/users/available', {
@@ -1208,7 +1229,17 @@ router.post('/create-and-add', authenticateToken, authorize, [
     [newUser.pk, resolvedUsername, email, firstName, lastName, attributes?.callsign, attributes?.color, attributes?.role, resolvedCallsignSuffix]
   );
 
-  // Send welcome/approval email to the new user
+  // Send welcome/approval email to the new user. Bugfix (silent
+  // welcome-email failures): the account has already been fully created
+  // by this point (Authentik, users, user_cache), and per this app's own
+  // rule a failed/bounced email is never grounds to unwind that -- so a
+  // send failure here must NOT roll back the response's success status.
+  // What it must NOT do either, though, is disappear into only the
+  // server log the way it previously did: `welcomeEmailSent` rides along
+  // on the same 201 response so the caller (an admin who may have
+  // fat-fingered the address) gets a chance to notice and follow up,
+  // rather than believing the invite went out when it didn't.
+  let welcomeEmailSent = true;
   try {
     const emailService = new EmailService();
     // Build team display path
@@ -1235,6 +1266,7 @@ router.post('/create-and-add', authenticateToken, authorize, [
     });
   } catch (emailErr) {
     getLogger().error({ err: emailErr }, 'Failed to send welcome email to new user');
+    welcomeEmailSent = false;
   }
 
   res.status(201).json({
@@ -1250,14 +1282,38 @@ router.post('/create-and-add', authenticateToken, authorize, [
       // The suffix actually assigned (supplied value, or the computed
       // default), so the Client can report it rather than guess.
       callsign_suffix: resolvedCallsignSuffix
-    }
+    },
+    // Bugfix (silent welcome-email failures): true unless the
+    // sendApprovalEmail call above threw. Only covers a failure visible
+    // synchronously at send time (e.g. an SMTP-level rejection) -- an
+    // asynchronous bounce reported later by the mail provider is a
+    // separate, unaddressed gap.
+    welcomeEmailSent
   });
 });
 
 // Add existing user to team
+//
+// Bugfix (Add Existing User onboarding): this is the ONLY step that turns
+// a user who exists in Authentik but has never been touched by TAK Team
+// Manager into a Team Manager-managed user, so it is also where an admin
+// reviews and corrects that user's First Name/Last Name/Callsign Suffix
+// before they're added -- values previously computed or imported blind,
+// with no review step. `firstName`/`lastName`/`callsignSuffix` are all
+// OPTIONAL: when omitted, this route's pre-existing behavior is preserved
+// exactly (existing name kept as-is; a blank callsign_suffix is
+// auto-defaulted, a non-blank one is left untouched). When supplied, they
+// are validated and PERSISTED to this user's account (users/user_cache/
+// Authentik), exactly like the Member_List inline-edit route's existing
+// dual-write pattern -- this is a real, permanent correction to the
+// user's account, not a one-off override for this team add alone.
 router.post('/add-to-team', authenticateToken, authorize, [
   body('userId').notEmpty(),
-  body('teamId').isInt()
+  body('teamId').isInt(),
+  body('firstName').optional().trim().isLength({ min: 1, max: 150 }),
+  body('lastName').optional().trim().isLength({ min: 1, max: 150 }),
+  body('callsignSuffix').optional().trim().custom(value => isValidCallsignSuffix(value))
+    .withMessage('callsignSuffix may only contain letters, digits, "-", and "."')
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -1265,7 +1321,7 @@ router.post('/add-to-team', authenticateToken, authorize, [
   }
 
   try {
-    const { userId, teamId } = req.body;
+    const { userId, teamId, firstName, lastName, callsignSuffix } = req.body;
     
     // Get user from user_cache
     const userResult = await pool.query(
@@ -1278,20 +1334,34 @@ router.post('/add-to-team', authenticateToken, authorize, [
     }
     
     const user = userResult.rows[0];
+
+    // Requirement (Add Existing User onboarding): the corrected name, if
+    // supplied, is what gets seeded into `users`/pushed to Authentik below
+    // -- the admin's review of this field takes precedence over whatever
+    // user_cache mirrored in from Authentik's single `name` field.
+    const effectiveFirstName = firstName !== undefined ? firstName : user.first_name;
+    const effectiveLastName = lastName !== undefined ? lastName : user.last_name;
     
-    // Ensure user exists in users table. first_name/last_name are
-    // deliberately omitted from the ON CONFLICT DO UPDATE SET clause here,
-    // matching the same one-way-sync direction used in
+    // Ensure user exists in users table. On CONFLICT, first_name/last_name
+    // are written ONLY when the admin actually supplied a correction here
+    // (COALESCE against the existing stored value otherwise) -- matching
+    // the same one-way-sync direction used in
     // server/services/authentikSync.js's syncSingleUser: the local `users`
     // table is the authoritative source for a real first/last name split
     // (set by UserProvisioningService.createAndAddUser and by the
     // Member_List inline-edit route), while user_cache's copy is only ever
     // a best-effort value derived from Authentik's single `name` field. An
     // unconditional overwrite here would re-clobber an already-established
-    // local split via this second propagation path.
+    // local split via this second propagation path -- unless the admin
+    // explicitly supplied a new value just now, which SHOULD win.
     await pool.query(
-      'INSERT INTO users (authentik_user_id, username, email, first_name, last_name, is_active) VALUES ($1, $2, $3, $4, $5, true) ON CONFLICT (authentik_user_id) DO UPDATE SET username = $2, email = $3, is_active = true',
-      [user.authentik_id, user.username, user.email, user.first_name, user.last_name]
+      `INSERT INTO users (authentik_user_id, username, email, first_name, last_name, is_active)
+       VALUES ($1, $2, $3, $4, $5, true)
+       ON CONFLICT (authentik_user_id) DO UPDATE SET
+         username = $2, email = $3, is_active = true,
+         first_name = COALESCE($6, users.first_name),
+         last_name = COALESCE($7, users.last_name)`,
+      [user.authentik_id, user.username, user.email, effectiveFirstName, effectiveLastName, firstName, lastName]
     );
     
     // Get the local user ID
@@ -1301,6 +1371,22 @@ router.post('/add-to-team', authenticateToken, authorize, [
     );
     
     const localUserId = localUserResult.rows[0].id;
+
+    // Requirement (Add Existing User onboarding): an explicit
+    // callsignSuffix correction is checked for uniqueness BEFORE any
+    // write, so a conflicting value never reaches the database -- same
+    // check, same exclude-self semantics, as the Member_List edit route
+    // (`PATCH /api/teams/:teamId/members/:userId`).
+    if (callsignSuffix !== undefined) {
+      try {
+        await checkCallsignSuffixUniqueness(teamId, callsignSuffix, localUserId);
+      } catch (conflictError) {
+        if (conflictError instanceof CallsignSuffixConflictError) {
+          return res.status(400).json({ error: conflictError.message });
+        }
+        throw conflictError;
+      }
+    }
     
     // Check if user is already in a team (exclude inherited memberships)
     const existingMembership = await pool.query(
@@ -1312,6 +1398,31 @@ router.post('/add-to-team', authenticateToken, authorize, [
       return res.status(400).json({ error: 'User is already a member of another team' });
     }
     
+    // Mirror an explicit name correction to user_cache too (same pattern
+    // as the Member_List edit route) -- the `users` row was already
+    // updated by the upsert above.
+    if (firstName !== undefined) {
+      await pool.query('UPDATE user_cache SET first_name = $1 WHERE authentik_id = $2', [firstName, user.authentik_id]);
+    }
+    if (lastName !== undefined) {
+      await pool.query('UPDATE user_cache SET last_name = $1 WHERE authentik_id = $2', [lastName, user.authentik_id]);
+    }
+
+    // An explicit callsignSuffix correction is written BEFORE
+    // TeamMembershipService.addUserToTeam runs, never after: that method
+    // performs its OWN internal uniqueness check against whatever is
+    // CURRENTLY stored in `users.callsign_suffix` (Requirement 11.18) --
+    // writing the correction only after calling it would let a stale,
+    // previously-stored suffix (e.g. from before this user was ever
+    // reviewed) wrongly pass or fail that internal check instead of the
+    // value actually being submitted here. An explicit correction always
+    // overwrites any existing stored value (unlike the auto-default
+    // branch below, which only ever fills in a BLANK suffix).
+    if (callsignSuffix !== undefined) {
+      await pool.query('UPDATE users SET callsign_suffix = $1 WHERE id = $2', [callsignSuffix, localUserId]);
+      await pool.query('UPDATE user_cache SET callsign_suffix = $1 WHERE authentik_id = $2', [callsignSuffix, user.authentik_id]);
+    }
+    
     // req.user.userId is already the local users.id (see
     // server/middleware/auth.js) -- no separate lookup by Authentik id is
     // needed here.
@@ -1319,81 +1430,91 @@ router.post('/add-to-team', authenticateToken, authorize, [
     
     // Use new service layer for team assignment
     const result = await TeamMembershipService.addUserToTeam(localUserId, teamId, 'member', requestingUserId);
-    
-    // Ensure the user has a callsign_suffix before generating the full callsign.
-    // If the user already has one (from prior provisioning or Member_List edit),
-    // this is a no-op. If they don't, compute and store a default.
-    //
-    // Bugfix: this used to call `UserProvisioningService.resolveCallsignSuffixForNewUser`,
-    // a method removed in favor of `resolveNewUserIdentity` (see that
-    // service's doc comment). Every call here therefore threw a
-    // `TypeError`, caught and only logged below -- silently leaving
-    // `callsign_suffix` blank on every existing-user add whose user had
-    // no prior suffix, with no error ever surfaced to the caller. Fixed
-    // by routing through `UserProvisioningService.resolveNewUserIdentity`
-    // itself -- the ONE allowed caller of
-    // `CallsignService.computeDefaultCallsignSuffix`
-    // (`newUserIdentityChokePoint.test.js`'s Assertion 2 allow-list; a
-    // second direct caller here would be exactly the choke-point drift
-    // that guard exists to catch). `requestedUsername`/`email` are passed
-    // `undefined` and its resolved `username` is discarded -- this
-    // existing user's identity is never re-minted -- but its
-    // policy-disabled branch's Callsign_Suffix computation (and its own
-    // `checkCallsignSuffixUniqueness` call) is exactly what's needed
-    // here. Under a Pseudonymous_Organisation with no explicit value
-    // supplied (this route has no such field), Callsign_Default_Suppression
-    // applies and the resolver throws `CallsignSuffixRequiredError`
-    // BEFORE attempting to mint anything -- caught below as non-fatal,
-    // same as a suffix conflict.
-    const suffixCheck = await pool.query('SELECT callsign_suffix, first_name, last_name FROM users WHERE id = $1', [localUserId]);
-    if (suffixCheck.rows.length > 0 && !suffixCheck.rows[0].callsign_suffix) {
-      try {
-        const identity = await UserProvisioningService.resolveNewUserIdentity(null, {
-          firstName: suffixCheck.rows[0].first_name || user.first_name || '',
-          lastName: suffixCheck.rows[0].last_name || user.last_name || '',
-          email: undefined,
-          teamId,
-          requestedUsername: undefined,
-          requestedCallsignSuffix: undefined
-        });
-        const resolvedSuffix = identity.callsignSuffix;
-        if (resolvedSuffix) {
-          await pool.query('UPDATE users SET callsign_suffix = $1 WHERE id = $2', [resolvedSuffix, localUserId]);
-          // Also mirror to user_cache
-          await pool.query('UPDATE user_cache SET callsign_suffix = $1 WHERE authentik_id = $2', [resolvedSuffix, user.authentik_id]);
-        }
-      } catch (suffixErr) {
-        if (suffixErr instanceof CallsignSuffixConflictError) {
-          // A computed default happened to collide with an existing
-          // member's suffix in this team -- non-fatal, matching this
-          // route's existing "log and proceed, callsign lacks a name
-          // segment" behavior rather than blocking the membership add
-          // over an auto-computed value the caller never typed.
-          getLogger().warn(
-            { teamId, localUserId, conflictingValue: suffixErr.conflictingValue },
-            'Computed default callsign_suffix conflicts with an existing member; leaving callsign_suffix blank for existing user add'
-          );
-        } else if (suffixErr instanceof UserProvisioningService.CallsignSuffixRequiredError) {
-          // Callsign_Default_Suppression applies (Pseudonymous_Organisation)
-          // and no explicit value can be supplied on this route -- non-fatal,
-          // the callsign lacks a name segment until an admin sets one via
-          // the Member_List edit form.
-          getLogger().warn(
-            { teamId, localUserId },
-            'Callsign_Default_Suppression applies for this Organisation; leaving callsign_suffix blank for existing user add'
-          );
-        } else {
-          // Non-fatal: log and proceed — the callsign will just lack a name segment
-          getLogger().error({ err: suffixErr }, 'Failed to compute default callsign_suffix for existing user');
+
+    if (callsignSuffix === undefined) {
+      // Ensure the user has a callsign_suffix before generating the full callsign.
+      // If the user already has one (from prior provisioning or Member_List edit),
+      // this is a no-op. If they don't, compute and store a default.
+      //
+      // Bugfix: this used to call `UserProvisioningService.resolveCallsignSuffixForNewUser`,
+      // a method removed in favor of `resolveNewUserIdentity` (see that
+      // service's doc comment). Every call here therefore threw a
+      // `TypeError`, caught and only logged below -- silently leaving
+      // `callsign_suffix` blank on every existing-user add whose user had
+      // no prior suffix, with no error ever surfaced to the caller. Fixed
+      // by routing through `UserProvisioningService.resolveNewUserIdentity`
+      // itself -- the ONE allowed caller of
+      // `CallsignService.computeDefaultCallsignSuffix`
+      // (`newUserIdentityChokePoint.test.js`'s Assertion 2 allow-list; a
+      // second direct caller here would be exactly the choke-point drift
+      // that guard exists to catch). `requestedUsername`/`email` are passed
+      // `undefined` and its resolved `username` is discarded -- this
+      // existing user's identity is never re-minted -- but its
+      // policy-disabled branch's Callsign_Suffix computation (and its own
+      // `checkCallsignSuffixUniqueness` call) is exactly what's needed
+      // here. Under a Pseudonymous_Organisation with no explicit value
+      // supplied here, Callsign_Default_Suppression applies and the
+      // resolver throws `CallsignSuffixRequiredError` BEFORE attempting to
+      // mint anything -- caught below as non-fatal, same as a suffix
+      // conflict.
+      const suffixCheck = await pool.query('SELECT callsign_suffix, first_name, last_name FROM users WHERE id = $1', [localUserId]);
+      if (suffixCheck.rows.length > 0 && !suffixCheck.rows[0].callsign_suffix) {
+        try {
+          const identity = await UserProvisioningService.resolveNewUserIdentity(null, {
+            firstName: suffixCheck.rows[0].first_name || user.first_name || '',
+            lastName: suffixCheck.rows[0].last_name || user.last_name || '',
+            email: undefined,
+            teamId,
+            requestedUsername: undefined,
+            requestedCallsignSuffix: undefined
+          });
+          const resolvedSuffix = identity.callsignSuffix;
+          if (resolvedSuffix) {
+            await pool.query('UPDATE users SET callsign_suffix = $1 WHERE id = $2', [resolvedSuffix, localUserId]);
+            // Also mirror to user_cache
+            await pool.query('UPDATE user_cache SET callsign_suffix = $1 WHERE authentik_id = $2', [resolvedSuffix, user.authentik_id]);
+          }
+        } catch (suffixErr) {
+          if (suffixErr instanceof CallsignSuffixConflictError) {
+            // A computed default happened to collide with an existing
+            // member's suffix in this team -- non-fatal, matching this
+            // route's existing "log and proceed, callsign lacks a name
+            // segment" behavior rather than blocking the membership add
+            // over an auto-computed value the caller never typed.
+            getLogger().warn(
+              { teamId, localUserId, conflictingValue: suffixErr.conflictingValue },
+              'Computed default callsign_suffix conflicts with an existing member; leaving callsign_suffix blank for existing user add'
+            );
+          } else if (suffixErr instanceof UserProvisioningService.CallsignSuffixRequiredError) {
+            // Callsign_Default_Suppression applies (Pseudonymous_Organisation)
+            // and no explicit value was supplied -- non-fatal, the
+            // callsign lacks a name segment until an admin sets one via
+            // the Member_List edit form.
+            getLogger().warn(
+              { teamId, localUserId },
+              'Callsign_Default_Suppression applies for this Organisation; leaving callsign_suffix blank for existing user add'
+            );
+          } else {
+            // Non-fatal: log and proceed — the callsign will just lack a name segment
+            getLogger().error({ err: suffixErr }, 'Failed to compute default callsign_suffix for existing user');
+          }
         }
       }
     }
 
     // Update user callsign and color
     const attributes = await UserAttributesService.generateCallsign(localUserId, teamId);
+    // A corrected name is pushed to Authentik alongside the recomputed
+    // callsign/color -- same combined-PATCH shape `create-and-add` and
+    // the Member_List edit route already use, so a name correction and a
+    // callsign recompute cannot race each other into two separate PATCHes.
+    const pushAttrs = { ...(attributes || {}) };
+    if (firstName !== undefined) pushAttrs.firstName = firstName;
+    if (lastName !== undefined) pushAttrs.lastName = lastName;
+    if (attributes || firstName !== undefined || lastName !== undefined) {
+      await UserAttributesService.updateUserAttributes(user.authentik_id, pushAttrs);
+    }
     if (attributes) {
-      await UserAttributesService.updateUserAttributes(user.authentik_id, attributes);
-      
       // Update user cache
       await pool.query(
         'UPDATE user_cache SET tak_callsign = $1, tak_color = $2, tak_role = $3 WHERE authentik_id = $4',

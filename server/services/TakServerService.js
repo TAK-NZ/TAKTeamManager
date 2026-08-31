@@ -428,10 +428,25 @@ class TakServerService {
    * and the caller (`SubscriptionPoller.mergeSubscriptionFreshness()`) filters
    * on exactly that.
    *
-   * `SubscriptionInfo` carries no `lastStatus`: every entry in this view is,
-   * by construction, a live subscription, so there is nothing here for
+   * `SubscriptionInfo` carries no `lastStatus` field, but its entries are
+   * nonetheless a SECOND, INDEPENDENT Connection_Status signal, and since
+   * the bugfix below a positive one: every entry in this view is, by
+   * construction, a live subscription that exists right now, so simple
+   * PRESENCE in this list is itself evidence of a live connection --
+   * stronger evidence than `ClientEndpoint.lastStatus` in the case that
+   * motivated this, where TAK Server's two connection-tracking views
+   * disagreed for the same session (verified live: a CloudTAK session
+   * reporting here every few seconds while `clientEndPoints`'s matching
+   * entry sat at `lastStatus: "Disconnected"` for over 20 minutes). Bugfix:
+   * an earlier version of this comment claimed there was "nothing here for
    * Connection_Status to read that `ClientEndpoint.lastStatus` does not
-   * already provide more completely (including disconnected Devices).
+   * already provide more completely" -- that was true only for a Device
+   * `lastStatus` had already correctly marked connected, and false for
+   * exactly the disagreement case above, which is common enough in
+   * practice (CloudTAK sessions especially) to matter. See
+   * `SubscriptionPoller.mergeSubscriptionFreshness()`, which now OR's this
+   * signal into `connected` alongside `ClientEndpoint.lastStatus` rather
+   * than treating this view as silent on the question.
    *
    * Same envelope-unwrap and same no-degraded-empty-result discipline as
    * `getClientEndpoints()`: a 200 with no `data` array unwraps to `[]` (a

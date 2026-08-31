@@ -257,11 +257,92 @@ const rowScopedResolvers = {
    * @param {import('express').Request} req
    * @returns {Promise<boolean>}
    */
+  /**
+   * Bugfix (re-parent authorization gap): `team:update` used to check
+   * ONLY the team being edited (`:teamId`, the source side of a
+   * re-parent) and never the DESTINATION named by a supplied
+   * `parentTeamId`. That let a Team_Admin — admin of `:teamId` or one of
+   * its ancestors, per `Team.isAdmin`'s upward walk — move their own team
+   * (and therefore its whole subtree) underneath ANY other team in the
+   * system, including one they hold no admin relationship to whatsoever,
+   * merely by naming its id in the request body. `POST /api/teams`
+   * (`team:create:root_or_sub` below) already requires admin rights on
+   * the destination for a NEW sub-team; this closes the exact same gap
+   * for an EXISTING team being MOVED.
+   *
+   * `parentTeamId` is present on EVERY edit submission from
+   * `TeamFormDialog.jsx` -- it always sends the team's current parent id
+   * (or `null` for a root team), never omits the key -- so this resolver
+   * cannot treat "key present" as "re-parent requested"; it must compare
+   * the submitted value against `:teamId`'s CURRENT stored
+   * `parent_team_id` and only apply the extra check on an actual CHANGE.
+   * An ordinary field edit that resubmits the unchanged parent is
+   * therefore unaffected and costs exactly the one `Team.findById`
+   * lookup this comparison needs.
+   *
+   * Three cases, once an admin of `:teamId` (or one of its ancestors) is
+   * confirmed:
+   *   - Submitted `parentTeamId` equals the CURRENT stored parent (by
+   *     loose `==` so a numeric id and its string form from a route/body
+   *     both match, and `null == undefined`): no re-parent is actually
+   *     happening. Permitted -- this is the common "just editing a
+   *     field" case.
+   *   - Submitted `parentTeamId` is a DIFFERENT non-null value: a
+   *     re-parent onto that destination. Permitted for a Global_Manager,
+   *     or for a Team_Admin who ALSO administers the destination (or one
+   *     of ITS ancestors) -- i.e. `Team.isAdmin` must return true for
+   *     both sides.
+   *   - Submitted `parentTeamId` is `null` while the CURRENT stored
+   *     parent is non-null: explicitly DETACHING `:teamId` to become a
+   *     new top-level Organisation. Structurally significant -- it mints
+   *     a new Organisation root on nothing but the mover's say-so -- so
+   *     restricted to a Global_Manager, mirroring
+   *     `team:create:root_or_sub`'s own "root creation is
+   *     Global_Manager-only" rule.
+   *
+   * `Team.update` itself performs no depth check on a re-parent
+   * (`Team.create`'s `MAX_TEAM_DEPTH` guard is create-time only) --
+   * tracked separately; this resolver is authorization only.
+   *
+   * @param {import('express').Request} req
+   * @returns {Promise<boolean>}
+   */
   'team:update': async (req) => {
     if (req.user && req.user.is_global_manager) {
       return true;
     }
-    return Team.isAdmin(req.params.teamId, req.user && req.user.userId);
+
+    const userId = req.user && req.user.userId;
+    const isAdminOfTarget = await Team.isAdmin(req.params.teamId, userId);
+    if (!isAdminOfTarget) {
+      return false;
+    }
+
+    const hasParentTeamId = req.body && Object.prototype.hasOwnProperty.call(req.body, 'parentTeamId');
+    if (!hasParentTeamId) {
+      return true;
+    }
+
+    const submittedParentTeamId = req.body.parentTeamId;
+    const currentTeam = await Team.findById(req.params.teamId);
+    const currentParentTeamId = currentTeam ? currentTeam.parent_team_id : null;
+
+    // Normalized comparison: a route/body id may arrive as a number or
+    // as its string form, and a missing parent may arrive as `null` or
+    // `undefined` -- both must compare equal to "no parent".
+    const normalizedSubmitted = submittedParentTeamId === undefined ? null : submittedParentTeamId;
+    const normalizedCurrent = currentParentTeamId === undefined ? null : currentParentTeamId;
+    if (String(normalizedSubmitted) === String(normalizedCurrent)) {
+      // Resubmission of the unchanged parent -- not a re-parent at all.
+      return true;
+    }
+
+    if (submittedParentTeamId === null || submittedParentTeamId === undefined) {
+      // Detaching to become a new top-level Organisation.
+      return false;
+    }
+
+    return Team.isAdmin(submittedParentTeamId, userId);
   },
 
   /**

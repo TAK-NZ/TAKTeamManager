@@ -238,3 +238,201 @@ describe('POST /api/users/add-to-team callsign_suffix default computation (bugfi
     expect(usersUpdateCall).toBeUndefined();
   });
 });
+
+/**
+ * Feature: Add Existing User onboarding review (member-only "Add Existing
+ * User" tab). This is the ONLY step that turns a user who exists in
+ * Authentik but has never been touched by TAK Team Manager into a
+ * Team-Manager-managed user, so this route now accepts optional
+ * `firstName`/`lastName`/`callsignSuffix` corrections, validates and
+ * PERSISTS them (never a one-off override for this add alone), before
+ * proceeding with the pre-existing membership-add logic.
+ */
+describe('POST /api/users/add-to-team optional firstName/lastName/callsignSuffix corrections (Add Existing User onboarding)', () => {
+  let app;
+  const USER_CACHE_ROW = {
+    authentik_id: '14',
+    username: 'chris@chriselsen.net',
+    email: 'chris@chriselsen.net',
+    first_name: 'Chris',
+    last_name: 'Elsen'
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    app = buildApp();
+
+    TeamMembershipService.addUserToTeam.mockResolvedValue({ success: true, groupsQueued: 0 });
+    UserAttributesService.generateCallsign.mockResolvedValue(null);
+    UserAttributesService.updateUserAttributes.mockResolvedValue(true);
+    Team.getAncestorChain.mockResolvedValue([organisationRow()]);
+    Team.getFullMemberList.mockResolvedValue([]);
+  });
+
+  /** Same wiring as mockHappyPathQueries above, factored out so this
+   * describe block's tests can each layer their own assertions on top. */
+  function mockQueries({ existingCallsignSuffix = null } = {}) {
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('SELECT authentik_id, username, email, first_name, last_name FROM user_cache')) {
+        return Promise.resolve({ rows: [USER_CACHE_ROW] });
+      }
+      if (typeof sql === 'string' && sql.includes('INSERT INTO users')) {
+        return Promise.resolve({ rows: [] });
+      }
+      if (typeof sql === 'string' && sql.includes('SELECT id FROM users WHERE authentik_user_id')) {
+        return Promise.resolve({ rows: [{ id: 2 }] });
+      }
+      if (typeof sql === 'string' && sql.includes("FROM team_memberships WHERE user_id = $1 AND inherited_from_team_id IS NULL")) {
+        return Promise.resolve({ rows: [] });
+      }
+      if (typeof sql === 'string' && sql.includes('SELECT callsign_suffix, first_name, last_name FROM users WHERE id')) {
+        return Promise.resolve({ rows: [{ callsign_suffix: existingCallsignSuffix, first_name: 'Chris', last_name: 'Elsen' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+  }
+
+  it('rejects a callsignSuffix containing a disallowed character with 400, before any write', async () => {
+    mockQueries();
+
+    const res = await request(app)
+      .post('/api/users/add-to-team')
+      .send({ userId: '14', teamId: 4, callsignSuffix: 'J Doe' });
+
+    expect(res.status).toBe(400);
+    const usersInsertCall = pool.query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO users')
+    );
+    expect(usersInsertCall).toBeUndefined();
+  });
+
+  it('rejects an empty-string firstName/lastName with 400 (min length 1), before any write', async () => {
+    mockQueries();
+
+    const res = await request(app)
+      .post('/api/users/add-to-team')
+      .send({ userId: '14', teamId: 4, firstName: '' });
+
+    expect(res.status).toBe(400);
+    const usersInsertCall = pool.query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO users')
+    );
+    expect(usersInsertCall).toBeUndefined();
+  });
+
+  it('rejects a conflicting callsignSuffix with 400 naming the value, and adds no membership', async () => {
+    mockQueries();
+    Team.getFullMemberList.mockResolvedValue([{ id: 99, callsign_suffix: 'K.Kokako' }]);
+
+    const res = await request(app)
+      .post('/api/users/add-to-team')
+      .send({ userId: '14', teamId: 4, callsignSuffix: 'K.Kokako' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/K\.Kokako/);
+    expect(TeamMembershipService.addUserToTeam).not.toHaveBeenCalled();
+  });
+
+  it('persists a corrected firstName/lastName to users (COALESCE upsert) and mirrors to user_cache', async () => {
+    mockQueries({ existingCallsignSuffix: 'Existing.Suffix' });
+
+    const res = await request(app)
+      .post('/api/users/add-to-team')
+      .send({ userId: '14', teamId: 4, firstName: 'Kingston', lastName: 'Kokako' });
+
+    expect(res.status).toBe(200);
+
+    const upsertCall = pool.query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO users')
+    );
+    expect(upsertCall).toBeDefined();
+    // effectiveFirstName/effectiveLastName (used to seed a brand-new row)
+    // are the corrected values; firstName/lastName (used by COALESCE for
+    // an existing row) are the corrected values too.
+    expect(upsertCall[1]).toEqual(['14', 'chris@chriselsen.net', 'chris@chriselsen.net', 'Kingston', 'Kokako', 'Kingston', 'Kokako']);
+
+    const cacheFirstNameCall = pool.query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql === 'UPDATE user_cache SET first_name = $1 WHERE authentik_id = $2'
+    );
+    expect(cacheFirstNameCall[1]).toEqual(['Kingston', '14']);
+    const cacheLastNameCall = pool.query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql === 'UPDATE user_cache SET last_name = $1 WHERE authentik_id = $2'
+    );
+    expect(cacheLastNameCall[1]).toEqual(['Kokako', '14']);
+
+    // Pushed to Authentik alongside the (here null) callsign recompute.
+    expect(UserAttributesService.updateUserAttributes).toHaveBeenCalledWith('14', {
+      firstName: 'Kingston',
+      lastName: 'Kokako'
+    });
+  });
+
+  it('persists an explicit callsignSuffix correction, overwriting an existing stored value, and never runs the auto-default branch', async () => {
+    mockQueries({ existingCallsignSuffix: 'Stale.Value' });
+
+    const res = await request(app)
+      .post('/api/users/add-to-team')
+      .send({ userId: '14', teamId: 4, callsignSuffix: 'K.Kokako' });
+
+    expect(res.status).toBe(200);
+
+    const usersSuffixUpdate = pool.query.mock.calls.find(
+      ([sql, params]) => sql === 'UPDATE users SET callsign_suffix = $1 WHERE id = $2' && params[0] === 'K.Kokako'
+    );
+    expect(usersSuffixUpdate).toBeDefined();
+    const cacheSuffixUpdate = pool.query.mock.calls.find(
+      ([sql, params]) => sql === 'UPDATE user_cache SET callsign_suffix = $1 WHERE authentik_id = $2' && params[0] === 'K.Kokako'
+    );
+    expect(cacheSuffixUpdate).toBeDefined();
+
+    // The auto-default branch (resolveNewUserIdentity) never runs when an
+    // explicit value was supplied -- Team.getAncestorChain would have
+    // been consulted a SECOND time (once for generateCallsign, mocked to
+    // null here) if it had, but resolveNewUserIdentity's own call is what
+    // this asserts is absent by checking the suffix value written is
+    // exactly the submitted one, never a computed default.
+    expect(usersSuffixUpdate[1][0]).toBe('K.Kokako');
+  });
+
+  it('checks callsign_suffix uniqueness BEFORE TeamMembershipService.addUserToTeam runs, excluding the user\'s own row', async () => {
+    mockQueries({ existingCallsignSuffix: null });
+    let uniquenessCheckedBeforeAdd = false;
+    TeamMembershipService.addUserToTeam.mockImplementation(() => {
+      // Team.getFullMemberList is called by checkCallsignSuffixUniqueness;
+      // if it was already called before this point, the check ran first.
+      uniquenessCheckedBeforeAdd = Team.getFullMemberList.mock.calls.length > 0;
+      return Promise.resolve({ success: true, groupsQueued: 0 });
+    });
+
+    await request(app)
+      .post('/api/users/add-to-team')
+      .send({ userId: '14', teamId: 4, callsignSuffix: 'K.Kokako' });
+
+    expect(uniquenessCheckedBeforeAdd).toBe(true);
+  });
+
+  it('applies no correction and preserves existing behavior exactly when none of the three fields are supplied', async () => {
+    mockQueries({ existingCallsignSuffix: 'Existing.Suffix' });
+
+    const res = await request(app)
+      .post('/api/users/add-to-team')
+      .send({ userId: '14', teamId: 4 });
+
+    expect(res.status).toBe(200);
+    const upsertCall = pool.query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO users')
+    );
+    // effectiveFirstName/effectiveLastName fall back to the user_cache
+    // row's own values; the two COALESCE params are undefined (dropped).
+    expect(upsertCall[1]).toEqual(['14', 'chris@chriselsen.net', 'chris@chriselsen.net', 'Chris', 'Elsen', undefined, undefined]);
+
+    const cacheFirstNameCall = pool.query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql === 'UPDATE user_cache SET first_name = $1 WHERE authentik_id = $2'
+    );
+    expect(cacheFirstNameCall).toBeUndefined();
+    const suffixUpdateCall = pool.query.mock.calls.find(
+      ([sql]) => sql === 'UPDATE users SET callsign_suffix = $1 WHERE id = $2'
+    );
+    expect(suffixUpdateCall).toBeUndefined();
+  });
+});

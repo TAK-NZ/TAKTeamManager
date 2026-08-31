@@ -147,7 +147,15 @@ const invalidPrefixArb = fc.constantFrom(
   null,
   undefined,
   42,
-  'AUK-1',
+  // Foreign-partner-prefix extension: a bare hyphenated prefix like
+  // 'AUK-1' is now VALID (see callsignValidation.js), so the invalid
+  // examples here are shapes the extension still rejects -- a leading/
+  // trailing/doubled hyphen (an empty segment), and a segment matching
+  // the Managed_Identifier marker+body shape.
+  '-AUK',
+  'AUK-',
+  'AUK--1',
+  'AUK-D2345678',
   'has space',
   'semi;colon',
   '   '

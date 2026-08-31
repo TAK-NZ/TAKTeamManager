@@ -48,14 +48,37 @@ class AuthentikService {
       : null;
   }
 
-  // Create regular user (not service account)
+  // Create a user. Defaults to `type: 'internal'` (a human-representing
+  // account) for every EXISTING caller (`routes/users.js`,
+  // `RequestApprovalService.js`, `BulkImportService.js`), none of which
+  // pass a `type` -- their behavior is unchanged.
+  //
+  // `DeviceEnrollmentService.createDevice` is the one caller that DOES
+  // pass `type: 'service_account'` (device-management follow-up,
+  // Team_Owned_Device / Authentik service-account type): a device has no
+  // email, cannot interactively log in, and only ever authenticates via
+  // the app-password token `createAppPasswordToken` mints for it below --
+  // exactly the shape Authentik's `service_account` user type is for
+  // (confirmed live against account.test.tak.nz: `POST /core/users/` with
+  // `type: 'service_account'` succeeds, and `createAppPasswordToken`'s
+  // `POST /core/tokens/` with `intent: 'app_password'` succeeds against
+  // it identically to an `internal` user -- neither Authentik's
+  // `TokenSerializer.validate` nor `TokenViewSet.perform_create` gates on
+  // user type). This also means `getUsers()`'s `?type=internal` filter
+  // below now excludes a NEWLY created device automatically, without
+  // needing a local `is_team_device` cross-reference for it -- though
+  // that local filter (`server/routes/users.js`) is deliberately KEPT
+  // rather than removed, because it still correctly excludes any
+  // Team_Owned_Device created before this change, which remains
+  // `type: 'internal'` in Authentik until/unless a separate backfill
+  // migrates it.
   async createUser(userData) {
     const response = await this.client.post('/core/users/', {
       username: userData.username,
       name: userData.name,
       email: userData.email,
       is_active: true,
-      type: 'internal'
+      type: userData.type || 'internal'
     });
     return response.data;
   }

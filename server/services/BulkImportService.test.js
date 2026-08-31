@@ -594,9 +594,13 @@ describe('BulkImportService.importTeams', () => {
     expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ callsign_prefix: null }));
   });
 
-  it('fails only the row with an invalid callsignPrefix (containing a -), without ever calling Team.create for that row', async () => {
+  // Foreign-partner-prefix extension: a bare hyphenated prefix like
+  // 'NZ-POL' is now VALID (server/utils/callsignValidation.js), so this
+  // row-level rejection test uses a shape the extension still rejects: a
+  // segment matching the Managed_Identifier marker+body shape.
+  it('fails only the row with an invalid callsignPrefix (a marker+body-shaped segment), without ever calling Team.create for that row', async () => {
     const csv = csvFromTeamRows([
-      { name: 'NZ Police', callsignPrefix: 'NZ-POL' },
+      { name: 'NZ Police', callsignPrefix: 'NZ-D2345678' },
       { name: 'Fine Org' }
     ]);
     Team.create.mockImplementation((teamData) =>
@@ -612,11 +616,28 @@ describe('BulkImportService.importTeams', () => {
     expect(summary.results[0]).toEqual({
       row: 1,
       success: false,
-      error: 'Invalid callsignPrefix: NZ-POL (letters and digits only)'
+      error:
+        'Invalid callsignPrefix: NZ-D2345678 (letters and digits only, optionally split into segments with a single hyphen, e.g. AUS-FIRE)'
     });
     expect(summary.results[1]).toEqual({ row: 2, success: true, teamId: 9 });
     // The invalid row never reached Team.create.
     expect(Team.create).toHaveBeenCalledTimes(1);
+  });
+
+  // Foreign-partner-prefix extension: a well-formed hyphenated prefix is
+  // now accepted end-to-end through the bulk-import row parser.
+  it('accepts a well-formed multi-segment callsignPrefix (e.g. "AUS-FIRE")', async () => {
+    const csv = csvFromTeamRows([{ name: 'Australia Fire', callsignPrefix: 'AUS-FIRE' }]);
+    Team.create.mockImplementation((teamData) =>
+      Promise.resolve({ id: 10, name: teamData.name, parent_team_id: teamData.parent_team_id })
+    );
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importTeams(csv, importingUser);
+
+    expect(summary.successCount).toBe(1);
+    expect(summary.failureCount).toBe(0);
+    expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ callsign_prefix: 'AUS-FIRE' }));
   });
 });
 

@@ -8,6 +8,8 @@ const EventPublisher = require('./EventPublisher');
 const authentikService = require('./authentik');
 const ManagedIdentifierService = require('./ManagedIdentifierService');
 const UserAttributesService = require('./userAttributes');
+const CallsignService = require('./CallsignService');
+const { MAX_TEAM_DEPTH } = require('../config/constants');
 const { IDENTIFIER_TYPE_MARKERS } = require('../utils/managedIdentifier');
 const { isValidCallsignPrefix } = require('../utils/callsignValidation');
 const { checkCallsignSuffixUniqueness } = require('./CallsignSuffixUniquenessService');
@@ -365,11 +367,20 @@ class DeviceEnrollmentService {
     // this is reached at most once per creation. NO email key at all --
     // built without one rather than assigned `undefined`, since a
     // device account has no email and no function for one to serve.
+    // device-management follow-up: created as an Authentik `service_account`
+    // user, not `internal` (AuthentikService.createUser's default) -- a
+    // device has no email, never interactively logs in, and only ever
+    // authenticates via the app-password token `createAppPasswordToken`
+    // mints for it later (`generateEnrollmentQrCode`/`generateSelfEnrollment`),
+    // which is exactly the shape Authentik's `service_account` type is for.
+    // See `AuthentikService.createUser`'s doc comment for the live
+    // verification behind this.
     let authentikUser;
     try {
       authentikUser = await authentikService.createUser({
         username,
-        name: displayName
+        name: displayName,
+        type: 'service_account'
       });
     } catch (error) {
       await DeviceEnrollmentService.#compensateClaimRow(claimId, { authentikUserId: null, teamId });
@@ -536,9 +547,28 @@ class DeviceEnrollmentService {
    * see `server/models/Team.js` and `server/routes/teams.js`, both
    * untouched by this method.
    *
+   * Bugfix (Members/Team Admins/Team Devices tab consistency): also
+   * returns `callsignSuffix`, `takRole` and a computed `callsign` for
+   * each device -- the same three facts the Members/Team Admins tabs
+   * show for a human member (`callsign_suffix`, `tak_role`,
+   * `tak_callsign`), so this tab's row shape can mirror theirs
+   * ("TAK Callsign & Role"). Unlike a human member, a device's
+   * `callsign` is computed HERE rather than read off a stored
+   * `user_cache.tak_callsign` column -- a Team_Owned_Device has no
+   * `user_cache` row at all (that table mirrors Authentik-authoritative
+   * human attributes; a device's `tak_role` lives on `users` directly,
+   * defaulted `'Team Member'` by its own column default) -- using
+   * `CallsignService.assembleCallsign` directly against ONE
+   * `Team.getAncestorChain(teamId)` call shared across every device in
+   * the list, exactly mirroring `UserAttributesService.
+   * computeCallsignAttributes`'s own assembly rule but batched to avoid
+   * an N+1 (one ancestor-chain query per device) that a live re-query
+   * would otherwise force -- `teamId` is the SAME team for every device
+   * returned here.
+   *
    * @param {number|string} teamId
    * @param {{userId?: number, is_global_manager?: boolean}} actingUser
-   * @returns {Promise<{devices: Array<{deviceUserId: number, username: string, deviceLabel: string|null, teamId: number|string, createdAt: string, liveCertificateCount: number}>}>}
+   * @returns {Promise<{devices: Array<{deviceUserId: number, username: string, deviceLabel: string|null, callsignSuffix: string|null, takRole: string, callsign: string|null, teamId: number|string, createdAt: string, liveCertificateCount: number}>}>}
    * @throws {DeviceEnrollmentAuthorizationError}
    */
   static async listTeamDevices(teamId, actingUser) {
@@ -548,6 +578,8 @@ class DeviceEnrollmentService {
       `SELECT u.id AS device_user_id,
               u.username AS username,
               u.device_label AS device_label,
+              u.callsign_suffix AS callsign_suffix,
+              u.tak_role AS tak_role,
               u.created_at AS created_at,
               COALESCE(certs.live_certificate_count, 0) AS live_certificate_count
        FROM users u
@@ -562,10 +594,42 @@ class DeviceEnrollmentService {
       [teamId]
     );
 
+    // One Ancestor_Chain resolution for the whole list -- every device
+    // returned here belongs to this SAME team, so the Organisation
+    // segment/Team segment/Callsign_Level_Selection are identical for
+    // each row; only the Name segment (`callsign_suffix`) varies.
+    // Guarded to `[]` for anything non-array (an empty device list needs
+    // no chain at all, and a caller's mock that leaves getAncestorChain
+    // unconfigured must not throw destructuring `[0]` off `undefined`).
+    const rawAncestorChain = result.rows.length > 0 ? await Team.getAncestorChain(teamId) : [];
+    const ancestorChain = Array.isArray(rawAncestorChain) ? rawAncestorChain : [];
+    const organisation = ancestorChain[0];
+    const callsignLevelSelection =
+      organisation?.callsign_level_selection == null
+        ? Array.from({ length: MAX_TEAM_DEPTH }, (_, i) => i + 1)
+        : organisation.callsign_level_selection;
+    const teamSegmentPrefixes = ancestorChain
+      .filter(
+        (t) =>
+          t.depth >= 1 &&
+          callsignLevelSelection.includes(t.depth) &&
+          !!t.callsign_prefix
+      )
+      .map((t) => t.callsign_prefix);
+
     const devices = result.rows.map((row) => ({
       deviceUserId: row.device_user_id,
       username: row.username,
       deviceLabel: row.device_label,
+      callsignSuffix: row.callsign_suffix,
+      takRole: row.tak_role,
+      callsign: organisation
+        ? CallsignService.assembleCallsign({
+            organisationPrefix: organisation.callsign_prefix,
+            teamSegmentPrefixes,
+            nameSegment: row.callsign_suffix
+          })
+        : null,
       teamId,
       createdAt: row.created_at,
       liveCertificateCount: row.live_certificate_count
@@ -597,11 +661,20 @@ class DeviceEnrollmentService {
    * that column untouched, mirroring `Team.update`'s COALESCE
    * convention.
    *
+   * Bugfix (Members/Team Admins/Team Devices tab consistency): the
+   * returned shape now also carries `takRole` and a recomputed
+   * `callsign` -- the SAME two fields `listTeamDevices` added -- so the
+   * client's optimistic row-merge after a save (`{...device, ...updated}`
+   * in `TeamDeviceList.jsx`) keeps the callsign column showing the
+   * device's NEW `callsign_suffix`-derived value immediately, rather than
+   * a stale one left over from before the edit until the next full
+   * re-fetch.
+   *
    * @param {number|string} deviceUserId - the Team_Owned_Device's local
    *   `users.id`.
    * @param {{deviceLabel?: string|null, callsignSuffix?: string|null}} updates
    * @param {{userId?: number, is_global_manager?: boolean}} actingUser
-   * @returns {Promise<{deviceUserId: number, username: string, deviceLabel: string|null, callsignSuffix: string|null, teamId: number|string}>}
+   * @returns {Promise<{deviceUserId: number, username: string, deviceLabel: string|null, callsignSuffix: string|null, takRole: string, callsign: string|null, teamId: number|string}>}
    * @throws {NotATeamOwnedDeviceError} when `deviceUserId` doesn't
    *   reference an existing Team_Owned_Device with a team membership.
    * @throws {DeviceEnrollmentAuthorizationError} per Requirement 27 Criterion 3.
@@ -655,11 +728,38 @@ class DeviceEnrollmentService {
       'Team-owned device updated'
     );
 
+    // Same single-device Ancestor_Chain assembly `listTeamDevices` uses
+    // for a whole list, applied here to just this one row so the
+    // returned `callsign` reflects the just-saved `callsign_suffix`
+    // immediately.
+    const ancestorChain = await Team.getAncestorChain(teamId);
+    const organisation = Array.isArray(ancestorChain) ? ancestorChain[0] : undefined;
+    const callsignLevelSelection =
+      organisation?.callsign_level_selection == null
+        ? Array.from({ length: MAX_TEAM_DEPTH }, (_, i) => i + 1)
+        : organisation.callsign_level_selection;
+    const teamSegmentPrefixes = (Array.isArray(ancestorChain) ? ancestorChain : [])
+      .filter(
+        (t) =>
+          t.depth >= 1 &&
+          callsignLevelSelection.includes(t.depth) &&
+          !!t.callsign_prefix
+      )
+      .map((t) => t.callsign_prefix);
+
     return {
       deviceUserId,
       username: updatedUser.username,
       deviceLabel: updatedUser.device_label,
       callsignSuffix: updatedUser.callsign_suffix,
+      takRole: updatedUser.tak_role,
+      callsign: organisation
+        ? CallsignService.assembleCallsign({
+            organisationPrefix: organisation.callsign_prefix,
+            teamSegmentPrefixes,
+            nameSegment: updatedUser.callsign_suffix
+          })
+        : null,
       teamId
     };
   }

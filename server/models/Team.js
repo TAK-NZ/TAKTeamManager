@@ -369,12 +369,32 @@ class Team {
     return result.rows[0];
   }
 
+  /**
+   * Bugfix (Sub-teams tab consistency with the /teams overview): also
+   * returns `admin_count`, `device_count` and `channel_count` -- the
+   * SAME four stat columns (alongside the pre-existing `member_count`/
+   * `sub_teams_count`) the /teams overview table already shows for
+   * every Team, per `getOrganisationTeams`/`getAllTeams` above. Mirrors
+   * their `admin_count`/`device_count` subqueries exactly (role =
+   * 'admin' direct-membership count; direct, non-inherited
+   * Team_Owned_Device count), and adds a `channel_count` neither of
+   * those two methods needed before now -- a straightforward
+   * `COUNT(*) FROM channels WHERE channels.team_id = t.id`, matching
+   * `Channel.getChannelCount`'s own query shape.
+   */
   static async getSubTeams(parentId) {
     const result = await pool.query(`
       SELECT t.*,
         (SELECT COUNT(*) FROM team_memberships tm
          JOIN users u ON u.id = tm.user_id
          WHERE tm.team_id = t.id AND u.is_team_device IS NOT TRUE) as member_count,
+        (SELECT COUNT(*) FROM team_memberships tm
+         JOIN users u ON u.id = tm.user_id
+         WHERE tm.team_id = t.id AND tm.role = 'admin' AND u.is_team_device IS NOT TRUE) as admin_count,
+        (SELECT COUNT(*) FROM team_memberships tm
+         JOIN users u ON u.id = tm.user_id
+         WHERE tm.team_id = t.id AND tm.inherited_from_team_id IS NULL AND u.is_team_device = true) as device_count,
+        (SELECT COUNT(*) FROM channels c WHERE c.team_id = t.id) as channel_count,
         (SELECT COUNT(*) FROM teams t2 WHERE t2.parent_team_id = t.id) as sub_teams_count,
           EXISTS(SELECT 1 FROM signup_codes sc WHERE sc.team_id = t.id) as has_signup_code
       FROM teams t

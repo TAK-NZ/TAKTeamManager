@@ -45,10 +45,30 @@ router.get('/joinable', async (req, res) => {
 // behavior is completely unchanged.
 router.get('/my-teams', authenticateToken, authorize, paginationParams, async (req, res) => {
   try {
+    // Bugfix (re-parent authorization gap, client-side follow-up): every
+    // branch below now also carries `can_manage` per row -- whether THIS
+    // caller may act as an admin of THAT team, mirroring `GET /api/users`'
+    // own `can_manage` field exactly (same `Team.getManagedTeamIds`
+    // Set-membership pattern, same "Global_Manager manages everything, no
+    // query needed" short-circuit). The Client's "Parent Team" dropdown
+    // (`TeamFormDialog.jsx`) filters candidates to `can_manage` rows for a
+    // non-Global_Manager, so the dropdown can no longer offer a
+    // destination the caller has no admin rights on -- the actual
+    // enforcement is server-side (`team:update`'s row-scoped resolver in
+    // authorize.js), and this field only keeps the dropdown from
+    // presenting an option that would 403 on submit.
+    const managedTeamIds = req.user && req.user.is_global_manager
+      ? null
+      : await Team.getManagedTeamIds(req.user && req.user.userId);
+    const withCanManage = (rows) => rows.map((team) => ({
+      ...team,
+      can_manage: managedTeamIds === null ? true : managedTeamIds.has(team.id)
+    }));
+
     if (req.query.scope === 'organisation') {
       const orgTeams = await resolveOwnOrganisationTeams(req.user);
       const visibleTeams = await TeamVisibilityService.filterVisibleBranches(orgTeams, req.user);
-      return res.json({ teams: visibleTeams });
+      return res.json({ teams: withCanManage(visibleTeams) });
     }
 
     let teams;
@@ -68,6 +88,7 @@ router.get('/my-teams', authenticateToken, authorize, paginationParams, async (r
       const orgTeams = await resolveOwnOrganisationTeams(req.user, true);
       teams = await TeamVisibilityService.filterVisibleBranches(orgTeams, req.user);
     }
+    teams = withCanManage(teams);
     res.json(pagination ? { teams, pagination } : { teams });
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to fetch teams');
@@ -124,7 +145,7 @@ router.post('/', authenticateToken, authorize, [
   body('name').trim().isLength({ min: 1, max: 255 }),
   body('description').optional().trim(),
   body('callsignPrefix').optional().trim().custom(value => isValidCallsignPrefix(value))
-    .withMessage('callsignPrefix may only contain letters and digits'),
+    .withMessage('callsignPrefix may only contain letters and digits, optionally split into segments with a single hyphen (e.g. AUS-FIRE)'),
   body('color').optional().trim(),
   body('visibility').optional().isIn(['public', 'private']),
   body('canJoin').optional().isBoolean(),
@@ -270,7 +291,7 @@ router.put('/:teamId', authenticateToken, authorize, [
   body('name').optional().trim().isLength({ min: 1, max: 255 }),
   body('description').optional().trim(),
   body('callsignPrefix').optional().trim().custom(value => isValidCallsignPrefix(value))
-    .withMessage('callsignPrefix may only contain letters and digits'),
+    .withMessage('callsignPrefix may only contain letters and digits, optionally split into segments with a single hyphen (e.g. AUS-FIRE)'),
   body('color').optional().trim(),
   body('visibility').optional().isIn(['public', 'private']),
   body('canJoin').optional().isBoolean(),
@@ -746,6 +767,56 @@ router.patch('/:teamId/members/:userId', authenticateToken, authorize, [
         'UPDATE user_cache SET callsign_suffix = $1 WHERE authentik_id = $2',
         [callsignSuffix, targetUser.authentik_user_id]
       );
+
+      // Bugfix (callsign-handling): a callsign_suffix edit must also
+      // recompute and persist the ASSEMBLED tak_callsign (Organisation
+      // prefix + Team segment + this Name segment). The raw
+      // callsign_suffix column above is correct immediately -- which is
+      // why re-opening the edit form shows the right value -- but
+      // without this the DISPLAYED callsign (user_cache.tak_callsign,
+      // and the value pushed to Authentik's takCallsign attribute)
+      // stays stale until some UNRELATED trigger (a Team-level
+      // callsignPrefix/callsignNameFormat/callsignLevelSelection
+      // change, or the next periodic Authentik sync) happens to
+      // regenerate it.
+      //
+      // Deliberately does NOT apply `attributes.role` from
+      // generateCallsign's result: that value is hardcoded to
+      // 'Team Member' (see BUG-029 in BUGS.md), and a callsign_suffix
+      // edit must never clobber this user's separately-managed
+      // tak_role -- only `callsign`/`color` are read from the result.
+      //
+      // Bugfix (callsign-handling, second pass): this route is reachable
+      // from ANY team page a user's row appears on -- including an
+      // ancestor Team's page, where the user shows up via an INHERITED
+      // membership row, not a direct one. Regenerating from
+      // `req.params.teamId` verbatim (the URL's team, e.g. the
+      // Organisation) resolves the WRONG Ancestor_Chain -- one with no
+      // Sub_Team segment at all -- and silently drops that segment from
+      // the recomputed callsign (e.g. "FENZ-K.Kokako" instead of the
+      // correct "FENZ-STL-K.Kokako"). The callsign must always be
+      // generated from the user's own DIRECT team
+      // (`inherited_from_team_id IS NULL`), never the team named in the
+      // URL, mirroring `updateTeamUserAttributes`'s own established
+      // "the user's actual direct team, exactly once" rule.
+      const directTeamResult = await pool.query(
+        'SELECT team_id FROM team_memberships WHERE user_id = $1 AND inherited_from_team_id IS NULL',
+        [userId]
+      );
+      const directTeamId = directTeamResult.rows[0]?.team_id ?? teamId;
+
+      const UserAttributesService = require('../services/userAttributes');
+      const generatedAttributes = await UserAttributesService.generateCallsign(userId, directTeamId);
+      if (generatedAttributes) {
+        await UserAttributesService.updateUserAttributes(targetUser.authentik_user_id, {
+          callsign: generatedAttributes.callsign,
+          color: generatedAttributes.color
+        });
+        await pool.query(
+          'UPDATE user_cache SET tak_callsign = $1, tak_color = $2 WHERE authentik_id = $3',
+          [generatedAttributes.callsign, generatedAttributes.color, targetUser.authentik_user_id]
+        );
+      }
     }
 
     // Requirement 13.6: takRole writes dual-write to user_cache and push

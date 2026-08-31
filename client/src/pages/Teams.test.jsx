@@ -12,8 +12,9 @@ import { getParentBreadcrumb } from './Teams.jsx';
 // Team dialogs" bugfix) applies HTML `pattern` validation plus an inline
 // error message to its own "Prefix" input (`formData.callsignPrefix`),
 // mirroring server/utils/callsignValidation.js's `isValidCallsignPrefix`
-// character class (letters and digits only, no `-`) and the same
-// convention already established by TeamDetail.jsx's
+// character class (foreign-partner-prefix extension: one or more
+// `-`-separated alphanumeric segments, rather than a single hyphen-free
+// run) and the same convention already established by TeamDetail.jsx's
 // `isValidSubTeamCallsignPrefix` for its Create Sub-Team Dialog's own
 // "Prefix" input (task 33.3). No component-render test harness (e.g.
 // @testing-library/react) is set up in this project -- see
@@ -35,8 +36,18 @@ describe('isValidCallsignPrefixInput (Req 3.10)', () => {
     expect(isValidCallsignPrefixInput('FENZ123')).toBe(true)
   })
 
-  it('rejects a value containing a "-" (stricter than callsign_suffix)', () => {
-    expect(isValidCallsignPrefixInput('NZ-POL')).toBe(false)
+  // Foreign-partner-prefix extension: a single internal hyphen (one or
+  // more `-`-separated alphanumeric segments, e.g. "AUS-FIRE") is now
+  // accepted, mirroring server/utils/callsignValidation.js's widened
+  // CALLSIGN_PREFIX_PATTERN.
+  it('accepts a value containing a single internal hyphen (a two-segment prefix)', () => {
+    expect(isValidCallsignPrefixInput('NZ-POL')).toBe(true)
+  })
+
+  it('rejects a value with a leading, trailing, or doubled hyphen', () => {
+    expect(isValidCallsignPrefixInput('-NZ')).toBe(false)
+    expect(isValidCallsignPrefixInput('NZ-')).toBe(false)
+    expect(isValidCallsignPrefixInput('NZ--POL')).toBe(false)
   })
 
   it('rejects a value containing any other disallowed character', () => {
@@ -69,6 +80,43 @@ describe('Teams.jsx overview table: Team Devices / Team Admins columns between M
   it('renders the device_count/admin_count data cells, defaulting to 0', () => {
     expect(source).toContain('{team.device_count || 0}')
     expect(source).toContain('{team.admin_count || 0}')
+  })
+})
+
+// Bugfix: each of the four counts on the Orgs & Teams overview (Members,
+// Team Devices, Team Admins, Sub-teams) links to that team's corresponding
+// TeamDetail.jsx tab (`?tab=<id>`, read there via `useSearchParams` and
+// TeamDetail.jsx's own `VALID_TAB_IDS` allow-list) rather than being plain
+// unlinked text -- checked once for the mobile card block and once for the
+// desktop table block, since the two are separate markup blocks that could
+// drift from each other. Source-contract check, matching this file's own
+// established convention.
+describe('Teams.jsx overview counts link to the corresponding TeamDetail.jsx tab (bugfix)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'Teams.jsx'), 'utf8')
+  const cardBlockStart = source.indexOf('sm:hidden divide-y')
+  const tableBlockStart = source.indexOf('hidden sm:block overflow-x-auto')
+  const cardBlock = source.slice(cardBlockStart, tableBlockStart)
+  const tableBlock = source.slice(tableBlockStart)
+
+  it.each([
+    ['Members', 'members', '{team.member_count || 0}'],
+    ['Team Devices', 'devices', '{team.device_count || 0}'],
+    ['Team Admins', 'admins', '{team.admin_count || 0}'],
+    ['Sub-teams', 'subteams', '{team.sub_teams_count || 0}']
+  ])('%s count is wrapped in a Link to ?tab=%s, in both the card and the table block', (_label, tabId, countExpr) => {
+    const linkPrefix = `<Link to={\`/teams/${'$'}{team.id}?tab=${tabId}\`}`
+
+    for (const [blockName, block] of [['card', cardBlock], ['table', tableBlock]]) {
+      expect(block, `${blockName} block should contain a ?tab=${tabId} Link`).toContain(linkPrefix)
+      const linkIndex = block.indexOf(linkPrefix)
+      const countIndex = block.indexOf(countExpr, linkIndex)
+      expect(countIndex, `${blockName} block: ${countExpr} should appear inside the ?tab=${tabId} Link`).toBeGreaterThan(linkIndex)
+      // Anti-vacuity: the count expression must appear BEFORE the link's
+      // own closing tag, not merely somewhere later in the block.
+      const closingLinkIndex = block.indexOf('</Link>', linkIndex)
+      expect(closingLinkIndex).toBeGreaterThan(-1)
+      expect(countIndex).toBeLessThan(closingLinkIndex)
+    }
   })
 })
 

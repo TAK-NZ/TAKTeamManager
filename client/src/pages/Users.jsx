@@ -83,6 +83,13 @@ export default function Users({ user }) {
   const [removeConfirmInput, setRemoveConfirmInput] = useState('')
   const [removingUser, setRemovingUser] = useState(false)
 
+  // Bugfix (Resend welcome email was the only action with no
+  // confirmation): mirrors `TeamDetail.jsx`'s own
+  // `resendingWelcomeTo`/`resendingWelcomeInFlight`. Holds the target
+  // row itself (not just an id) since the dialog needs its email.
+  const [resendingWelcomeTo, setResendingWelcomeTo] = useState(null)
+  const [resendingWelcomeInFlight, setResendingWelcomeInFlight] = useState(false)
+
   // "Create User" dialog state.
   const [showCreateDialog, setShowCreateDialog] = useState(false)
   const [createTeams, setCreateTeams] = useState([])
@@ -178,16 +185,29 @@ export default function Users({ user }) {
     }
   }
 
-  // Mirrors TeamDetail.jsx's `handleResendWelcome`. `teamId` is cosmetic
+  // Bugfix (Resend welcome email was the only action with no
+  // confirmation): opens the confirmation dialog for a single row,
+  // mirroring `TeamDetail.jsx`'s `handleResendWelcomeClick`.
+  const handleResendWelcomeClick = (targetUser) => {
+    setResendingWelcomeTo(targetUser)
+  }
+
+  // Mirrors TeamDetail.jsx's `confirmResendWelcome`. `teamId` is cosmetic
   // server-side (used only to build the email's display text; the actual
   // authorization walks the user's real current teams), so this page's
   // per-row `team_id` (possibly null) is passed through as-is.
-  const handleResendWelcome = async (targetUser) => {
+  const confirmResendWelcome = async () => {
+    if (!resendingWelcomeTo) return
+
+    setResendingWelcomeInFlight(true)
     try {
-      await usersAPI.resendWelcome(targetUser.local_user_id, targetUser.team_id)
-      toast.success(`Welcome email resent to ${targetUser.email}`)
+      await usersAPI.resendWelcome(resendingWelcomeTo.local_user_id, resendingWelcomeTo.team_id)
+      toast.success(`Welcome email resent to ${resendingWelcomeTo.email}`)
+      setResendingWelcomeTo(null)
     } catch (err) {
       toast.error('Failed to resend welcome email')
+    } finally {
+      setResendingWelcomeInFlight(false)
     }
   }
 
@@ -277,13 +297,22 @@ export default function Users({ user }) {
     setCreatingUser(true)
     setCreateError(null)
     try {
-      await usersAPI.createAndAdd(
+      const response = await usersAPI.createAndAdd(
         createForm.email,
         createForm.firstName,
         createForm.lastName,
         createForm.teamId
       )
-      toast.success('User created and added to the selected team')
+      // Bugfix (silent welcome-email failures): mirrors
+      // `TeamDetail.jsx`'s own handling -- a single combined toast, not
+      // a success toast plus a separate warning, since the account was
+      // created either way and layering two toasts for one action would
+      // read as contradictory.
+      if (response?.data?.welcomeEmailSent === false) {
+        toast.error(`User created, but the welcome email to ${createForm.email} could not be sent. You may need to resend it manually.`)
+      } else {
+        toast.success('User created and added to the selected team')
+      }
       setShowCreateDialog(false)
       fetchUsers()
     } catch (error) {
@@ -495,7 +524,7 @@ export default function Users({ user }) {
                               : 'This user has no team assignment'
                           }
                           onEdit={() => handleStartEditUser(targetUser)}
-                          onResendWelcome={() => handleResendWelcome(targetUser)}
+                          onResendWelcome={() => handleResendWelcomeClick(targetUser)}
                           onTransfer={() => setTransferringUser(targetUser)}
                           onViewDevices={() => setDevicesForUser(targetUser)}
                           onRemove={() => handleRemoveUser(targetUser)}
@@ -602,6 +631,48 @@ export default function Users({ user }) {
           </div>
         )
       })()}
+
+      {/* Bugfix (Resend welcome email was the only action with no
+          confirmation): mirrors TeamDetail.jsx's own Resend Welcome
+          Email dialog -- plain Cancel/Confirm, btn-primary (not
+          btn-danger) since this is not destructive. */}
+      {resendingWelcomeTo && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="resend-welcome-title"
+            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full"
+          >
+            <div className="p-6">
+              <h3 id="resend-welcome-title" className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
+                Resend Welcome Email
+              </h3>
+              <p className="text-gray-600 dark:text-gray-400 mb-6">
+                Send a new welcome email to {resendingWelcomeTo.email}?
+              </p>
+              <div className="flex justify-end space-x-3">
+                <button
+                  type="button"
+                  onClick={() => setResendingWelcomeTo(null)}
+                  className="btn-secondary"
+                  disabled={resendingWelcomeInFlight}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmResendWelcome}
+                  disabled={resendingWelcomeInFlight}
+                  className="btn-primary disabled:opacity-50"
+                >
+                  {resendingWelcomeInFlight ? 'Sending...' : 'Resend Email'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Users-page-action-parity: the Create User dialog. Unlike
           TeamDetail.jsx's Add Member Dialog (which always creates into

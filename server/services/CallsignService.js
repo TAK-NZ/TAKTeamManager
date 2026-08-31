@@ -85,11 +85,23 @@ class CallsignService {
    *   mirroring the pre-existing `userAttributes.js` inline switch's
    *   `default:` fallback that this function replaces.
    *
-   * After the format-specific string is built, every character outside
-   * `[A-Za-z0-9.-]` is replaced with a single `-` character (Requirement
-   * 11.7) -- this deliberately preserves the `.` synthesized by
-   * `first_initial_dot_last`, since `.` is itself inside the allowed
-   * character class.
+   * Before the character-class sanitization below, the format-specific
+   * string is first run through diacritic stripping (Unicode NFD
+   * decomposition + removal of combining marks in the U+0300-U+036F
+   * range): a name like "Kōkako" must sanitize to "Kokako", not
+   * "K-kako". Without this step every accented/macroned/umlauted letter
+   * (macrons in Māori names being the concrete case that surfaced this)
+   * falls outside `[A-Za-z0-9.-]` and is replaced by a literal `-`,
+   * which is indistinguishable from an intended segment boundary in the
+   * assembled callsign. Decomposition acts on the base letter plus its
+   * combining mark independently of surrounding characters, so it never
+   * touches the ASCII characters (including the literal `.`/`-` this
+   * function itself synthesizes) that are already valid.
+   *
+   * After stripping diacritics, every character outside `[A-Za-z0-9.-]`
+   * is replaced with a single `-` character (Requirement 11.7) -- this
+   * deliberately preserves the `.` synthesized by `first_initial_dot_last`,
+   * since `.` is itself inside the allowed character class.
    *
    * @param {string} firstName
    * @param {string} lastName
@@ -128,7 +140,9 @@ class CallsignService {
         break;
     }
 
-    return rawSuffix.replace(/[^A-Za-z0-9.-]/g, '-');
+    const deaccented = rawSuffix.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+    return deaccented.replace(/[^A-Za-z0-9.-]/g, '-');
   }
 }
 

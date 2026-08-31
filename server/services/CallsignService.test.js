@@ -208,6 +208,27 @@ describe('CallsignService.computeDefaultCallsignSuffix', () => {
     const result = CallsignService.computeDefaultCallsignSuffix('Anne', 'Smith-Jones', 'full_name');
     expect(result).toBe('Anne-Smith-Jones');
   });
+
+  // Bugfix (callsign-handling): a macroned/accented letter must be
+  // transliterated to its base ASCII letter, never mangled into a `-`
+  // that is indistinguishable from an intended segment boundary.
+  it('strips a macron (Kōkako -> Kokako) rather than replacing it with a dash', () => {
+    const result = CallsignService.computeDefaultCallsignSuffix('Kingston', 'Kōkako', 'first_initial_dot_last');
+    expect(result).toBe('K.Kokako');
+  });
+
+  it('strips diacritics across full_name formatting (José Muñoz -> Jose-Munoz)', () => {
+    const result = CallsignService.computeDefaultCallsignSuffix('José', 'Muñoz', 'full_name');
+    expect(result).toBe('Jose-Munoz');
+  });
+
+  it('strips a diaeresis (Zoë -> Zoe) while still replacing a genuinely disallowed character with a dash', () => {
+    const result = CallsignService.computeDefaultCallsignSuffix('Zoë', "O'Brien", 'first_initial_last');
+    // First initial "Z" (from de-accented "Zoe") + space + "O'Brien" ->
+    // the apostrophe (a real disallowed character, not a diacritic) is
+    // still replaced with '-'.
+    expect(result).toBe('Z-O-Brien');
+  });
 });
 
 /**

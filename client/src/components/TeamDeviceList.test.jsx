@@ -177,6 +177,83 @@ describe('TeamDeviceList (mounted)', () => {
     expect(container.textContent).toContain('3 active TAK Server certificates')
   })
 
+  // Bugfix (list-width reduction, consistency with Members/Team Admins):
+  // this tab now shows Device+username, TAK Callsign & Role, Added,
+  // Actions -- the "TAK Callsign & Role" column/label is new, and the
+  // device's `callsign`/`takRole` fields (from
+  // `DeviceEnrollmentService.listTeamDevices`) render in both the
+  // desktop table and the mobile card.
+  it('renders "TAK Callsign & Role" as a column header, and each device\'s callsign/takRole beneath it', async () => {
+    devicesAPI.getTeamDevices.mockResolvedValue({
+      data: {
+        devices: [
+          {
+            deviceUserId: 1,
+            username: 'AUK-D7K3QMX',
+            deviceLabel: 'Engine 4 Tablet',
+            callsignSuffix: 'Tanker1',
+            takRole: 'Team Lead',
+            callsign: 'AUK-Tanker1',
+            teamId: 5,
+            createdAt: '2025-01-02T03:04:05Z',
+            liveCertificateCount: 0,
+          },
+        ],
+      },
+    })
+
+    root = createRoot(container)
+    await act(async () => {
+      root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(container.textContent).toContain('TAK Callsign & Role')
+    expect(container.textContent).toContain('AUK-Tanker1')
+    expect(container.textContent).toContain('Team Lead')
+    // Old separate "Device"/"Username" two-column table header and
+    // plain "Added"-only informational column are gone; "Username" is
+    // no longer its OWN column header (it now renders stacked under the
+    // device name).
+    const table = container.querySelector('table')
+    const headerCells = [...table.querySelectorAll('thead th')].map((th) => th.textContent.trim())
+    expect(headerCells).toEqual(['Device', 'TAK Callsign & Role', 'Added', 'Actions'])
+  })
+
+  it('falls back to "-" for the callsign and "Team Member" for the role when a device carries neither', async () => {
+    devicesAPI.getTeamDevices.mockResolvedValue({
+      data: {
+        devices: [
+          {
+            deviceUserId: 2,
+            username: 'AUK-D9Q2WXY',
+            deviceLabel: null,
+            callsignSuffix: null,
+            takRole: null,
+            callsign: null,
+            teamId: 5,
+            createdAt: '2025-02-03T03:04:05Z',
+            liveCertificateCount: 0,
+          },
+        ],
+      },
+    })
+
+    root = createRoot(container)
+    await act(async () => {
+      root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(container.textContent).toContain('Team Member')
+    const table = container.querySelector('table')
+    expect(table.textContent).toContain('-')
+  })
+
   it('calls onEnroll with the device when its action is activated', async () => {
     devicesAPI.getTeamDevices.mockResolvedValue({
       data: {

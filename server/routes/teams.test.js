@@ -47,6 +47,7 @@ jest.mock('../models/Team', () => {
     getSubTeams: jest.fn(),
     getAncestorChain: jest.fn(),
     getOrganisationTeams: jest.fn(),
+    getManagedTeamIds: jest.fn(),
     findById: jest.fn(),
     getMembers: jest.fn(),
     create: jest.fn(),
@@ -97,9 +98,15 @@ jest.mock('../services/EventPublisher', () => ({
 // regardless of when it happens, so this mock lets the tests below
 // assert whether `updateTeamUserAttributes`/`updateUserAttributes` was
 // (or wasn't) triggered by a given update.
+// Bugfix (callsign-handling): PATCH /:teamId/members/:userId now also
+// calls generateCallsign to recompute the assembled tak_callsign after a
+// callsign_suffix edit. Defaults to null (the "nothing to persist" path)
+// so every EXISTING test below that doesn't care about this behavior is
+// unaffected; the dedicated describe block further down overrides it.
 jest.mock('../services/userAttributes', () => ({
   updateTeamUserAttributes: jest.fn().mockResolvedValue(true),
-  updateUserAttributes: jest.fn().mockResolvedValue(true)
+  updateUserAttributes: jest.fn().mockResolvedValue(true),
+  generateCallsign: jest.fn().mockResolvedValue(null)
 }));
 
 // Requirement 11.4, 13.2 (task 28.1): PATCH /api/teams/:teamId/members/:userId
@@ -145,6 +152,12 @@ describe('GET /api/teams/my-teams pagination (Requirement 11.4)', () => {
     jest.clearAllMocks();
     mockIsAdmin = true;
     app = buildApp();
+    // Bugfix (re-parent authorization gap, client-side follow-up): every
+    // /my-teams branch now also resolves Team.getManagedTeamIds for a
+    // non-Global_Manager to annotate each row's `can_manage`. This suite
+    // is scoped to pagination, not can_manage itself (see the dedicated
+    // describe block below), so default to an empty Set here.
+    Team.getManagedTeamIds.mockResolvedValue(new Set());
   });
 
   describe('admin "all teams" branch', () => {
@@ -173,7 +186,10 @@ describe('GET /api/teams/my-teams pagination (Requirement 11.4)', () => {
       // page=2, pageSize=5 -> offset = (2-1)*5 = 5
       expect(Team.getAllTeams).toHaveBeenCalledWith(5, 5);
       expect(res.body.pagination).toEqual({ page: 2, pageSize: 5, total: 42 });
-      expect(res.body.teams).toEqual([{ id: 1, name: 'Team A' }]);
+      // mockIsAdmin=true means req.user.is_global_manager is also true
+      // (see the shared authenticateToken mock above), so can_manage is
+      // true for every row with no Team.getManagedTeamIds query at all.
+      expect(res.body.teams).toEqual([{ id: 1, name: 'Team A', can_manage: true }]);
     });
 
     it('defaults to page 1 / pageSize 50 when no query params are supplied', async () => {
@@ -200,12 +216,13 @@ describe('GET /api/teams/my-teams pagination (Requirement 11.4)', () => {
       const orgTeams = [{ id: 2, name: 'My Team', parent_team_id: null, visibility: 'public' }];
       Team.getOrganisationTeams.mockResolvedValue(orgTeams);
       TeamVisibilityService.filterVisibleBranches.mockResolvedValue(orgTeams);
+      Team.getManagedTeamIds.mockResolvedValue(new Set([2]));
 
       const res = await request(app).get('/api/teams/my-teams').query({ page: 3, pageSize: 10 });
 
       expect(res.status).toBe(200);
       expect(Team.getAllTeams).not.toHaveBeenCalled();
-      expect(res.body.teams).toEqual(orgTeams);
+      expect(res.body.teams).toEqual([{ ...orgTeams[0], can_manage: true }]);
       expect(res.body.pagination).toBeUndefined();
     });
 
@@ -239,6 +256,7 @@ describe('GET /api/teams/my-teams?scope=organisation (Requirement 6.6)', () => {
     jest.clearAllMocks();
     mockIsAdmin = false;
     app = buildApp();
+    Team.getManagedTeamIds.mockResolvedValue(new Set());
   });
 
   it('resolves the caller\'s Organisation, fetches its hierarchy, filters via filterVisibleBranches, and returns { teams } with no pagination field', async () => {
@@ -253,6 +271,7 @@ describe('GET /api/teams/my-teams?scope=organisation (Requirement 6.6)', () => {
     Team.getOrganisationTeams.mockResolvedValue(orgTeams);
     const filtered = [orgTeams[0], orgTeams[1]];
     TeamVisibilityService.filterVisibleBranches.mockResolvedValue(filtered);
+    Team.getManagedTeamIds.mockResolvedValue(new Set([5]));
 
     const res = await request(app).get('/api/teams/my-teams').query({ scope: 'organisation' });
 
@@ -263,7 +282,10 @@ describe('GET /api/teams/my-teams?scope=organisation (Requirement 6.6)', () => {
       orgTeams,
       expect.objectContaining({ userId: 1 })
     );
-    expect(res.body.teams).toEqual(filtered);
+    expect(res.body.teams).toEqual([
+      { ...filtered[0], can_manage: false },
+      { ...filtered[1], can_manage: true }
+    ]);
     expect(res.body.pagination).toBeUndefined();
     // The existing default-scope branches must not run.
     expect(Team.getAllTeams).not.toHaveBeenCalled();
@@ -379,16 +401,30 @@ describe('callsignPrefix character-class validation (Requirements 3.8, 3.9)', ()
   });
 
   describe('POST /api/teams', () => {
-    // Load-bearing: `-` is excluded from callsignPrefix's character class
-    // because it is BOTH the Callsign segment separator (Requirement 8)
-    // and the Managed_Identifier separator (takserver-enrollment
-    // Requirement 1) -- a prefix containing one would make the boundary
-    // between the prefix and whatever follows ambiguous. See
+    // Foreign-partner-prefix extension: callsignPrefix now accepts one or
+    // more `-`-separated alphanumeric segments (e.g. "AUS-FIRE"), so a
+    // bare internal hyphen like "NZ-POL" is no longer rejected. See
     // server/utils/callsignValidation.js's header comment.
-    it('rejects a callsignPrefix containing a "-" with 400', async () => {
+    it('accepts a callsignPrefix containing a single internal "-" (a two-segment prefix)', async () => {
+      Team.create.mockResolvedValue({ id: 1, name: 'Police', callsign_prefix: 'NZ-POL' });
+
       const res = await request(app)
         .post('/api/teams')
         .send({ name: 'Police', callsignPrefix: 'NZ-POL' });
+
+      expect(res.status).toBe(201);
+      expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ callsign_prefix: 'NZ-POL' }));
+    });
+
+    // A segment matching the Managed_Identifier marker+body shape (`D`/`U`
+    // followed by exactly 7 Identifier_Alphabet characters) is still
+    // rejected, since it would make a minted identifier's own
+    // prefix/marker boundary ambiguous. See
+    // server/utils/callsignValidation.js's header comment.
+    it('rejects a callsignPrefix with a segment matching the Managed_Identifier marker+body shape with 400', async () => {
+      const res = await request(app)
+        .post('/api/teams')
+        .send({ name: 'Police', callsignPrefix: 'NZ-D2345678' });
 
       expect(res.status).toBe(400);
       expect(Team.create).not.toHaveBeenCalled();
@@ -481,17 +517,18 @@ describe('callsignPrefix character-class validation (Requirements 3.8, 3.9)', ()
       expect(Team.create).not.toHaveBeenCalled();
     });
 
-    // takserver-enrollment task 4.3 edge case: a prefix that IS non-empty
-    // but consists ENTIRELY of characters outside [A-Za-z0-9] (here, a
-    // bare "-") must be caught -- the requirement is that it never
-    // reaches Team.create, regardless of which of the two independent
-    // checks (the express-validator character-class .custom() chain, or
-    // the handler's own "required for an Organisation" emptiness check)
-    // is the one that catches it. Asserted here as the validator-chain
-    // shape (`res.body.errors`, not `res.body.error`), since the
-    // character-class check runs as request-shape validation BEFORE the
-    // handler body executes, so it is the one that actually fires first
-    // for this input -- the emptiness check never gets a chance to run.
+    // takserver-enrollment task 4.3 edge case: a bare "-" is still
+    // rejected under the foreign-partner-prefix extension (it is a
+    // leading AND trailing hyphen at once -- two empty segments), so it
+    // never reaches Team.create, regardless of which of the two
+    // independent checks (the express-validator character-class
+    // .custom() chain, or the handler's own "required for an
+    // Organisation" emptiness check) is the one that catches it. Asserted
+    // here as the validator-chain shape (`res.body.errors`, not
+    // `res.body.error`), since the character-class check runs as
+    // request-shape validation BEFORE the handler body executes, so it is
+    // the one that actually fires first for this input -- the emptiness
+    // check never gets a chance to run.
     it('rejects a callsignPrefix of only disallowed characters ("-") via the character-class check, not the emptiness check', async () => {
       const res = await request(app)
         .post('/api/teams')
@@ -544,17 +581,35 @@ describe('callsignPrefix character-class validation (Requirements 3.8, 3.9)', ()
       Team.findById.mockResolvedValue({ id: 42, color: 'Blue', parent_team_id: null });
     });
 
-    it('rejects a callsignPrefix containing a "-" with 400', async () => {
+    // Foreign-partner-prefix extension: callsignPrefix now accepts one or
+    // more `-`-separated alphanumeric segments (e.g. "AUS-FIRE"), so a
+    // bare internal hyphen like "NZ-POL" is no longer rejected on edit
+    // either.
+    it('accepts a callsignPrefix containing a single internal "-" (a two-segment prefix) on edit', async () => {
+      Team.update.mockResolvedValue({ id: 42, callsign_prefix: 'NZ-POL' });
+
       const res = await request(app)
         .put('/api/teams/42')
         .send({ callsignPrefix: 'NZ-POL' });
+
+      expect(res.status).toBe(200);
+      expect(Team.update).toHaveBeenCalled();
+    });
+
+    // A segment matching the Managed_Identifier marker+body shape is
+    // still rejected on edit too.
+    it('rejects a callsignPrefix with a segment matching the Managed_Identifier marker+body shape with 400 on edit', async () => {
+      const res = await request(app)
+        .put('/api/teams/42')
+        .send({ callsignPrefix: 'NZ-D2345678' });
 
       expect(res.status).toBe(400);
       expect(Team.update).not.toHaveBeenCalled();
     });
 
-    // takserver-enrollment task 4.3 edge case: a callsignPrefix of only
-    // disallowed characters ("-") is caught by the character-class
+    // takserver-enrollment task 4.3 edge case: a bare "-" is still
+    // rejected under the foreign-partner-prefix extension (a leading AND
+    // trailing hyphen at once). It is caught by the character-class
     // .custom() validator (a validation error, `res.body.errors`) rather
     // than ever reaching the handler's own "cannot be cleared" emptiness
     // check (`res.body.error`) -- the character-class check runs as
@@ -1595,6 +1650,15 @@ describe('PATCH /api/teams/:teamId/members/:userId (Requirements 11.4, 11.16, 13
     app = buildApp();
     User.findById.mockResolvedValue({ id: 7, authentik_user_id: 900, first_name: 'John', last_name: 'Doe', email: 'john@example.com' });
     checkCallsignSuffixUniqueness.mockResolvedValue(undefined);
+    // Bugfix (callsign-handling, second pass): a callsignSuffix edit now
+    // issues a direct-team-membership SELECT before recomputing the
+    // callsign (see the dedicated describe block below, which overrides
+    // this with its own scenario-specific rows). Every other test in
+    // this block that merely SENDS callsignSuffix, without asserting on
+    // the recompute itself, still needs this query to resolve to
+    // SOMETHING rather than `undefined` (`pool.query` is a bare
+    // `jest.fn()` with no default implementation).
+    pool.query.mockResolvedValue({ rows: [] });
   });
 
   it('updates firstName only', async () => {
@@ -1653,6 +1717,138 @@ describe('PATCH /api/teams/:teamId/members/:userId (Requirements 11.4, 11.16, 13
     );
   });
 
+  /**
+   * Bugfix (callsign-handling): a callsign_suffix edit must recompute
+   * and persist the ASSEMBLED tak_callsign, not just the raw
+   * callsign_suffix column -- otherwise the DISPLAYED callsign
+   * (user_cache.tak_callsign, and the value pushed to Authentik) stays
+   * stale until an unrelated trigger (a Team-level prefix/format change,
+   * or the next periodic Authentik sync) happens to regenerate it.
+   */
+  describe('callsignSuffix edit recomputes the assembled tak_callsign', () => {
+    const UserAttributesService = require('../services/userAttributes');
+
+    /**
+     * Bugfix (callsign-handling, second pass): the recompute now reads
+     * the user's DIRECT team via a `SELECT team_id FROM team_memberships
+     * WHERE user_id = $1 AND inherited_from_team_id IS NULL` query
+     * (never the URL's `:teamId`, which may name an ancestor the user
+     * only holds an INHERITED row in) -- these tests mock `pool.query`
+     * for exactly that SELECT, defaulting every OTHER query this handler
+     * issues to `{ rows: [] }` (harmless for the writes, which never
+     * read their own result).
+     *
+     * @param {number|string|null} directTeamId - the row this mock
+     *   returns for the direct-team lookup; `null` models "no direct
+     *   membership row found" (falls back to the URL's teamId).
+     */
+    function mockDirectTeamLookup(directTeamId) {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('FROM team_memberships WHERE user_id = $1 AND inherited_from_team_id IS NULL')) {
+          return Promise.resolve({ rows: directTeamId === null ? [] : [{ team_id: directTeamId }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+    }
+
+    it('calls generateCallsign with the user\'s DIRECT team id, not the URL\'s :teamId, and persists the result to user_cache and Authentik', async () => {
+      User.update.mockResolvedValue({ id: 7, callsign_suffix: 'K.Kokako' });
+      // The URL below is team 1, but the user's real direct team is 4 --
+      // e.g. this PATCH was issued from an ancestor Organisation's page,
+      // where the user shows up via an inherited row.
+      mockDirectTeamLookup(4);
+      UserAttributesService.generateCallsign.mockResolvedValue({
+        callsign: 'FENZ-STL-K.Kokako',
+        color: 'Red',
+        role: 'Team Member'
+      });
+
+      const res = await request(app)
+        .patch('/api/teams/1/members/7')
+        .send({ callsignSuffix: 'K.Kokako' });
+
+      expect(res.status).toBe(200);
+      // The direct team (4), never the URL's team (1).
+      expect(UserAttributesService.generateCallsign).toHaveBeenCalledWith('7', 4);
+      expect(UserAttributesService.updateUserAttributes).toHaveBeenCalledWith(900, {
+        callsign: 'FENZ-STL-K.Kokako',
+        color: 'Red'
+      });
+      expect(pool.query).toHaveBeenCalledWith(
+        'UPDATE user_cache SET tak_callsign = $1, tak_color = $2 WHERE authentik_id = $3',
+        ['FENZ-STL-K.Kokako', 'Red', 900]
+      );
+    });
+
+    it('falls back to the URL\'s :teamId when no direct-membership row is found', async () => {
+      User.update.mockResolvedValue({ id: 7, callsign_suffix: 'K.Kokako' });
+      mockDirectTeamLookup(null);
+      UserAttributesService.generateCallsign.mockResolvedValue({
+        callsign: 'FENZ-K.Kokako',
+        color: 'Red',
+        role: 'Team Member'
+      });
+
+      const res = await request(app)
+        .patch('/api/teams/1/members/7')
+        .send({ callsignSuffix: 'K.Kokako' });
+
+      expect(res.status).toBe(200);
+      expect(UserAttributesService.generateCallsign).toHaveBeenCalledWith('7', '1');
+    });
+
+    it('never applies the role field from generateCallsign\'s result (tak_role is separately managed)', async () => {
+      User.update.mockResolvedValue({ id: 7, callsign_suffix: 'K.Kokako' });
+      mockDirectTeamLookup(4);
+      UserAttributesService.generateCallsign.mockResolvedValue({
+        callsign: 'FENZ-STL-K.Kokako',
+        color: 'Red',
+        role: 'Team Member'
+      });
+
+      await request(app)
+        .patch('/api/teams/1/members/7')
+        .send({ callsignSuffix: 'K.Kokako' });
+
+      const updateAttributesCall = UserAttributesService.updateUserAttributes.mock.calls.find(
+        ([authentikId]) => authentikId === 900
+      );
+      expect(updateAttributesCall[1]).not.toHaveProperty('role');
+      const cacheCall = pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.startsWith('UPDATE user_cache SET tak_callsign')
+      );
+      expect(cacheCall[0]).not.toContain('tak_role');
+    });
+
+    it('makes no recompute call when generateCallsign resolves null (e.g. team not found)', async () => {
+      User.update.mockResolvedValue({ id: 7, callsign_suffix: 'K.Kokako' });
+      mockDirectTeamLookup(4);
+      UserAttributesService.generateCallsign.mockResolvedValue(null);
+
+      const res = await request(app)
+        .patch('/api/teams/1/members/7')
+        .send({ callsignSuffix: 'K.Kokako' });
+
+      expect(res.status).toBe(200);
+      expect(UserAttributesService.updateUserAttributes).not.toHaveBeenCalled();
+      const cacheCall = pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.startsWith('UPDATE user_cache SET tak_callsign')
+      );
+      expect(cacheCall).toBeUndefined();
+    });
+
+    it('does not call generateCallsign at all when callsignSuffix is not part of the update', async () => {
+      User.update.mockResolvedValue({ id: 7, first_name: 'Jane' });
+      mockDirectTeamLookup(4);
+
+      await request(app)
+        .patch('/api/teams/1/members/7')
+        .send({ firstName: 'Jane' });
+
+      expect(UserAttributesService.generateCallsign).not.toHaveBeenCalled();
+    });
+  });
+
   it('updates all fields together', async () => {
     User.update.mockResolvedValue({
       id: 7, first_name: 'Jane', last_name: 'Smith', tak_role: 'Medic', callsign_suffix: 'J.Smith'
@@ -1669,7 +1865,7 @@ describe('PATCH /api/teams/:teamId/members/:userId (Requirements 11.4, 11.16, 13
       callsign_suffix: 'J.Smith',
       tak_role: 'Medic'
     });
-  });
+  }); // generateCallsign defaults to resolving null in this describe block's beforeEach, so no extra recompute write occurs here.
 
   it('confirms a firstName/lastName-only edit writes directly to users with no access_requests interaction (Requirement 13.9)', async () => {
     User.update.mockResolvedValue({ id: 7, first_name: 'Jane', last_name: 'Smith' });

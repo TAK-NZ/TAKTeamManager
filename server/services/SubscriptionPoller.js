@@ -96,6 +96,25 @@ const logger = require('../config/logger').createLogger('SubscriptionPoller');
  * cannot identify (no `clientUid`, e.g. every ETL connection) is entirely
  * unaffected -- it keeps relying on `lastEventTime` alone, exactly as before.
  *
+ * Bugfix (Connection_Status disagreement between TAK Server's two views).
+ * `mergeSubscriptionFreshness()` used to touch `lastEventTime` only -- a uid
+ * "does NOT gain a `connected` value from this source" was an explicit rule.
+ * That rule produced a real defect: TAK Server's two connection-tracking
+ * views can disagree about the SAME session, and verified live they did --
+ * a CloudTAK session's live-subscription entry reported every few seconds
+ * (proving the session was open) while its `clientEndPoints` entry sat at
+ * `lastStatus: "Disconnected"` throughout, so the Device_List's "Currently
+ * Connected" badge stayed absent for a session that plainly was connected,
+ * with its Last_Seen advancing to "just now" every poll the whole time --
+ * an inconsistent, confusing combination. Since that bugfix,
+ * `mergeSubscriptionFreshness()` also OR's a positive `connected` signal in
+ * for any uid this view reports at all: simple PRESENCE in a live-subscription
+ * table is itself proof of an open session, independent of whatever
+ * `ClientEndpoint.lastStatus` says. This is additive/OR, never a replacement
+ * -- `ClientEndpoint.lastStatus: "Connected"` still marks a uid connected on
+ * its own, which remains the ONLY signal for the majority of live entries
+ * this view cannot identify at all (empty `clientUid`, Requirement 13.2).
+ *
  * Last_Seen is derived ONLY from TAK Server's Marti HTTP API -- this feature
  * never queries TAK Server's `cot_router` table or any TAK Server database
  * (Requirement 3.6). It is what TAK Server itself reports, not a
@@ -368,9 +387,12 @@ class SubscriptionPoller {
       unreported: 0
     };
 
+    // Counted AFTER mergeSubscriptionFreshness() has already run above, so a
+    // uid its Connection_Status bugfix OR'd to connected -- despite
+    // ClientEndpoint.lastStatus disagreeing -- is counted connected here, not
+    // just written connected below. These two counts are the poll's own
+    // final view of the fleet across BOTH sources, not a write tally.
     for (const [clientUid, { lastEventTime, connected }] of reportedByUid) {
-      // Counted from what TAK Server reported, before the write is attempted:
-      // these two are the poll's own view of the fleet, not a write tally.
       if (connected) counts.connected += 1;
       else counts.disconnected += 1;
 
@@ -652,26 +674,44 @@ function describeFetchFailure(error, fallbackEndpoints) {
 }
 
 /**
- * Advances a reported uid's `lastEventTime` using TAK Server's live
- * subscription table wherever it reports a MORE RECENT observation for that
- * SAME uid than the primary source did this poll -- see the file header for
- * why a second source exists at all (a currently-live connection's
- * `lastEventTime` can sit unchanged for many minutes while its live
- * subscription entry advances every few seconds). Mutates `reportedByUid` in
- * place, matching `extractLastEventTimes`'s own collapse-in-place shape, and
- * returns the count of uids it actually advanced, for the run summary's
- * `freshened` field.
+ * Merges TAK Server's live subscription table into a poll's reported-uid map,
+ * in two INDEPENDENT ways -- see the file header and `TakServerService.
+ * getAllSubscriptions()`'s doc comment for why a second source exists at all:
+ *
+ *   1. ADVANCES `lastEventTime` wherever this source reports a MORE RECENT
+ *      observation for the SAME uid than the primary source did this poll (a
+ *      currently-live connection's `lastEventTime` can sit unchanged for many
+ *      minutes while its live subscription entry advances every few
+ *      seconds).
+ *   2. Bugfix (Connection_Status disagreement between TAK Server's two
+ *      views): OR's a positive `connected` signal in. Simple PRESENCE in
+ *      this view is itself evidence of a live connection -- every entry here
+ *      is, by construction, a session that is open right now -- so a uid
+ *      this source reports is marked connected REGARDLESS of what
+ *      `ClientEndpoint.lastStatus` said for it. Verified live: a CloudTAK
+ *      session reported here every few seconds while its `clientEndPoints`
+ *      entry sat at `lastStatus: "Disconnected"` the entire time, which
+ *      previously left the Device_List's "Currently Connected" badge absent
+ *      for a session that plainly was connected. This is an OR, never a
+ *      replacement -- `ClientEndpoint.lastStatus: "Connected"` still marks a
+ *      uid connected on its own (`extractLastEventTimes`'s
+ *      Status_Collapse_Rule, unchanged), for the Devices this view cannot
+ *      identify at all (Requirement 13.2's empty-`clientUid` majority).
+ *
+ * Mutates `reportedByUid` in place, matching `extractLastEventTimes`'s own
+ * collapse-in-place shape, and returns the count of uids whose
+ * `lastEventTime` it actually advanced, for the run summary's `freshened`
+ * field -- `freshened` counts (1) only; the `connected` OR is invisible to
+ * that count and is instead visible in `counts.connected`/
+ * `counts.disconnected`, computed from `reportedByUid` AFTER this call runs.
  *
  * ADDITIVE ONLY, for the same reason Requirement 22.2's Candidate_Client_Uids
  * rule is additive only: a uid the PRIMARY source already reported THIS poll
- * is eligible to be freshened; a uid this endpoint names but
+ * is eligible for both effects above; a uid this endpoint names but
  * `getClientEndpoints()` did not report this poll is left alone entirely --
- * it is NOT inserted as a new reported uid and does NOT gain a `connected`
- * value from this source. That keeps `counts.connected`/`counts.disconnected`
- * derived from exactly one source, unaffected by this merge, and keeps this
- * change scoped to freshening a timestamp the primary source under-reports
- * the granularity of -- not to widening which uids a poll can report, and not
- * to re-deriving Connection_Status from a second source.
+ * it is NOT inserted as a new reported uid. That keeps this change scoped to
+ * REFINING an already-reported uid's Last_Seen and Connection_Status, never
+ * to widening which uids a poll can report at all.
  *
  * `SubscriptionInfo.clientUid` is EMPTY for the majority of live entries --
  * verified live, every CloudTAK ETL/service ingest connection, identified by
@@ -687,9 +727,14 @@ function describeFetchFailure(error, fallbackEndpoints) {
  *
  * PURE and TOTAL over its `liveSubscriptions` argument: a non-object entry, a
  * missing/empty/non-string `clientUid`, and a missing/non-finite
- * `lastReportMilliseconds` are each skipped rather than thrown on, since this
- * whole step is best-effort (Requirement 13 freshening) and must never be
- * what turns a poll that reached both endpoints into a failed one.
+ * `lastReportMilliseconds` are each skipped rather than thrown on for the
+ * TIMESTAMP effect (1 above), since that step is best-effort (Requirement 13
+ * freshening) and must never be what turns a poll that reached both
+ * endpoints into a failed one. The CONNECTED effect (2 above) needs only a
+ * usable `clientUid` naming an already-reported uid -- an unusable
+ * `lastReportMilliseconds` costs a uid its freshened timestamp but never its
+ * positive `connected` signal, since presence alone is what that signal
+ * means.
  *
  * @param {Map<string, {lastEventTime: Date|null, connected: boolean}>} reportedByUid
  *   this poll's reported-uid map, from `extractLastEventTimes()`. Mutated in
@@ -710,6 +755,14 @@ function mergeSubscriptionFreshness(reportedByUid, liveSubscriptions) {
     // report this poll is left untouched, never inserted here.
     const incumbent = reportedByUid.get(clientUid);
     if (incumbent === undefined) continue;
+
+    // Bugfix: presence in this view IS a positive connected signal on its
+    // own, independent of whether a usable lastReportMilliseconds follows --
+    // an entry naming this uid at all means TAK Server currently holds an
+    // open subscription for it, which is a stronger, more current claim than
+    // ClientEndpoint.lastStatus can make. OR, never AND: this never turns an
+    // already-true value false.
+    incumbent.connected = true;
 
     const reportMs = subscription.lastReportMilliseconds;
     if (typeof reportMs !== 'number' || !Number.isFinite(reportMs)) continue;

@@ -470,19 +470,27 @@ export default function Teams({ user }) {
                     <div className="grid grid-cols-2 gap-x-4 gap-y-1">
                       <div className="flex items-baseline gap-1">
                         <span className="text-xs text-gray-500 dark:text-gray-400">Members:</span>
-                        <span className="text-gray-900 dark:text-gray-100">{team.member_count || 0}</span>
+                        <Link to={`/teams/${team.id}?tab=members`} className="text-gray-900 dark:text-gray-100 hover:text-primary-600 dark:hover:text-primary-400 hover:underline">
+                          {team.member_count || 0}
+                        </Link>
                       </div>
                       <div className="flex items-baseline gap-1">
                         <span className="text-xs text-gray-500 dark:text-gray-400">Team Devices:</span>
-                        <span className="text-gray-900 dark:text-gray-100">{team.device_count || 0}</span>
+                        <Link to={`/teams/${team.id}?tab=devices`} className="text-gray-900 dark:text-gray-100 hover:text-primary-600 dark:hover:text-primary-400 hover:underline">
+                          {team.device_count || 0}
+                        </Link>
                       </div>
                       <div className="flex items-baseline gap-1">
                         <span className="text-xs text-gray-500 dark:text-gray-400">Team Admins:</span>
-                        <span className="text-gray-900 dark:text-gray-100">{team.admin_count || 0}</span>
+                        <Link to={`/teams/${team.id}?tab=admins`} className="text-gray-900 dark:text-gray-100 hover:text-primary-600 dark:hover:text-primary-400 hover:underline">
+                          {team.admin_count || 0}
+                        </Link>
                       </div>
                       <div className="flex items-baseline gap-1">
                         <span className="text-xs text-gray-500 dark:text-gray-400">Sub-teams:</span>
-                        <span className="text-gray-900 dark:text-gray-100">{team.sub_teams_count || 0}</span>
+                        <Link to={`/teams/${team.id}?tab=subteams`} className="text-gray-900 dark:text-gray-100 hover:text-primary-600 dark:hover:text-primary-400 hover:underline">
+                          {team.sub_teams_count || 0}
+                        </Link>
                       </div>
                       {team.callsign_prefix && (
                         <div className="flex items-baseline gap-1">
@@ -641,16 +649,24 @@ export default function Teams({ user }) {
                       {team.callsign_prefix || '-'}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                      {team.member_count || 0}
+                      <Link to={`/teams/${team.id}?tab=members`} className="hover:text-primary-600 dark:hover:text-primary-400 hover:underline">
+                        {team.member_count || 0}
+                      </Link>
                     </td>
                     <td className="hidden md:table-cell px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                      {team.device_count || 0}
+                      <Link to={`/teams/${team.id}?tab=devices`} className="hover:text-primary-600 dark:hover:text-primary-400 hover:underline">
+                        {team.device_count || 0}
+                      </Link>
                     </td>
                     <td className="hidden md:table-cell px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                      {team.admin_count || 0}
+                      <Link to={`/teams/${team.id}?tab=admins`} className="hover:text-primary-600 dark:hover:text-primary-400 hover:underline">
+                        {team.admin_count || 0}
+                      </Link>
                     </td>
                     <td className="hidden md:table-cell px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                      {team.sub_teams_count || 0}
+                      <Link to={`/teams/${team.id}?tab=subteams`} className="hover:text-primary-600 dark:hover:text-primary-400 hover:underline">
+                        {team.sub_teams_count || 0}
+                      </Link>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       {team.role ? (
