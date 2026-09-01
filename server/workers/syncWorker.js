@@ -1358,7 +1358,7 @@ class SyncWorker {
 
     const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
     // Create read and write groups using tak_<category> format
-    // (tak_BCH.../tak_UTL...).
+    // (tak_BCH.../tak_XtraTools...).
     const readGroupName = `tak_${categoryPrefix}${separator}${channel_name}_READ`;
     const writeGroupName = `tak_${categoryPrefix}${separator}${channel_name}`;
 
@@ -3442,8 +3442,8 @@ class SyncWorker {
       // Define separator at the top
       const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
       
-      // Process BCH/UTL channels (groups starting with 'tak_BCH'/'tak_UTL'
-      // -- the two BCH_CHANNEL_CATEGORY_PREFIX values), mirroring exactly
+      // Process BCH/UTL channels (groups starting with 'tak_BCH'/
+      // 'tak_XtraTools' -- the two BCH_CHANNEL_CATEGORY_PREFIX values), mirroring exactly
       // how the region-channel loop below iterates
       // REGION_CHANNEL_TIER_PREFIX instead of matching one hardcoded
       // prefix. Unlike region channels, a BCH/UTL channel is a read/write

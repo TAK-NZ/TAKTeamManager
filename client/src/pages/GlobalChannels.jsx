@@ -48,7 +48,7 @@ export default function GlobalChannels({ user }) {
 
   // bch-channel-category: `bchChannels` still holds every row from the
   // single GET /api/global-channels/bch fetch (each row now carries
-  // `category`); the two BCH/Utility cards below FILTER this one array
+  // `category`); the two BCH/XtraTools cards below FILTER this one array
   // client-side by `channel.category`, exactly mirroring how
   // responseChannels/supportChannels above split ONE regionChannels
   // fetch by `tier` rather than fetching separately. A row with no
@@ -65,7 +65,7 @@ export default function GlobalChannels({ user }) {
   // call site.
   const CHANNEL_TYPE_META = {
     bch: { label: 'BCH', channels: bchOnlyChannels },
-    utl: { label: 'Utility', channels: utlChannels },
+    utl: { label: 'XtraTools', channels: utlChannels },
     response: { label: 'Response', channels: responseChannels },
     support: { label: 'Support', channels: supportChannels }
   };
@@ -359,7 +359,14 @@ export default function GlobalChannels({ user }) {
       
       if (isExpanded) {
         items.push(
-          <div key={`${folderPath}-children`} className="ml-6 mt-2 space-y-2">
+          // Bugfix (mobile responsiveness parity with Dashboard.jsx's own
+          // Channel_Tree_Row): `ml-3 sm:ml-6` -- each nesting level's
+          // indentation compounds with its ancestors', so a few levels
+          // deep can push a row's content out of the visible width
+          // entirely on a narrow phone. Halving the per-level indent
+          // below `sm` keeps the hierarchy visually distinguishable
+          // without costing that much horizontal room.
+          <div key={`${folderPath}-children`} className="ml-3 sm:ml-6 mt-2 space-y-2">
             {renderFolderTree(subtree, folderPath, channelType)}
           </div>
         );
@@ -369,18 +376,24 @@ export default function GlobalChannels({ user }) {
     // Render channels
     tree.channels.forEach(channel => {
       items.push(
-        <div key={channel.id} className="flex items-center justify-between p-3 bg-gray-100 dark:bg-gray-700 rounded-lg ml-6">
-          <div className="flex-1">
+        // Bugfix (mobile responsiveness): below `sm:`, the Get
+        // credentials/Edit/Delete action icons now drop underneath the
+        // channel's own name/description rather than squeezing into a
+        // fixed-width column beside them, mirroring Requests.jsx's
+        // identical fix for its Approve/Deny column. `ml-3 sm:ml-6`
+        // matches the halved-indent fix above.
+        <div key={channel.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 p-3 bg-gray-100 dark:bg-gray-700 rounded-lg ml-3 sm:ml-6">
+          <div className="flex-1 min-w-0">
             <div className="flex items-center">
               <SignalIcon className="h-4 w-4 text-gray-900 dark:text-gray-100 mr-1.5 flex-shrink-0" />
-              <h3 className="font-medium text-gray-900 dark:text-gray-100">
+              <h3 className="font-medium text-gray-900 dark:text-gray-100 break-words">
                 {channel.name}
               </h3>
             </div>
-            <p className="text-sm text-gray-600 dark:text-gray-300">
+            <p className="text-sm text-gray-600 dark:text-gray-300 break-words">
               {channel.description}
             </p>
-            <p className="text-xs text-gray-500 dark:text-gray-500 mt-1">
+            <p className="text-xs text-gray-500 dark:text-gray-500 mt-1 break-words">
               Created by {channel.created_by_name}
               {/* bch-channel-category: a UTL channel gets the exact same
                   service-account/credentials treatment as a BCH channel --
@@ -395,29 +408,38 @@ export default function GlobalChannels({ user }) {
           </div>
 
           {isGlobalManager && (
-            <div className="flex items-center space-x-3">
+            // Bugfix (mobile tap targets too small): `p-2 rounded-lg` box
+            // around each icon (was a bare h-4 w-4 icon with no padding),
+            // matching the tap-target treatment `DeviceListRow.jsx`'s
+            // Revoke button and `MemberActions.jsx`'s card variant both
+            // use -- grey for the two ordinary actions, red-tinted for
+            // the destructive one.
+            <div className="flex items-center gap-2 flex-shrink-0">
               {(channelType === 'bch' || channelType === 'utl') && (
                 <button
                   onClick={() => handleGetCredentials(channel.id)}
-                  className="text-blue-600 hover:text-blue-500 dark:text-blue-400 dark:hover:text-blue-300"
+                  className="p-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-blue-600 dark:bg-gray-700 dark:hover:bg-gray-600 dark:text-blue-400"
                   title="Get credentials"
+                  aria-label={`Get credentials for ${channel.name}`}
                 >
-                  <KeyIcon className="h-4 w-4" />
+                  <KeyIcon className="h-5 w-5" />
                 </button>
               )}
               <button
                 onClick={() => handleEdit(channel, channelType)}
-                className="text-gray-600 hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300"
+                className="p-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-600 dark:bg-gray-700 dark:hover:bg-gray-600 dark:text-gray-300"
                 title="Edit channel"
+                aria-label={`Edit ${channel.name}`}
               >
-                <PencilIcon className="h-4 w-4" />
+                <PencilIcon className="h-5 w-5" />
               </button>
               <button
                 onClick={() => handleDelete(channel.id, channelType, channel.name)}
-                className="text-red-600 hover:text-red-500 dark:text-red-400 dark:hover:text-red-300"
+                className="p-2 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 dark:bg-red-950/40 dark:hover:bg-red-900/60 dark:text-red-400"
                 title="Delete channel"
+                aria-label={`Delete ${channel.name}`}
               >
-                <TrashIcon className="h-4 w-4" />
+                <TrashIcon className="h-5 w-5" />
               </button>
             </div>
           )}
@@ -438,24 +460,31 @@ export default function GlobalChannels({ user }) {
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
+      {/* Bugfix (mobile responsiveness parity with /dashboard, /downloads,
+          /enrollment, /teams, /users, /requests): below `sm:`, the header's
+          four Create buttons drop underneath the title/description and
+          stack full-width rather than sitting beside a two-line paragraph
+          in a `flex-wrap` row that squeezed them into whatever width was
+          left -- `flex-col` here mirrors Dashboard.jsx's "Review Requests"
+          banner fix. `sm:` and up is the original side-by-side layout. */}
+      <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Global Channels</h1>
           <p className="text-gray-600 dark:text-gray-400">
-            Manage BCH (broadcast/ETL), Utility, Response (emergency services) and Support (all-agency) channels that users have access to.
+            Manage BCH (broadcast/ETL), XtraTools (maps, overlays and other extras), Response (emergency services) and Support (all-agency) channels that users have access to.
           </p>
         </div>
         
         {isGlobalManager && (
-          <div className="flex flex-wrap gap-2">
+          <div className="grid grid-cols-2 sm:flex sm:flex-wrap gap-2">
             <button
               onClick={() => {
                 setCreateType('bch');
                 setShowCreateModal(true);
               }}
-              className="btn-primary flex items-center"
+              className="btn-primary flex items-center justify-center"
             >
-              <PlusIcon className="h-4 w-4 mr-2" />
+              <PlusIcon className="h-4 w-4 mr-2 flex-shrink-0" />
               Create BCH Channel
             </button>
             <button
@@ -463,19 +492,19 @@ export default function GlobalChannels({ user }) {
                 setCreateType('utl');
                 setShowCreateModal(true);
               }}
-              className="btn-secondary flex items-center"
+              className="btn-secondary flex items-center justify-center"
             >
-              <PlusIcon className="h-4 w-4 mr-2" />
-              Create Utility Channel
+              <PlusIcon className="h-4 w-4 mr-2 flex-shrink-0" />
+              Create XtraTools Channel
             </button>
             <button
               onClick={() => {
                 setCreateType('response');
                 setShowCreateModal(true);
               }}
-              className="btn-secondary flex items-center"
+              className="btn-secondary flex items-center justify-center"
             >
-              <PlusIcon className="h-4 w-4 mr-2" />
+              <PlusIcon className="h-4 w-4 mr-2 flex-shrink-0" />
               Create Response Channel
             </button>
             <button
@@ -483,9 +512,9 @@ export default function GlobalChannels({ user }) {
                 setCreateType('support');
                 setShowCreateModal(true);
               }}
-              className="btn-secondary flex items-center"
+              className="btn-secondary flex items-center justify-center"
             >
-              <PlusIcon className="h-4 w-4 mr-2" />
+              <PlusIcon className="h-4 w-4 mr-2 flex-shrink-0" />
               Create Support Channel
             </button>
           </div>
@@ -497,11 +526,14 @@ export default function GlobalChannels({ user }) {
           <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
             Global Channel Management
           </h3>
-          <div className="flex space-x-3 mb-4">
+          {/* Bugfix: same stack-below-`sm:` fix as the header buttons above
+              -- three actions in a non-wrapping `space-x-3` row previously
+              had no way to stay tappable on a narrow phone. */}
+          <div className="flex flex-col sm:flex-row sm:flex-wrap gap-3 mb-4">
             <button
               onClick={handleSyncChannels}
               disabled={syncingChannels}
-              className="btn-secondary flex items-center"
+              className="btn-secondary flex items-center justify-center"
             >
               {syncingChannels ? (
                 <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current mr-2"></div>
@@ -541,7 +573,12 @@ export default function GlobalChannels({ user }) {
 
       {/* BCH Channels */}
       <div className="card">
-        <div className="flex items-center justify-between mb-4">
+        {/* Bugfix: `flex-wrap gap-2` (was a non-wrapping row) so the
+            section title and the Expand/Collapse All buttons can drop to
+            their own line on a narrow phone, matching Teams.jsx's own
+            search-bar wrap fix -- identical across all four sections
+            below. */}
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
           <div className="flex items-center">
             <RadioIcon className="h-6 w-6 text-blue-600 mr-2" />
             <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
@@ -577,13 +614,13 @@ export default function GlobalChannels({ user }) {
         )}
       </div>
 
-      {/* Utility Channels */}
+      {/* XtraTools Channels */}
       <div className="card">
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
           <div className="flex items-center">
             <RadioIcon className="h-6 w-6 text-purple-600 mr-2" />
             <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
-              Utility Channels
+              XtraTools Channels
             </h2>
           </div>
           {utlChannels.length > 0 && Object.keys(buildFolderTree(utlChannels, folderSeparator, 'name').folders).length > 0 && (
@@ -607,7 +644,7 @@ export default function GlobalChannels({ user }) {
         </div>
         
         {utlChannels.length === 0 ? (
-          <p className="text-gray-500 dark:text-gray-400">No utility channels configured.</p>
+          <p className="text-gray-500 dark:text-gray-400">No XtraTools channels configured.</p>
         ) : (
           <div className="space-y-3">
             {renderFolderTree(buildFolderTree(utlChannels, folderSeparator, 'name'), '', 'utl')}
@@ -617,7 +654,7 @@ export default function GlobalChannels({ user }) {
 
       {/* Response Channels */}
       <div className="card">
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
           <div className="flex items-center">
             <GlobeAltIcon className="h-6 w-6 text-red-600 mr-2" />
             <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
@@ -655,7 +692,7 @@ export default function GlobalChannels({ user }) {
 
       {/* Support Channels */}
       <div className="card">
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
           <div className="flex items-center">
             <GlobeAltIcon className="h-6 w-6 text-green-600 mr-2" />
             <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
@@ -693,7 +730,16 @@ export default function GlobalChannels({ user }) {
 
       {/* Create Modal */}
       {showCreateModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        // Bugfix: `p-4` on the overlay (was missing entirely, unlike every
+        // other dialog on this page) so the card doesn't sit flush against
+        // the screen edges on a phone -- matching the Assign/Seed/Delete
+        // confirmation dialogs' own outer padding below. This is a
+        // 2-field form (Name, Description), the same size class as this
+        // app's "plain tier" confirm dialogs rather than the larger
+        // multi-field ones that get the full-bleed `w-full h-full sm:...`
+        // treatment (Create User, Transfer, Suspend), so a fixed
+        // `max-w-md` card with edge padding is the appropriate fix here.
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div
             role="dialog"
             aria-modal="true"
@@ -748,9 +794,9 @@ export default function GlobalChannels({ user }) {
         </div>
       )}
 
-      {/* Edit Modal */}
+      {/* Edit Modal. Bugfix: same `p-4` overlay-padding fix as Create above. */}
       {showEditModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div
             role="dialog"
             aria-modal="true"

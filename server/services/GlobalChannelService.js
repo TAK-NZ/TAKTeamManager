@@ -73,7 +73,7 @@ class GlobalChannelService {
       // Queue operations to create Authentik groups and service account.
       // `category` is passed through so the Sync_Worker's
       // createBchChannelGroups handler names the groups with the correct
-      // category prefix (tak_BCH.../tak_UTL...) without needing a
+      // category prefix (tak_BCH.../tak_XtraTools...) without needing a
       // separate DB lookup, mirroring create_region_channel_group's
       // `tier` field.
       //
@@ -97,7 +97,7 @@ class GlobalChannelService {
       
       // Add group membership rules for all users. The rule/pattern prefix
       // is category-derived (categoryPrefix), not the literal 'BCH', so a
-      // UTL channel's rules correctly reference tak_UTL... groups.
+      // UTL channel's rules correctly reference tak_XtraTools... groups.
       const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
       await client.query(`
         INSERT INTO group_membership_rules (
@@ -423,7 +423,7 @@ class GlobalChannelService {
       // name/description edits -- so it is read back off the row rather
       // than accepted from the caller, and forwarded to the Sync_Operation
       // below so the worker's rename PATCH builds the correct
-      // tak_BCH.../tak_UTL... group name for THIS row's actual category.
+      // tak_BCH.../tak_XtraTools... group name for THIS row's actual category.
       const existingResult = await client.query(
         'SELECT category FROM bch_channels WHERE id = $1',
         [channelId]

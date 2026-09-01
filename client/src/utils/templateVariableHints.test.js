@@ -92,7 +92,7 @@ describe('templateVariableHints examples', () => {
       'first_name', 'username'
     ])
     expect(getVariableHints('team_transfer_completed')).toEqual([
-      'first_name', 'callsign', 'team_path'
+      'first_name', 'team_path', 'callsign', 'username'
     ])
   })
 

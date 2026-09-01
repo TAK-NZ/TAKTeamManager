@@ -11,13 +11,21 @@ import { usersAPI } from '../services/api'
  * selects which of `usersAPI.suspendAccount`/`unsuspendAccount` is called
  * and which copy is shown).
  *
- * Unlike `RevokeDeviceDialog.jsx`, this dialog requires NO type-in
- * confirmation text: suspension is fully reversible (Requirement 1
- * Criteria 6-10 -- unsuspending restores the account with no further
- * setup, unlike a certificate revocation, which cannot be undone), so a
- * plain Cancel/Confirm pair is the proportionate amount of friction,
- * matching the "Remove as admin" confirmation's own weight rather than
- * "Permanently Delete User"'s type-to-confirm one.
+ * Bugfix (consistency with "Permanently Delete User"/"Delete Channel"):
+ * Suspend now requires the admin to TYPE the target's username exactly,
+ * matching this app's established type-to-confirm pattern for
+ * destructive-*feeling* actions -- locking someone's account out and
+ * revoking every live certificate they hold is disruptive enough to
+ * warrant the same friction, even though it is fully reversible.
+ * Unsuspend stays a plain Cancel/Confirm pair (no type-to-confirm input):
+ * it undoes exactly that disruption rather than causing it, matching how
+ * "Remove as admin" (reversible -- simply re-promote) never grew a
+ * type-to-confirm requirement either. `targetUsername` -- the value the
+ * admin must type -- is the account's own `username` column (present for
+ * BOTH a human row and a Team_Owned_Device row, unlike `email`, which
+ * the Device_Email_Null_Invariant allows to be null for a device), the
+ * SAME field `AccountLifecycleService.suspendAccount` itself reads to
+ * build the Revoke_Operation payload.
  *
  * The warning statement below is still explicit about what suspending
  * DOES (locks the Authentik account, revokes every live TAK Server
@@ -30,13 +38,18 @@ import { usersAPI } from '../services/api'
  *   suspended/unsuspended.
  * @param {string} [props.targetName] the target's display name, shown in
  *   the prompt. Falls back to a generic phrase when omitted.
+ * @param {string} [props.targetUsername] the target's `username` column
+ *   -- REQUIRED for `mode="suspend"` (the Confirm button stays disabled
+ *   with no value to match against if omitted); unused for
+ *   `mode="unsuspend"`, which has no type-to-confirm input at all.
  * @param {() => void} props.onClose
  * @param {() => void} [props.onCompleted] invoked after the App accepts
  *   the action (HTTP 200), so the parent can refresh its list.
  */
-export default function SuspendAccountDialog({ mode, targetUserId, targetName, onClose, onCompleted }) {
+export default function SuspendAccountDialog({ mode, targetUserId, targetName, targetUsername, onClose, onCompleted }) {
   const [submitting, setSubmitting] = useState(false)
   const [serverError, setServerError] = useState(null)
+  const [confirmInput, setConfirmInput] = useState('')
 
   const isSuspend = mode === 'suspend'
   const displayName = targetName || 'this account'
@@ -75,6 +88,7 @@ export default function SuspendAccountDialog({ mode, targetUserId, targetName, o
       }
 
       toast.success(isSuspend ? 'Account suspended' : 'Account unsuspended')
+      setConfirmInput('')
       onCompleted?.()
       onClose()
     } catch (error) {
@@ -84,6 +98,11 @@ export default function SuspendAccountDialog({ mode, targetUserId, targetName, o
       setSubmitting(false)
     }
   }
+
+  // Only Suspend requires typing the username; Unsuspend's Confirm button
+  // is never gated by `confirmInput` at all (see the dialog's own doc
+  // comment for why the two modes carry different friction).
+  const confirmDisabled = submitting || (isSuspend && confirmInput !== targetUsername)
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center sm:p-4 z-50">
@@ -129,6 +148,24 @@ export default function SuspendAccountDialog({ mode, targetUserId, targetName, o
             </p>
           </div>
 
+          {isSuspend && (
+            <div>
+              <label htmlFor="suspend-account-confirm" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                Type <span className="font-mono font-bold text-gray-900 dark:text-gray-100">{targetUsername}</span> to confirm:
+              </label>
+              <input
+                id="suspend-account-confirm"
+                type="text"
+                className="input w-full"
+                value={confirmInput}
+                onChange={(e) => setConfirmInput(e.target.value)}
+                placeholder={targetUsername}
+                autoComplete="off"
+                disabled={submitting}
+              />
+            </div>
+          )}
+
           {serverError && (
             <p role="alert" className="text-sm text-red-600 dark:text-red-400">
               {serverError}
@@ -138,7 +175,10 @@ export default function SuspendAccountDialog({ mode, targetUserId, targetName, o
           <div className="flex justify-end space-x-3 pt-2 border-t border-gray-200 dark:border-gray-700">
             <button
               type="button"
-              onClick={handleClose}
+              onClick={() => {
+                setConfirmInput('')
+                handleClose()
+              }}
               disabled={submitting}
               className="btn-secondary px-4 py-2"
             >
@@ -147,7 +187,7 @@ export default function SuspendAccountDialog({ mode, targetUserId, targetName, o
             <button
               type="button"
               onClick={handleConfirm}
-              disabled={submitting}
+              disabled={confirmDisabled}
               className={isSuspend ? 'btn-danger disabled:opacity-50 disabled:cursor-not-allowed' : 'btn-primary disabled:opacity-50 disabled:cursor-not-allowed'}
             >
               {submitting

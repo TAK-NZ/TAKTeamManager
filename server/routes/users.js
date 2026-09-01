@@ -160,6 +160,18 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
     // the authoritative, freshest copy). `null` for a user with no local
     // `users` row, exactly like `local_user_id`.
     const memberEditFieldsByAuthentikUserId = new Map();
+    // account-lifecycle-management: authentik_user_id -> the local
+    // `users.account_status`/`username` pair, sourced from the SAME
+    // batched query below rather than a second lookup. `account_status`
+    // drives the Suspend/Unsuspend action's icon/label/mode on this page
+    // (mirroring `TeamDetail.jsx`'s Member_List, which already carries
+    // it via `Team.getMembers`'s `SELECT u.*`), and `username` is the
+    // value `SuspendAccountDialog`'s type-to-confirm input requires for
+    // `mode="suspend"` -- present for BOTH a human row and a
+    // Team_Owned_Device row, unlike `email`, which the
+    // Device_Email_Null_Invariant allows to be null for a device. `null`
+    // for a user with no local `users` row, exactly like `local_user_id`.
+    const accountLifecycleFieldsByAuthentikUserId = new Map();
     // takserver-enrollment Requirement 13.2/13.6: authentik_user_id ->
     // live certificate count, built from the SAME batched query below via
     // an additional `certs` derived-table LEFT JOIN keyed on `u.id`. A
@@ -202,6 +214,8 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
                u.last_name AS local_last_name,
                u.tak_role AS local_tak_role,
                u.callsign_suffix AS local_callsign_suffix,
+               u.username AS local_username,
+               u.account_status AS local_account_status,
                root.root_id AS direct_membership_org_id,
                t.id AS team_id,
                CASE
@@ -234,6 +248,10 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
           last_name: row.local_last_name ?? null,
           tak_role: row.local_tak_role ?? null,
           callsign_suffix: row.local_callsign_suffix ?? null,
+        });
+        accountLifecycleFieldsByAuthentikUserId.set(row.authentik_user_id, {
+          account_status: row.local_account_status ?? null,
+          username: row.local_username ?? null,
         });
         // The `users` row exists locally, so its email/first_name are known,
         // but scoping only needs the org facts here; the email a candidate is
@@ -303,6 +321,19 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
           last_name: null,
           tak_role: null,
           callsign_suffix: null,
+        }),
+        // account-lifecycle-management: additive, defaulting to null for
+        // a user with no local `users` row -- same fallback shape as
+        // every other local-column field above. Spread AFTER `...user`
+        // for the same documented reason as memberEditFieldsByAuthentikUserId's
+        // own spread: Authentik's own payload carries no `account_status`
+        // at all and its `username` is the SAME value (this app's sync
+        // writes Authentik's username FROM the local column, never the
+        // reverse), so there is no real collision today, but the ordering
+        // guards against that changing silently.
+        ...(accountLifecycleFieldsByAuthentikUserId.get(user.pk) ?? {
+          account_status: null,
+          username: null,
         })
       }));
 

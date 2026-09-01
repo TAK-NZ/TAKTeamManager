@@ -21,7 +21,7 @@ export const TEMPLATE_VARIABLE_HINTS = {
   admin_notification_digest: ['pending_count', 'request_list'],
   signup_pending_review: ['first_name', 'team_path'],
   signup_already_active: ['first_name', 'username'],
-  team_transfer_completed: ['first_name', 'callsign', 'team_path']
+  team_transfer_completed: ['first_name', 'team_path', 'callsign', 'username']
 }
 
 /**

@@ -556,7 +556,7 @@ const DASHBOARD_CHANNEL_DESCRIPTIONS = [
 ]
 
 // bch-channel-category: GlobalChannels.jsx now renders TWO
-// bch_channels-derived sections (BCH, Utility) from this ONE fetch,
+// bch_channels-derived sections (BCH, XtraTools) from this ONE fetch,
 // filtering by `channel.category` client-side -- see GlobalChannels.jsx's
 // `bchOnlyChannels`/`utlChannels`. One channel per category, each under a
 // folder-producing name DISTINCT from the other, so each section's
@@ -855,9 +855,9 @@ describe('Channel_Tree_Row contrast: GlobalChannels.jsx (Reqs 5, 6, 7)', () => {
       }
     })
 
-    it('found the folder rows in ALL FOUR channel sections (BCH, Utility, Response, Support)', () => {
-      // The page renders four trees (BCH, Utility, Response, Support) --
-      // BCH/Utility both come from the ONE getBchChannels fetch, split
+    it('found the folder rows in ALL FOUR channel sections (BCH, XtraTools, Response, Support)', () => {
+      // The page renders four trees (BCH, XtraTools, Response, Support) --
+      // BCH/XtraTools both come from the ONE getBchChannels fetch, split
       // client-side by `channel.category`, and Response/Support both come
       // from the ONE getRegionChannels fetch, split client-side by
       // `channel.tier`, so a fixture/filter mismatch on either category or

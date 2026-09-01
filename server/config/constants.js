@@ -64,19 +64,37 @@ const REGION_CHANNEL_TIER_DESCRIPTION_QUALIFIER = Object.freeze({
 /**
  * bch-channel-category: maps a `bch_channels.category` value ('BCH' or
  * 'UTL') to the Authentik group-name prefix used for that category
- * (`tak_BCH...`/`tak_UTL...`). 'BCH' is the original broadcast/ETL
+ * (`tak_BCH...`/`tak_XtraTools...`). 'BCH' is the original broadcast/ETL
  * category (external data feeds pushed in via a service account);
- * 'UTL' is the general Utility category (e.g. "UTL - Data Packages"),
- * added so a non-ETL channel can still get the exact same
- * service-account/read-write-group/unconditional-membership machinery
- * BCH channels already have, without inventing a second mechanism.
+ * 'UTL' is the general miscellaneous/utility category (e.g.
+ * "XtraTools - Data Packages", covering things like map overlays and
+ * data packages/syncs), added so a non-ETL channel can still get the
+ * exact same service-account/read-write-group/unconditional-membership
+ * machinery BCH channels already have, without inventing a second
+ * mechanism.
+ *
+ * The DISPLAY PREFIX was renamed from 'UTL' to 'XtraTools' (the DB
+ * category VALUE stays 'UTL' -- see the `bch_channels_category_check`
+ * migration, unchanged) because 'UTL' read to non-technical users as a
+ * utility-company abbreviation, and because channels are sorted
+ * alphabetically: 'XtraTools' keeps this category sorting near the end
+ * of the list (as 'UTL' did) while being an unambiguous, plain-language
+ * name. Renaming this value alone is sufficient to rename every group
+ * this category creates going forward -- see
+ * `createBchChannelGroups`/`updateBchChannelGroup`/
+ * `syncExistingGlobalChannels` in `server/workers/syncWorker.js`, none of
+ * which hardcode the literal string 'UTL' as a display prefix. Any
+ * ALREADY-CREATED Authentik group under the old `tak_UTL...` name needs
+ * a one-time rename to match (not something this constant alone can
+ * retroactively fix).
  *
  * Single source of truth shared by `server/services/GlobalChannelService.js`
  * (channel creation) and `server/workers/syncWorker.js` (the Authentik
  * group create/update/sync handlers), mirroring `REGION_CHANNEL_TIER_PREFIX`
- * exactly. Frozen, and deliberately not a superset of the CHECK
- * constraint's own two values -- every value here is one the migration's
- * `bch_channels_category_check` constraint also accepts, and vice versa.
+ * exactly. Frozen. The KEYS here (not the values) are what the CHECK
+ * constraint's own two values must match -- every key here is one the
+ * migration's `bch_channels_category_check` constraint also accepts, and
+ * vice versa; the values are free-standing display text.
  *
  * Every `bch_channels` row, regardless of category, is treated
  * identically by `syncWorker.assignUserToGlobalChannels`'s unconditional
@@ -87,7 +105,7 @@ const REGION_CHANNEL_TIER_DESCRIPTION_QUALIFIER = Object.freeze({
  */
 const BCH_CHANNEL_CATEGORY_PREFIX = Object.freeze({
   BCH: 'BCH',
-  UTL: 'UTL'
+  UTL: 'XtraTools'
 });
 
 module.exports = {

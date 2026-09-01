@@ -343,12 +343,17 @@ function DeviceActions({ device, onEdit, onTransfer, onEnroll, onDelete, onSuspe
           orphaned device account (Requirement 4.1), which the caller
           expresses by simply not passing `onSuspend`. Mirrors
           `MemberActions.jsx`'s identical `onSuspend`/`accountStatus`
-          convention exactly. */}
+          convention exactly, including the red/danger treatment for
+          Suspend (locking the account and revoking every live
+          certificate is disruptive enough to carry the same
+          "this one's different" colour signal as Delete) while
+          Unsuspend -- the reverse, non-destructive direction -- stays
+          neutral grey. */}
       {onSuspend && (
         <button
           type="button"
           onClick={() => onSuspend(device)}
-          className={`${boxClass} ${neutralClass}`}
+          className={`${boxClass} ${accountStatus === 'suspended' ? neutralClass : dangerClass}`}
           title={accountStatus === 'suspended' ? 'Unsuspend device account' : 'Suspend device account'}
           aria-label={accountStatus === 'suspended' ? `Unsuspend device account ${deviceDisplayName(device)}` : `Suspend device account ${deviceDisplayName(device)}`}
         >
@@ -727,6 +732,7 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
           mode={suspendingDevice.mode}
           targetUserId={suspendingDevice.device.deviceUserId}
           targetName={deviceDisplayName(suspendingDevice.device)}
+          targetUsername={suspendingDevice.device.username}
           onClose={() => setSuspendingDevice(null)}
           onCompleted={fetchDevices}
         />

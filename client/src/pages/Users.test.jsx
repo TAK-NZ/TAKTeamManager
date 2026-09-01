@@ -40,7 +40,13 @@ vi.mock('../services/api', () => ({
     resendWelcome: vi.fn(),
     removeFromTeam: vi.fn(),
     createAndAdd: vi.fn(),
-    transfer: vi.fn()
+    transfer: vi.fn(),
+    // account-lifecycle-management: reached only through the shared
+    // `SuspendAccountDialog` -- a named import of a missing export from a
+    // mocked ES module is a load-time failure, so both are present even
+    // where a given test does not exercise them.
+    suspendAccount: vi.fn(),
+    unsuspendAccount: vi.fn()
   },
   // Users-page-action-parity: `Users.jsx` now also reaches `teamsAPI`
   // (Edit's PATCH via `teamsAPI.updateMember`, and the Create User
@@ -204,6 +210,147 @@ describe('Users Last Login cell renders through FormattedDate (task 6.7)', () =>
   })
 })
 
+// Sorting by "User" (name) and "Last Login" -- the two columns clicking a
+// header now sorts by, mirroring TeamDetail.jsx's own click-to-sort/
+// click-again-to-reverse convention (handleSort/getSortIcon). Unit and
+// Status are not sortable yet -- out of scope for this change.
+describe('Users sortable columns (User, Last Login)', () => {
+  let container
+  let root
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    vi.clearAllMocks()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false })
+    configAPI.getPublic.mockResolvedValue({ data: {} })
+    setDisplayTimezone('UTC')
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    vi.restoreAllMocks()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+    setDisplayTimezone(DEFAULT_DISPLAY_TIMEZONE)
+  })
+
+  const mountWith = async (users) => {
+    usersAPI.getAll.mockResolvedValue({ data: { users } })
+    root = createRoot(container)
+    await act(async () => {
+      root.render(<Users />)
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+  }
+
+  const userNameHeader = () => Array.from(container.querySelectorAll('thead th')).find((th) => th.textContent.trim() === 'User')
+  const lastLoginHeader = () => Array.from(container.querySelectorAll('thead th')).find((th) => th.textContent.trim() === 'Last Login')
+  const bodyRowNames = () => Array.from(container.querySelectorAll('tbody tr')).map((tr) => tr.querySelector('td:first-child .text-sm.font-medium').textContent)
+
+  it('defaults to ascending by name (case-insensitively) on initial load, with the User header\'s sort icon already shown', async () => {
+    await mountWith([
+      userRow({ pk: 1, name: 'charlie' }),
+      userRow({ pk: 2, name: 'Alice' }),
+      userRow({ pk: 3, name: 'Bob' })
+    ])
+
+    expect(bodyRowNames()).toEqual(['Alice', 'Bob', 'charlie'])
+    expect(userNameHeader().querySelector('svg')).not.toBeNull()
+    expect(lastLoginHeader().querySelector('svg')).toBeNull()
+  })
+
+  it('reverses to descending on a first click of the (already-active) User header', async () => {
+    await mountWith([
+      userRow({ pk: 1, name: 'Charlie' }),
+      userRow({ pk: 2, name: 'Alice' }),
+      userRow({ pk: 3, name: 'Bob' })
+    ])
+
+    await act(async () => {
+      userNameHeader().dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+
+    expect(bodyRowNames()).toEqual(['Charlie', 'Bob', 'Alice'])
+  })
+
+  it('a second click of the User header returns to ascending', async () => {
+    await mountWith([
+      userRow({ pk: 1, name: 'Charlie' }),
+      userRow({ pk: 2, name: 'Alice' }),
+      userRow({ pk: 3, name: 'Bob' })
+    ])
+
+    await act(async () => {
+      userNameHeader().dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await act(async () => {
+      userNameHeader().dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+
+    expect(bodyRowNames()).toEqual(['Alice', 'Bob', 'Charlie'])
+  })
+
+  it('switching to the Last Login header sorts ascending regardless of the User column\'s prior direction', async () => {
+    await mountWith([
+      userRow({ pk: 1, name: 'Charlie', last_login: '2026-03-10T00:00:00.000Z' }),
+      userRow({ pk: 2, name: 'Alice', last_login: '2026-03-12T00:00:00.000Z' }),
+      userRow({ pk: 3, name: 'Bob', last_login: '2026-03-11T00:00:00.000Z' })
+    ])
+
+    // Sort by User first (ascending, then descending), to prove switching
+    // columns resets to ascending rather than carrying over direction.
+    await act(async () => {
+      userNameHeader().dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await act(async () => {
+      userNameHeader().dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await act(async () => {
+      lastLoginHeader().dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+
+    expect(bodyRowNames()).toEqual(['Charlie', 'Bob', 'Alice'])
+    expect(lastLoginHeader().querySelector('svg')).not.toBeNull()
+    expect(userNameHeader().querySelector('svg')).toBeNull()
+  })
+
+  it('sorts a "Never" (absent last_login) row as the earliest, ahead of any real timestamp, ascending', async () => {
+    await mountWith([
+      userRow({ pk: 1, name: 'Charlie', last_login: '2026-03-10T00:00:00.000Z' }),
+      userRow({ pk: 2, name: 'Alice', last_login: null })
+    ])
+
+    await act(async () => {
+      lastLoginHeader().dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+
+    expect(bodyRowNames()).toEqual(['Alice', 'Charlie'])
+  })
+
+  it('treats an unparseable last_login the same as absent (earliest) rather than throwing', async () => {
+    await mountWith([
+      userRow({ pk: 1, name: 'Charlie', last_login: '2026-03-10T00:00:00.000Z' }),
+      userRow({ pk: 2, name: 'Alice', last_login: 'not-a-date' })
+    ])
+
+    await act(async () => {
+      lastLoginHeader().dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+
+    expect(bodyRowNames()).toEqual(['Alice', 'Charlie'])
+  })
+})
+
 // Bugfix: the Users view used to render the amber MultipleCertificateWarning
 // note ("This account has N active TAK Server certificates."), shown only
 // for N > 1. It's now an unconditional, plain "TAK device certificates: N"
@@ -339,13 +486,18 @@ describe('Users row actions (Users-page-action-parity)', () => {
 
   const actionButtons = () => container.querySelectorAll('tbody tr td:last-child button')
 
-  it('renders the full MemberActions group (Edit, Resend, Transfer, Remove) for a row with a local account and a team', async () => {
+  it('renders the full MemberActions group (Edit, Resend, Transfer, Suspend, Remove) for a row with a local account and a team', async () => {
     await mountWith([userRowWithTeam()])
 
     const labels = Array.from(actionButtons()).map((b) => b.getAttribute('aria-label'))
     expect(labels).toContain('Edit user')
     expect(labels).toContain('Resend welcome email')
     expect(labels).toContain('Transfer member to another team')
+    // account-lifecycle-management: the row's account_status is undefined
+    // (not 'orphaned'), so onSuspend is passed and the button renders,
+    // defaulting to the "Suspend account" label (accountStatus defaults
+    // to 'active' in MemberActions when the prop is undefined too).
+    expect(labels).toContain('Suspend account')
     expect(labels).toContain('Delete user (permanently removes their account)')
   })
 
@@ -370,7 +522,9 @@ describe('Users row actions (Users-page-action-parity)', () => {
     const disabledButtons = Array.from(actionButtons()).filter(
       (b) => b.getAttribute('aria-label') === 'This user has no team assignment'
     )
-    expect(disabledButtons).toHaveLength(4)
+    // Edit, Resend, Transfer, Suspend, Delete -- five actions now that
+    // Suspend is wired up on this page too.
+    expect(disabledButtons).toHaveLength(5)
     disabledButtons.forEach((b) => expect(b.disabled).toBe(true))
   })
 
@@ -388,7 +542,7 @@ describe('Users row actions (Users-page-action-parity)', () => {
     const disabledButtons = Array.from(actionButtons()).filter(
       (b) => b.getAttribute('aria-label') === "You don't administer this user's team"
     )
-    expect(disabledButtons).toHaveLength(4)
+    expect(disabledButtons).toHaveLength(5)
     disabledButtons.forEach((b) => expect(b.disabled).toBe(true))
 
     // Distinct from the no-team-assignment case's wording -- the two are
@@ -403,6 +557,7 @@ describe('Users row actions (Users-page-action-parity)', () => {
     expect(labels).toContain('Edit user')
     expect(labels).toContain('Resend welcome email')
     expect(labels).toContain('Transfer member to another team')
+    expect(labels).toContain('Suspend account')
     expect(labels).toContain('Delete user (permanently removes their account)')
     actionButtons().forEach((b) => expect(b.disabled).toBe(false))
   })
@@ -596,6 +751,261 @@ describe('Users row actions (Users-page-action-parity)', () => {
 
     expect(toast.error).toHaveBeenCalledWith(expect.stringContaining('queued for retry'))
     expect(toast.success).not.toHaveBeenCalled()
+  })
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// account-lifecycle-management: the Suspend/Unsuspend action, previously
+// offered only on TeamDetail.jsx's Members/Team Admins tabs, is now also
+// wired up on /users -- same shared MemberActions icon and
+// SuspendAccountDialog instance.
+// ══════════════════════════════════════════════════════════════════════════
+describe('Users Suspend/Unsuspend action (account-lifecycle-management)', () => {
+  let container
+  let root
+
+  const userRowWithTeam = (overrides = {}) => ({
+    pk: 1,
+    name: 'Ada Lovelace',
+    email: 'ada@example.com',
+    username: 'ada',
+    first_name: 'Ada',
+    last_name: 'Lovelace',
+    team_name: 'Alpha Team',
+    team_id: 42,
+    can_manage: true,
+    is_active: true,
+    local_user_id: 7,
+    account_status: 'active',
+    last_login: null,
+    ...overrides
+  })
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    vi.clearAllMocks()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false })
+    configAPI.getPublic.mockResolvedValue({ data: {} })
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    vi.restoreAllMocks()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  const mountWith = async (users) => {
+    usersAPI.getAll.mockResolvedValue({ data: { users } })
+    root = createRoot(container)
+    await act(async () => {
+      root.render(<Users />)
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+  }
+
+  const actionButtons = () => container.querySelectorAll('tbody tr td:last-child button')
+  const findButton = (label) => Array.from(actionButtons()).find((b) => b.getAttribute('aria-label') === label)
+
+  it('renders a "Suspend account" closed-lock button for an active account', async () => {
+    await mountWith([userRowWithTeam({ account_status: 'active' })])
+    expect(findButton('Suspend account')).not.toBeUndefined()
+    expect(findButton('Unsuspend account')).toBeUndefined()
+  })
+
+  it('renders an "Unsuspend account" open-lock button for a suspended account', async () => {
+    await mountWith([userRowWithTeam({ account_status: 'suspended' })])
+    expect(findButton('Unsuspend account')).not.toBeUndefined()
+    expect(findButton('Suspend account')).toBeUndefined()
+  })
+
+  it('renders no suspend/unsuspend button at all for an orphaned account', async () => {
+    await mountWith([userRowWithTeam({ account_status: 'orphaned' })])
+    expect(findButton('Suspend account')).toBeUndefined()
+    expect(findButton('Unsuspend account')).toBeUndefined()
+  })
+
+  it('opens SuspendAccountDialog in suspend mode, requiring the username typed exactly, then calls usersAPI.suspendAccount and refetches the list', async () => {
+    usersAPI.suspendAccount.mockResolvedValue({ data: {} })
+    usersAPI.getAll.mockResolvedValueOnce({ data: { users: [userRowWithTeam({ account_status: 'active' })] } })
+    root = createRoot(container)
+    await act(async () => {
+      root.render(<Users />)
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    const suspendButton = findButton('Suspend account')
+    await act(async () => {
+      suspendButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+
+    const dialog = container.querySelector('[role="dialog"][aria-labelledby="suspend-account-title"]')
+    expect(dialog).not.toBeNull()
+    expect(dialog.textContent).toContain('ada')
+
+    const confirmButton = Array.from(dialog.querySelectorAll('button')).find((b) => /Suspend Account/.test(b.textContent))
+    expect(confirmButton.disabled).toBe(true)
+
+    const input = dialog.querySelector('#suspend-account-confirm')
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+    await act(async () => {
+      setter.call(input, 'ada')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    expect(confirmButton.disabled).toBe(false)
+
+    usersAPI.getAll.mockResolvedValueOnce({ data: { users: [userRowWithTeam({ account_status: 'suspended' })] } })
+    await act(async () => {
+      confirmButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(usersAPI.suspendAccount).toHaveBeenCalledWith(7)
+    expect(usersAPI.getAll).toHaveBeenCalledTimes(2)
+    expect(container.querySelector('[role="dialog"][aria-labelledby="suspend-account-title"]')).toBeNull()
+  })
+
+  it('opens SuspendAccountDialog in unsuspend mode for a suspended row, with no type-to-confirm input, and calls usersAPI.unsuspendAccount', async () => {
+    usersAPI.unsuspendAccount.mockResolvedValue({ data: {} })
+    await mountWith([userRowWithTeam({ account_status: 'suspended' })])
+
+    const unsuspendButton = findButton('Unsuspend account')
+    await act(async () => {
+      unsuspendButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+
+    const dialog = container.querySelector('[role="dialog"][aria-labelledby="suspend-account-title"]')
+    expect(dialog).not.toBeNull()
+    expect(dialog.querySelector('#suspend-account-confirm')).toBeNull()
+
+    const confirmButton = Array.from(dialog.querySelectorAll('button')).find((b) => /Unsuspend Account/.test(b.textContent))
+    expect(confirmButton.disabled).toBe(false)
+
+    await act(async () => {
+      confirmButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(usersAPI.unsuspendAccount).toHaveBeenCalledWith(7)
+  })
+})
+
+// Bugfix (account-lifecycle-management Requirement 1.11/4.1): /users
+// previously showed NO indicator distinguishing a suspended account from
+// an orphaned one -- both rendered as the same plain "Inactive" pill, and
+// the only other signal was the suspend action icon changing shape or
+// disappearing entirely, which carries no text at all for 'orphaned'.
+// Mirrors TeamDetail.jsx's identical badge treatment on the Members/Team
+// Admins tabs via the same shared `describeAccountStatusBadge` helper.
+describe('Users Status column renders describeAccountStatusBadge (bugfix)', () => {
+  let container
+  let root
+
+  const userRowWithTeam = (overrides = {}) => ({
+    pk: 1,
+    name: 'Ada Lovelace',
+    email: 'ada@example.com',
+    username: 'ada',
+    first_name: 'Ada',
+    last_name: 'Lovelace',
+    team_name: 'Alpha Team',
+    team_id: 42,
+    can_manage: true,
+    is_active: true,
+    local_user_id: 7,
+    account_status: 'active',
+    last_login: null,
+    ...overrides
+  })
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    vi.clearAllMocks()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false })
+    configAPI.getPublic.mockResolvedValue({ data: {} })
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    vi.restoreAllMocks()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  const mountWith = async (users) => {
+    usersAPI.getAll.mockResolvedValue({ data: { users } })
+    root = createRoot(container)
+    await act(async () => {
+      root.render(<Users />)
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+  }
+
+  /** The Status cell -- the third of the row's five cells. */
+  const statusCell = () => container.querySelectorAll('tbody tr td')[2]
+
+  it('renders no extra badge for an active account -- only the plain Active/Inactive pill', async () => {
+    await mountWith([userRowWithTeam({ account_status: 'active', is_active: true })])
+
+    expect(statusCell().textContent).toContain('Active')
+    expect(statusCell().textContent).not.toContain('Suspended')
+    expect(statusCell().textContent).not.toContain('Account not found in Authentik')
+  })
+
+  it('renders a "Suspended" badge, distinct from the plain Inactive pill, for a suspended account', async () => {
+    await mountWith([userRowWithTeam({ account_status: 'suspended', is_active: false })])
+
+    expect(statusCell().textContent).toContain('Inactive')
+    expect(statusCell().textContent).toContain('Suspended')
+    const badge = statusCell().querySelector('.bg-amber-100')
+    expect(badge).not.toBeNull()
+    expect(badge.textContent).toBe('Suspended')
+  })
+
+  it('renders an "Account not found in Authentik" badge, distinct from "Suspended", for an orphaned account', async () => {
+    await mountWith([userRowWithTeam({ account_status: 'orphaned', is_active: false })])
+
+    expect(statusCell().textContent).toContain('Account not found in Authentik')
+    expect(statusCell().textContent).not.toContain('Suspended')
+    const badge = Array.from(statusCell().querySelectorAll('span')).find(
+      (el) => el.textContent === 'Account not found in Authentik'
+    )
+    expect(badge).not.toBeUndefined()
+    expect(badge.className).toContain('bg-red-100')
+  })
+
+  it('renders no extra badge for a row missing account_status entirely (fetched before this feature existed)', async () => {
+    const { account_status, ...rowWithoutStatus } = userRowWithTeam()
+    await mountWith([rowWithoutStatus])
+
+    expect(statusCell().textContent).not.toContain('Suspended')
+    expect(statusCell().textContent).not.toContain('Account not found in Authentik')
   })
 })
 

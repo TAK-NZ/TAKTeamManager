@@ -1170,7 +1170,7 @@ describe('Access-request approve/deny against a real Postgres database (Requirem
    *
    * `applyPostCommitEffects` step 4 calls
    * `emailService.sendEmail(user.email, 'team_transfer_completed',
-   * { first_name, team_path, callsign })` on the module-scope
+   * { first_name, team_path, username, callsign })` on the module-scope
    * `new EmailService()` singleton inside `TeamTransferService`. That
    * singleton is never exposed, so the shared `mockSendEmail` spy
    * installed by this file's `jest.mock('../services/EmailService')`
@@ -1469,10 +1469,15 @@ describe('Access-request approve/deny against a real Postgres database (Requirem
             // Requirement 13.1: the Transferred_User's own address.
             expect(recipient).toBe(userEmail);
 
-            // Requirement 13.3: exactly the three documented variables.
-            expect(Object.keys(variables).sort()).toEqual(['callsign', 'first_name', 'team_path']);
+            // Requirement 13.3 (widened): exactly the four documented
+            // variables -- `username` was added alongside the original
+            // three so the template can render the same blue Team/
+            // Username/TAK-Callsign info box `access_request_approved`
+            // uses.
+            expect(Object.keys(variables).sort()).toEqual(['callsign', 'first_name', 'team_path', 'username']);
             expect(variables.first_name).toBe(scenario.firstName || '');
             expect(variables.team_path).toBe(expectedTeamPath);
+            expect(variables.username).toBe(username);
 
             // The callsign is asserted only as far as Requirement 13.1
             // states -- present, non-empty, and ending in the stored

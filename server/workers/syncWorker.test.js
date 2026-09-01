@@ -1342,7 +1342,7 @@ describe('SyncWorker Authentik failure classification wiring', () => {
       worker.pool.query = jest.fn().mockResolvedValue({ rows: [] });
     });
 
-    it("names the read/write groups with the category's prefix (tak_UTL for category 'UTL')", async () => {
+    it("names the read/write groups with the category's prefix (tak_XtraTools for category 'UTL')", async () => {
       let call = 0;
       global.fetch = jest.fn().mockImplementation(() => {
         call++;
@@ -1366,8 +1366,8 @@ describe('SyncWorker Authentik failure classification wiring', () => {
 
       const readCallBody = JSON.parse(global.fetch.mock.calls[0][1].body);
       const writeCallBody = JSON.parse(global.fetch.mock.calls[1][1].body);
-      expect(readCallBody.name).toBe('tak_UTL - Data Packages_READ');
-      expect(writeCallBody.name).toBe('tak_UTL - Data Packages');
+      expect(readCallBody.name).toBe('tak_XtraTools - Data Packages_READ');
+      expect(writeCallBody.name).toBe('tak_XtraTools - Data Packages');
       expect(readCallBody.attributes.category).toBe('UTL');
       expect(writeCallBody.attributes.category).toBe('UTL');
     });
@@ -1484,7 +1484,7 @@ describe('SyncWorker Authentik failure classification wiring', () => {
       });
     });
 
-    it("PATCHes both groups with the category's prefix (tak_UTL for category 'UTL')", async () => {
+    it("PATCHes both groups with the category's prefix (tak_XtraTools for category 'UTL')", async () => {
       global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 200 });
 
       await worker.executeOperationSafely({ ...baseOperation });
@@ -1492,8 +1492,8 @@ describe('SyncWorker Authentik failure classification wiring', () => {
       expect(global.fetch).toHaveBeenCalledTimes(2);
       const readBody = JSON.parse(global.fetch.mock.calls[0][1].body);
       const writeBody = JSON.parse(global.fetch.mock.calls[1][1].body);
-      expect(readBody.name).toBe('tak_UTL - Data Packages_READ');
-      expect(writeBody.name).toBe('tak_UTL - Data Packages');
+      expect(readBody.name).toBe('tak_XtraTools - Data Packages_READ');
+      expect(writeBody.name).toBe('tak_XtraTools - Data Packages');
       expect(readBody.attributes.category).toBe('UTL');
     });
 
@@ -1782,11 +1782,13 @@ describe('SyncWorker Authentik failure classification wiring', () => {
 
   /**
    * bch-channel-category: `syncExistingGlobalChannels` recognizes BOTH
-   * 'tak_BCH...' and 'tak_UTL...' prefixed groups (looping
+   * 'tak_BCH...' and 'tak_XtraTools...' prefixed groups (looping
    * BCH_CHANNEL_CATEGORY_PREFIX, mirroring how the region-channel loop
    * iterates REGION_CHANNEL_TIER_PREFIX), and scopes its existence
    * check/import by (name, category) so a same-named BCH and UTL channel
-   * are never conflated.
+   * are never conflated. 'XtraTools' is the display prefix for the DB
+   * category value 'UTL' (renamed from the former display prefix 'UTL'
+   * itself -- the CATEGORY VALUE stored on the row is unchanged).
    */
   describe('syncExistingGlobalChannels BCH/UTL category recognition', () => {
     const separator = ' - ';
@@ -1800,7 +1802,7 @@ describe('SyncWorker Authentik failure classification wiring', () => {
       process.env.CHANNEL_FOLDER_SEPARATOR = originalSeparator;
     });
 
-    it('imports a tak_UTL group as a new bch_channels row with category=\'UTL\'', async () => {
+    it('imports a tak_XtraTools group as a new bch_channels row with category=\'UTL\'', async () => {
       worker.pool.query = jest.fn().mockImplementation((sql) => {
         if (typeof sql === 'string' && sql.includes('SELECT id FROM bch_channels')) {
           return Promise.resolve({ rows: [] });
@@ -1812,8 +1814,8 @@ describe('SyncWorker Authentik failure classification wiring', () => {
       });
 
       const groups = [
-        { pk: 'g1', name: `tak_UTL${separator}Data Packages_READ`, attributes: {} },
-        { pk: 'g2', name: `tak_UTL${separator}Data Packages`, attributes: {} }
+        { pk: 'g1', name: `tak_XtraTools${separator}Data Packages_READ`, attributes: {} },
+        { pk: 'g2', name: `tak_XtraTools${separator}Data Packages`, attributes: {} }
       ];
       global.fetch = jest.fn().mockResolvedValue({
         ok: true,
@@ -1827,7 +1829,7 @@ describe('SyncWorker Authentik failure classification wiring', () => {
       );
       expect(insertCall).toBeDefined();
       // name, display_name, description, read_group_id, write_group_id, category, created_by
-      expect(insertCall[1]).toEqual(['Data Packages', 'Data Packages', 'UTL Channel - Data Packages', 'g1', 'g2', 'UTL', 1]);
+      expect(insertCall[1]).toEqual(['Data Packages', 'Data Packages', 'XtraTools Channel - Data Packages', 'g1', 'g2', 'UTL', 1]);
     });
 
     it('checks existence scoped by (name, category) -- a "Data Packages" BCH row does not satisfy a UTL import', async () => {
@@ -1847,8 +1849,8 @@ describe('SyncWorker Authentik failure classification wiring', () => {
       });
 
       const groups = [
-        { pk: 'g1', name: `tak_UTL${separator}Data Packages_READ`, attributes: {} },
-        { pk: 'g2', name: `tak_UTL${separator}Data Packages`, attributes: {} }
+        { pk: 'g1', name: `tak_XtraTools${separator}Data Packages_READ`, attributes: {} },
+        { pk: 'g2', name: `tak_XtraTools${separator}Data Packages`, attributes: {} }
       ];
       global.fetch = jest.fn().mockResolvedValue({
         ok: true,
@@ -1877,8 +1879,8 @@ describe('SyncWorker Authentik failure classification wiring', () => {
       });
 
       const groups = [
-        { pk: 'g1', name: `tak_UTL${separator}Data Packages_READ`, attributes: {} },
-        { pk: 'g2', name: `tak_UTL${separator}Data Packages`, attributes: {} }
+        { pk: 'g1', name: `tak_XtraTools${separator}Data Packages_READ`, attributes: {} },
+        { pk: 'g2', name: `tak_XtraTools${separator}Data Packages`, attributes: {} }
       ];
       global.fetch = jest.fn().mockResolvedValue({
         ok: true,

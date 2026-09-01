@@ -1301,8 +1301,8 @@ describe('AuthentikSyncService.syncSingleUser push-to-Authentik guard is keyed o
       if (typeof sql === 'string' && sql.includes('INSERT INTO users')) {
         return Promise.resolve({ rows: [{ id: 99, is_team_device: true }] });
       }
-      if (typeof sql === 'string' && sql.includes('SELECT first_name, last_name, tak_role, is_active FROM users')) {
-        return Promise.resolve({ rows: [{ first_name: 'Device', last_name: '', tak_role: 'Team Member', is_active: true }] });
+      if (typeof sql === 'string' && sql.includes('SELECT first_name, last_name, tak_role, is_active, account_status FROM users')) {
+        return Promise.resolve({ rows: [{ first_name: 'Device', last_name: '', tak_role: 'Team Member', is_active: true, account_status: 'active' }] });
       }
       if (typeof sql === 'string' && sql.includes('SELECT tak_callsign, tak_color FROM user_cache')) {
         return Promise.resolve({ rows: [{ tak_callsign: '', tak_color: '' }] });
@@ -1313,7 +1313,7 @@ describe('AuthentikSyncService.syncSingleUser push-to-Authentik guard is keyed o
     await authentikSync.processBatch([deviceUser], {});
 
     const localSelect = db.query.mock.calls.find(([sql]) =>
-      typeof sql === 'string' && sql.includes('SELECT first_name, last_name, tak_role, is_active FROM users')
+      typeof sql === 'string' && sql.includes('SELECT first_name, last_name, tak_role, is_active, account_status FROM users')
     );
     const cacheSelect = db.query.mock.calls.find(([sql]) =>
       typeof sql === 'string' && sql.includes('SELECT tak_callsign, tak_color FROM user_cache')
@@ -1343,7 +1343,7 @@ describe('AuthentikSyncService.syncSingleUser push-to-Authentik guard is keyed o
     await authentikSync.processBatch([user], {});
 
     const localSelect = db.query.mock.calls.find(([sql]) =>
-      typeof sql === 'string' && sql.includes('SELECT first_name, last_name, tak_role, is_active FROM users')
+      typeof sql === 'string' && sql.includes('SELECT first_name, last_name, tak_role, is_active, account_status FROM users')
     );
     const cacheSelect = db.query.mock.calls.find(([sql]) =>
       typeof sql === 'string' && sql.includes('SELECT tak_callsign, tak_color FROM user_cache')
@@ -1423,6 +1423,440 @@ describe('AuthentikSyncService.syncSingleUser is_team_device threading into user
   });
 });
 
+/**
+ * Bugfix (External_Lock Detection): a manual Authentik-side lock
+ * (`is_active: false` set directly in Authentik, bypassing
+ * `AccountLifecycleService.suspendAccount` entirely) was previously
+ * invisible to this sync and, worse, ACTIVELY UNDONE on the very next
+ * run -- local `users.is_active` (unaware of the change, still `true`)
+ * is authoritative and gets pushed onto Authentik, silently re-enabling
+ * an account someone just tried to lock. `syncSingleUser` now detects
+ * `user.is_active === false` for a locally `'active'` row, reflects it
+ * as `account_status = 'suspended'`/`is_active = false` locally,
+ * enqueues a `revoke_tak_certificates` Sync_Operation, and writes a
+ * `user.suspended_externally` audit row attributed to `SYSTEM_USER_ID`
+ * -- mirroring `AccountLifecycleService.suspendAccount`'s own shape for
+ * an admin-initiated suspend.
+ */
+describe('AuthentikSyncService.syncSingleUser External_Lock Detection (bugfix)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    console.error = jest.fn();
+    console.log = jest.fn();
+    EventPublisher.publishOperation.mockResolvedValue(1);
+  });
+
+  function mockLockDetectionQueries({ localRow, cacheRow = { tak_callsign: '', tak_color: '' }, isTeamDevice = false }) {
+    db.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO users')) {
+        return Promise.resolve({ rows: [{ id: 42, is_team_device: isTeamDevice }] });
+      }
+      if (typeof sql === 'string' && sql.includes('SELECT first_name, last_name, tak_role, is_active, account_status FROM users')) {
+        return Promise.resolve({ rows: [localRow] });
+      }
+      if (typeof sql === 'string' && sql.includes('SELECT tak_callsign, tak_color FROM user_cache')) {
+        return Promise.resolve({ rows: [cacheRow] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+  }
+
+  it('reflects a manual Authentik lock (is_active: false) for a locally-active human account: suspends locally, enqueues a Revoke_Operation, and audit-logs as system-detected', async () => {
+    const user = {
+      pk: 'user-locked-1',
+      username: 'alice',
+      email: 'alice@example.com',
+      groups: [],
+      is_active: false, // manually disabled directly in Authentik
+      attributes: {}
+    };
+    mockLockDetectionQueries({
+      localRow: { first_name: 'Alice', last_name: 'Local', tak_role: 'Team Member', is_active: true, account_status: 'active' }
+    });
+
+    await authentikSync.processBatch([user], {});
+
+    expect(db.query).toHaveBeenCalledWith(
+      `UPDATE users SET account_status = 'suspended', is_active = false WHERE id = $1`,
+      [42]
+    );
+    expect(db.query).toHaveBeenCalledWith(
+      'UPDATE user_cache SET is_active = false WHERE authentik_id = $1',
+      ['user-locked-1']
+    );
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'revoke_tak_certificates',
+      { tak_usernames: ['alice'] },
+      -1 // SYSTEM_USER_ID
+    );
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO audit_logs'),
+      [-1, 'user.suspended_externally', 'user', 42, JSON.stringify({ reason: 'authentik_is_active_false' })]
+    );
+  });
+
+  it('uses the client_uid revoke payload shape for a Team_Owned_Device row, not tak_usernames', async () => {
+    const deviceUser = {
+      pk: 'device-locked-1',
+      username: 'AUK-D7K3QMX',
+      email: '',
+      groups: [],
+      is_active: false,
+      attributes: {}
+    };
+    mockLockDetectionQueries({
+      localRow: { first_name: 'Device', last_name: '', tak_role: 'Team Member', is_active: true, account_status: 'active' },
+      isTeamDevice: true
+    });
+
+    await authentikSync.processBatch([deviceUser], {});
+
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'revoke_tak_certificates',
+      { client_uid: 'AUK-D7K3QMX' },
+      -1
+    );
+  });
+
+  it('does NOT re-push is_active: true to Authentik in the same run after detecting and reflecting the lock', async () => {
+    // name/attributes deliberately match the local row exactly so the
+    // ONLY thing that could still trigger a PATCH is a stale is_active
+    // comparison -- isolating this assertion to the lock-detection fix
+    // itself, not any of this function's other, unrelated push
+    // conditions (name/attrs mismatches, which are pre-existing and out
+    // of scope here).
+    const user = {
+      pk: 'user-locked-2',
+      username: 'bob',
+      email: 'bob@example.com',
+      name: 'Bob',
+      groups: [],
+      is_active: false,
+      attributes: { first_name: 'Bob', last_name: '', takCallsign: '', takColor: '', takRole: 'Team Member' }
+    };
+    mockLockDetectionQueries({
+      localRow: { first_name: 'Bob', last_name: '', tak_role: 'Team Member', is_active: true, account_status: 'active' }
+    });
+
+    await authentikSync.processBatch([user], {});
+
+    // The push-to-Authentik PATCH must never fire in this run: the
+    // detection branch updates the in-memory `local` snapshot to match
+    // what Authentik already reports, so isActiveChanged/nameChanged/
+    // attrsChanged are all false and no axios.patch is issued.
+    expect(axios.patch).not.toHaveBeenCalled();
+  });
+
+  it('does nothing when Authentik reports is_active: false for an account ALREADY locally suspended (no duplicate revoke/audit row)', async () => {
+    const user = {
+      pk: 'user-already-suspended',
+      username: 'carol',
+      email: 'carol@example.com',
+      groups: [],
+      is_active: false,
+      attributes: {}
+    };
+    mockLockDetectionQueries({
+      localRow: { first_name: 'Carol', last_name: '', tak_role: 'Team Member', is_active: false, account_status: 'suspended' }
+    });
+
+    await authentikSync.processBatch([user], {});
+
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+    expect(db.query).not.toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO audit_logs'),
+      expect.arrayContaining(['user.suspended_externally'])
+    );
+  });
+
+  it('does nothing when Authentik reports is_active: true for a locally-active account (the ordinary, unlocked case)', async () => {
+    const user = {
+      pk: 'user-normal',
+      username: 'dave',
+      email: 'dave@example.com',
+      groups: [],
+      is_active: true,
+      attributes: {}
+    };
+    mockLockDetectionQueries({
+      localRow: { first_name: 'Dave', last_name: '', tak_role: 'Team Member', is_active: true, account_status: 'active' }
+    });
+
+    await authentikSync.processBatch([user], {});
+
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+  });
+
+  // Bugfix: this used to assert the OPPOSITE -- that an Authentik-side
+  // re-enable of a locally-suspended account was deliberately ignored.
+  // That asymmetry has been reverted: TAK Team Manager should reflect a
+  // real Authentik-side change rather than fight or ignore it. See the
+  // dedicated `External_Unlock Detection` describe block below for the
+  // full behaviour this case now exercises (it belongs there, not here,
+  // since External_Lock Detection's own `if` condition is simply not
+  // met when `local.account_status` is already `'suspended'` -- the two
+  // detections are independent branches, each with its own tests).
+  it('leaves External_Lock Detection\'s own branch a no-op for an already-suspended row reported active by Authentik (handled by External_Unlock Detection instead)', async () => {
+    const user = {
+      pk: 'user-reenabled-in-authentik',
+      username: 'erin',
+      email: 'erin@example.com',
+      groups: [],
+      is_active: true,
+      attributes: {}
+    };
+    mockLockDetectionQueries({
+      localRow: { first_name: 'Erin', last_name: '', tak_role: 'Team Member', is_active: false, account_status: 'suspended' }
+    });
+
+    await authentikSync.processBatch([user], {});
+
+    // External_Lock Detection's own audit action never fires for this
+    // row -- account_status was already 'suspended', not 'active', so
+    // its `if` condition is false. (External_Unlock Detection's OWN
+    // 'active' write for this exact scenario is asserted in that
+    // describe block below.)
+    expect(db.query).not.toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO audit_logs'),
+      expect.arrayContaining(['user.suspended_externally'])
+    );
+  });
+
+  it('does not throw and continues the batch when the lock-detection write fails (non-fatal, logged)', async () => {
+    const user = {
+      pk: 'user-lock-detection-failure',
+      username: 'frank',
+      email: 'frank@example.com',
+      groups: [],
+      is_active: false,
+      attributes: {}
+    };
+    db.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO users')) {
+        return Promise.resolve({ rows: [{ id: 43, is_team_device: false }] });
+      }
+      if (typeof sql === 'string' && sql.includes('SELECT first_name, last_name, tak_role, is_active, account_status FROM users')) {
+        return Promise.resolve({ rows: [{ first_name: 'Frank', last_name: '', tak_role: 'Team Member', is_active: true, account_status: 'active' }] });
+      }
+      if (typeof sql === 'string' && sql.startsWith("UPDATE users SET account_status = 'suspended'")) {
+        return Promise.reject(new Error('DB unavailable'));
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await expect(authentikSync.processBatch([user], {})).resolves.toBeUndefined();
+
+    expect(mockLoggerInstance.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error) }),
+      expect.stringContaining('External_Lock Detection')
+    );
+  });
+
+  it('never orphans the account -- External_Lock Detection sets account_status to suspended, never orphaned', async () => {
+    const user = {
+      pk: 'user-locked-3',
+      username: 'grace',
+      email: 'grace@example.com',
+      groups: [],
+      is_active: false,
+      attributes: {}
+    };
+    mockLockDetectionQueries({
+      localRow: { first_name: 'Grace', last_name: '', tak_role: 'Team Member', is_active: true, account_status: 'active' }
+    });
+
+    await authentikSync.processBatch([user], {});
+
+    expect(db.query).not.toHaveBeenCalledWith(
+      expect.stringContaining("account_status = 'orphaned'"),
+      expect.anything()
+    );
+  });
+});
+
+/**
+ * Bugfix (External_Unlock Detection): the mirror-image direction of
+ * External_Lock Detection above. An admin unlocking an account directly
+ * in Authentik (`is_active: true`, bypassing
+ * `AccountLifecycleService.unsuspendAccount` entirely) is now recognised
+ * and reflected -- `account_status` flips back to `'active'` locally, an
+ * audit row (`user.unsuspended_externally`, attributed to
+ * `SYSTEM_USER_ID`) is written, and NO certificate action is taken
+ * (mirroring `unsuspendAccount`'s own behaviour: unsuspending never
+ * restores a revoked certificate).
+ */
+describe('AuthentikSyncService.syncSingleUser External_Unlock Detection (bugfix)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    console.error = jest.fn();
+    console.log = jest.fn();
+    EventPublisher.publishOperation.mockResolvedValue(1);
+  });
+
+  function mockUnlockDetectionQueries({ localRow, cacheRow = { tak_callsign: '', tak_color: '' }, isTeamDevice = false }) {
+    db.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO users')) {
+        return Promise.resolve({ rows: [{ id: 42, is_team_device: isTeamDevice }] });
+      }
+      if (typeof sql === 'string' && sql.includes('SELECT first_name, last_name, tak_role, is_active, account_status FROM users')) {
+        return Promise.resolve({ rows: [localRow] });
+      }
+      if (typeof sql === 'string' && sql.includes('SELECT tak_callsign, tak_color FROM user_cache')) {
+        return Promise.resolve({ rows: [cacheRow] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+  }
+
+  it('reflects a manual Authentik unlock (is_active: true) for a locally-suspended human account: reactivates locally and audit-logs as system-detected, with NO certificate action', async () => {
+    const user = {
+      pk: 'user-unlocked-1',
+      username: 'heidi',
+      email: 'heidi@example.com',
+      groups: [],
+      is_active: true, // manually re-enabled directly in Authentik
+      attributes: {}
+    };
+    mockUnlockDetectionQueries({
+      localRow: { first_name: 'Heidi', last_name: 'Local', tak_role: 'Team Member', is_active: false, account_status: 'suspended' }
+    });
+
+    await authentikSync.processBatch([user], {});
+
+    expect(db.query).toHaveBeenCalledWith(
+      `UPDATE users SET account_status = 'active', is_active = true WHERE id = $1`,
+      [42]
+    );
+    expect(db.query).toHaveBeenCalledWith(
+      'UPDATE user_cache SET is_active = true WHERE authentik_id = $1',
+      ['user-unlocked-1']
+    );
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO audit_logs'),
+      [-1, 'user.unsuspended_externally', 'user', 42, JSON.stringify({ reason: 'authentik_is_active_true' })]
+    );
+    // Unsuspending never restores a certificate -- no Revoke_Operation,
+    // and no other Sync_Operation of any kind, is enqueued here.
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+  });
+
+  it('applies identically to a Team_Owned_Device row (no is_team_device branch in the detection itself)', async () => {
+    const deviceUser = {
+      pk: 'device-unlocked-1',
+      username: 'AUK-D7K3QMX',
+      email: '',
+      groups: [],
+      is_active: true,
+      attributes: {}
+    };
+    mockUnlockDetectionQueries({
+      localRow: { first_name: 'Device', last_name: '', tak_role: 'Team Member', is_active: false, account_status: 'suspended' },
+      isTeamDevice: true
+    });
+
+    await authentikSync.processBatch([deviceUser], {});
+
+    expect(db.query).toHaveBeenCalledWith(
+      `UPDATE users SET account_status = 'active', is_active = true WHERE id = $1`,
+      [42]
+    );
+  });
+
+  it('does NOT re-push is_active: false to Authentik in the same run after detecting and reflecting the unlock', async () => {
+    // name/attributes deliberately match the local row exactly, isolating
+    // this assertion to the unlock-detection fix itself (see the
+    // equivalent External_Lock Detection test's identical reasoning).
+    const user = {
+      pk: 'user-unlocked-2',
+      username: 'ivan',
+      email: 'ivan@example.com',
+      name: 'Ivan',
+      groups: [],
+      is_active: true,
+      attributes: { first_name: 'Ivan', last_name: '', takCallsign: '', takColor: '', takRole: 'Team Member' }
+    };
+    mockUnlockDetectionQueries({
+      localRow: { first_name: 'Ivan', last_name: '', tak_role: 'Team Member', is_active: false, account_status: 'suspended' }
+    });
+
+    await authentikSync.processBatch([user], {});
+
+    expect(axios.patch).not.toHaveBeenCalled();
+  });
+
+  it('does nothing when Authentik reports is_active: true for an account ALREADY locally active (no duplicate audit row)', async () => {
+    const user = {
+      pk: 'user-already-active',
+      username: 'judy',
+      email: 'judy@example.com',
+      groups: [],
+      is_active: true,
+      attributes: {}
+    };
+    mockUnlockDetectionQueries({
+      localRow: { first_name: 'Judy', last_name: '', tak_role: 'Team Member', is_active: true, account_status: 'active' }
+    });
+
+    await authentikSync.processBatch([user], {});
+
+    expect(db.query).not.toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO audit_logs'),
+      expect.arrayContaining(['user.unsuspended_externally'])
+    );
+  });
+
+  it('does NOT reactivate an orphaned account even if Authentik reports is_active: true (orphan reclaim is a separate flow)', async () => {
+    const user = {
+      pk: 'user-orphaned-but-present',
+      username: 'karl',
+      email: 'karl@example.com',
+      groups: [],
+      is_active: true,
+      attributes: {}
+    };
+    mockUnlockDetectionQueries({
+      localRow: { first_name: 'Karl', last_name: '', tak_role: 'Team Member', is_active: false, account_status: 'orphaned' }
+    });
+
+    await authentikSync.processBatch([user], {});
+
+    expect(db.query).not.toHaveBeenCalledWith(
+      expect.stringContaining("SET account_status = 'active'"),
+      expect.anything()
+    );
+  });
+
+  it('does not throw and continues the batch when the unlock-detection write fails (non-fatal, logged)', async () => {
+    const user = {
+      pk: 'user-unlock-detection-failure',
+      username: 'liam',
+      email: 'liam@example.com',
+      groups: [],
+      is_active: true,
+      attributes: {}
+    };
+    db.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO users')) {
+        return Promise.resolve({ rows: [{ id: 44, is_team_device: false }] });
+      }
+      if (typeof sql === 'string' && sql.includes('SELECT first_name, last_name, tak_role, is_active, account_status FROM users')) {
+        return Promise.resolve({ rows: [{ first_name: 'Liam', last_name: '', tak_role: 'Team Member', is_active: false, account_status: 'suspended' }] });
+      }
+      if (typeof sql === 'string' && sql.startsWith("UPDATE users SET account_status = 'active'")) {
+        return Promise.reject(new Error('DB unavailable'));
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await expect(authentikSync.processBatch([user], {})).resolves.toBeUndefined();
+
+    expect(mockLoggerInstance.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error) }),
+      expect.stringContaining('External_Unlock Detection')
+    );
+  });
+});
+
 describe('AuthentikSyncService.syncSingleUser reconciles an EXISTING Team_Owned_Device on every sync (bugfix found in takserver-enrollment task 12.2 live verification)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -1472,8 +1906,8 @@ describe('AuthentikSyncService.syncSingleUser reconciles an EXISTING Team_Owned_
         expect(sql).toMatch(/is_team_device/);
         return Promise.resolve({ rows: [{ id: 501, is_team_device: true }] });
       }
-      if (typeof sql === 'string' && sql.includes('SELECT first_name, last_name, tak_role, is_active FROM users')) {
-        return Promise.resolve({ rows: [{ first_name: 'Device', last_name: '', tak_role: 'Team Member', is_active: true }] });
+      if (typeof sql === 'string' && sql.includes('SELECT first_name, last_name, tak_role, is_active, account_status FROM users')) {
+        return Promise.resolve({ rows: [{ first_name: 'Device', last_name: '', tak_role: 'Team Member', is_active: true, account_status: 'active' }] });
       }
       if (typeof sql === 'string' && sql.includes('SELECT tak_callsign, tak_color FROM user_cache')) {
         return Promise.resolve({ rows: [{ tak_callsign: '', tak_color: '' }] });

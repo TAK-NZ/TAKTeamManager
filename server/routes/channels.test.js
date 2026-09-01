@@ -138,9 +138,12 @@ describe('GET /api/channels/descriptions', () => {
   // started with the single literal 'BCH - ' prefix the route used to
   // check, so it fell through to the team-channel branch and always
   // missed, rendering the 'TAK Channel' fallback regardless of the real
-  // description stored on the row.
-  it('returns the real local description for a UTL channel, matched by name+category with the "UTL - " prefix stripped', async () => {
-    mockUserGroups = ['tak_UTL - Data Packages_READ'];
+  // description stored on the row. 'XtraTools' is the current Authentik
+  // display prefix for the 'UTL' category value (renamed from the
+  // former display prefix 'UTL' itself -- the stored category VALUE is
+  // unchanged).
+  it('returns the real local description for a UTL channel, matched by name+category with the "XtraTools - " prefix stripped', async () => {
+    mockUserGroups = ['tak_XtraTools - Data Packages_READ'];
     mockTables({
       bch: [
         { name: 'Data Packages', category: 'UTL', description: 'Data package delivery channel' }
@@ -151,8 +154,8 @@ describe('GET /api/channels/descriptions', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.channels[0]).toMatchObject({
-      name: 'tak_UTL - Data Packages',
-      display_name: 'UTL - Data Packages',
+      name: 'tak_XtraTools - Data Packages',
+      display_name: 'XtraTools - Data Packages',
       description: 'Data package delivery channel'
     });
   });
@@ -161,7 +164,7 @@ describe('GET /api/channels/descriptions', () => {
   // UNIQUE(name, category)) -- the lookup must never let one shadow the
   // other's description.
   it('does not conflate a BCH and a UTL channel that share the same underlying name', async () => {
-    mockUserGroups = ['tak_BCH - Shared_READ', 'tak_UTL - Shared_READ'];
+    mockUserGroups = ['tak_BCH - Shared_READ', 'tak_XtraTools - Shared_READ'];
     mockTables({
       bch: [
         { name: 'Shared', category: 'BCH', description: 'The BCH one' },
@@ -173,7 +176,7 @@ describe('GET /api/channels/descriptions', () => {
 
     const byName = Object.fromEntries(res.body.channels.map((c) => [c.display_name, c.description]));
     expect(byName['BCH - Shared']).toBe('The BCH one');
-    expect(byName['UTL - Shared']).toBe('The UTL one');
+    expect(byName['XtraTools - Shared']).toBe('The UTL one');
   });
 
   // Bugfix (region-channel-tiers): a Response/Support channel's base

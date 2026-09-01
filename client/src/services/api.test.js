@@ -164,4 +164,19 @@ describe('communicationsAPI / settingsAPI wrappers', () => {
     settingsAPI.importSettings(payload);
     expect(instance.post).toHaveBeenCalledWith('/settings/import', payload);
   });
+
+  // Bugfix (BUG-014): these two back the Admin page's Colour Mappings /
+  // Role Descriptions tabs, which previously read from the legacy
+  // env-backed GET /api/config/color-mappings (no PUT counterpart) and
+  // never persisted an edit at all.
+  it('settingsAPI.getTakMappings() GETs /settings/tak-mappings', () => {
+    settingsAPI.getTakMappings();
+    expect(instance.get).toHaveBeenCalledWith('/settings/tak-mappings');
+  });
+
+  it('settingsAPI.updateTakMappings(updates) PUTs /settings/tak-mappings with { updates }', () => {
+    const updates = { tak_color_yellow: 'Fire' };
+    settingsAPI.updateTakMappings(updates);
+    expect(instance.put).toHaveBeenCalledWith('/settings/tak-mappings', { updates });
+  });
 });

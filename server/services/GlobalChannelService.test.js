@@ -214,15 +214,15 @@ describe('GlobalChannelService.createBchChannel', () => {
     expect(ruleCall[1]).toContain('tak_BCH - Test Channel');
   });
 
-  it('builds the group_membership_rules target_group_pattern with the UTL category prefix when supplied', async () => {
+  it('builds the group_membership_rules target_group_pattern with the UTL category\'s XtraTools display prefix when supplied', async () => {
     await service.createBchChannel({ name: 'Data Packages', description: 'desc', category: 'UTL' }, 7);
 
     const ruleCall = mockClient.query.mock.calls.find(
       ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO group_membership_rules')
     );
     expect(ruleCall).toBeDefined();
-    expect(ruleCall[1]).toContain('tak_UTL - Data Packages_READ');
-    expect(ruleCall[1]).toContain('tak_UTL - Data Packages');
+    expect(ruleCall[1]).toContain('tak_XtraTools - Data Packages_READ');
+    expect(ruleCall[1]).toContain('tak_XtraTools - Data Packages');
   });
 });
 

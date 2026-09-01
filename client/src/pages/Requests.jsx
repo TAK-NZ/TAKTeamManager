@@ -192,7 +192,16 @@ export default function Requests({ user }) {
         <div className="space-y-4">
           {requests.map((request) => (
             <div key={request.id} className="card">
-              <div className="flex items-start justify-between">
+              {/* Bugfix (mobile responsiveness parity with /dashboard,
+                  /downloads, /enrollment, /teams, /users): below `sm:`, the
+                  Approve/Deny buttons now drop underneath the request's own
+                  content and go full-width side by side, rather than being
+                  squeezed into a fixed-width `ml-6` column beside
+                  potentially several lines of text -- the same
+                  stack-below-`sm:` pattern Dashboard.jsx's "Review Requests"
+                  banner already uses. `sm:` and up is the original
+                  side-by-side row, unchanged. */}
+              <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
                 <div className="flex-1">
                   <div className="flex items-center space-x-3 mb-2">
                     <span className="px-2 py-1 text-xs font-medium bg-yellow-100 text-yellow-800 rounded-full">
@@ -366,17 +375,17 @@ export default function Requests({ user }) {
                   )}
                 </div>
                 
-                <div className="flex space-x-2 ml-6">
+                <div className="flex gap-2 sm:ml-6">
                   <button
                     onClick={() => handleApprove(request.id)}
-                    className="flex items-center px-3 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 transition-colors"
+                    className="flex-1 sm:flex-initial flex items-center justify-center px-3 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 transition-colors"
                   >
                     <CheckIcon className="h-4 w-4 mr-1" />
                     Approve
                   </button>
                   <button
                     onClick={() => handleDeny(request.id)}
-                    className="flex items-center px-3 py-2 bg-red-600 text-white text-sm font-medium rounded-lg hover:bg-red-700 transition-colors"
+                    className="flex-1 sm:flex-initial flex items-center justify-center px-3 py-2 bg-red-600 text-white text-sm font-medium rounded-lg hover:bg-red-700 transition-colors"
                   >
                     <XMarkIcon className="h-4 w-4 mr-1" />
                     Deny

@@ -37,15 +37,15 @@ const router = express.Router();
 // `user_cache.groups`, populated by authentikSync.js's
 // `groupMap[groupId] = group.name`) holds the raw Authentik GROUP NAME,
 // e.g. "tak_Teams - FENZ - Southland District", "tak_BCH - Community -
-// Amateur Radio APRS_READ", "tak_Response - Auckland", "tak_UTL - Data
-// Packages". After stripping the "tak_" prefix and any
+// Amateur Radio APRS_READ", "tak_Response - Auckland", "tak_XtraTools -
+// Data Packages". After stripping the "tak_" prefix and any
 // "_READ"/"_WRITE" suffix (both already done below for the
 // base-channel-name grouping itself):
 //   - a team channel's base name matches `channels.display_name` exactly
 //     (e.g. "Teams - FENZ - Southland District")
 //   - a BCH/UTL channel's base name has an additional category prefix
-//     ("BCH - "/"UTL - ") beyond what `bch_channels.name` stores (e.g.
-//     base name "BCH - Community - Amateur Radio APRS" ->
+//     ("BCH - "/"XtraTools - ") beyond what `bch_channels.name` stores
+//     (e.g. base name "BCH - Community - Amateur Radio APRS" ->
 //     bch_channels.name "Community - Amateur Radio APRS") -- confirmed
 //     against syncWorker.js's syncExistingGlobalChannels, which strips
 //     exactly `tak_${categoryPrefix}${separator}` (not just "tak_") when
@@ -156,7 +156,12 @@ router.get('/descriptions', authenticateToken, authorize, async (req, res) => {
 router.post('/custom', authenticateToken, authorize, [
   body('teamId').isInt(),
   body('customSuffix').trim().isLength({ min: 1, max: 100 }),
-  body('memberPermissions').isArray()
+  body('memberPermissions').isArray(),
+  // Bugfix (Create Custom Channel dialog had no way to set a
+  // description at creation time -- only via the later "Edit channel"
+  // action): optional, same length limit as the PUT /:channelId edit
+  // route's own `description` validation.
+  body('description').optional({ nullable: true }).trim().isLength({ max: 500 })
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -164,7 +169,7 @@ router.post('/custom', authenticateToken, authorize, [
   }
 
   try {
-    const { teamId, customSuffix, memberPermissions } = req.body;
+    const { teamId, customSuffix, memberPermissions, description } = req.body;
     
     // Check if team exists and user has permission
     const team = await Team.findById(teamId);
@@ -192,7 +197,7 @@ router.post('/custom', authenticateToken, authorize, [
       }
     }
     
-    const channel = await Channel.createCustomChannel(teamId, customSuffix, memberPermissions);
+    const channel = await Channel.createCustomChannel(teamId, customSuffix, memberPermissions, description || null);
 
     try {
       await pool.query(

@@ -340,8 +340,8 @@ class Channel {
    * intentionally left out to avoid over-engineering beyond what was
    * asked. This is flagged for visibility -- see task report.
    */
-  static async createCustomChannel(teamId, customSuffix, memberPermissions) {
-    const prepared = await Channel.prepareCustomChannelCreation(teamId, customSuffix);
+  static async createCustomChannel(teamId, customSuffix, memberPermissions, description = null) {
+    const prepared = await Channel.prepareCustomChannelCreation(teamId, customSuffix, description);
 
     // --- Phase 2: single SERIALIZABLE transaction re-validating the count
     // immediately before INSERT, on one acquired client. ---
@@ -385,9 +385,17 @@ class Channel {
    * convention intact for that caller too, exactly as it already is for
    * `createCustomChannel` itself.
    *
+   * @param {string|null} [customDescription] - Bugfix (Create Custom
+   *   Channel dialog had no way to set a description at creation time --
+   *   only via the later "Edit channel" action): when supplied
+   *   (a non-empty, trimmed string), this becomes the description
+   *   written to the local `channels` row AND to all three Authentik
+   *   groups' `attributes.description`, in place of the generated
+   *   `Custom channel: ${fullChannelName}` default. `null`/omitted
+   *   preserves the exact previous behaviour.
    * @returns {Promise<{fullChannelName: string, description: string, channelDbName: string, rwGroup: object, readGroup: object, writeGroup: object}>}
    */
-  static async prepareCustomChannelCreation(teamId, customSuffix) {
+  static async prepareCustomChannelCreation(teamId, customSuffix, customDescription = null) {
     let fullChannelName, description, channelDbName, authentikGroupName;
     let rwGroup, readGroup, writeGroup;
     try {
@@ -420,7 +428,7 @@ class Channel {
       }
 
       fullChannelName = `${baseChannelName} - ${customSuffix}`;
-      description = `Custom channel: ${fullChannelName}`;
+      description = customDescription || `Custom channel: ${fullChannelName}`;
       channelDbName = fullChannelName.toLowerCase().replace(/[^a-z0-9-]/g, '-');
 
       // Create Authentik groups

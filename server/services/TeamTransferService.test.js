@@ -354,7 +354,7 @@ function createTransferHarness(scenario, options = {}) {
   const poolQuery = async (sql, params = []) => {
     const text = String(sql);
 
-    if (/SELECT authentik_user_id, email, first_name, is_team_device/.test(text)) {
+    if (/SELECT authentik_user_id, email, first_name, username, is_team_device/.test(text)) {
       const user = findUser(params[0]);
 
       return {
@@ -363,6 +363,7 @@ function createTransferHarness(scenario, options = {}) {
             authentik_user_id: user.authentik_user_id,
             email: user.email,
             first_name: user.first_name,
+            username: user.username,
             is_team_device: user.is_team_device
           }]
           : [],
@@ -3838,7 +3839,12 @@ describe('applyPostCommitEffects failure examples (Requirements 8.3, 8.4, 8.5, 1
     expect(mockSendEmail).toHaveBeenCalledWith(
       harness.store.users[0].email,
       'team_transfer_completed',
-      { first_name: 'Casey', team_path: POST_COMMIT_TEAM_PATH, callsign: POST_COMMIT_CALLSIGN }
+      {
+        first_name: 'Casey',
+        team_path: POST_COMMIT_TEAM_PATH,
+        username: harness.store.users[0].username,
+        callsign: POST_COMMIT_CALLSIGN
+      }
     );
     expect(harness.store.auditLogs).toHaveLength(1);
 

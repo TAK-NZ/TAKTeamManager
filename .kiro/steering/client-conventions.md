@@ -56,3 +56,21 @@ Established while auditing and fixing small/hard-to-tap controls across `/dashbo
 - `client/src/components/DeviceListRow.jsx` is the single definition of a device-list row AND its header (`DeviceListRow`, `DeviceListHeader`, `DEVICE_LIST_COLUMNS`), shared by the Dashboard card and `UserDevicesModal`. Two copies that match today diverge on the next change to one surface.
 - Extract a shared component when BEHAVIOUR is duplicated. For a colour-values-only change across duplicated markup, a mechanical test covering both copies is the lighter answer — the channel tree in `client/src/pages/Dashboard.jsx` and `client/src/pages/GlobalChannels.jsx` is deliberately NOT extracted (see `client/src/pages/channelTreeContrast.test.jsx`), but the two must be changed together and identically.
 - A failed background refresh must never clear a rendered list, re-raise the spinner, or hide a card. Only an explicit "feature off" response hides it. Auto-refresh pauses while the tab is hidden; never auto-refresh inside a short-lived dialog.
+
+## Confirmation dialogs: two tiers, chosen by reversibility
+
+Every destructive-*feeling* action gets a confirmation dialog before it fires, but not all of them get the SAME dialog. Which tier an action gets is decided by one question: **if this goes wrong, can an admin undo it themselves, with no support ticket?**
+
+- **Type-to-confirm (the stronger tier)** — required for exactly two categories of action, regardless of surface:
+  1. **Permanently deleting a row from the data model** — a user, a team, a channel, a sub-team. The record and its history are gone.
+  2. **Suspending an account** — the record survives, but suspending locks the Authentik identity and revokes every live TAK Server certificate the account holds. A revoked certificate cannot be restored; re-enrollment issues a new one. That one-way side effect is why Suspend sits in this tier even though `account_status` itself can be flipped back.
+
+  The mechanic: a text input that must match a stable identifying field on the target EXACTLY (case-sensitive, no trim) before the Confirm button enables — never a static word unrelated to the target (that's `RevokeDeviceDialog`'s own narrower `REVOKE` literal, kept there because a device revocation already commits to one specific device with no ambiguity a typed name would resolve). Prefer the target's `username` or `display_name`/`email` — whichever field the surrounding UI already shows as this row's primary label. See `SuspendAccountDialog.jsx`'s `targetUsername` prop, `TeamDetail.jsx`'s "Permanently Delete User" (types the email) and "Delete Channel" (types the `display_name`) dialogs.
+
+  Confirm renders `btn-danger`. Cancel must also clear the typed text, so a re-open never starts pre-filled.
+
+- **Plain Cancel/Confirm (the lighter tier)** — everything else that still deserves a pause: Unsuspend, "Remove as admin" (the member keeps their team membership, just demoted — trivially re-promoted), "Delete Sub-Team" *(current exception, not the intended state — see below)*, "Resend welcome email." No type-to-confirm input. Confirm renders `btn-danger` for a destructive-but-reversible action (Unsuspend does not even get that — it's `btn-primary`, since it undoes disruption rather than causing it) or `btn-primary` for a non-destructive one like Resend.
+
+- **Do not invent a third tier.** If an action's blast radius doesn't obviously sort into "gone forever" / "certificates revoked" vs. "reversible with a click," default to the lighter tier and say so in a comment — the lighter tier is the existing default for most actions in this app, and type-to-confirm should read as the deliberately-added friction, not the norm.
+
+- Every permanent-deletion dialog in this app is on the type-to-confirm tier today: "Permanently Delete User" (types the email), "Delete Channel" (types the `display_name`), and "Delete Sub-Team" (types the `display_name`/`name`). If a new one ships on the plain tier, that is a bug to fix, not a second sanctioned pattern for permanent deletion.

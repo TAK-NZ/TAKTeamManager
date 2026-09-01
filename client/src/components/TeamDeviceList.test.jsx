@@ -474,6 +474,48 @@ describe('TeamDeviceList (mounted)', () => {
       expect(container.querySelector('button[title="Suspend device account"]')).toBeNull()
     })
 
+    // Bugfix: Suspend now gets the same red/danger treatment as Delete,
+    // not the neutral grey every other action uses -- locking the
+    // account and revoking every live certificate is disruptive enough
+    // to carry the same "this one's different" colour signal.
+    it('applies the red/danger colour to Suspend, and grey to Unsuspend (the reverse, non-destructive direction)', async () => {
+      devicesAPI.getTeamDevices.mockResolvedValue({
+        data: { devices: [{ ...baseDevice, accountStatus: 'active' }] }
+      })
+      root = createRoot(container)
+      await act(async () => {
+        root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+      })
+      await act(async () => {
+        await Promise.resolve()
+      })
+
+      const suspendButton = container.querySelector('button[title="Suspend device account"]')
+      expect(suspendButton.className).toContain('text-red-600')
+      expect(suspendButton.className).not.toContain('text-gray-600')
+
+      devicesAPI.getTeamDevices.mockResolvedValue({
+        data: { devices: [{ ...baseDevice, accountStatus: 'suspended' }] }
+      })
+      const root2Container = document.createElement('div')
+      document.body.appendChild(root2Container)
+      const root2 = createRoot(root2Container)
+      await act(async () => {
+        root2.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+      })
+      await act(async () => {
+        await Promise.resolve()
+      })
+      const unsuspendButton = root2Container.querySelector('button[title="Unsuspend device account"]')
+      expect(unsuspendButton.className).toContain('text-gray-600')
+      expect(unsuspendButton.className).not.toContain('text-red-600')
+
+      await act(async () => {
+        root2.unmount()
+      })
+      root2Container.remove()
+    })
+
     it('omits the action entirely when accountStatus is "orphaned"', async () => {
       devicesAPI.getTeamDevices.mockResolvedValue({
         data: { devices: [{ ...baseDevice, accountStatus: 'orphaned' }] }
@@ -576,9 +618,20 @@ describe('TeamDeviceList (mounted)', () => {
         suspendButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
       })
 
-      const confirmButton = container.querySelector('#suspend-account-title')
-        .closest('[role="dialog"]')
-        .querySelector('button.btn-danger')
+      const dialog = container.querySelector('#suspend-account-title').closest('[role="dialog"]')
+      const confirmButton = dialog.querySelector('button.btn-danger')
+      // Bugfix (type-to-confirm parity with "Permanently Delete User"/
+      // "Delete Channel"): Suspend now requires the device's own
+      // username typed exactly before the confirm button enables.
+      expect(confirmButton.disabled).toBe(true)
+      const confirmInput = dialog.querySelector('#suspend-account-confirm')
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+      await act(async () => {
+        setter.call(confirmInput, baseDevice.username)
+        confirmInput.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      expect(confirmButton.disabled).toBe(false)
+
       await act(async () => {
         confirmButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
       })

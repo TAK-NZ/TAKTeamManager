@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { ClipboardDocumentListIcon } from '@heroicons/react/24/outline'
+import { ClipboardDocumentListIcon, EyeIcon, XMarkIcon } from '@heroicons/react/24/outline'
 import { teamsAPI, auditLogsAPI } from '../services/api'
 import FormattedDate, {
   DATE_PRECISION,
@@ -30,6 +30,13 @@ export default function AuditLogs({ user }) {
   })
   const [appliedFilters, setAppliedFilters] = useState({}) // last-applied filters
   const [teams, setTeams] = useState([])                  // for the team filter <select>
+  // Bugfix (mobile responsiveness / details-in-a-modal): the row whose
+  // full `details` JSON (and the rest of its fields, for context) is
+  // currently shown in the Details_Modal, or null when the modal is
+  // closed. Holds the whole row rather than just an id, matching this
+  // app's own convention for a dialog that needs more than one field off
+  // its target (e.g. Users.jsx's `suspendingUser`).
+  const [selectedLog, setSelectedLog] = useState(null)
 
   // Requirement 4.1 / design.md "Team filter options": fetch the full team
   // list once on mount to populate the Team_Filter_Dropdown. Guarded on
@@ -151,7 +158,15 @@ export default function AuditLogs({ user }) {
 
           <div>
             {/* Requirement 3.6: free-text input, not a fixed <select>, since
-                audit_logs.action is an unconstrained varchar. */}
+                audit_logs.action is an unconstrained varchar.
+
+                Bugfix: the placeholder used to read "e.g. user.login", but
+                this app never writes that action -- there is no
+                `INSERT INTO audit_logs` call anywhere with that value (the
+                closest real actions are things like `user.suspend`,
+                `team.create`, `user.add_to_team`). `user.suspend` is a real
+                action every deployment eventually has rows for, unlike an
+                example that could never match anything. */}
             <label htmlFor="audit-log-action-filter" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
               Action
             </label>
@@ -161,7 +176,7 @@ export default function AuditLogs({ user }) {
               value={filters.action}
               onChange={(e) => setFilters({ ...filters, action: e.target.value })}
               className="input w-full"
-              placeholder="e.g. user.login"
+              placeholder="e.g. user.suspend"
             />
           </div>
 
@@ -227,7 +242,10 @@ export default function AuditLogs({ user }) {
           </div>
         </div>
 
-        <div className="flex justify-end space-x-2 mt-4">
+        {/* Bugfix: `flex-wrap gap-2` (was a non-wrapping `space-x-2` row)
+            so the three buttons can drop onto more than one line on a
+            narrow phone instead of shrinking or overflowing. */}
+        <div className="flex flex-wrap justify-end gap-2 mt-4">
           {/* Requirements 5.1, 5.2, 5.4: the Export_Action is inherently
               Global_Manager-only because this entire page returns the
               not-authorized guard above when isGlobalManager is false, so
@@ -291,7 +309,69 @@ export default function AuditLogs({ user }) {
             <p className="text-gray-500 dark:text-gray-400">No audit log entries match the current filters.</p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
+          <>
+          {/* Bugfix (mobile responsiveness parity with /dashboard,
+              /downloads, /enrollment, /teams, /users, /requests,
+              /global-channels): a `sm:hidden` stacked card list alongside
+              the existing `hidden sm:block overflow-x-auto` table.
+
+              Also folds Details into a per-row modal, opened by clicking
+              (or Enter/Space-activating) the row itself, rather than a
+              `<pre>` JSON blob inline in every row -- that blob forced
+              `overflow-x-auto` on this table even at desktop widths and
+              had no mobile equivalent at all. Resource Type is dropped as
+              its own column/line: it is shown as a small secondary label
+              under Action instead (still visible, just no longer a
+              redundant sibling column carrying mostly-the-same information
+              -- `user.suspend` beside `user`, `team.create` beside `team`
+              -- one glance instead of two). */}
+          <div className="sm:hidden divide-y divide-gray-200 dark:divide-gray-700">
+            {auditLogs.map((row) => (
+              <div
+                key={row.id}
+                role="button"
+                tabIndex={0}
+                onClick={() => setSelectedLog(row)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    setSelectedLog(row)
+                  }
+                }}
+                className="p-4 space-y-1 text-sm cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50"
+                aria-label={`View details for audit log entry ${row.id}`}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="font-medium text-gray-900 dark:text-gray-100 break-words">{row.action}</p>
+                    <p className="text-xs text-gray-500 dark:text-gray-400">{row.resource_type}</p>
+                  </div>
+                  <EyeIcon className="h-4 w-4 text-gray-400 dark:text-gray-500 flex-shrink-0 mt-0.5" aria-hidden="true" />
+                </div>
+                <p className="text-gray-500 dark:text-gray-400">
+                  {/* Same fallback chain as the User column below -- a raw
+                      numeric id is never shown; an unresolved value reads
+                      as '—' instead. */}
+                  {row.username || row.email || '—'}
+                  {' · '}
+                  {row.resource_name || '—'}
+                </p>
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  {/* Not inside an `overflow-x-auto` wrapper here, so this
+                      opens rightward like most Date_Tooltip hosts --
+                      unlike the table cell below, which stays LEFT. */}
+                  <FormattedDate
+                    value={row.created_at}
+                    fallback={row.created_at}
+                    precision={DATE_PRECISION.DATE_TIME}
+                    side={TOOLTIP_SIDES.RIGHT}
+                  />
+                </p>
+              </div>
+            ))}
+          </div>
+
+          <div className="hidden sm:block overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
               <thead className="bg-gray-50 dark:bg-gray-700">
                 <tr>
@@ -305,13 +385,7 @@ export default function AuditLogs({ user }) {
                     Action
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                    Resource Type
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     Resource
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                    Details
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     Created At
@@ -320,7 +394,20 @@ export default function AuditLogs({ user }) {
               </thead>
               <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                 {auditLogs.map((row) => (
-                  <tr key={row.id}>
+                  <tr
+                    key={row.id}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setSelectedLog(row)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        setSelectedLog(row)
+                      }
+                    }}
+                    className="cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50"
+                    aria-label={`View details for audit log entry ${row.id}`}
+                  >
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-gray-100">
                       {row.id}
                     </td>
@@ -328,30 +415,40 @@ export default function AuditLogs({ user }) {
                       {/* The server resolves user_id to the acting user's
                           username/email via a LEFT JOIN (server/routes/
                           auditLogs.js), since a raw internal id is
-                          meaningless to an admin reviewing the log. Falls
-                          back to the numeric id if the actor's user row
-                          was later deleted (LEFT JOIN leaves username/email
-                          null in that case), and to '—' if there's no
-                          actor at all. */}
-                      {row.username || row.email || row.user_id || '—'}
+                          meaningless to an admin reviewing the log.
+
+                          Bugfix: this used to fall back to the raw
+                          numeric `user_id` when the actor's user row was
+                          later deleted (LEFT JOIN leaves username/email
+                          null in that case) -- a bare internal database
+                          id conveys nothing to an admin either way, so
+                          this now falls straight to '—' instead, exactly
+                          like the "no actor at all" case already did. */}
+                      {row.username || row.email || '—'}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-gray-100">
+                      {/* Bugfix (Action/Resource Type redundancy): the two
+                          used to be separate columns carrying mostly the
+                          same information (`user.suspend` beside `user`,
+                          `team.create` beside `team`) -- Resource Type is
+                          now a small secondary label under Action instead
+                          of its own column. */}
                       {row.action}
+                      <div className="text-xs text-gray-500 dark:text-gray-400">{row.resource_type}</div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-gray-100">
-                      {row.resource_type}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-gray-100">
-                      {row.resource_name || row.resource_id || '—'}
-                    </td>
-                    <td className="px-6 py-4 text-sm text-gray-900 dark:text-gray-100">
-                      {row.details == null ? (
-                        '—'
-                      ) : (
-                        <pre className="whitespace-pre-wrap text-xs bg-gray-50 dark:bg-gray-900 rounded p-2 max-w-md overflow-x-auto">
-                          {JSON.stringify(row.details, null, 2)}
-                        </pre>
-                      )}
+                      {/* Bugfix: same "never show the raw internal id"
+                          fix as the User column above -- resource_id is
+                          an implementation detail (a bch_channels.id, a
+                          channel_requests.id, etc.), not something an
+                          admin should ever have to look up manually. The
+                          server (server/routes/auditLogs.js) now resolves
+                          every nameable resource_type to a real name;
+                          anything it can't resolve (already deleted, or a
+                          resource_type with no meaningful name of its
+                          own, e.g. a vendor_channel_grant) reads as '—'
+                          rather than a bare number. */}
+                      {row.resource_name || '—'}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                       {/* Created At, the last cell of a table inside an
@@ -386,11 +483,15 @@ export default function AuditLogs({ user }) {
               </tbody>
             </table>
           </div>
+          </>
         )}
 
-        {/* Pagination (task 10.1) */}
+        {/* Pagination (task 10.1). Bugfix: `flex-wrap gap-2` (was a
+            non-wrapping `justify-between` row) -- same fix as Teams.jsx's
+            identical pagination row, so the summary text doesn't compete
+            against Previous/Page-N-of-M/Next for room on a narrow phone. */}
         {!loading && auditLogs.length > 0 && (
-          <div className="mt-6 flex items-center justify-between">
+          <div className="mt-6 flex flex-wrap items-center justify-between gap-2">
             <div className="text-sm text-gray-500 dark:text-gray-400">
               Showing {(pagination.page - 1) * pagination.pageSize + 1} to{' '}
               {Math.min(pagination.page * pagination.pageSize, pagination.total)} of {pagination.total} entries
@@ -419,6 +520,89 @@ export default function AuditLogs({ user }) {
           </div>
         )}
       </div>
+
+      {/* Bugfix (details-in-a-modal): the full row -- including the
+          `details` JSON blob that used to render inline as a `<pre>` in
+          every row -- now shows here, opened by clicking (or
+          Enter/Space-activating) either the mobile card or the desktop
+          table row above. Small confirm-dialog tier (plain `max-w-lg
+          w-full`, matching e.g. Resend Welcome Email), not full-bleed:
+          this is a single read-only record, not a multi-field form. */}
+      {selectedLog && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="audit-log-details-title"
+            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-lg w-full max-h-[85vh] overflow-y-auto"
+          >
+            <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
+              <h3 id="audit-log-details-title" className="text-lg font-medium text-gray-900 dark:text-gray-100">
+                Audit Log Entry #{selectedLog.id}
+              </h3>
+              <button
+                type="button"
+                onClick={() => setSelectedLog(null)}
+                aria-label="Close audit log details dialog"
+                className="p-2 rounded-lg text-gray-400 hover:text-gray-500 hover:bg-gray-100 dark:hover:text-gray-300 dark:hover:bg-gray-700"
+              >
+                <XMarkIcon className="h-6 w-6" aria-hidden="true" />
+              </button>
+            </div>
+            <div className="p-6 space-y-4 text-sm">
+              <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+                <div>
+                  <dt className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">User</dt>
+                  <dd className="mt-1 text-gray-900 dark:text-gray-100">
+                    {/* Bugfix: never a raw internal id -- '—' once
+                        username/email can't be resolved. */}
+                    {selectedLog.username || selectedLog.email || '—'}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Created At</dt>
+                  <dd className="mt-1 text-gray-900 dark:text-gray-100">
+                    <FormattedDate
+                      value={selectedLog.created_at}
+                      fallback={selectedLog.created_at}
+                      precision={DATE_PRECISION.DATE_TIME}
+                      side={TOOLTIP_SIDES.RIGHT}
+                    />
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Action</dt>
+                  <dd className="mt-1 text-gray-900 dark:text-gray-100 break-words">{selectedLog.action}</dd>
+                </div>
+                <div>
+                  <dt className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Resource Type</dt>
+                  <dd className="mt-1 text-gray-900 dark:text-gray-100 break-words">{selectedLog.resource_type}</dd>
+                </div>
+                <div className="col-span-2">
+                  <dt className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Resource</dt>
+                  <dd className="mt-1 text-gray-900 dark:text-gray-100 break-words">
+                    {/* Bugfix: never the raw resource_id -- '—' once the
+                        server can't resolve a name for it. */}
+                    {selectedLog.resource_name || '—'}
+                  </dd>
+                </div>
+              </div>
+              <div>
+                <dt className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1">Details</dt>
+                <dd>
+                  {selectedLog.details == null ? (
+                    <p className="text-gray-500 dark:text-gray-400">—</p>
+                  ) : (
+                    <pre className="whitespace-pre-wrap text-xs bg-gray-50 dark:bg-gray-900 rounded p-3 overflow-x-auto">
+                      {JSON.stringify(selectedLog.details, null, 2)}
+                    </pre>
+                  )}
+                </dd>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -233,14 +233,47 @@ describe('MemberActions (mounted) -- Suspend/Unsuspend action', () => {
     expect(button).toBeTruthy()
   })
 
-  it('applies the card variant\u2019s button-box treatment identically to the other neutral actions', async () => {
+  // Bugfix: Suspend now gets the SAME red/danger button-box treatment as
+  // Delete, not the neutral grey every other action uses -- locking the
+  // account and revoking every live certificate is disruptive enough to
+  // carry the same "this one's different" colour signal.
+  it('applies the card variant\u2019s RED/danger button-box treatment to Suspend, matching Delete rather than the neutral actions', async () => {
     const onSuspend = vi.fn()
     await mount({ onSuspend, variant: 'card' })
 
     const button = buttonByLabel('Suspend account')
     expect(button.className).toContain('p-2')
     expect(button.className).toContain('rounded-lg')
-    expect(button.className).toContain('bg-gray-100')
+    expect(button.className).toContain('bg-red-50')
+    expect(button.className).not.toContain('bg-gray-100')
     expect(button.querySelector('svg').getAttribute('class')).toContain('h-5 w-5')
+  })
+
+  // Unsuspend is the reverse direction -- it UNDOES the disruption rather
+  // than causing it, matching SuspendAccountDialog's own btn-primary (not
+  // btn-danger) choice for that mode -- so it keeps the neutral grey
+  // treatment every other non-destructive action uses.
+  it('keeps the NEUTRAL/grey button-box treatment for Unsuspend, unlike Suspend', async () => {
+    const onSuspend = vi.fn()
+    await mount({ onSuspend, accountStatus: 'suspended', variant: 'card' })
+
+    const button = buttonByLabel('Unsuspend account')
+    expect(button.className).toContain('bg-gray-100')
+    expect(button.className).not.toContain('bg-red-50')
+  })
+
+  // Table variant (bare text colour, no box) must carry the same red/grey
+  // split as the card variant's box colours.
+  it('applies red TEXT to Suspend in the default table variant', async () => {
+    const onSuspend = vi.fn()
+    await mount({ onSuspend })
+    expect(buttonByLabel('Suspend account').className).toContain('text-red-600')
+  })
+
+  it('applies grey TEXT (not red) to Unsuspend in the default table variant', async () => {
+    const onSuspend = vi.fn()
+    await mount({ onSuspend, accountStatus: 'suspended' })
+    expect(buttonByLabel('Unsuspend account').className).toContain('text-gray-600')
+    expect(buttonByLabel('Unsuspend account').className).not.toContain('text-red-600')
   })
 })

@@ -277,3 +277,182 @@ describe('AuditLogs renders its dates in the Display_Timezone (Requirement 18.4)
     })
   })
 })
+
+// ══════════════════════════════════════════════════════════════════════════
+// Bugfix: a raw internal database id is meaningless to an admin reviewing
+// the log. The User and Resource columns must never render a bare numeric
+// id -- '—' once no name can be resolved -- and Action/Resource Type are
+// merged into one column (Resource Type as a small secondary label under
+// Action) rather than two separate, mostly-redundant columns.
+// ══════════════════════════════════════════════════════════════════════════
+describe('AuditLogs never renders a raw internal id, and merges Action/Resource Type (bugfix)', () => {
+  let container
+  let root
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    vi.clearAllMocks()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    teamsAPI.getMyTeams.mockResolvedValue({ data: { teams: [] } })
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    vi.restoreAllMocks()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  const mountPage = async (rows) => {
+    auditLogsAPI.getAuditLogs.mockResolvedValue({
+      data: { auditLogs: rows, pagination: { page: 1, pageSize: 50, total: rows.length } }
+    })
+    root = createRoot(container)
+    await act(async () => {
+      root.render(<AuditLogs user={GLOBAL_MANAGER} />)
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+  }
+
+  const desktopRow = () => container.querySelector('table tbody tr')
+
+  it('renders "—" rather than the raw user_id when username/email are absent', async () => {
+    await mountPage([{
+      id: 1,
+      username: null,
+      email: null,
+      user_id: 12345,
+      action: 'bch_channel.create',
+      resource_type: 'bch_channel',
+      resource_name: 'BCH - Ops',
+      details: null,
+      created_at: REPORTED_INSTANT
+    }])
+
+    const row = desktopRow()
+    expect(row.textContent).not.toContain('12345')
+    expect(row.textContent).toContain('—')
+  })
+
+  it('renders "—" rather than the raw resource_id when resource_name is absent', async () => {
+    await mountPage([{
+      id: 1,
+      username: 'ada',
+      email: 'ada@example.com',
+      user_id: 7,
+      action: 'vendor_channel_grant_created',
+      resource_type: 'vendor_channel_grant',
+      resource_id: 98765,
+      resource_name: null,
+      details: null,
+      created_at: REPORTED_INSTANT
+    }])
+
+    const row = desktopRow()
+    expect(row.textContent).not.toContain('98765')
+    expect(row.textContent).toContain('—')
+  })
+
+  it('renders a resolved resource_name rather than any id at all', async () => {
+    // A distinctive id (999999) chosen so it cannot coincidentally appear
+    // inside the row's other rendered text (e.g. the timestamp).
+    await mountPage([{
+      id: 1,
+      username: 'ada',
+      email: 'ada@example.com',
+      user_id: 7,
+      action: 'bch_channel.update',
+      resource_type: 'bch_channel',
+      resource_id: 999999,
+      resource_name: 'BCH - Ops',
+      details: null,
+      created_at: REPORTED_INSTANT
+    }])
+
+    const row = desktopRow()
+    expect(row.textContent).toContain('BCH - Ops')
+    expect(row.textContent).not.toContain('999999')
+  })
+
+  it('merges Action and Resource Type into one column instead of two separate columns', async () => {
+    await mountPage([AUDIT_ROW])
+
+    // Exactly 5 columns now (ID, User, Action, Resource, Created At) --
+    // Resource Type is no longer its own column.
+    const headers = Array.from(container.querySelectorAll('table thead th')).map((th) => th.textContent.trim())
+    expect(headers).toEqual(['ID', 'User', 'Action', 'Resource', 'Created At'])
+
+    const row = desktopRow()
+    expect(row.textContent).toContain(AUDIT_ROW.action)
+    expect(row.textContent).toContain(AUDIT_ROW.resource_type)
+  })
+
+  it('opens a Details modal with the full record when a row is clicked, and closes it', async () => {
+    await mountPage([{
+      id: 42,
+      username: 'ada',
+      email: 'ada@example.com',
+      user_id: 7,
+      action: 'team.create',
+      resource_type: 'team',
+      resource_id: 3,
+      resource_name: 'Alpha Team',
+      details: { name: 'Alpha Team' },
+      created_at: REPORTED_INSTANT
+    }])
+
+    expect(container.querySelector('[role="dialog"][aria-labelledby="audit-log-details-title"]')).toBeNull()
+
+    const row = desktopRow()
+    await act(async () => {
+      row.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+
+    const dialog = container.querySelector('[role="dialog"][aria-labelledby="audit-log-details-title"]')
+    expect(dialog).not.toBeNull()
+    expect(dialog.textContent).toContain('Audit Log Entry #42')
+    expect(dialog.textContent).toContain('Alpha Team')
+    expect(dialog.textContent).toContain('"name": "Alpha Team"')
+
+    const closeButton = dialog.querySelector('button[aria-label="Close audit log details dialog"]')
+    await act(async () => {
+      closeButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+
+    expect(container.querySelector('[role="dialog"][aria-labelledby="audit-log-details-title"]')).toBeNull()
+  })
+
+  it('opens the same Details modal via keyboard (Enter) for accessibility', async () => {
+    await mountPage([{
+      id: 9,
+      username: 'ada',
+      email: 'ada@example.com',
+      user_id: 7,
+      action: 'team.delete',
+      resource_type: 'team',
+      resource_id: 3,
+      resource_name: 'Alpha Team',
+      details: null,
+      created_at: REPORTED_INSTANT
+    }])
+
+    const row = desktopRow()
+    expect(row.getAttribute('role')).toBe('button')
+    expect(row.getAttribute('tabindex')).toBe('0')
+
+    await act(async () => {
+      row.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    })
+
+    expect(container.querySelector('[role="dialog"][aria-labelledby="audit-log-details-title"]')).not.toBeNull()
+  })
+})

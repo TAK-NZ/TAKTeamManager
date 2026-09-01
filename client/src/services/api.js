@@ -256,8 +256,12 @@ export const channelsAPI = {
   getByTeam: (teamId) => api.get(`/channels/team/${teamId}`),
   getDescriptions: () => api.get('/channels/descriptions'),
   create: (data) => api.post('/channels', data),
-  createCustom: (teamId, customSuffix, memberPermissions) => 
-    api.post('/channels/custom', { teamId, customSuffix, memberPermissions }),
+  // Bugfix (Create Custom Channel dialog had no way to set a
+  // description at creation time -- only via the later "Edit channel"
+  // action): `description` is optional (a caller that omits it, or
+  // passes an empty string, gets the server's own generated default).
+  createCustom: (teamId, customSuffix, memberPermissions, description) => 
+    api.post('/channels/custom', { teamId, customSuffix, memberPermissions, description }),
   addMember: (channelId, data) => api.post(`/channels/${channelId}/members`, data),
   removeMember: (channelId, userId) => api.delete(`/channels/${channelId}/members/${userId}`),
   getMembers: (channelId) => api.get(`/channels/${channelId}/members`),
@@ -393,6 +397,17 @@ export const settingsAPI = {
   exportSettings: () => api.get('/settings/export', { responseType: 'blob' }),
   // payload: { systemConfig, siteConfig, emailTemplates? }
   importSettings: (payload) => api.post('/settings/import', payload),
+  // Bugfix (BUG-014): the Admin page's Colour Mappings / Role Descriptions
+  // tabs must read/write the DATABASE-backed system_config rows through
+  // these two endpoints, not the legacy env-var-backed
+  // GET /api/config/color-mappings (configAPI.getColorMappings), which has
+  // no PUT counterpart at all -- that mismatch is why edits used to appear
+  // to save (local state updated) but silently revert on reload.
+  // Response/request shape for both: { colorMappings: {...}, roleDescriptions: {...} }.
+  getTakMappings: () => api.get('/settings/tak-mappings'),
+  // updates: { [config_key]: newValue, ... } -- keyed by the raw
+  // tak_color_*/tak_role_* config_key, not the display label.
+  updateTakMappings: (updates) => api.put('/settings/tak-mappings', { updates }),
 };
 
 // --- Device management (device-management spec) ---

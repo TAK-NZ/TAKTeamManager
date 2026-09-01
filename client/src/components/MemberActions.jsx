@@ -196,12 +196,21 @@ export default function MemberActions({
           "Suspend" action for an active account, an open-lock "Unsuspend"
           for a suspended one -- never rendered at all for an orphaned
           account (Requirement 4.1), which the caller expresses by simply
-          not passing `onSuspend`. */}
+          not passing `onSuspend`.
+
+          Bugfix: Suspend gets the SAME red/danger treatment as Delete --
+          it locks the account and revokes every live certificate, which
+          is disruptive enough to carry the same "this one's different"
+          colour signal, and SuspendAccountDialog already treats it as
+          btn-danger for the same reason. Unsuspend stays neutral (grey):
+          it undoes that disruption rather than causing it, matching the
+          dialog's own btn-primary (not btn-danger) choice for that
+          direction. */}
       {onSuspend && (
         <button
           onClick={() => hasTeam && onSuspend(member)}
           disabled={!hasTeam}
-          className={`${boxClass} ${hasTeam ? neutralClass : neutralDisabledClass}`}
+          className={`${boxClass} ${hasTeam ? (accountStatus === 'suspended' ? neutralClass : dangerClass) : (accountStatus === 'suspended' ? neutralDisabledClass : dangerDisabledClass)}`}
           title={hasTeam ? (accountStatus === 'suspended' ? 'Unsuspend account' : 'Suspend account') : noTeamTitle}
           aria-label={hasTeam ? (accountStatus === 'suspended' ? 'Unsuspend account' : 'Suspend account') : noTeamTitle}
         >

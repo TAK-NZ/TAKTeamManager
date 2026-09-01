@@ -444,7 +444,7 @@ function createPathHarness(scenario) {
       };
     }
 
-    if (/SELECT authentik_user_id, email, first_name, is_team_device/.test(text)) {
+    if (/SELECT authentik_user_id, email, first_name, username, is_team_device/.test(text)) {
       const user = findUser(params[0]);
 
       return {
@@ -453,6 +453,7 @@ function createPathHarness(scenario) {
             authentik_user_id: user.authentik_user_id,
             email: user.email,
             first_name: user.first_name,
+            username: user.username,
             is_team_device: user.is_team_device
           }]
           : [],

@@ -67,7 +67,66 @@ export default function OrgInterestRequests() {
           No org interest requests.
         </p>
       ) : (
-        <div className="overflow-x-auto">
+        <>
+        {/* Bugfix (mobile responsiveness parity with /dashboard, /downloads,
+            /enrollment, /teams, /users): a `sm:hidden` stacked card list
+            alongside the existing `hidden sm:block overflow-x-auto` table,
+            same dual-render convention as every other tabular surface in
+            this pass. */}
+        <div className="sm:hidden divide-y divide-gray-200 dark:divide-gray-700">
+          {requests.map((req) => (
+            <div key={req.id} className="py-3 space-y-1 text-sm">
+              <p className="font-medium text-gray-900 dark:text-gray-100 break-words">
+                {req.first_name} {req.last_name}
+              </p>
+              <p className="text-gray-500 dark:text-gray-400 break-all">{req.email}</p>
+              <p className="text-gray-900 dark:text-gray-100">{req.org_name}</p>
+              <div className="flex items-center justify-between gap-2">
+                <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${
+                  req.status === 'pending'
+                    ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200'
+                    : req.status === 'actioned'
+                      ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
+                      : 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300'
+                }`}>
+                  {req.status}
+                </span>
+                <span className="text-xs text-gray-500 dark:text-gray-400">
+                  {req.created_at ? (
+                    <FormattedDate
+                      value={req.created_at}
+                      fallback=""
+                      precision={DATE_PRECISION.DATE_TIME}
+                      side={TOOLTIP_SIDES.RIGHT}
+                    />
+                  ) : (
+                    '-'
+                  )}
+                </span>
+              </div>
+              {req.status === 'pending' && (
+                <div className="flex gap-2 pt-1">
+                  <button
+                    onClick={() => handleUpdateStatus(req.id, 'actioned')}
+                    disabled={updatingId === req.id}
+                    className="flex-1 text-xs btn-primary px-2 py-1"
+                  >
+                    Mark Actioned
+                  </button>
+                  <button
+                    onClick={() => handleUpdateStatus(req.id, 'dismissed')}
+                    disabled={updatingId === req.id}
+                    className="flex-1 text-xs btn-secondary px-2 py-1"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <div className="hidden sm:block overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
             <thead className="bg-gray-50 dark:bg-gray-700">
               <tr>
@@ -175,6 +234,7 @@ export default function OrgInterestRequests() {
             </tbody>
           </table>
         </div>
+        </>
       )}
     </div>
   )

@@ -136,6 +136,54 @@ describe('Channel.createCustomChannel', () => {
     expect(pool.connect).toHaveBeenCalledTimes(1);
   });
 
+  // Bugfix (Create Custom Channel dialog had no way to set a description
+  // at creation time -- only via the later "Edit channel" action): a
+  // supplied description is used verbatim, in the local INSERT and in
+  // ALL THREE Authentik groups' attributes.description (with the
+  // Read/Write-Only suffixes still appended, matching the generated-
+  // default behaviour exactly).
+  describe('with a custom description supplied', () => {
+    it('uses the supplied description for the local INSERT and every Authentik group, instead of the generated default', async () => {
+      mockAuthentikGroupCreationSuccess();
+      const client = buildMockClient(0);
+      pool.connect.mockResolvedValue(client);
+
+      await Channel.createCustomChannel(7, 'Radio', [], 'Ops channel for Alpha team');
+
+      const groupCreateBodies = global.fetch.mock.calls.map(([, options]) => JSON.parse(options.body));
+      expect(groupCreateBodies[0].attributes.description).toBe('Ops channel for Alpha team');
+      expect(groupCreateBodies[1].attributes.description).toBe('Ops channel for Alpha team - Read Only');
+      expect(groupCreateBodies[2].attributes.description).toBe('Ops channel for Alpha team - Write Only');
+
+      const insertCall = client.query.mock.calls.find(([sql]) => typeof sql === 'string' && sql.startsWith('INSERT INTO channels'));
+      expect(insertCall[1]).toContain('Ops channel for Alpha team');
+    });
+
+    it('falls back to the generated default description when omitted (preserves existing behaviour)', async () => {
+      mockAuthentikGroupCreationSuccess();
+      const client = buildMockClient(0);
+      pool.connect.mockResolvedValue(client);
+
+      await Channel.createCustomChannel(7, 'Radio', []);
+
+      const [, options] = global.fetch.mock.calls[0];
+      const body = JSON.parse(options.body);
+      expect(body.attributes.description).toContain('Custom channel:');
+    });
+
+    it('falls back to the generated default description when an empty string is supplied', async () => {
+      mockAuthentikGroupCreationSuccess();
+      const client = buildMockClient(0);
+      pool.connect.mockResolvedValue(client);
+
+      await Channel.createCustomChannel(7, 'Radio', [], '');
+
+      const [, options] = global.fetch.mock.calls[0];
+      const body = JSON.parse(options.body);
+      expect(body.attributes.description).toContain('Custom channel:');
+    });
+  });
+
   it('runs BEGIN ISOLATION LEVEL SERIALIZABLE, the count re-check SELECT, and the channels INSERT on the same client, then COMMITs', async () => {
     mockAuthentikGroupCreationSuccess();
     const client = buildMockClient(2); // 2 existing channels -> still under the limit of 3

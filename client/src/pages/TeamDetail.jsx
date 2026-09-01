@@ -280,7 +280,17 @@ export default function TeamDetail({ user, refreshUser }) {
     canJoin: false
   })
   const [creatingSubTeam, setCreatingSubTeam] = useState(false)
-  const [deleteSubTeamId, setDeleteSubTeamId] = useState(null)
+  // Bugfix (consistency with "Permanently Delete User"/"Delete
+  // Channel"): deleting a sub-team now requires typing its own
+  // display_name to confirm -- a plain Cancel/Confirm dialog (this
+  // one's original shape) understated that this is a PERMANENT team
+  // deletion, the same severity class as those two. `deletingSubTeam`
+  // holds the whole sub-team row (not just an id), same reasoning as
+  // `deletingChannel` below -- the dialog needs its display_name both
+  // to show the prompt and as the value the admin must type.
+  const [deletingSubTeam, setDeletingSubTeam] = useState(null)
+  const [deleteSubTeamConfirmInput, setDeleteSubTeamConfirmInput] = useState('')
+  const [deletingSubTeamInFlight, setDeletingSubTeamInFlight] = useState(false)
   // Bugfix (Sub-teams tab missing Edit/Delete parity with /teams):
   // holds the whole sub-team row being edited (not just an id, since
   // TeamFormDialog needs the full object), or null when the dialog is
@@ -314,7 +324,6 @@ export default function TeamDetail({ user, refreshUser }) {
   const [editingChannel, setEditingChannel] = useState(null)
   const [editChannelDescription, setEditChannelDescription] = useState('')
   const [savingChannelEdit, setSavingChannelEdit] = useState(false)
-  const [deletingSubTeam, setDeletingSubTeam] = useState(false)
   const [allTeams, setAllTeams] = useState([])
   // Bugfix: Edit Team is now the same shared `TeamFormDialog` component
   // Teams.jsx uses (previously this page had its own stale, drifted copy
@@ -333,6 +342,12 @@ export default function TeamDetail({ user, refreshUser }) {
   const [showChannelDialog, setShowChannelDialog] = useState(false)
   const [channelFormData, setChannelFormData] = useState({
     customSuffix: '',
+    // Bugfix (Create Custom Channel dialog had no way to set a
+    // description at creation time -- only via the later "Edit
+    // channel" action): optional, matching "Edit channel"'s own
+    // description field exactly (same placeholder/help text, same
+    // Authentik/LDAP destination).
+    description: '',
     memberPermissions: []
   })
   const [creatingChannel, setCreatingChannel] = useState(false)
@@ -503,18 +518,19 @@ export default function TeamDetail({ user, refreshUser }) {
   }
 
   const handleDeleteSubTeam = async () => {
-    if (!deleteSubTeamId) return
-    
-    setDeletingSubTeam(true)
+    if (!deletingSubTeam) return
+
+    setDeletingSubTeamInFlight(true)
     try {
-      await teamsAPI.delete(deleteSubTeamId)
-      setSubTeams(subTeams.filter(team => team.id !== deleteSubTeamId))
-      setDeleteSubTeamId(null)
+      await teamsAPI.delete(deletingSubTeam.id)
+      setSubTeams(subTeams.filter(team => team.id !== deletingSubTeam.id))
+      setDeletingSubTeam(null)
+      setDeleteSubTeamConfirmInput('')
     } catch (error) {
       console.error('Failed to delete sub-team:', error)
       toast.error('Failed to delete sub-team: ' + (error.response?.data?.error || error.message))
     } finally {
-      setDeletingSubTeam(false)
+      setDeletingSubTeamInFlight(false)
     }
   }
 
@@ -595,7 +611,8 @@ export default function TeamDetail({ user, refreshUser }) {
       await channelsAPI.createCustom(
         team.id, 
         channelFormData.customSuffix, 
-        channelFormData.memberPermissions
+        channelFormData.memberPermissions,
+        channelFormData.description
       )
 
       // Bugfix (Channels tab showed "0 members" right after creating a
@@ -611,7 +628,7 @@ export default function TeamDetail({ user, refreshUser }) {
       const channelsResponse = await channelsAPI.getByTeam(team.id)
       setChannels(channelsResponse.data.channels || [])
 
-      setChannelFormData({ customSuffix: '', memberPermissions: [] })
+      setChannelFormData({ customSuffix: '', description: '', memberPermissions: [] })
       setShowChannelDialog(false)
     } catch (error) {
       console.error('Failed to create channel:', error)
@@ -2020,8 +2037,6 @@ export default function TeamDetail({ user, refreshUser }) {
                         <AdminActions
                           member={admin}
                           onRemoveAdmin={handleRemoveAdminClick}
-                          onSuspend={admin.account_status !== 'orphaned' ? handleSuspendClick : undefined}
-                          accountStatus={admin.account_status}
                           variant="card"
                         />
                       )}
@@ -2109,8 +2124,6 @@ export default function TeamDetail({ user, refreshUser }) {
                             <AdminActions
                               member={admin}
                               onRemoveAdmin={handleRemoveAdminClick}
-                              onSuspend={admin.account_status !== 'orphaned' ? handleSuspendClick : undefined}
-                              accountStatus={admin.account_status}
                             />
                           )}
                         </td>
@@ -2464,7 +2477,7 @@ export default function TeamDetail({ user, refreshUser }) {
                           equality) operators. */}
                       {canManageTeam && Number(subTeam.sub_teams_count || 0) === 0 && (
                         <button
-                          onClick={() => setDeleteSubTeamId(subTeam.id)}
+                          onClick={() => setDeletingSubTeam(subTeam)}
                           className="p-2 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 dark:bg-red-950/40 dark:hover:bg-red-900/60 dark:text-red-400"
                           title="Delete sub-team"
                         >
@@ -2611,7 +2624,7 @@ export default function TeamDetail({ user, refreshUser }) {
                           )}
                           {canManageTeam && Number(subTeam.sub_teams_count || 0) === 0 && (
                             <button
-                              onClick={() => setDeleteSubTeamId(subTeam.id)}
+                              onClick={() => setDeletingSubTeam(subTeam)}
                               className="text-red-600 hover:text-red-500 dark:text-red-400 dark:hover:text-red-300"
                               title="Delete sub-team"
                             >
@@ -2852,8 +2865,13 @@ export default function TeamDetail({ user, refreshUser }) {
         </div>
       )}
 
-      {/* Delete Sub-Team Confirmation Dialog */}
-      {deleteSubTeamId && (
+      {/* Delete Sub-Team Confirmation Dialog. Consistency bugfix: now
+          requires typing the sub-team's own display_name to confirm,
+          matching "Permanently Delete User"'s/"Delete Channel"'s own
+          type-to-confirm pattern -- a plain Cancel/Confirm dialog (this
+          one's original shape) understated that this permanently
+          deletes a team, the same severity class as those two. */}
+      {deletingSubTeam && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div
             role="dialog"
@@ -2862,26 +2880,42 @@ export default function TeamDetail({ user, refreshUser }) {
             className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full"
           >
             <div className="p-6">
-              <h3 id="delete-sub-team-title" className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
+              <h3 id="delete-sub-team-title" className="text-lg font-medium text-red-600 dark:text-red-400 mb-4">
                 Delete Sub-Team
               </h3>
-              <p className="text-gray-600 dark:text-gray-400 mb-6">
-                Are you sure you want to delete this sub-team? This action cannot be undone.
+              <p className="text-gray-600 dark:text-gray-400 mb-4">
+                Are you sure you want to delete <span className="font-medium text-gray-900 dark:text-gray-100">{deletingSubTeam.display_name || deletingSubTeam.name}</span>? This action cannot be undone.
               </p>
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Type "<span className="font-mono font-bold text-gray-900 dark:text-gray-100">{deletingSubTeam.display_name || deletingSubTeam.name}</span>" to confirm:
+                </label>
+                <input
+                  type="text"
+                  className="input w-full"
+                  value={deleteSubTeamConfirmInput}
+                  onChange={(e) => setDeleteSubTeamConfirmInput(e.target.value)}
+                  placeholder={deletingSubTeam.display_name || deletingSubTeam.name}
+                  autoComplete="off"
+                />
+              </div>
               <div className="flex justify-end space-x-3">
                 <button
-                  onClick={() => setDeleteSubTeamId(null)}
+                  onClick={() => {
+                    setDeletingSubTeam(null)
+                    setDeleteSubTeamConfirmInput('')
+                  }}
                   className="btn-secondary"
-                  disabled={deletingSubTeam}
+                  disabled={deletingSubTeamInFlight}
                 >
                   Cancel
                 </button>
                 <button
                   onClick={handleDeleteSubTeam}
-                  disabled={deletingSubTeam}
-                  className="btn-danger disabled:opacity-50"
+                  disabled={deletingSubTeamInFlight || deleteSubTeamConfirmInput !== (deletingSubTeam.display_name || deletingSubTeam.name)}
+                  className="btn-danger disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {deletingSubTeam ? 'Deleting...' : 'Delete Sub-Team'}
+                  {deletingSubTeamInFlight ? 'Deleting...' : 'Delete Sub-Team'}
                 </button>
               </div>
             </div>
@@ -3518,6 +3552,30 @@ export default function TeamDetail({ user, refreshUser }) {
                     This will be added after " - " to create the full channel name
                   </p>
                 </div>
+
+                {/* Bugfix (Create Custom Channel dialog had no way to
+                    set a description at creation time -- only via the
+                    later "Edit channel" action): mirrors that dialog's
+                    own description field exactly. Optional -- an empty
+                    value falls back to the server's own generated
+                    default ("Custom channel: <full name>"). */}
+                <div>
+                  <label htmlFor="createChannelDescription" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Description
+                  </label>
+                  <textarea
+                    id="createChannelDescription"
+                    value={channelFormData.description}
+                    onChange={(e) => setChannelFormData({...channelFormData, description: e.target.value})}
+                    className="input w-full"
+                    rows={3}
+                    maxLength={500}
+                    placeholder="Describe this channel's purpose"
+                  />
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    Shown in Authentik/LDAP as this channel's group description.
+                  </p>
+                </div>
                 
                 <div>
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-4">
@@ -3752,6 +3810,7 @@ export default function TeamDetail({ user, refreshUser }) {
           mode={suspendingMember.mode}
           targetUserId={suspendingMember.member.id}
           targetName={`${suspendingMember.member.first_name || ''} ${suspendingMember.member.last_name || ''}`.trim() || suspendingMember.member.username}
+          targetUsername={suspendingMember.member.username}
           onClose={() => setSuspendingMember(null)}
           onCompleted={refreshMembersAfterSuspend}
         />

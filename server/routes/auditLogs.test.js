@@ -226,6 +226,143 @@ describe('GET /api/audit-logs filtering and pagination', () => {
 });
 
 /**
+ * Bugfix (a raw internal id is meaningless to an admin reviewing the
+ * log -- the same complaint BUG-024 already fixed for the User column):
+ * `GET /api/audit-logs` resolves a `resource_id` to a human-readable
+ * `resource_name` for every `resource_type` that carries one, including
+ * the ones added here (`bch_channel`, `region_channel`,
+ * `deployment_channel`, `channel_request`, `mou_document`) alongside the
+ * pre-existing `team`/`user`/`channel`/`access_request` handling. A
+ * `resource_type` this route has no name-resolution rule for (or a
+ * resolvable id whose row has since been deleted) must resolve to
+ * `resource_name: null` -- the client renders that as '—', never the raw
+ * numeric id.
+ */
+describe('GET /api/audit-logs resolves resource_name for every nameable resource_type', () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockUser = { id: 1, userId: 1, is_global_manager: true };
+    app = buildApp();
+  });
+
+  /**
+   * A `pool.query` mock that answers the main audit_logs SELECT with
+   * `rows`, the COUNT(*) query with `rows.length`, and every batched
+   * name-resolution SELECT this route issues with whatever rows the
+   * matching lookup table supplies -- keyed by the FROM clause's table
+   * name so this helper needs no knowledge of query order or count.
+   *
+   * @param {object[]} rows the raw audit_logs rows (pre-enrichment).
+   * @param {object} lookups optional per-table resolution rows, e.g.
+   *   `{ bch_channels: [{ id: 5, display_name: 'BCH - Ops' }] }`.
+   */
+  function mockRowsAndResolution(rows, lookups = {}) {
+    pool.query.mockImplementation((sql) => {
+      if (sql.includes('SELECT COUNT(*)')) {
+        return Promise.resolve({ rows: [{ total: String(rows.length) }] });
+      }
+      if (sql.includes('FROM audit_logs')) {
+        return Promise.resolve({ rows });
+      }
+      for (const [table, tableRows] of Object.entries(lookups)) {
+        if (sql.includes(`FROM ${table}`)) {
+          return Promise.resolve({ rows: tableRows });
+        }
+      }
+      // Any other lookup table not explicitly stubbed above (e.g. this
+      // fixture has no bch_channels row to resolve) has nothing to
+      // return -- matching what a real ANY($1) WHERE clause over an
+      // empty/non-matching id set would answer.
+      return Promise.resolve({ rows: [] });
+    });
+  }
+
+  it.each([
+    ['bch_channel', 'bch_channels', { id: 5, display_name: 'BCH - Ops' }, 'BCH - Ops'],
+    ['region_channel', 'region_channels', { id: 6, display_name: 'North - Alpha' }, 'North - Alpha'],
+    ['deployment_channel', 'deployment_channels', { id: 7, name: 'Exercise Southern Storm' }, 'Exercise Southern Storm'],
+    ['channel_request', 'channel_requests', { id: 8, custom_suffix: 'Ops' }, 'Ops'],
+    ['mou_document', 'mou_documents', { id: 9, title: 'Volunteer Agreement 2026' }, 'Volunteer Agreement 2026']
+  ])('resolves a %s resource_id to its real name via %s', async (resourceType, table, lookupRow, expectedName) => {
+    const rows = [{
+      id: 1,
+      user_id: 1,
+      action: `${resourceType}.create`,
+      resource_type: resourceType,
+      resource_id: lookupRow.id,
+      details: null,
+      created_at: '2024-01-01'
+    }];
+    mockRowsAndResolution(rows, { [table]: [lookupRow] });
+
+    const res = await request(app).get('/api/audit-logs');
+
+    expect(res.status).toBe(200);
+    expect(res.body.auditLogs[0].resource_name).toBe(expectedName);
+  });
+
+  it('resolves resource_name to null (not the raw resource_id) when the resolvable row has since been deleted', async () => {
+    const rows = [{
+      id: 1,
+      user_id: 1,
+      action: 'bch_channel.create',
+      resource_type: 'bch_channel',
+      resource_id: 999,
+      details: null,
+      created_at: '2024-01-01'
+    }];
+    // The lookup query runs but returns no matching row -- the channel
+    // was deleted after this audit_logs row was written.
+    mockRowsAndResolution(rows, { bch_channels: [] });
+
+    const res = await request(app).get('/api/audit-logs');
+
+    expect(res.status).toBe(200);
+    expect(res.body.auditLogs[0].resource_name).toBeNull();
+    // The raw id must not leak into resource_name as a fallback.
+    expect(res.body.auditLogs[0].resource_name).not.toBe(999);
+  });
+
+  it('resolves resource_name to null for a resource_type with no meaningful name of its own (e.g. a vendor_channel_grant)', async () => {
+    const rows = [{
+      id: 1,
+      user_id: 1,
+      action: 'vendor_channel_grant_created',
+      resource_type: 'vendor_channel_grant',
+      resource_id: 42,
+      details: null,
+      created_at: '2024-01-01'
+    }];
+    mockRowsAndResolution(rows);
+
+    const res = await request(app).get('/api/audit-logs');
+
+    expect(res.status).toBe(200);
+    expect(res.body.auditLogs[0].resource_name).toBeNull();
+  });
+
+  it('resolves resource_name to null for a row whose resource_id is itself null (e.g. settings.update_branding)', async () => {
+    const rows = [{
+      id: 1,
+      user_id: 1,
+      action: 'settings.update_branding',
+      resource_type: 'settings',
+      resource_id: null,
+      details: null,
+      created_at: '2024-01-01'
+    }];
+    mockRowsAndResolution(rows);
+
+    const res = await request(app).get('/api/audit-logs');
+
+    expect(res.status).toBe(200);
+    expect(res.body.auditLogs[0].resource_name).toBeNull();
+  });
+});
+
+/**
  * Integration tests for `GET /api/audit-logs/export.csv` (Requirement 31
  * Criterion 2, task 53.2).
  *

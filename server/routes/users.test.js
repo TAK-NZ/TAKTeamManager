@@ -635,6 +635,75 @@ describe('GET /api/users projects local member-edit fields (Users-page-action-pa
 });
 
 /**
+ * account-lifecycle-management: `GET /api/users` additionally projects
+ * `account_status` and `username` from the LOCAL `users` row, needed by
+ * the Users page's Suspend/Unsuspend action -- `account_status` drives
+ * the action's icon/label/mode, and `username` is the value
+ * `SuspendAccountDialog`'s type-to-confirm input requires for
+ * `mode="suspend"`. Sourced from the SAME batched query as the other
+ * local-column fields above, never from Authentik's own payload.
+ */
+describe('GET /api/users projects account_status and username (account-lifecycle-management)', () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    app = buildApp();
+  });
+
+  it('attaches account_status and username from the local users row', async () => {
+    authentikService.getUsers.mockResolvedValue({
+      results: [{ pk: 1, username: 'alice-authentik' }],
+      count: 1
+    });
+    pool.query.mockResolvedValue({
+      rows: [{
+        authentik_user_id: 1,
+        local_account_status: 'suspended',
+        local_username: 'alice-local'
+      }]
+    });
+
+    const res = await request(app).get('/api/users');
+
+    expect(res.status).toBe(200);
+    const alice = res.body.users.find((u) => u.pk === 1);
+    expect(alice.account_status).toBe('suspended');
+    expect(alice.username).toBe('alice-local');
+  });
+
+  it('defaults both fields to null for a user absent from the query result rows', async () => {
+    authentikService.getUsers.mockResolvedValue({
+      results: [{ pk: 1, username: 'no-local-row' }],
+      count: 1
+    });
+    pool.query.mockResolvedValue({ rows: [] });
+
+    const res = await request(app).get('/api/users');
+
+    expect(res.status).toBe(200);
+    const user = res.body.users.find((u) => u.pk === 1);
+    expect(user.account_status).toBeNull();
+    expect(user.username).toBeNull();
+  });
+
+  it('the SQL text projects both local columns under their local_ aliases', async () => {
+    authentikService.getUsers.mockResolvedValue({
+      results: [{ pk: 1, username: 'alice' }],
+      count: 1
+    });
+    pool.query.mockResolvedValue({ rows: [] });
+
+    await request(app).get('/api/users');
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    const [sql] = pool.query.mock.calls[0];
+    expect(sql).toMatch(/u\.account_status AS local_account_status/);
+    expect(sql).toMatch(/u\.username AS local_username/);
+  });
+});
+
+/**
  * Users-page-action-parity: `GET /api/users` additionally projects
  * `can_manage`, answering "may THIS caller act on THIS row's own team"
  * (Edit/Transfer/Delete), independent of `DirectoryScopeService`'s

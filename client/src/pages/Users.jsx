@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { PlusIcon, MagnifyingGlassIcon, XMarkIcon } from '@heroicons/react/24/outline'
+import { PlusIcon, MagnifyingGlassIcon, XMarkIcon, ChevronUpIcon, ChevronDownIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import { usersAPI, teamsAPI, configAPI } from '../services/api'
 import FormattedDate, { DATE_PRECISION, TOOLTIP_SIDES } from '../components/FormattedDate'
@@ -11,6 +11,8 @@ import MemberEditRow, {
   DEFAULT_TAK_ROLE_VALUES
 } from '../components/MemberEditRow'
 import TransferMemberDialog from '../components/TransferMemberDialog'
+import SuspendAccountDialog from '../components/SuspendAccountDialog'
+import { describeAccountStatusBadge } from '../utils/accountStatusBadge'
 import { isValidNewUserEmail, extractCallsignSuffixServerError } from '../utils/newUserForm'
 
 /**
@@ -77,6 +79,14 @@ export default function Users({ user }) {
   // The row whose Transfer dialog is open. Null when closed.
   const [transferringUser, setTransferringUser] = useState(null)
 
+  // account-lifecycle-management: the row whose Suspend/Unsuspend
+  // confirmation is open, or null when closed. `{ user, mode }` rather
+  // than just the row, mirroring `TeamDetail.jsx`'s own
+  // `suspendingMember` -- the same `SuspendAccountDialog` serves both
+  // directions, and the row's current `account_status` decides which
+  // one this action opens.
+  const [suspendingUser, setSuspendingUser] = useState(null)
+
   // The Permanently-Delete-User confirmation dialog's state, mirroring
   // `TeamDetail.jsx`'s `removeUserId`/`removeConfirmInput`/`removingUser`.
   const [removeUserId, setRemoveUserId] = useState(null)
@@ -98,6 +108,15 @@ export default function Users({ user }) {
   const [createEmailError, setCreateEmailError] = useState(null)
   const [createError, setCreateError] = useState(null)
   const [creatingUser, setCreatingUser] = useState(false)
+
+  // Sorting by "User" (name) or "Last Login", mirroring TeamDetail.jsx's
+  // own sortField/sortDirection + handleSort/getSortIcon convention
+  // (clicking the active column's header flips direction; clicking a
+  // different column switches to it, ascending). Only these two columns
+  // are sortable -- Unit and Status filtering/sorting are a separate,
+  // not-yet-implemented piece of work.
+  const [sortField, setSortField] = useState('name')
+  const [sortDirection, setSortDirection] = useState('asc')
 
   const fetchUsers = async () => {
     try {
@@ -139,6 +158,49 @@ export default function Users({ user }) {
     user.email?.toLowerCase().includes(searchQuery.toLowerCase()) ||
     user.username?.toLowerCase().includes(searchQuery.toLowerCase())
   )
+
+  // `name` sorts case-insensitively as a string, matching
+  // TeamDetail.jsx's own `filterAndSort`. `last_login` sorts as a
+  // timestamp: an absent/unparseable value (`Date.parse` -> `NaN`) is
+  // treated as the earliest possible time (`-Infinity`) rather than
+  // `NaN` itself, since `NaN` compares false against everything and
+  // would leave a "Never" row's position undefined relative to its
+  // neighbours -- this way "Never" rows sort first ascending, last
+  // descending, consistent with them being the oldest activity.
+  const sortedUsers = sortField
+    ? [...filteredUsers].sort((a, b) => {
+        let aValue
+        let bValue
+        if (sortField === 'last_login') {
+          const aTime = Date.parse(a.last_login)
+          const bTime = Date.parse(b.last_login)
+          aValue = Number.isNaN(aTime) ? -Infinity : aTime
+          bValue = Number.isNaN(bTime) ? -Infinity : bTime
+        } else {
+          aValue = (a[sortField] || '').toLowerCase()
+          bValue = (b[sortField] || '').toLowerCase()
+        }
+
+        if (sortDirection === 'asc') {
+          return aValue < bValue ? -1 : aValue > bValue ? 1 : 0
+        }
+        return aValue > bValue ? -1 : aValue < bValue ? 1 : 0
+      })
+    : filteredUsers
+
+  const handleSort = (field) => {
+    setSortDirection(sortField === field && sortDirection === 'asc' ? 'desc' : 'asc')
+    setSortField(field)
+  }
+
+  const getSortIcon = (field) => {
+    if (sortField !== field) return null
+    return sortDirection === 'asc' ? (
+      <ChevronUpIcon className="h-4 w-4" />
+    ) : (
+      <ChevronDownIcon className="h-4 w-4" />
+    )
+  }
 
   const handleStartEditUser = (targetUser) => {
     setEditingUserId(targetUser.pk)
@@ -262,6 +324,19 @@ export default function Users({ user }) {
     fetchUsers()
   }
 
+  // account-lifecycle-management: opens the Suspend/Unsuspend
+  // confirmation for a row, mirroring `TeamDetail.jsx`'s own
+  // `handleSuspendClick`. `mode` is derived from the row's OWN
+  // `account_status` (falling back to 'active' -- i.e. offer Suspend --
+  // for a row that doesn't carry the field yet), never from a
+  // caller-supplied value.
+  const handleSuspendClick = (targetUser) => {
+    setSuspendingUser({
+      user: targetUser,
+      mode: targetUser.account_status === 'suspended' ? 'unsuspend' : 'suspend'
+    })
+  }
+
   const openCreateDialog = async () => {
     setCreateForm({ email: '', firstName: '', lastName: '', teamId: '' })
     setCreateEmailError(null)
@@ -343,9 +418,17 @@ export default function Users({ user }) {
           <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Users</h1>
           <p className="text-gray-600 dark:text-gray-400">Manage users and their team assignments.</p>
         </div>
-        <button className="btn-primary flex items-center" onClick={openCreateDialog}>
-          <PlusIcon className="h-5 w-5 mr-2" />
-          Create User
+        {/* Mobile tap targets: icon-only below `sm:`, full text restored at
+            `sm:` and up -- matching TeamDetail.jsx's "Add Member" button,
+            this page's own closest equivalent single header action. */}
+        <button
+          className="btn-primary flex items-center justify-center sm:justify-start p-2 sm:px-4 sm:py-2"
+          onClick={openCreateDialog}
+          aria-label="Create User"
+          title="Create User"
+        >
+          <PlusIcon className="h-5 w-5 sm:h-4 sm:w-4 sm:mr-2" aria-hidden="true" />
+          <span className="hidden sm:inline">Create User</span>
         </button>
       </div>
 
@@ -374,17 +457,132 @@ export default function Users({ user }) {
           <div className="text-center py-12">
             <p role="alert" className="text-red-600 dark:text-red-400">{error}</p>
           </div>
-        ) : filteredUsers.length === 0 ? (
+        ) : sortedUsers.length === 0 ? (
           <div className="text-center py-12">
             <p className="text-gray-500 dark:text-gray-400">No users found.</p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
+          <>
+          {/* Bugfix (mobile responsiveness parity with /dashboard,
+              /downloads, /enrollment, /teams): a `sm:hidden` stacked card
+              list PLUS the existing `hidden sm:block overflow-x-auto`
+              table below, mirroring TeamDetail.jsx's Members tab -- same
+              shared `MemberActions` component (`variant="card"` here vs.
+              the table's default `variant="table"`), same
+              `describeAccountStatusBadge` badge, same "wrap MemberEditRow
+              in a one-column mini table" treatment for a row mid-edit. */}
+          <div className="sm:hidden divide-y divide-gray-200 dark:divide-gray-700">
+            {sortedUsers.map((targetUser) => (
+              editingUserId === targetUser.pk ? (
+                <div key={targetUser.pk} className="overflow-x-auto">
+                  <table className="min-w-full">
+                    <tbody>
+                      <MemberEditRow
+                        colSpan={1}
+                        form={memberEditForm}
+                        setForm={setMemberEditForm}
+                        takRoleValues={takRoleValues}
+                        saving={savingMemberEdit}
+                        error={memberEditError}
+                        onSave={() => handleSaveMemberEdit(targetUser)}
+                        onCancel={handleCancelEditUser}
+                      />
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div key={targetUser.pk} className="p-4 space-y-2 text-sm">
+                  <div className="flex items-start gap-3">
+                    <div className="flex-shrink-0 h-10 w-10">
+                      <img className="h-10 w-10 rounded-full" src={targetUser.avatar} alt="" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="font-medium text-gray-900 dark:text-gray-100 break-words">{targetUser.name}</p>
+                      <p className="text-xs text-gray-500 dark:text-gray-400 break-all">{targetUser.email}</p>
+                      <p className="text-xs text-gray-500 dark:text-gray-400">
+                        TAK device certificates: {targetUser.live_certificate_count ?? 0}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+                    <p className="text-gray-500 dark:text-gray-400">
+                      Unit: <span className="text-gray-900 dark:text-gray-100">{targetUser.team_name || 'Not assigned'}</span>
+                    </p>
+                    <p className="text-gray-500 dark:text-gray-400 text-right">
+                      Last login:{' '}
+                      <span className="text-gray-900 dark:text-gray-100">
+                        {targetUser.last_login ? (
+                          <FormattedDate
+                            value={targetUser.last_login}
+                            fallback=""
+                            precision={DATE_PRECISION.DATE}
+                            side={TOOLTIP_SIDES.LEFT}
+                          />
+                        ) : (
+                          'Never'
+                        )}
+                      </span>
+                    </p>
+                  </div>
+                  <div>
+                    <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
+                      targetUser.is_active ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                    }`}>
+                      {targetUser.is_active ? 'Active' : 'Inactive'}
+                    </span>
+                    {describeAccountStatusBadge(targetUser.account_status) && (
+                      <span className={`ml-2 ${describeAccountStatusBadge(targetUser.account_status).className}`}>
+                        {describeAccountStatusBadge(targetUser.account_status).label}
+                      </span>
+                    )}
+                  </div>
+                  {targetUser.local_user_id ? (
+                    <MemberActions
+                      member={{
+                        id: targetUser.local_user_id,
+                        first_name: targetUser.first_name,
+                        last_name: targetUser.last_name,
+                        email: targetUser.email,
+                        username: targetUser.username,
+                        account_status: targetUser.account_status
+                      }}
+                      roleLabel="user"
+                      devicesEnabled={devicesEnabled}
+                      onSuspend={targetUser.account_status !== 'orphaned' ? handleSuspendClick : undefined}
+                      accountStatus={targetUser.account_status}
+                      hasTeam={Boolean(targetUser.team_id) && targetUser.can_manage === true}
+                      disabledReason={
+                        targetUser.team_id
+                          ? "You don't administer this user's team"
+                          : 'This user has no team assignment'
+                      }
+                      onEdit={() => handleStartEditUser(targetUser)}
+                      onResendWelcome={() => handleResendWelcomeClick(targetUser)}
+                      onTransfer={() => setTransferringUser(targetUser)}
+                      onViewDevices={() => setDevicesForUser(targetUser)}
+                      onRemove={() => handleRemoveUser(targetUser)}
+                      variant="card"
+                    />
+                  ) : (
+                    <span className="text-xs text-gray-400 dark:text-gray-500">No local account</span>
+                  )}
+                </div>
+              )
+            ))}
+          </div>
+
+          <div className="hidden sm:block overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
               <thead className="bg-gray-50 dark:bg-gray-700">
                 <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                    User
+                  <th
+                    onClick={() => handleSort('name')}
+                    className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-600"
+                  >
+                    <div className="flex items-center space-x-1">
+                      <span>User</span>
+                      {getSortIcon('name')}
+                    </div>
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     Unit
@@ -392,8 +590,14 @@ export default function Users({ user }) {
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     Status
                   </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                    Last Login
+                  <th
+                    onClick={() => handleSort('last_login')}
+                    className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-600"
+                  >
+                    <div className="flex items-center space-x-1">
+                      <span>Last Login</span>
+                      {getSortIcon('last_login')}
+                    </div>
                   </th>
                   <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     Actions
@@ -401,7 +605,7 @@ export default function Users({ user }) {
                 </tr>
               </thead>
               <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                {filteredUsers.map((targetUser) => (
+                {sortedUsers.map((targetUser) => (
                   editingUserId === targetUser.pk ? (
                     <MemberEditRow
                       key={targetUser.pk}
@@ -456,6 +660,25 @@ export default function Users({ user }) {
                       }`}>
                         {targetUser.is_active ? 'Active' : 'Inactive'}
                       </span>
+                      {/* Bugfix (account-lifecycle-management Requirement
+                          1.11/4.1: /users showed NO indicator distinguishing
+                          a suspended account from an orphaned one -- both
+                          rendered as the SAME plain "Inactive" pill above,
+                          and the only other signal was the suspend action
+                          icon itself changing shape/disappearing, which is
+                          easy to miss and, for 'orphaned', is colour/
+                          icon-only with no text at all. Mirrors
+                          TeamDetail.jsx's identical badge treatment on the
+                          Members/Team Admins tabs -- same shared helper,
+                          same "returns null for 'active', render nothing"
+                          convention. */}
+                      {describeAccountStatusBadge(targetUser.account_status) && (
+                        <div className="mt-1">
+                          <span className={describeAccountStatusBadge(targetUser.account_status).className}>
+                            {describeAccountStatusBadge(targetUser.account_status).label}
+                          </span>
+                        </div>
+                      )}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                       {/* Date_Render_Position 6 (Criteria 2.1, 2.2, 2.3): the
@@ -516,10 +739,22 @@ export default function Users({ user }) {
                             id: targetUser.local_user_id,
                             first_name: targetUser.first_name,
                             last_name: targetUser.last_name,
-                            email: targetUser.email
+                            email: targetUser.email,
+                            username: targetUser.username,
+                            account_status: targetUser.account_status
                           }}
                           roleLabel="user"
                           devicesEnabled={devicesEnabled}
+                          // account-lifecycle-management: omitted entirely
+                          // (no button rendered, matching
+                          // `TeamDetail.jsx`'s own gating) for an
+                          // 'orphaned' row -- there is no Authentik
+                          // identity left to lock/unlock. `hasTeam` below
+                          // already covers whether the button is enabled
+                          // vs. disabled; this covers whether it exists
+                          // at all.
+                          onSuspend={targetUser.account_status !== 'orphaned' ? handleSuspendClick : undefined}
+                          accountStatus={targetUser.account_status}
                           // Users-page-action-parity: a row is only
                           // actionable when it has a team AND the caller
                           // administers that team (or an ancestor of it) --
@@ -551,6 +786,7 @@ export default function Users({ user }) {
               </tbody>
             </table>
           </div>
+          </>
         )}
       </div>
 
@@ -580,6 +816,25 @@ export default function Users({ user }) {
           user={user}
           onClose={() => setTransferringUser(null)}
           onCompleted={handleTransferCompleted}
+        />
+      )}
+
+      {/* account-lifecycle-management: the shared Suspend/Unsuspend
+          confirmation dialog, mirroring TeamDetail.jsx's own single-
+          shared-instance pattern. */}
+      {suspendingUser && (
+        <SuspendAccountDialog
+          mode={suspendingUser.mode}
+          // `suspendingUser.user` is the `member` object MemberActions'
+          // onSuspend was called with -- the constructed object this
+          // page passes it (`{ id: local_user_id, ... }`), NOT the raw
+          // `GET /api/users` row -- so this is `.id`, not
+          // `.local_user_id`.
+          targetUserId={suspendingUser.user.id}
+          targetName={`${suspendingUser.user.first_name || ''} ${suspendingUser.user.last_name || ''}`.trim() || suspendingUser.user.username}
+          targetUsername={suspendingUser.user.username}
+          onClose={() => setSuspendingUser(null)}
+          onCompleted={fetchUsers}
         />
       )}
 

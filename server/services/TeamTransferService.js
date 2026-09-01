@@ -546,8 +546,11 @@ class TeamTransferService {
     // shared by steps 2, 3, and 4.
     //
     // Steps 2 and 3 need `authentik_user_id`; step 4 needs `email`,
-    // `first_name`, and `is_team_device` (Requirement 13.5). Reading the
-    // row once rather than three times costs nothing in failure
+    // `first_name`, `username`, and `is_team_device` (Requirement 13.5).
+    // `username` is read here (not previously) so the notification email
+    // can carry it in the same blue info box `access_request_approved`
+    // uses, matching that template's `{{username}}` variable. Reading
+    // the row once rather than three times costs nothing in failure
     // tolerance: a database failure here would fail each per-step read
     // identically, and steps 2-4 each guard on the result being present,
     // so a missing row skips them individually rather than aborting the
@@ -558,7 +561,7 @@ class TeamTransferService {
 
     try {
       const userResult = await pool.query(
-        `SELECT authentik_user_id, email, first_name, is_team_device
+        `SELECT authentik_user_id, email, first_name, username, is_team_device
            FROM users
           WHERE id = $1`,
         [userId]
@@ -730,6 +733,14 @@ class TeamTransferService {
       // Team's full `name` rather than its prefix, matching those same
       // call sites.
       //
+      // `username` is now passed alongside `team_path`/`callsign` (a
+      // widening of Requirement 13.3's original three-variable set) so
+      // the `team_transfer_completed` template can render the same blue
+      // Team/Username/TAK-Callsign info box `access_request_approved`
+      // uses, keeping the two emails visually aligned. Falls back to
+      // `user.email` on the rare chance `username` is unset, mirroring
+      // `sendApprovalEmail`'s own `username || email` fallback.
+      //
       // The destination chain is re-resolved here rather than carried on
       // the outcome: `TransferOutcome` is a value object of ids that both
       // callers can hand back after their COMMIT, and re-reading `teams`
@@ -750,6 +761,7 @@ class TeamTransferService {
           await emailService.sendEmail(user.email, 'team_transfer_completed', {
             first_name: user.first_name || '',
             team_path: teamPath,
+            username: user.username || user.email,
             callsign
           });
 

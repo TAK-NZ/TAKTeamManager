@@ -242,12 +242,37 @@ router.get('/', authenticateToken, authorize, paginationParams, [
     const resolveUserIds = new Set();
     const channelIds = new Set();
     const accessRequestIds = new Set();
+    // Bugfix (a raw internal id is meaningless to an admin reviewing the
+    // log -- BUG-024 already fixed this for the User column via a JOIN;
+    // this closes the SAME gap for the Resource column's remaining
+    // nameable `resource_type`s): `bch_channel`/`region_channel` rows
+    // (written by `routes/globalChannels.js`), `deployment_channel` rows
+    // (`routes/deploymentChannels.js`), `channel_request` rows
+    // (`routes/channelRequests.js`), and `mou_document` rows
+    // (`routes/mou.js`) all carry a `resource_id` that resolves to a real,
+    // human-readable name -- they just weren't being resolved. Every OTHER
+    // resource_type (`vendor_channel_grant`, `settings`, `config`, `sync`,
+    // `communication`, `bulk_import`, `email_template`, `global_channel`,
+    // etc.) either has no meaningful name to resolve to (a grant/operation
+    // has no "name" of its own) or already carries `resource_id: null` --
+    // those now correctly fall through to '—' below rather than ever
+    // showing their raw id (see the client's matching fallback fix).
+    const bchChannelIds = new Set();
+    const regionChannelIds = new Set();
+    const deploymentChannelIds = new Set();
+    const channelRequestIds = new Set();
+    const mouDocumentIds = new Set();
 
     for (const row of rows) {
       if (row.resource_type === 'team' && row.resource_id) teamIds.add(row.resource_id);
       if (row.resource_type === 'user' && row.resource_id) resolveUserIds.add(row.resource_id);
       if (row.resource_type === 'channel' && row.resource_id) channelIds.add(row.resource_id);
       if (row.resource_type === 'access_request' && row.resource_id) accessRequestIds.add(row.resource_id);
+      if (row.resource_type === 'bch_channel' && row.resource_id) bchChannelIds.add(row.resource_id);
+      if (row.resource_type === 'region_channel' && row.resource_id) regionChannelIds.add(row.resource_id);
+      if (row.resource_type === 'deployment_channel' && row.resource_id) deploymentChannelIds.add(row.resource_id);
+      if (row.resource_type === 'channel_request' && row.resource_id) channelRequestIds.add(row.resource_id);
+      if (row.resource_type === 'mou_document' && row.resource_id) mouDocumentIds.add(row.resource_id);
 
       // Collect user IDs from details JSON
       if (row.details && typeof row.details === 'object') {
@@ -264,6 +289,11 @@ router.get('/', authenticateToken, authorize, paginationParams, [
     const userEmailMap = new Map();
     const channelNameMap = new Map();
     const requestEmailMap = new Map();
+    const bchChannelNameMap = new Map();
+    const regionChannelNameMap = new Map();
+    const deploymentChannelNameMap = new Map();
+    const channelRequestNameMap = new Map();
+    const mouDocumentNameMap = new Map();
 
     if (teamIds.size > 0) {
       const teamResult = await pool.query(
@@ -297,7 +327,52 @@ router.get('/', authenticateToken, authorize, paginationParams, [
       for (const r of reqResult.rows) requestEmailMap.set(r.id, r.requester_email);
     }
 
-    // Enrich rows with resolved names
+    if (bchChannelIds.size > 0) {
+      const bchResult = await pool.query(
+        'SELECT id, display_name FROM bch_channels WHERE id = ANY($1)',
+        [Array.from(bchChannelIds)]
+      );
+      for (const r of bchResult.rows) bchChannelNameMap.set(r.id, r.display_name);
+    }
+
+    if (regionChannelIds.size > 0) {
+      const regionResult = await pool.query(
+        'SELECT id, display_name FROM region_channels WHERE id = ANY($1)',
+        [Array.from(regionChannelIds)]
+      );
+      for (const r of regionResult.rows) regionChannelNameMap.set(r.id, r.display_name);
+    }
+
+    if (deploymentChannelIds.size > 0) {
+      const deploymentResult = await pool.query(
+        'SELECT id, name FROM deployment_channels WHERE id = ANY($1)',
+        [Array.from(deploymentChannelIds)]
+      );
+      for (const r of deploymentResult.rows) deploymentChannelNameMap.set(r.id, r.name);
+    }
+
+    if (channelRequestIds.size > 0) {
+      const channelRequestResult = await pool.query(
+        'SELECT id, custom_suffix FROM channel_requests WHERE id = ANY($1)',
+        [Array.from(channelRequestIds)]
+      );
+      for (const r of channelRequestResult.rows) channelRequestNameMap.set(r.id, r.custom_suffix);
+    }
+
+    if (mouDocumentIds.size > 0) {
+      const mouResult = await pool.query(
+        'SELECT id, title FROM mou_documents WHERE id = ANY($1)',
+        [Array.from(mouDocumentIds)]
+      );
+      for (const r of mouResult.rows) mouDocumentNameMap.set(r.id, r.title);
+    }
+
+    // Enrich rows with resolved names. Every branch's result -- including
+    // the final `else null` -- falls through to res.json unresolved; the
+    // CLIENT decides what to render for a null resource_name ('—'), never
+    // this route, so a resource_type this route doesn't know how to name
+    // (or a resolved id whose row has since been deleted) reads the same
+    // way a genuinely un-nameable one does.
     const enrichedRows = rows.map(row => {
       let resource_name = null;
       const rid = row.resource_id;
@@ -305,6 +380,11 @@ router.get('/', authenticateToken, authorize, paginationParams, [
       else if (row.resource_type === 'user') resource_name = userEmailMap.get(rid) || null;
       else if (row.resource_type === 'channel') resource_name = channelNameMap.get(rid) || null;
       else if (row.resource_type === 'access_request') resource_name = requestEmailMap.get(rid) || (row.details?.requesterEmail ? `Request from ${row.details.requesterEmail}` : null);
+      else if (row.resource_type === 'bch_channel') resource_name = bchChannelNameMap.get(rid) || null;
+      else if (row.resource_type === 'region_channel') resource_name = regionChannelNameMap.get(rid) || null;
+      else if (row.resource_type === 'deployment_channel') resource_name = deploymentChannelNameMap.get(rid) || null;
+      else if (row.resource_type === 'channel_request') resource_name = channelRequestNameMap.get(rid) || null;
+      else if (row.resource_type === 'mou_document') resource_name = mouDocumentNameMap.get(rid) || null;
 
       // Resolve user IDs in details to emails
       let enriched_details = row.details;

@@ -503,7 +503,7 @@ class AuthentikSyncService {
         try {
           // Read the LOCAL authoritative values for this user
           const localResult = await db.query(
-            'SELECT first_name, last_name, tak_role, is_active FROM users WHERE authentik_user_id = $1',
+            'SELECT first_name, last_name, tak_role, is_active, account_status FROM users WHERE authentik_user_id = $1',
             [user.pk]
           );
           const cacheResult = await db.query(
@@ -514,6 +514,170 @@ class AuthentikSyncService {
           if (localResult.rows.length > 0) {
             const local = localResult.rows[0];
             const cache = cacheResult.rows[0] || {};
+
+            // account-lifecycle-management (bugfix -- External_Lock
+            // Detection): this service is otherwise entirely one-directional
+            // for is_active -- LOCAL is authoritative, and any mismatch is
+            // resolved by PATCHing Authentik to match (below). That is
+            // backwards for exactly one case: an admin manually disabling
+            // this account DIRECTLY in Authentik (bypassing
+            // AccountLifecycleService.suspendAccount entirely). Before this
+            // fix, that manual lock was invisible here and was actively
+            // UNDONE on the very next sync, since local `is_active` (still
+            // `true`, unaware of the change) would be pushed back onto
+            // Authentik as `is_active: true` by the push-to-Authentik step
+            // below -- silently re-enabling an account an admin just tried
+            // to lock, with no certificate revocation ever triggered.
+            //
+            // Detected as: Authentik reports `is_active: false` for an
+            // account whose LOCAL `account_status` is still `'active'` --
+            // i.e. this app never suspended it itself (an app-initiated
+            // suspend already sets local `account_status = 'suspended'`
+            // synchronously, before any PATCH is attempted, so that case
+            // never reaches this branch). Deliberately NOT keyed on
+            // `is_team_device` -- Requirement 1's "applies identically to a
+            // human and a Team_Owned_Device" framing applies here too, and
+            // `isTeamDevice`/`user.username` are already in scope from the
+            // upsert above, so no extra query is needed for the revoke
+            // payload shape.
+            //
+            // Response mirrors `AccountLifecycleService.suspendAccount`'s
+            // own local-write + Revoke_Operation shape, and
+            // `reconcileOrphanedAccounts`'s own audit-attribution
+            // convention (`SYSTEM_USER_ID`, not an admin) for a
+            // system-detected transition. `local.is_active`/
+            // `local.account_status` are updated IN PLACE afterward so the
+            // push-to-Authentik comparison immediately below sees the NEW,
+            // already-Authentik-consistent state -- without that, the
+            // stale `local.is_active = true` read above would make
+            // `isActiveChanged` true and re-push `is_active: true`,
+            // undoing the very lock just reflected.
+            //
+            // See the mirror-image External_Unlock Detection branch just
+            // below this one for the reverse direction (Authentik-side
+            // unlock of a locally-suspended account).
+            if (user.is_active === false && local.account_status === 'active') {
+              try {
+                await db.query(
+                  `UPDATE users SET account_status = 'suspended', is_active = false WHERE id = $1`,
+                  [localUserId]
+                );
+                await db.query(
+                  'UPDATE user_cache SET is_active = false WHERE authentik_id = $1',
+                  [String(user.pk)]
+                );
+
+                const revokePayload = isTeamDevice
+                  ? { client_uid: user.username }
+                  : { tak_usernames: [user.username] };
+                await EventPublisher.publishOperation('revoke_tak_certificates', revokePayload, SYSTEM_USER_ID);
+
+                await db.query(
+                  `INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details)
+                   VALUES ($1, $2, $3, $4, $5)`,
+                  [
+                    SYSTEM_USER_ID,
+                    'user.suspended_externally',
+                    'user',
+                    localUserId,
+                    JSON.stringify({ reason: 'authentik_is_active_false' })
+                  ]
+                );
+
+                logger.info(
+                  { authentikUserId: user.pk, localUserId },
+                  'External_Lock Detection: Authentik reports is_active=false for a locally-active account; reflected as account_status=suspended and enqueued certificate revocation'
+                );
+
+                // Keep the in-memory `local` snapshot consistent with what
+                // was just written, so the push-to-Authentik comparison
+                // below does not treat this row as needing a PATCH at all.
+                local.is_active = false;
+                local.account_status = 'suspended';
+              } catch (lockDetectionError) {
+                // Non-fatal, matching every other per-user/per-row
+                // best-effort step in this file: log and continue with the
+                // REST of this user's sync (and every other user in the
+                // batch) rather than aborting. An undetected lock simply
+                // retries on the next sync interval.
+                logger.error(
+                  { err: lockDetectionError, authentikUserId: user.pk, localUserId },
+                  'External_Lock Detection: failed to reflect a detected Authentik-side account lock; will retry on the next sync'
+                );
+              }
+            }
+
+            // External_Unlock Detection: the mirror-image direction. TAK
+            // Team Manager is meant to be the single source of truth, but
+            // an admin unlocking an account directly in Authentik (the
+            // exact reverse of the External_Lock case just above) is a
+            // real, supported workflow this app should recognise rather
+            // than silently ignore or fight -- the whole reason the LOCK
+            // direction is detected at all is "reflect what actually
+            // happened in Authentik", and an unlock is just as real an
+            // event as a lock.
+            //
+            // Detected as: Authentik reports `is_active: true` for an
+            // account whose LOCAL `account_status` is still `'suspended'`
+            // -- i.e. nobody unsuspended it through
+            // `AccountLifecycleService.unsuspendAccount` (that path already
+            // sets local `account_status = 'active'` synchronously before
+            // any PATCH, so it never reaches this branch either).
+            // Deliberately does NOT touch an `'orphaned'` row: `orphaned`
+            // means the Reconciliation_Sweep already found this identity
+            // MISSING from Authentik on a past run, and an `'orphaned'` row
+            // is only ever reachable in THIS loop at all if Authentik's
+            // current fetch returned a user sharing its `authentik_user_id`
+            // -- a distinct, separate re-signup/re-creation situation that
+            // Requirement 5's Account_Reclaim flow owns, not this sync.
+            //
+            // No certificate action here, deliberately mirroring
+            // `AccountLifecycleService.unsuspendAccount`'s OWN behaviour:
+            // unsuspending never restores a previously revoked
+            // certificate, so an externally-detected unsuspend does not
+            // either -- re-enrollment is the only path back to a live one,
+            // exactly as after any other revoke.
+            if (user.is_active === true && local.account_status === 'suspended') {
+              try {
+                await db.query(
+                  `UPDATE users SET account_status = 'active', is_active = true WHERE id = $1`,
+                  [localUserId]
+                );
+                await db.query(
+                  'UPDATE user_cache SET is_active = true WHERE authentik_id = $1',
+                  [String(user.pk)]
+                );
+
+                await db.query(
+                  `INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details)
+                   VALUES ($1, $2, $3, $4, $5)`,
+                  [
+                    SYSTEM_USER_ID,
+                    'user.unsuspended_externally',
+                    'user',
+                    localUserId,
+                    JSON.stringify({ reason: 'authentik_is_active_true' })
+                  ]
+                );
+
+                logger.info(
+                  { authentikUserId: user.pk, localUserId },
+                  'External_Unlock Detection: Authentik reports is_active=true for a locally-suspended account; reflected as account_status=active'
+                );
+
+                // Same reasoning as External_Lock Detection above: keep
+                // the in-memory snapshot consistent with what was just
+                // written, so the push-to-Authentik comparison below sees
+                // no is_active mismatch to re-push.
+                local.is_active = true;
+                local.account_status = 'active';
+              } catch (unlockDetectionError) {
+                logger.error(
+                  { err: unlockDetectionError, authentikUserId: user.pk, localUserId },
+                  'External_Unlock Detection: failed to reflect a detected Authentik-side account unlock; will retry on the next sync'
+                );
+              }
+            }
 
             // Current Authentik values (from the user object we already fetched)
             const authentikAttrs = user.attributes || {};

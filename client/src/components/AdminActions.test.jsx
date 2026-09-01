@@ -106,6 +106,21 @@ describe('AdminActions (mounted)', () => {
     })
   })
 
+  // Bugfix: AdminActions previously ALSO offered a Suspend/Unsuspend
+  // action as a deliberate exception to its "don't duplicate
+  // MemberActions" rule. That exception is reverted -- suspension is an
+  // action on the underlying ACCOUNT, not the admin permission this tab
+  // manages, so it belongs on the Members tab (and /users) exclusively.
+  // This component now accepts no onSuspend/accountStatus props at all;
+  // passing them (as an unrecognized prop) has no rendering effect.
+  it('renders no Suspend/Unsuspend action even when onSuspend-shaped props are passed (reverted exception)', async () => {
+    await mount({ onSuspend: () => {}, accountStatus: 'active' })
+
+    expect(buttonByLabel('Suspend account')).toBeFalsy()
+    expect(buttonByLabel('Unsuspend account')).toBeFalsy()
+    expect(container.querySelectorAll('button')).toHaveLength(1)
+  })
+
   describe('hasTeam=false', () => {
     it('disables the action and shows the disabled reason instead', async () => {
       await mount({ hasTeam: false })

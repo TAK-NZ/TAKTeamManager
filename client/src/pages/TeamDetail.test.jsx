@@ -814,18 +814,22 @@ describe('Suspend/Unsuspend action (account-lifecycle-management)', () => {
     expect(block).toContain("mode: member.account_status === 'suspended' ? 'unsuspend' : 'suspend'")
   })
 
-  it('all 4 MemberActions/AdminActions call sites (Members card+table, Team Admins card+table) pass onSuspend gated on account_status !== "orphaned"', () => {
+  // Bugfix: Suspend/Unsuspend is a MEMBER-tab-only action -- suspension
+  // acts on the underlying account, not the admin permission the Team
+  // Admins tab manages, so only the 2 MemberActions call sites
+  // (Members card+table) pass onSuspend; both AdminActions call sites
+  // (Team Admins card+table) do not.
+  it('the 2 MemberActions call sites (Members card+table) pass onSuspend gated on account_status !== "orphaned"; AdminActions has no onSuspend prop at all', () => {
     const occurrences = source.split("onSuspend={member.account_status !== 'orphaned' ? handleSuspendClick : undefined}").length - 1
-    const adminOccurrences = source.split("onSuspend={admin.account_status !== 'orphaned' ? handleSuspendClick : undefined}").length - 1
     expect(occurrences).toBe(2)
-    expect(adminOccurrences).toBe(2)
+    expect(source).not.toContain("onSuspend={admin.account_status !== 'orphaned' ? handleSuspendClick : undefined}")
+    expect(source).not.toMatch(/<AdminActions[^/]*onSuspend/)
   })
 
-  it('all 4 call sites also pass accountStatus={member.account_status} / accountStatus={admin.account_status}', () => {
+  it('the 2 MemberActions call sites also pass accountStatus={member.account_status}; AdminActions has no accountStatus prop at all', () => {
     const memberOccurrences = source.split('accountStatus={member.account_status}').length - 1
-    const adminOccurrences = source.split('accountStatus={admin.account_status}').length - 1
     expect(memberOccurrences).toBe(2)
-    expect(adminOccurrences).toBe(2)
+    expect(source).not.toContain('accountStatus={admin.account_status}')
   })
 
   it('refreshMembersAfterSuspend refetches members/admins from teamsAPI.getById, matching the refresh pattern used by every other mutation on this page, without refetching channels', () => {
@@ -841,7 +845,7 @@ describe('Suspend/Unsuspend action (account-lifecycle-management)', () => {
     expect(block).not.toContain('channelsAPI.getByTeam')
   })
 
-  it('renders SuspendAccountDialog gated on suspendingMember, wired to its mode/targetUserId/targetName/onClose/onCompleted', () => {
+  it('renders SuspendAccountDialog gated on suspendingMember, wired to its mode/targetUserId/targetName/targetUsername/onClose/onCompleted', () => {
     expect(source).toContain('{suspendingMember && (')
     const index = source.indexOf('{suspendingMember && (')
     const dialogEnd = source.indexOf('\n      )}', index)
@@ -849,6 +853,10 @@ describe('Suspend/Unsuspend action (account-lifecycle-management)', () => {
     expect(block).toContain('<SuspendAccountDialog')
     expect(block).toContain('mode={suspendingMember.mode}')
     expect(block).toContain('targetUserId={suspendingMember.member.id}')
+    // Bugfix (type-to-confirm parity with "Permanently Delete User"/
+    // "Delete Channel"): SuspendAccountDialog's type-to-confirm input
+    // requires the target's username, so this page must supply it.
+    expect(block).toContain('targetUsername={suspendingMember.member.username}')
     expect(block).toContain('onClose={() => setSuspendingMember(null)}')
     expect(block).toContain('onCompleted={refreshMembersAfterSuspend}')
   })
@@ -1934,6 +1942,41 @@ describe('Channels tab actions (bugfix: had no delete-channel or manage-members 
     expect(block).toContain('disabled={savingChannelEdit}')
   })
 
+  // Bugfix (Create Custom Channel dialog had no way to set a
+  // description at creation time -- only via the later "Edit channel"
+  // action): the create dialog now has its own description field,
+  // mirroring the Edit dialog's field.
+  describe('Create Custom Channel dialog description field (bugfix)', () => {
+    it('seeds channelFormData with a description field alongside customSuffix/memberPermissions', () => {
+      expect(source).toContain("const [channelFormData, setChannelFormData] = useState({")
+      const index = source.indexOf('const [channelFormData, setChannelFormData] = useState({')
+      const block = source.slice(index, source.indexOf('})', index))
+      expect(block).toContain("description: ''")
+    })
+
+    it('renders a description textarea inside the Create Custom Channel dialog, bound to channelFormData.description', () => {
+      expect(source).toContain('id="create-channel-title"')
+      const dialogStart = source.indexOf('{showChannelDialog && (')
+      const dialogEnd = source.indexOf('\n      )}', dialogStart)
+      const block = source.slice(dialogStart, dialogEnd)
+      expect(block).toContain('id="createChannelDescription"')
+      expect(block).toContain('value={channelFormData.description}')
+      expect(block).toContain("onChange={(e) => setChannelFormData({...channelFormData, description: e.target.value})}")
+    })
+
+    it('defines handleCreateChannel calling channelsAPI.createCustom with channelFormData.description as the 4th argument', () => {
+      expect(source).toContain('const handleCreateChannel = async (e) => {')
+      const index = source.indexOf('const handleCreateChannel = async (e) => {')
+      const block = source.slice(index, source.indexOf('\n  }', index))
+      expect(block).toContain('await channelsAPI.createCustom(')
+      expect(block).toContain('channelFormData.description')
+    })
+
+    it('resets description alongside customSuffix/memberPermissions on successful creation', () => {
+      expect(source).toContain("setChannelFormData({ customSuffix: '', description: '', memberPermissions: [] })")
+    })
+  })
+
   it('opens ChannelMembersDialog via setManagingMembersChannel(channel) from both usages', () => {
     const block = channelsTabBlock()
     const occurrences = block.split('onClick={() => setManagingMembersChannel(channel)}').length - 1
@@ -1987,6 +2030,48 @@ describe('Channels tab actions (bugfix: had no delete-channel or manage-members 
     const cancelIndex = block.indexOf('setDeletingChannel(null)')
     expect(cancelIndex).toBeGreaterThan(-1)
     expect(block.slice(cancelIndex, cancelIndex + 120)).toContain('setDeleteChannelConfirmInput(\'\')')
+  })
+
+  // Bugfix (consistency with "Permanently Delete User"/"Delete
+  // Channel"): deleting a sub-team now requires typing its own
+  // display_name to confirm -- the plain Cancel/Confirm shape this
+  // dialog originally had understated that this permanently deletes a
+  // team, the same severity class as those two.
+  describe('Delete Sub-Team dialog (bugfix: now type-to-confirm)', () => {
+    it('defines handleDeleteSubTeam calling teamsAPI.delete with deletingSubTeam.id', () => {
+      expect(source).toContain('const handleDeleteSubTeam = async () => {')
+      const index = source.indexOf('const handleDeleteSubTeam = async () => {')
+      const block = source.slice(index, source.indexOf('\n  }', index))
+      expect(block).toContain('await teamsAPI.delete(deletingSubTeam.id)')
+    })
+
+    it('both "Delete sub-team" buttons (card+table) open the dialog via setDeletingSubTeam(subTeam), passing the whole row', () => {
+      const occurrences = source.split('onClick={() => setDeletingSubTeam(subTeam)}').length - 1
+      expect(occurrences).toBe(2)
+    })
+
+    it('renders a type-to-confirm "Delete Sub-Team" dialog requiring the sub-team\'s own display_name/name, gated on deletingSubTeam', () => {
+      expect(source).toContain('{deletingSubTeam && (')
+      const index = source.indexOf('{deletingSubTeam && (')
+      const dialogEnd = source.indexOf('\n      )}', index)
+      const block = source.slice(index, dialogEnd)
+      expect(block).toContain('Delete Sub-Team')
+      expect(block).toContain('{deletingSubTeam.display_name || deletingSubTeam.name}')
+      expect(block).toContain('value={deleteSubTeamConfirmInput}')
+      expect(block).toContain('onChange={(e) => setDeleteSubTeamConfirmInput(e.target.value)}')
+      expect(block).toContain('onClick={handleDeleteSubTeam}')
+      expect(block).toContain('disabled={deletingSubTeamInFlight || deleteSubTeamConfirmInput !== (deletingSubTeam.display_name || deletingSubTeam.name)}')
+      // Cancel must also clear the typed confirmation text, so a re-open
+      // for a different sub-team never starts pre-filled with a stale
+      // value.
+      const cancelIndex = block.indexOf('setDeletingSubTeam(null)')
+      expect(cancelIndex).toBeGreaterThan(-1)
+      expect(block.slice(cancelIndex, cancelIndex + 120)).toContain("setDeleteSubTeamConfirmInput('')")
+    })
+
+    it('no longer references the old bare-id state (deleteSubTeamId) anywhere', () => {
+      expect(source).not.toContain('deleteSubTeamId')
+    })
   })
 
   it('renders ChannelMembersDialog gated on managingMembersChannel, passing the team\'s own members as teamMembers', () => {
