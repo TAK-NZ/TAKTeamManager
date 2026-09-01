@@ -24,56 +24,22 @@ const adminSource = readFileSync(join(__dirname, 'Admin.jsx'), 'utf8')
 // across) so a phrase split over several source lines still matches.
 const normalized = adminSource.replace(/\s+/g, ' ')
 
-// Bugfix (BUG-014): the Colour Mappings / Role Descriptions save handlers
-// previously updated only local React state and never called any API,
-// so an edit appeared to save (the green checkmark) but silently reverted
-// on the next page load. The fix (1) reads from the database-backed
-// GET /api/settings/tak-mappings instead of the legacy env-var-backed
-// GET /api/config/color-mappings, which has no PUT counterpart, and
-// (2) actually calls settingsAPI.updateTakMappings from both save
-// handlers, keyed by config_key via the label->key lookup tables.
-describe('Admin.jsx Colour Mappings / Role Descriptions persistence (BUG-014)', () => {
-  it('reads TAK mappings from the database-backed settings endpoint, not the legacy env-backed one', () => {
-    expect(adminSource).toContain('await settingsAPI.getTakMappings()')
-    // A trailing comment referencing the OLD call site is fine (and present,
-    // explaining the fix); an actual call site is not.
-    expect(adminSource).not.toContain('await configAPI.getColorMappings()')
+// The database-backed Colour Mappings / Role
+// Descriptions tabs (and the settingsAPI.getTakMappings/updateTakMappings
+// wrappers they used) have been removed entirely. These deployments
+// source TAK_COLOR_*/TAK_ROLE_* from a deploy-time env file, so an
+// in-app-editable database override was a second, competing source of
+// truth. Dashboard.jsx/Teams.jsx/TeamDetail.jsx already read the
+// env-backed GET /api/config/color-mappings directly and are unaffected.
+describe('Admin.jsx no longer has a database-backed color/role mapping surface', () => {
+  it('does not call the removed settingsAPI tak-mappings wrappers', () => {
+    expect(adminSource).not.toContain('settingsAPI.getTakMappings')
+    expect(adminSource).not.toContain('settingsAPI.updateTakMappings')
   })
 
-  it('handleSaveColor is async and awaits settingsAPI.updateTakMappings before updating local state', () => {
-    const start = adminSource.indexOf('const handleSaveColor')
-    expect(start).toBeGreaterThan(-1)
-    expect(adminSource.slice(start, start + 40)).toContain('async')
-
-    const nextHandlerStart = adminSource.indexOf('const handleCancelColorEdit', start)
-    const body = adminSource.slice(start, nextHandlerStart)
-    expect(body).toContain('await settingsAPI.updateTakMappings(')
-    expect(body).toContain('colorLabelToConfigKey(')
-    // Local state is updated only after (i.e. later in the source, inside
-    // the same try block) the awaited call -- not standing in for it.
-    const awaitIndex = body.indexOf('await settingsAPI.updateTakMappings(')
-    const stateUpdateIndex = body.indexOf('setOrganizationMappings(')
-    expect(stateUpdateIndex).toBeGreaterThan(awaitIndex)
-  })
-
-  it('handleSaveRole is async and awaits settingsAPI.updateTakMappings before updating local state', () => {
-    const start = adminSource.indexOf('const handleSaveRole')
-    expect(start).toBeGreaterThan(-1)
-    expect(adminSource.slice(start, start + 40)).toContain('async')
-
-    const nextHandlerStart = adminSource.indexOf('const handleCancelRoleEdit', start)
-    const body = adminSource.slice(start, nextHandlerStart)
-    expect(body).toContain('await settingsAPI.updateTakMappings(')
-    expect(body).toContain('roleLabelToConfigKey(')
-    const awaitIndex = body.indexOf('await settingsAPI.updateTakMappings(')
-    const stateUpdateIndex = body.indexOf('setRoleDescriptions(')
-    expect(stateUpdateIndex).toBeGreaterThan(awaitIndex)
-  })
-
-  it('surfaces a save failure rather than swallowing it silently', () => {
-    expect(adminSource).toContain('mappingSaveError')
-    expect(normalized).toContain('Failed to save the colour mapping')
-    expect(normalized).toContain('Failed to save the role description')
+  it('does not render a Colour Mappings or Role Descriptions tab', () => {
+    expect(adminSource).not.toContain('Colour Mappings')
+    expect(adminSource).not.toContain('Role Descriptions')
   })
 })
 

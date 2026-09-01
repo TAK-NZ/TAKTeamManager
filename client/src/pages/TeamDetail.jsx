@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import React from 'react'
 import { useParams, useSearchParams, Link } from 'react-router-dom'
-import { PlusIcon, UsersIcon, UserPlusIcon, ShieldCheckIcon, BuildingOfficeIcon, FolderPlusIcon, SignalIcon, XMarkIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, TrashIcon, PencilIcon, CheckIcon, ArrowLeftOnRectangleIcon, ArrowPathIcon, DevicePhoneMobileIcon } from '@heroicons/react/24/outline'
+import { PlusIcon, UsersIcon, UserPlusIcon, ShieldCheckIcon, BuildingOfficeIcon, FolderPlusIcon, SignalIcon, XMarkIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, TrashIcon, PencilIcon, CheckIcon, ArrowLeftOnRectangleIcon, ArrowPathIcon, DevicePhoneMobileIcon, ArrowUpTrayIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import { teamsAPI, channelsAPI, usersAPI, configAPI, devicesAPI } from '../services/api'
 import api from '../services/api'
@@ -14,6 +14,7 @@ import TransferMemberDialog from '../components/TransferMemberDialog'
 import UserDevicesModal, { useDeviceManagementEnabled } from '../components/UserDevicesModal'
 import TeamDeviceList, { deviceDisplayName } from '../components/TeamDeviceList'
 import AddTeamDeviceDialog from '../components/AddTeamDeviceDialog'
+import BulkImportUsersDialog from '../components/BulkImportUsersDialog'
 import MoreOptionsMenu from '../components/MoreOptionsMenu'
 import { tabAria } from '../components/Tabs'
 import MemberEditRow, {
@@ -356,6 +357,10 @@ export default function TeamDetail({ user, refreshUser }) {
   // (distinct from the Team Devices tab's "Enroll" action on an
   // ALREADY-EXISTING one).
   const [showAddDeviceDialog, setShowAddDeviceDialog] = useState(false)
+  // More Options -> "Import Users", opens the shared
+  // team-scoped CSV bulk-import dialog with this team as the default
+  // target.
+  const [showBulkImportDialog, setShowBulkImportDialog] = useState(false)
   // Bumped after a successful AddTeamDeviceDialog creation and used as
   // `TeamDeviceList`'s `key`, forcing a remount (and therefore a fresh
   // `GET /api/devices/team/:teamId` fetch) so the newly created device
@@ -1014,6 +1019,21 @@ export default function TeamDetail({ user, refreshUser }) {
     setAdmins((prev) => prev.map(mergeRow))
   }
 
+  // Re-fetches the member list after a successful
+  // bulk CSV import, matching every other member-mutating action's own
+  // refresh pattern on this page.
+  const refreshMembers = async () => {
+    try {
+      const teamResponse = await teamsAPI.getById(team.id)
+      const allMembers = teamResponse.data.members || []
+      setMembers(allMembers.filter(m => m.role === 'member' || m.role === 'inherited' || m.role === 'admin'))
+      setAdmins(allMembers.filter(m => m.role === 'admin'))
+      window.dispatchEvent(new CustomEvent('userAssignmentChanged'))
+    } catch (error) {
+      console.error('Failed to refresh members after bulk import:', error)
+    }
+  }
+
   // Requirements 11.13, 11.16, 13.2, 13.3, 13.4, 13.6, 14.2, 14.3 (task
   // 33.2): submits the inline edit form's current values to
   // `PATCH /api/teams/:teamId/members/:userId`. Email is never included
@@ -1575,6 +1595,15 @@ export default function TeamDetail({ user, refreshUser }) {
                     onClick: () => setShowChannelDialog(true),
                     disabled: channels.length >= 3,
                     title: channels.length >= 3 ? 'Maximum 3 channels allowed' : 'Create custom channel'
+                  },
+                  // Bulk CSV import scoped to this
+                  // team -- the operator never types a team id, since
+                  // this action already knows which team it's on.
+                  {
+                    key: 'import-users',
+                    label: 'Import Users',
+                    icon: ArrowUpTrayIcon,
+                    onClick: () => setShowBulkImportDialog(true)
                   }
                 ]}
               />
@@ -3829,6 +3858,18 @@ export default function TeamDetail({ user, refreshUser }) {
           allTeams={allTeams}
           onClose={() => setShowAddDeviceDialog(false)}
           onCreated={() => setDeviceListVersion((version) => version + 1)}
+        />
+      )}
+
+      {/* More Options -> "Import Users" -- the
+          team-scoped CSV bulk-import dialog, defaulting every row's
+          target team to this team. */}
+      {showBulkImportDialog && (
+        <BulkImportUsersDialog
+          defaultTeamId={team.id}
+          title={`Import Users into ${team.name}`}
+          onClose={() => setShowBulkImportDialog(false)}
+          onImported={refreshMembers}
         />
       )}
 

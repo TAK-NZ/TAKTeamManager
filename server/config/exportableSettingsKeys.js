@@ -62,41 +62,19 @@
  * given the archive is Global_Manager-only to produce, and the operational
  * cost of losing path configuration on every export/import round trip.
  *
- * Every `tak_color_*`/`tak_role_*` key (task 54.1's seeded rows) and the
- * `organization_display_name`/`organization_logo_path` branding keys
- * (task 54.2's seeded rows) are INCLUDED: none of these are secret-shaped,
- * all are exactly the kind of "branding settings, color/role mappings"
- * content Requirement 32.5 names as what the export SHOULD contain.
+ * The `organization_display_name`/`organization_logo_path` branding keys
+ * (task 54.2's seeded rows) are INCLUDED: neither is secret-shaped, and
+ * both are exactly the kind of "branding settings" content Requirement
+ * 32.5 names as what the export SHOULD contain.
+ *
+ * `tak_color_*`/`tak_role_*` keys are NOT here: the database-backed
+ * color/role mapping surface was removed entirely (these
+ * deployments source `TAK_COLOR_*`/`TAK_ROLE_*` from a deploy-time env
+ * file, not an in-app-editable database row), so there is no longer any
+ * `system_config` row of that shape to export or restore.
  */
 
 const systemConfigKeys = [
-  // TAK color mappings (task 54.1 seed migration
-  // `1786790000000_seed-tak-color-role-system-config.cjs`).
-  'tak_color_yellow',
-  'tak_color_cyan',
-  'tak_color_green',
-  'tak_color_red',
-  'tak_color_purple',
-  'tak_color_orange',
-  'tak_color_blue',
-  'tak_color_magenta',
-  'tak_color_white',
-  'tak_color_maroon',
-  'tak_color_dark_blue',
-  'tak_color_teal',
-  'tak_color_dark_green',
-  'tak_color_brown',
-
-  // TAK role descriptions (same task 54.1 seed migration).
-  'tak_role_team_member',
-  'tak_role_team_lead',
-  'tak_role_sniper',
-  'tak_role_medic',
-  'tak_role_forward_observer',
-  'tak_role_rto',
-  'tak_role_k9',
-  'tak_role_hq',
-
   // TAK Server integration settings (task 54.3). `tak_server_p12_passphrase`
   // is deliberately NOT in this list -- see header comment.
   'tak_server_url',

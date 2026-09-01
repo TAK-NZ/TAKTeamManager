@@ -197,22 +197,26 @@ describe('operationSchemas structure', () => {
 
 /**
  * Feature device-management, Requirements 12.2/12.3 (task 19.7): the
- * `revoke_tak_certificates`-SPECIFIC accept/reject behaviour of its two
+ * `revoke_tak_certificates`-SPECIFIC accept/reject behaviour of its
  * mutually exclusive discriminators, driven through the real
  * `SyncWorker.validatePayloadSchema`.
  *
  * Distinct from the generic `exactlyOneOf` well-formedness case in
  * `describe('operationSchemas structure')` above, which only checks that every
  * entry DECLARING discriminators declares them in a legal shape. What matters
- * for this feature is what the validator DOES with the two shapes:
+ * for this feature is what the validator DOES with the three shapes:
  *
- *   - the new device-scoped `{ client_uid }` payload validates (12.2), and
+ *   - the device-scoped `{ client_uid }` payload validates (12.2), and
  *   - the pre-existing user-scoped `{ tak_usernames }` payload STILL validates,
  *     so this feature widened the contract rather than replacing it and the
  *     three pre-existing call sites keep working (12.3, main-spec 26.6/26.7);
- *   - a payload carrying BOTH is ambiguous about what to revoke, and one
- *     carrying NEITHER identifies nothing, so both are rejected up front
- *     instead of being silently resolved by the handler's branch order.
+ *   - cert-expiry-notifications Requirement 8.2 (task 9.3): the newest
+ *     `{ cert_ids }` payload (this feature's Superseding_Revoke) also
+ *     validates, on the SAME terms;
+ *   - a payload carrying more than one of the three is ambiguous about what to
+ *     revoke, and one carrying none identifies nothing, so both are rejected
+ *     up front instead of being silently resolved by the handler's branch
+ *     order.
  *
  * `validatePayloadSchema` reads only its two arguments and the schema map (no
  * instance state), but it is invoked on a real instance here so the production
@@ -226,14 +230,19 @@ describe('revoke_tak_certificates payload validation (12.2, 12.3)', () => {
     validate = (payload) => worker.validatePayloadSchema('revoke_tak_certificates', payload);
   });
 
-  it('declares the two discriminators (and no unconditionally required field)', () => {
+  it('declares the three discriminators (and no unconditionally required field)', () => {
     const schema = operationSchemas.revoke_tak_certificates;
 
-    // Neither shape's key may be listed as unconditionally required: doing so
-    // would make the OTHER shape permanently invalid, which is exactly how the
-    // device-scoped addition would break the user-scoped call sites (12.3).
+    // No shape's key may be listed as unconditionally required: doing so
+    // would make the OTHER shapes permanently invalid, which is exactly how
+    // the device-scoped and cert_ids additions would break the user-scoped
+    // call sites (12.3).
     expect(schema.requiredFields).toBeUndefined();
-    expect(schema.exactlyOneOf).toEqual({ client_uid: 'string', tak_usernames: 'object' });
+    expect(schema.exactlyOneOf).toEqual({
+      client_uid: 'string',
+      tak_usernames: 'object',
+      cert_ids: 'object'
+    });
     expect(schema.optionalFields).toEqual({ target_user_id: 'number' });
   });
 
@@ -243,14 +252,18 @@ describe('revoke_tak_certificates payload validation (12.2, 12.3)', () => {
       ['a device-scoped payload without the optional target_user_id', { client_uid: 'ANDROID-842f08e120efdbe3' }],
       ['the pre-existing user-scoped payload, unchanged', { tak_usernames: ['alice'] }],
       ['a user-scoped payload carrying the optional target_user_id', { tak_usernames: ['alice'], target_user_id: 42 }],
-      ['a user-scoped payload with several usernames', { tak_usernames: ['alice', 'bob'] }]
+      ['a user-scoped payload with several usernames', { tak_usernames: ['alice', 'bob'] }],
+      // cert-expiry-notifications Requirement 8.2 (task 9.3): the
+      // Superseding_Revoke shape.
+      ['a cert_ids payload naming a single superseded certificate', { cert_ids: [4242] }],
+      ['a cert_ids payload naming several certificates, carrying the optional target_user_id', { cert_ids: [1, 2, 3], target_user_id: 42 }]
     ])('%s', (_label, payload) => {
       expect(validate(payload)).toEqual({ valid: true });
     });
   });
 
   describe('rejects', () => {
-    it('a payload carrying BOTH discriminators, naming both in the reason', () => {
+    it('a payload carrying BOTH client_uid and tak_usernames, naming both in the reason', () => {
       const result = validate({
         client_uid: 'ANDROID-842f08e120efdbe3',
         tak_usernames: ['alice'],
@@ -261,6 +274,13 @@ describe('revoke_tak_certificates payload validation (12.2, 12.3)', () => {
       expect(result.reason).toContain('exactly one');
       expect(result.reason).toContain('client_uid');
       expect(result.reason).toContain('tak_usernames');
+    });
+
+    it('a payload carrying BOTH cert_ids and client_uid', () => {
+      const result = validate({ client_uid: 'ANDROID-842f08e120efdbe3', cert_ids: [1] });
+
+      expect(result.valid).toBe(false);
+      expect(result.reason).toContain('exactly one');
     });
 
     it.each([
@@ -275,7 +295,8 @@ describe('revoke_tak_certificates payload validation (12.2, 12.3)', () => {
 
     it.each([
       ['a numeric client_uid', { client_uid: 42 }],
-      ['a string tak_usernames (the un-arrayed single-username mistake)', { tak_usernames: 'alice' }]
+      ['a string tak_usernames (the un-arrayed single-username mistake)', { tak_usernames: 'alice' }],
+      ['a string cert_ids (the un-arrayed single-id mistake)', { cert_ids: '4242' }]
     ])('%s, whose present discriminator has the wrong type', (_label, payload) => {
       const result = validate(payload);
 

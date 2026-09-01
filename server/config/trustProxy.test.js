@@ -1,8 +1,8 @@
 /**
  * Tests for `getTrustProxyHops` (server/config/trustProxy.js), which
- * governs Express's `trust proxy` setting -- the fix for BUGS.md
- * NOTE-001 (req.ip collapsing onto a single shared bucket for every
- * `req.ip`-keyed rate limiter once deployed behind the production ALB).
+ * governs Express's `trust proxy` setting -- the fix for
+ * req.ip collapsing onto a single shared bucket for every
+ * `req.ip`-keyed rate limiter once deployed behind the production ALB.
  *
  * Mirrors `getRevokeMaxCerts`'s clamp-to-a-usable-positive-value
  * convention in `server/config/__tests__/deviceMgmt.test.js`: an unset,
@@ -16,7 +16,7 @@
 
 const { getTrustProxyHops } = require('./trustProxy');
 
-describe('getTrustProxyHops (BUGS.md NOTE-001)', () => {
+describe('getTrustProxyHops', () => {
   it('defaults to 0 when TRUSTED_PROXY_HOPS is unset', () => {
     expect(getTrustProxyHops({})).toBe(0);
     expect(getTrustProxyHops({ TRUSTED_PROXY_HOPS: undefined })).toBe(0);

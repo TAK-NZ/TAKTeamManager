@@ -4,6 +4,7 @@ import toast from 'react-hot-toast'
 import { devicesAPI } from '../services/api'
 import FormattedDate, { DATE_PRECISION } from '../components/FormattedDate'
 import MultipleCertificateWarning from '../components/MultipleCertificateWarning'
+import { DeviceExpiryLine } from '../components/DeviceListRow'
 import TransferMemberDialog from '../components/TransferMemberDialog'
 import SuspendAccountDialog from '../components/SuspendAccountDialog'
 import EnrollmentView from './EnrollmentView'
@@ -299,6 +300,7 @@ export default function Devices({ user }) {
                     <p className="text-xs text-gray-500 dark:text-gray-400">{device.takRole || 'Team Member'}</p>
                   </div>
                   <MultipleCertificateWarning count={device.liveCertificateCount} />
+                  <DeviceExpiryLine expiresAt={device.expiresAt} />
                   <DeviceActions
                     device={device}
                     onEdit={handleStartEdit}
@@ -374,6 +376,7 @@ export default function Devices({ user }) {
                         </div>
                       )}
                       <MultipleCertificateWarning count={device.liveCertificateCount} className="mt-1" />
+                      <DeviceExpiryLine expiresAt={device.expiresAt} />
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-gray-100">
                       {device.teamName || 'Not assigned'}

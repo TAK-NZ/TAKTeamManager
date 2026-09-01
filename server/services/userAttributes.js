@@ -364,10 +364,19 @@ class UserAttributesService {
         if (attributes) {
           await this.updateUserAttributes(user.authentik_user_id, attributes);
           
-          // Update user cache
+          // Update user cache. `tak_role` is deliberately NOT included
+          // here. `computeCallsignAttributes` returns a hardcoded
+          // `role: 'Team Member'` -- role is not team-derived,
+          // so writing it into `user_cache.tak_role` for every user in
+          // the subtree clobbered each user's REAL role with that
+          // placeholder value. Every other caller of
+          // `generateCallsign`/`computeCallsignAttributes` in this
+          // codebase (e.g. `server/routes/teams.js`) already omits
+          // `tak_role` from its own `user_cache` UPDATE for exactly this
+          // reason -- this was the one outlier.
           await pool.query(
-            'UPDATE user_cache SET tak_callsign = $1, tak_color = $2, tak_role = $3 WHERE authentik_id = $4',
-            [attributes.callsign, attributes.color, attributes.role, user.authentik_user_id]
+            'UPDATE user_cache SET tak_callsign = $1, tak_color = $2 WHERE authentik_id = $3',
+            [attributes.callsign, attributes.color, user.authentik_user_id]
           );
         }
       }

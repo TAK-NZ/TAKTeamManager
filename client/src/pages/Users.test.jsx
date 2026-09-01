@@ -66,6 +66,14 @@ vi.mock('../services/api', () => ({
     getUserDevices: vi.fn(),
     revokeUserDevice: vi.fn(),
     revokeMyDevice: vi.fn()
+  },
+  // `Users.jsx` reaches this only through the "Import
+  // Users" button's `BulkImportUsersDialog`, mounted only once opened --
+  // but the import itself is hoisted at module load regardless, so both
+  // methods are present even where a given test never opens the dialog.
+  bulkImportAPI: {
+    previewUsers: vi.fn(),
+    importUsers: vi.fn()
   }
 }))
 
@@ -1011,11 +1019,11 @@ describe('Users Status column renders describeAccountStatusBadge (bugfix)', () =
 
 // ══════════════════════════════════════════════════════════════════════════
 // Users-page-action-parity: the "Create User" button, previously dead (no
-// `onClick` at all -- BUG-026), now opens a working dialog that collects a
+// `onClick` at all), now opens a working dialog that collects a
 // target team (this page has none in scope) before calling
 // `usersAPI.createAndAdd`.
 // ══════════════════════════════════════════════════════════════════════════
-describe('Users "Create User" dialog (Users-page-action-parity, fixes BUG-026)', () => {
+describe('Users "Create User" dialog (Users-page-action-parity)', () => {
   let container
   let root
 
@@ -1062,7 +1070,7 @@ describe('Users "Create User" dialog (Users-page-action-parity, fixes BUG-026)',
     })
   }
 
-  it('has a working onClick handler that opens a dialog with a team picker (fixes BUG-026)', async () => {
+  it('has a working onClick handler that opens a dialog with a team picker', async () => {
     teamsAPI.getMyTeams.mockResolvedValue({
       data: { teams: [{ id: 5, name: 'Bravo Team', display_name: 'Bravo Team' }] }
     })

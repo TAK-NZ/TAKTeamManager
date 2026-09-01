@@ -26,10 +26,10 @@ const router = express.Router();
  * Authorization is enforced centrally by `authorize.js` via the
  * Permission_Registry's `audit_log:read` entry (resolved through
  * `roleDefaults.global_manager: ['*']`), matching the pattern already
- * used by every other Global_Manager-only route file (`vendorChannels.js`,
- * `deploymentChannels.js`) -- no inline `is_global_manager` check is
- * duplicated here (Requirement 31 Criterion 4: not exposed to a team
- * admin who is not also a Global_Manager).
+ * used by every other Global_Manager-only route file -- no inline
+ * `is_global_manager` check is duplicated here (Requirement 31
+ * Criterion 4: not exposed to a team admin who is not also a
+ * Global_Manager).
  *
  * `buildAuditLogFilters` is exported alongside the router, and is reused
  * unchanged by `GET /api/audit-logs/export.csv` below (Requirement 31
@@ -54,21 +54,19 @@ const router = express.Router();
  * whose `resource_id` refers to a `teams.id` row. Requirement 31
  * Criterion 1's "an associated team (via `resource_id` where
  * `resource_type` indicates a team-scoped resource)" is deliberately NOT
- * "every `resource_type` value" -- e.g. `vendor_channel_grant` rows
- * (written by `VendorChannelService`) have a `resource_id` that refers to
- * a `vendor_channel_grants.id`, not a team, so a `teamId` filter must not
- * match those rows even if their `resource_id` happens to collide
- * numerically with a team id.
+ * "every `resource_type` value" -- e.g. `bch_channel`/`region_channel`
+ * rows have a `resource_id` that refers to their own table, not a team,
+ * so a `teamId` filter must not match those rows even if their
+ * `resource_id` happens to collide numerically with a team id.
  *
  * `'team'` covers the direct team resource itself (e.g. a future
  * team-lifecycle audit event); `'channel'` covers a team-scoped
  * `channels` row (distinct from the non-team-scoped
- * `vendor_channel`/`vendor_channel_grant`/`deployment_channel`/
  * `bch_channel`/`region_channel` resource types), since a channel's
- * `resource_id` can be resolved back to the owning team via
- * `channels.team_id` -- callers filtering by `teamId` are asking "what
- * happened to/within this team", which includes actions on that team's
- * channels.
+ * `resource_id` can be resolved back to the owning team
+ * via `channels.team_id` -- callers filtering by `teamId` are asking
+ * "what happened to/within this team", which includes actions on that
+ * team's channels.
  */
 const TEAM_SCOPED_RESOURCE_TYPES = ['team', 'channel'];
 
@@ -243,25 +241,19 @@ router.get('/', authenticateToken, authorize, paginationParams, [
     const channelIds = new Set();
     const accessRequestIds = new Set();
     // Bugfix (a raw internal id is meaningless to an admin reviewing the
-    // log -- BUG-024 already fixed this for the User column via a JOIN;
+    // log -- this was already fixed for the User column via a JOIN;
     // this closes the SAME gap for the Resource column's remaining
     // nameable `resource_type`s): `bch_channel`/`region_channel` rows
-    // (written by `routes/globalChannels.js`), `deployment_channel` rows
-    // (`routes/deploymentChannels.js`), `channel_request` rows
-    // (`routes/channelRequests.js`), and `mou_document` rows
-    // (`routes/mou.js`) all carry a `resource_id` that resolves to a real,
-    // human-readable name -- they just weren't being resolved. Every OTHER
-    // resource_type (`vendor_channel_grant`, `settings`, `config`, `sync`,
+    // (written by `routes/globalChannels.js`) carry a `resource_id` that
+    // resolves to a real, human-readable name -- they just weren't being
+    // resolved. Every OTHER resource_type (`settings`, `config`, `sync`,
     // `communication`, `bulk_import`, `email_template`, `global_channel`,
-    // etc.) either has no meaningful name to resolve to (a grant/operation
-    // has no "name" of its own) or already carries `resource_id: null` --
+    // etc.) either has no meaningful name to resolve to (an operation has
+    // no "name" of its own) or already carries `resource_id: null` --
     // those now correctly fall through to '—' below rather than ever
     // showing their raw id (see the client's matching fallback fix).
     const bchChannelIds = new Set();
     const regionChannelIds = new Set();
-    const deploymentChannelIds = new Set();
-    const channelRequestIds = new Set();
-    const mouDocumentIds = new Set();
 
     for (const row of rows) {
       if (row.resource_type === 'team' && row.resource_id) teamIds.add(row.resource_id);
@@ -270,9 +262,6 @@ router.get('/', authenticateToken, authorize, paginationParams, [
       if (row.resource_type === 'access_request' && row.resource_id) accessRequestIds.add(row.resource_id);
       if (row.resource_type === 'bch_channel' && row.resource_id) bchChannelIds.add(row.resource_id);
       if (row.resource_type === 'region_channel' && row.resource_id) regionChannelIds.add(row.resource_id);
-      if (row.resource_type === 'deployment_channel' && row.resource_id) deploymentChannelIds.add(row.resource_id);
-      if (row.resource_type === 'channel_request' && row.resource_id) channelRequestIds.add(row.resource_id);
-      if (row.resource_type === 'mou_document' && row.resource_id) mouDocumentIds.add(row.resource_id);
 
       // Collect user IDs from details JSON
       if (row.details && typeof row.details === 'object') {
@@ -291,9 +280,6 @@ router.get('/', authenticateToken, authorize, paginationParams, [
     const requestEmailMap = new Map();
     const bchChannelNameMap = new Map();
     const regionChannelNameMap = new Map();
-    const deploymentChannelNameMap = new Map();
-    const channelRequestNameMap = new Map();
-    const mouDocumentNameMap = new Map();
 
     if (teamIds.size > 0) {
       const teamResult = await pool.query(
@@ -343,30 +329,6 @@ router.get('/', authenticateToken, authorize, paginationParams, [
       for (const r of regionResult.rows) regionChannelNameMap.set(r.id, r.display_name);
     }
 
-    if (deploymentChannelIds.size > 0) {
-      const deploymentResult = await pool.query(
-        'SELECT id, name FROM deployment_channels WHERE id = ANY($1)',
-        [Array.from(deploymentChannelIds)]
-      );
-      for (const r of deploymentResult.rows) deploymentChannelNameMap.set(r.id, r.name);
-    }
-
-    if (channelRequestIds.size > 0) {
-      const channelRequestResult = await pool.query(
-        'SELECT id, custom_suffix FROM channel_requests WHERE id = ANY($1)',
-        [Array.from(channelRequestIds)]
-      );
-      for (const r of channelRequestResult.rows) channelRequestNameMap.set(r.id, r.custom_suffix);
-    }
-
-    if (mouDocumentIds.size > 0) {
-      const mouResult = await pool.query(
-        'SELECT id, title FROM mou_documents WHERE id = ANY($1)',
-        [Array.from(mouDocumentIds)]
-      );
-      for (const r of mouResult.rows) mouDocumentNameMap.set(r.id, r.title);
-    }
-
     // Enrich rows with resolved names. Every branch's result -- including
     // the final `else null` -- falls through to res.json unresolved; the
     // CLIENT decides what to render for a null resource_name ('—'), never
@@ -382,9 +344,6 @@ router.get('/', authenticateToken, authorize, paginationParams, [
       else if (row.resource_type === 'access_request') resource_name = requestEmailMap.get(rid) || (row.details?.requesterEmail ? `Request from ${row.details.requesterEmail}` : null);
       else if (row.resource_type === 'bch_channel') resource_name = bchChannelNameMap.get(rid) || null;
       else if (row.resource_type === 'region_channel') resource_name = regionChannelNameMap.get(rid) || null;
-      else if (row.resource_type === 'deployment_channel') resource_name = deploymentChannelNameMap.get(rid) || null;
-      else if (row.resource_type === 'channel_request') resource_name = channelRequestNameMap.get(rid) || null;
-      else if (row.resource_type === 'mou_document') resource_name = mouDocumentNameMap.get(rid) || null;
 
       // Resolve user IDs in details to emails
       let enriched_details = row.details;

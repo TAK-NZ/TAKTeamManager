@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react'
-import { PlusIcon, MagnifyingGlassIcon, XMarkIcon, ChevronUpIcon, ChevronDownIcon } from '@heroicons/react/24/outline'
+import { PlusIcon, MagnifyingGlassIcon, XMarkIcon, ChevronUpIcon, ChevronDownIcon, ArrowUpTrayIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import { usersAPI, teamsAPI, configAPI } from '../services/api'
 import FormattedDate, { DATE_PRECISION, TOOLTIP_SIDES } from '../components/FormattedDate'
 import UserDevicesModal, { useDeviceManagementEnabled } from '../components/UserDevicesModal'
+import BulkImportUsersDialog from '../components/BulkImportUsersDialog'
 import MemberActions from '../components/MemberActions'
 import MemberEditRow, {
   getInitialMemberEditForm,
@@ -65,6 +66,11 @@ export default function Users({ user }) {
   // flag is on, and that flag is never exposed through /api/config/public
   // (Requirement 1.4), so the affordance is gated on the reachability probe.
   const devicesEnabled = useDeviceManagementEnabled()
+
+  // "Import Users" -- the global CSV bulk-import
+  // dialog, with no default target team (each row's own `teamId` column
+  // decides), unlike TeamDetail.jsx's team-scoped entry point.
+  const [showBulkImportDialog, setShowBulkImportDialog] = useState(false)
 
   // Users-page-action-parity: the row currently open for inline edit
   // (First Name/Last Name/TAK Role/Callsign Suffix), mirroring
@@ -421,16 +427,34 @@ export default function Users({ user }) {
         {/* Mobile tap targets: icon-only below `sm:`, full text restored at
             `sm:` and up -- matching TeamDetail.jsx's "Add Member" button,
             this page's own closest equivalent single header action. */}
-        <button
-          className="btn-primary flex items-center justify-center sm:justify-start p-2 sm:px-4 sm:py-2"
-          onClick={openCreateDialog}
-          aria-label="Create User"
-          title="Create User"
-        >
-          <PlusIcon className="h-5 w-5 sm:h-4 sm:w-4 sm:mr-2" aria-hidden="true" />
-          <span className="hidden sm:inline">Create User</span>
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button
+            className="btn-secondary flex items-center justify-center sm:justify-start p-2 sm:px-4 sm:py-2"
+            onClick={() => setShowBulkImportDialog(true)}
+            aria-label="Import Users"
+            title="Import Users"
+          >
+            <ArrowUpTrayIcon className="h-5 w-5 sm:h-4 sm:w-4 sm:mr-2" aria-hidden="true" />
+            <span className="hidden sm:inline">Import Users</span>
+          </button>
+          <button
+            className="btn-primary flex items-center justify-center sm:justify-start p-2 sm:px-4 sm:py-2"
+            onClick={openCreateDialog}
+            aria-label="Create User"
+            title="Create User"
+          >
+            <PlusIcon className="h-5 w-5 sm:h-4 sm:w-4 sm:mr-2" aria-hidden="true" />
+            <span className="hidden sm:inline">Create User</span>
+          </button>
+        </div>
       </div>
+
+      {showBulkImportDialog && (
+        <BulkImportUsersDialog
+          onClose={() => setShowBulkImportDialog(false)}
+          onImported={fetchUsers}
+        />
+      )}
 
       {/* Search */}
       <div className="card">

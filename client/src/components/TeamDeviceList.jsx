@@ -4,6 +4,7 @@ import toast from 'react-hot-toast'
 import { devicesAPI } from '../services/api'
 import FormattedDate, { DATE_PRECISION } from './FormattedDate'
 import MultipleCertificateWarning from './MultipleCertificateWarning'
+import { DeviceExpiryLine } from './DeviceListRow'
 import TransferMemberDialog from './TransferMemberDialog'
 import SuspendAccountDialog from './SuspendAccountDialog'
 import { describeAccountStatusBadge } from '../utils/accountStatusBadge'
@@ -644,6 +645,7 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
                   Added <FormattedDate value={device.createdAt} fallback="Unknown" precision={DATE_PRECISION.DATE} />
                 </p>
                 <MultipleCertificateWarning count={device.liveCertificateCount} />
+                <DeviceExpiryLine expiresAt={device.expiresAt} />
                 <DeviceActions
                   device={device}
                   onEdit={handleStartEdit}
@@ -717,6 +719,7 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
                           </div>
                         )}
                         <MultipleCertificateWarning count={device.liveCertificateCount} className="mt-1" />
+                        <DeviceExpiryLine expiresAt={device.expiresAt} />
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm">
                         <p className="text-gray-900 dark:text-gray-100">{device.callsign || '-'}</p>

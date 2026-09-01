@@ -43,6 +43,7 @@ jest.mock('../services/BulkImportService', () => {
 
   return {
     importUsers: jest.fn(),
+    previewUsers: jest.fn(),
     importTeams: jest.fn(),
     BulkImportAuthorizationError
   };
@@ -87,9 +88,23 @@ describe('POST /api/bulk-import/users', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual(serviceResult);
     expect(BulkImportService.importUsers).toHaveBeenCalledTimes(1);
-    const [bufferArg, userArg] = BulkImportService.importUsers.mock.calls[0];
+    const [bufferArg, userArg, optionsArg] = BulkImportService.importUsers.mock.calls[0];
     expect(Buffer.isBuffer(bufferArg)).toBe(true);
     expect(userArg).toEqual(mockUser);
+    expect(optionsArg).toEqual({ defaultTeamId: null, rowNumbers: null });
+  });
+
+  it('passes through an uploaded teamId field as defaultTeamId and a rowNumbers field as a parsed array', async () => {
+    BulkImportService.importUsers.mockResolvedValue({ successCount: 0, failureCount: 0, results: [] });
+
+    await request(app)
+      .post('/api/bulk-import/users')
+      .field('teamId', '7')
+      .field('rowNumbers', JSON.stringify([1, 3]))
+      .attach('csv', Buffer.from('email,firstName,lastName,teamId\n'), { filename: 'users.csv', contentType: 'text/csv' });
+
+    const [, , optionsArg] = BulkImportService.importUsers.mock.calls[0];
+    expect(optionsArg).toEqual({ defaultTeamId: '7', rowNumbers: [1, 3] });
   });
 
   it('permits a team-admin (non-Global_Manager) caller to reach the route (200, not 403), since per-row auth is the service\'s job', async () => {
@@ -116,6 +131,76 @@ describe('POST /api/bulk-import/users', () => {
 
     const res = await request(app)
       .post('/api/bulk-import/users')
+      .attach('csv', Buffer.from('email,firstName,lastName,teamId\n'), { filename: 'users.csv', contentType: 'text/csv' });
+
+    expect(res.status).toBe(500);
+  });
+});
+
+describe('POST /api/bulk-import/users/preview', () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockUser = { id: 'authentik-1', userId: 1, is_global_manager: false };
+    app = buildApp();
+  });
+
+  it('returns the preview rows on success', async () => {
+    const previewResult = {
+      rows: [
+        { row: 1, email: 'alice@example.com', firstName: 'Alice', lastName: 'Smith', teamId: 5, username: 'alice@example.com', status: 'new' }
+      ]
+    };
+    BulkImportService.previewUsers.mockResolvedValue(previewResult);
+
+    const res = await request(app)
+      .post('/api/bulk-import/users/preview')
+      .attach('csv', Buffer.from('email,firstName,lastName,teamId\n'), { filename: 'users.csv', contentType: 'text/csv' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(previewResult);
+    expect(BulkImportService.previewUsers).toHaveBeenCalledTimes(1);
+    const [bufferArg, userArg, defaultTeamIdArg] = BulkImportService.previewUsers.mock.calls[0];
+    expect(Buffer.isBuffer(bufferArg)).toBe(true);
+    expect(userArg).toEqual(mockUser);
+    expect(defaultTeamIdArg).toBeNull();
+  });
+
+  it('passes an uploaded teamId field through as defaultTeamId', async () => {
+    BulkImportService.previewUsers.mockResolvedValue({ rows: [] });
+
+    await request(app)
+      .post('/api/bulk-import/users/preview')
+      .field('teamId', '7')
+      .attach('csv', Buffer.from('email,firstName,lastName,teamId\n'), { filename: 'users.csv', contentType: 'text/csv' });
+
+    const [, , defaultTeamIdArg] = BulkImportService.previewUsers.mock.calls[0];
+    expect(defaultTeamIdArg).toBe('7');
+  });
+
+  it('permits a team-admin (non-Global_Manager) caller to reach the route (200, not 403), sharing bulk_import:users with the commit route', async () => {
+    BulkImportService.previewUsers.mockResolvedValue({ rows: [] });
+
+    const res = await request(app)
+      .post('/api/bulk-import/users/preview')
+      .attach('csv', Buffer.from('email,firstName,lastName,teamId\n'), { filename: 'users.csv', contentType: 'text/csv' });
+
+    expect(res.status).toBe(200);
+  });
+
+  it('returns 400 and never calls the service when no file is uploaded', async () => {
+    const res = await request(app).post('/api/bulk-import/users/preview');
+
+    expect(res.status).toBe(400);
+    expect(BulkImportService.previewUsers).not.toHaveBeenCalled();
+  });
+
+  it('returns 500 when the service throws an unexpected error', async () => {
+    BulkImportService.previewUsers.mockRejectedValue(new Error('unexpected failure'));
+
+    const res = await request(app)
+      .post('/api/bulk-import/users/preview')
       .attach('csv', Buffer.from('email,firstName,lastName,teamId\n'), { filename: 'users.csv', contentType: 'text/csv' });
 
     expect(res.status).toBe(500);

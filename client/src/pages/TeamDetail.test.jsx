@@ -675,8 +675,9 @@ describe('Members list includes admins (Defect 1)', () => {
   it('includes admin rows in every setMembers filter', () => {
     const matches = source.match(/setMembers\(allMembers\.filter\([^)]*\)\)/g) || []
     // account-lifecycle-management task 4.2 added a 7th call site,
-    // `refreshMembersAfterSuspend`, matching this exact shape.
-    expect(matches.length).toBe(7)
+    // `refreshMembersAfterSuspend`; a later fix added an 8th,
+    // `refreshMembers` (bulk CSV import), matching this exact shape.
+    expect(matches.length).toBe(8)
     for (const m of matches) {
       expect(m).toContain("m.role === 'admin'")
       expect(m).toContain("m.role === 'member'")
@@ -687,8 +688,9 @@ describe('Members list includes admins (Defect 1)', () => {
   it('keeps the Team Admins list admin-only', () => {
     const matches = source.match(/setAdmins\(allMembers\.filter\([^)]*\)\)/g) || []
     // account-lifecycle-management task 4.2 added a 7th call site,
-    // `refreshMembersAfterSuspend`, matching this exact shape.
-    expect(matches.length).toBe(7)
+    // `refreshMembersAfterSuspend`; a later fix added an 8th,
+    // `refreshMembers` (bulk CSV import), matching this exact shape.
+    expect(matches.length).toBe(8)
     for (const m of matches) {
       expect(m).toBe("setAdmins(allMembers.filter(m => m.role === 'admin'))")
     }

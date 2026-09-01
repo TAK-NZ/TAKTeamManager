@@ -79,8 +79,8 @@ function buildMockClient() {
 }
 
 function csvFromRows(rows) {
-  const header = 'email,firstName,lastName,teamId,username';
-  const lines = rows.map((r) => [r.email ?? '', r.firstName ?? '', r.lastName ?? '', r.teamId ?? '', r.username ?? ''].join(','));
+  const header = 'email,firstName,lastName,teamId';
+  const lines = rows.map((r) => [r.email ?? '', r.firstName ?? '', r.lastName ?? '', r.teamId ?? ''].join(','));
   return [header, ...lines].join('\n');
 }
 
@@ -693,8 +693,7 @@ describe('Property 14: CSV batch row processing is isolated', () => {
       email,
       firstName: `First${spec.uid}`,
       lastName: `Last${spec.uid}`,
-      teamId,
-      username: `user${spec.uid}`
+      teamId
     };
   }
 
@@ -1615,16 +1614,16 @@ describe('BulkImportService.importUserRow identity resolution (takserver-enrollm
   });
 
   function csvFromUserRowsWithSuffix(rows) {
-    const header = 'email,firstName,lastName,teamId,username,callsignSuffix';
+    const header = 'email,firstName,lastName,teamId,callsignSuffix';
     const lines = rows.map((r) => [
-      r.email ?? '', r.firstName ?? '', r.lastName ?? '', r.teamId ?? '', r.username ?? '', r.callsignSuffix ?? ''
+      r.email ?? '', r.firstName ?? '', r.lastName ?? '', r.teamId ?? '', r.callsignSuffix ?? ''
     ].join(','));
     return [header, ...lines].join('\n');
   }
 
-  it('reads the optional callsignSuffix column and passes it through resolution to createAndAddUser', async () => {
+  it('reads the optional callsignSuffix column and passes the email verbatim as requestedUsername through to createAndAddUser', async () => {
     UserProvisioningService.resolveNewUserIdentity.mockResolvedValue({
-      username: 'jdoe',
+      username: 'jdoe@example.com',
       callsignSuffix: 'J.Doe',
       pseudonymous: false,
       organisationId: 1,
@@ -1632,34 +1631,37 @@ describe('BulkImportService.importUserRow identity resolution (takserver-enrollm
       claimId: null
     });
     const csv = csvFromUserRowsWithSuffix([
-      { email: 'jdoe@example.com', firstName: 'John', lastName: 'Doe', teamId: '5', username: 'jdoe', callsignSuffix: 'J.Doe' }
+      { email: 'jdoe@example.com', firstName: 'John', lastName: 'Doe', teamId: '5', callsignSuffix: 'J.Doe' }
     ]);
 
     const importingUser = { userId: 1, is_global_manager: true };
     const summary = await BulkImportService.importUsers(csv, importingUser);
 
     expect(summary.successCount).toBe(1);
+    // Bugfix: requestedUsername is the email VERBATIM -- matching
+    // `POST /api/users/create-and-add`'s own derivation -- never a
+    // CSV-supplied override and never the email's local part alone.
     expect(UserProvisioningService.resolveNewUserIdentity).toHaveBeenCalledWith(null, {
       firstName: 'John',
       lastName: 'Doe',
       email: 'jdoe@example.com',
       teamId: 5,
-      requestedUsername: 'jdoe',
+      requestedUsername: 'jdoe@example.com',
       requestedCallsignSuffix: 'J.Doe'
     });
     // The RESOLVED username reaches the Authentik call.
     expect(authentikService.createUser).toHaveBeenCalledWith(
-      expect.objectContaining({ username: 'jdoe' })
+      expect.objectContaining({ username: 'jdoe@example.com' })
     );
     expect(UserProvisioningService.createAndAddUser).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ username: 'jdoe', callsign_suffix: 'J.Doe' })
+      expect.objectContaining({ username: 'jdoe@example.com', callsign_suffix: 'J.Doe' })
     );
   });
 
-  it('passes undefined requestedCallsignSuffix when the CSV column is omitted/empty, and derives requestedUsername from the email local part when the username column is empty', async () => {
+  it('passes undefined requestedCallsignSuffix when the CSV column is omitted/empty', async () => {
     UserProvisioningService.resolveNewUserIdentity.mockResolvedValue({
-      username: 'jdoe',
+      username: 'jdoe@example.com',
       callsignSuffix: 'J-Doe',
       pseudonymous: false,
       claimId: null
@@ -1676,7 +1678,7 @@ describe('BulkImportService.importUserRow identity resolution (takserver-enrollm
       lastName: 'Doe',
       email: 'jdoe@example.com',
       teamId: 5,
-      requestedUsername: 'jdoe',
+      requestedUsername: 'jdoe@example.com',
       requestedCallsignSuffix: undefined
     });
   });
@@ -1691,7 +1693,7 @@ describe('BulkImportService.importUserRow identity resolution (takserver-enrollm
       claimId: 999
     });
     const csv = csvFromRows([
-      { email: 'jdoe@example.com', firstName: 'John', lastName: 'Doe', teamId: '5', username: 'jdoe' }
+      { email: 'jdoe@example.com', firstName: 'John', lastName: 'Doe', teamId: '5' }
     ]);
 
     const importingUser = { userId: 1, is_global_manager: true };
@@ -1699,7 +1701,7 @@ describe('BulkImportService.importUserRow identity resolution (takserver-enrollm
 
     expect(summary.successCount).toBe(1);
     // The Authentik create-user call uses the RESOLVED (minted)
-    // username, never the raw CSV-supplied `jdoe`.
+    // username, never the caller-supplied email.
     expect(authentikService.createUser).toHaveBeenCalledWith(
       expect.objectContaining({ username: 'ORG-U7K3QMX' })
     );
@@ -1808,5 +1810,224 @@ describe('BulkImportService.importUserRow identity resolution (takserver-enrollm
     expect(authentikService.createUser).not.toHaveBeenCalledWith(
       expect.objectContaining({ email: 'bob@example.com' })
     );
+  });
+});
+
+/**
+ * Unit tests for `BulkImportService`'s additions:
+ *   - `defaultTeamId` (team-scoped import: a row's own `teamId` column
+ *     still wins when present, but a blank/absent column falls back to
+ *     the caller-supplied default).
+ *   - `importUsers`'s `rowNumbers` option (preview-then-confirm commit:
+ *     only the named 1-based row numbers are processed; every other row
+ *     is skipped with no Authentik call, no DB write, and no `results`
+ *     entry).
+ *   - `previewUsers` (the read-only dry run backing the preview step):
+ *     new / invalid / unauthorized / duplicate_in_file /
+ *     duplicate_existing classification, and its single batched
+ *     existing-user lookup query.
+ */
+describe('BulkImportService defaultTeamId fallback', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    pool.connect.mockImplementation(() => Promise.resolve(buildMockClient()));
+    authentikService.createUser.mockResolvedValue({ pk: 1000 });
+    UserProvisioningService.createAndAddUser.mockResolvedValue({ localUserId: 42, queuedGroups: 1 });
+    UserProvisioningService.resolveNewUserIdentity.mockImplementation((client, { requestedUsername }) =>
+      Promise.resolve({ username: requestedUsername, callsignSuffix: null, pseudonymous: false, claimId: null })
+    );
+    Team.isAdmin.mockResolvedValue(true);
+  });
+
+  it('uses defaultTeamId for a row whose own teamId column is blank', async () => {
+    const csv = 'email,firstName,lastName,teamId\nalice@example.com,Alice,Smith,\n';
+    const importingUser = { userId: 1, is_global_manager: true };
+
+    await BulkImportService.importUsers(csv, importingUser, { defaultTeamId: 7 });
+
+    expect(Team.isAdmin).not.toHaveBeenCalled(); // is_global_manager: true skips the check
+    expect(UserProvisioningService.resolveNewUserIdentity).toHaveBeenCalledWith(
+      null,
+      expect.objectContaining({ teamId: 7 })
+    );
+  });
+
+  it('prefers a row\'s own non-blank teamId column over defaultTeamId', async () => {
+    const csv = 'email,firstName,lastName,teamId\nalice@example.com,Alice,Smith,9\n';
+    const importingUser = { userId: 1, is_global_manager: true };
+
+    await BulkImportService.importUsers(csv, importingUser, { defaultTeamId: 7 });
+
+    expect(UserProvisioningService.resolveNewUserIdentity).toHaveBeenCalledWith(
+      null,
+      expect.objectContaining({ teamId: 9 })
+    );
+  });
+
+  it('still rejects the row when neither the column nor defaultTeamId supplies a teamId', async () => {
+    const csv = 'email,firstName,lastName,teamId\nalice@example.com,Alice,Smith,\n';
+    const importingUser = { userId: 1, is_global_manager: true };
+
+    const summary = await BulkImportService.importUsers(csv, importingUser, {});
+
+    expect(summary.failureCount).toBe(1);
+    expect(summary.results[0].error).toBe('Missing required field: teamId');
+  });
+});
+
+describe('BulkImportService.importUsers rowNumbers filtering', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    pool.connect.mockImplementation(() => Promise.resolve(buildMockClient()));
+    authentikService.createUser.mockResolvedValue({ pk: 1000 });
+    UserProvisioningService.createAndAddUser.mockResolvedValue({ localUserId: 42, queuedGroups: 1 });
+    UserProvisioningService.resolveNewUserIdentity.mockImplementation((client, { requestedUsername }) =>
+      Promise.resolve({ username: requestedUsername, callsignSuffix: null, pseudonymous: false, claimId: null })
+    );
+    Team.isAdmin.mockResolvedValue(true);
+  });
+
+  it('processes only the named row numbers, skipping every other row entirely', async () => {
+    const csv = csvFromRows([
+      { email: 'alice@example.com', firstName: 'Alice', lastName: 'Smith', teamId: '5' },
+      { email: 'bob@example.com', firstName: 'Bob', lastName: 'Jones', teamId: '5' },
+      { email: 'carol@example.com', firstName: 'Carol', lastName: 'Lee', teamId: '5' }
+    ]);
+    const importingUser = { userId: 1, is_global_manager: true };
+
+    const summary = await BulkImportService.importUsers(csv, importingUser, { rowNumbers: [1, 3] });
+
+    expect(summary.results).toEqual([
+      { row: 1, success: true, userId: 42 },
+      { row: 3, success: true, userId: 42 }
+    ]);
+    expect(authentikService.createUser).toHaveBeenCalledTimes(2);
+    expect(authentikService.createUser).not.toHaveBeenCalledWith(
+      expect.objectContaining({ email: 'bob@example.com' })
+    );
+  });
+
+  it('processes every row when rowNumbers is omitted, matching pre-existing behaviour', async () => {
+    const csv = csvFromRows([
+      { email: 'alice@example.com', firstName: 'Alice', lastName: 'Smith', teamId: '5' },
+      { email: 'bob@example.com', firstName: 'Bob', lastName: 'Jones', teamId: '5' }
+    ]);
+    const importingUser = { userId: 1, is_global_manager: true };
+
+    const summary = await BulkImportService.importUsers(csv, importingUser);
+
+    expect(summary.successCount).toBe(2);
+  });
+});
+
+describe('BulkImportService.previewUsers', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    pool.query.mockResolvedValue({ rows: [] });
+    Team.isAdmin.mockResolvedValue(true);
+  });
+
+  it('classifies a well-formed, non-duplicate row as new', async () => {
+    const csv = csvFromRows([
+      { email: 'alice@example.com', firstName: 'Alice', lastName: 'Smith', teamId: '5' }
+    ]);
+    const importingUser = { userId: 1, is_global_manager: true };
+
+    const { rows } = await BulkImportService.previewUsers(csv, importingUser);
+
+    expect(rows).toEqual([
+      {
+        row: 1,
+        email: 'alice@example.com',
+        firstName: 'Alice',
+        lastName: 'Smith',
+        teamId: 5,
+        username: 'alice@example.com',
+        status: 'new'
+      }
+    ]);
+    // Read-only: no Authentik call, no client acquired.
+    expect(authentikService.createUser).not.toHaveBeenCalled();
+    expect(pool.connect).not.toHaveBeenCalled();
+  });
+
+  it('classifies a row missing a required field as invalid, without querying the DB for duplicates', async () => {
+    const csv = csvFromRows([
+      { email: '', firstName: 'Alice', lastName: 'Smith', teamId: '5' }
+    ]);
+    const importingUser = { userId: 1, is_global_manager: true };
+
+    const { rows } = await BulkImportService.previewUsers(csv, importingUser);
+
+    expect(rows[0].status).toBe('invalid');
+    expect(rows[0].reason).toBe('Missing required field: email');
+  });
+
+  it('classifies a row targeting a team the importing team admin does not administer as unauthorized', async () => {
+    Team.isAdmin.mockResolvedValue(false);
+    const csv = csvFromRows([
+      { email: 'alice@example.com', firstName: 'Alice', lastName: 'Smith', teamId: '99' }
+    ]);
+    const importingUser = { userId: 7, is_global_manager: false };
+
+    const { rows } = await BulkImportService.previewUsers(csv, importingUser);
+
+    expect(rows[0].status).toBe('unauthorized');
+    expect(rows[0].reason).toMatch(/Unauthorized/);
+    expect(Team.isAdmin).toHaveBeenCalledWith(99, 7);
+  });
+
+  it('flags every occurrence after the first of a duplicated email within the same file as duplicate_in_file', async () => {
+    const csv = csvFromRows([
+      { email: 'alice@example.com', firstName: 'Alice', lastName: 'Smith', teamId: '5' },
+      { email: 'alice@example.com', firstName: 'Alice', lastName: 'Jones', teamId: '5' }
+    ]);
+    const importingUser = { userId: 1, is_global_manager: true };
+
+    const { rows } = await BulkImportService.previewUsers(csv, importingUser);
+
+    expect(rows[0].status).toBe('new');
+    expect(rows[1].status).toBe('duplicate_in_file'); // same email (== username) as row 1
+  });
+
+  it('flags a row matching an existing users row (by username OR email) as duplicate_existing, via one batched query', async () => {
+    pool.query.mockResolvedValue({
+      rows: [{ username: 'alice@example.com', email: 'someoneelse@example.com' }]
+    });
+    const csv = csvFromRows([
+      { email: 'alice@example.com', firstName: 'Alice', lastName: 'Smith', teamId: '5' },
+      { email: 'someoneelse@example.com', firstName: 'Bob', lastName: 'Jones', teamId: '5' }
+    ]);
+    const importingUser = { userId: 1, is_global_manager: true };
+
+    const { rows } = await BulkImportService.previewUsers(csv, importingUser);
+
+    expect(rows[0].status).toBe('duplicate_existing');
+    expect(rows[1].status).toBe('duplicate_existing');
+    expect(pool.query).toHaveBeenCalledTimes(1);
+  });
+
+  it('an invalid or unauthorized row is never additionally reported as a duplicate', async () => {
+    Team.isAdmin.mockResolvedValue(false);
+    const csv = csvFromRows([
+      { email: 'alice@example.com', firstName: 'Alice', lastName: 'Smith', teamId: '99' },
+      { email: 'alice@example.com', firstName: 'Bob', lastName: 'Jones', teamId: '99' }
+    ]);
+    const importingUser = { userId: 7, is_global_manager: false };
+
+    const { rows } = await BulkImportService.previewUsers(csv, importingUser);
+
+    expect(rows[0].status).toBe('unauthorized');
+    expect(rows[1].status).toBe('unauthorized');
+  });
+
+  it('applies defaultTeamId to a row whose own teamId column is blank, matching importUsers', async () => {
+    const csv = 'email,firstName,lastName,teamId\nalice@example.com,Alice,Smith,\n';
+    const importingUser = { userId: 1, is_global_manager: true };
+
+    const { rows } = await BulkImportService.previewUsers(csv, importingUser, 7);
+
+    expect(rows[0].status).toBe('new');
+    expect(rows[0].teamId).toBe(7);
   });
 });

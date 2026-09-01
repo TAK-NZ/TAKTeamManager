@@ -56,57 +56,33 @@ const router = express.Router();
  * already sanitizes any string `config_value` through the documented safe
  * HTML subset (Requirements 5.4-5.6) before persisting.
  *
- * --- TAK color/role mappings (system_config) ---
+ * --- TAK color/role mappings: reverted to env-only ---
  *
- * Task 54.1's migration
- * (`1786790000000_seed-tak-color-role-system-config.cjs`) seeded
- * `system_config` with one `tak_color_<name>`/`tak_role_<name>` row per
- * `TAK_COLOR_*`/`TAK_ROLE_*` environment variable previously hardcoded in
- * `server/routes/config.js`'s `GET /color-mappings` handler, using the
- * naming scheme `TAK_COLOR_<NAME>` -> `tak_color_<name>` (lower-cased),
- * e.g. `TAK_COLOR_DARK_BLUE` -> `tak_color_dark_blue`.
- * `GET /api/settings/tak-mappings` reads every `tak_color_*`/`tak_role_*`
- * row back out and reshapes it into the same
- * `{colorMappings: {...}, roleDescriptions: {...}}` structure already
- * returned by the (soon-to-be-superseded) `GET /api/config/color-mappings`
- * route, keyed by the same human-readable labels (`'Yellow'`,
- * `'Team Member'`, etc.) that route already uses, so any client consuming
- * this new endpoint sees an identical response shape.
- *
- * `PUT /api/settings/tak-mappings` intentionally accepts an `updates`
- * object keyed by the raw `config_key` (e.g. `{"tak_color_yellow": "..."}`)
- * rather than by the display label used in the GET response: the
- * `config_key` is the single unambiguous, allow-listable identifier for
- * "one or more system_config rows" (this task's own wording), whereas the
- * display label is a presentation convenience with a few irregular cases
- * (`RTO`, `K9`, `HQ`) that would otherwise need a label -> key reverse
- * mapping on every write. Only keys already present in
- * `TAK_MAPPING_CONFIG_KEYS` (i.e. exactly the set task 54.1 seeded) may be
- * updated; any other key in the `updates` object is rejected without
- * applying any part of the request.
+ * A database-backed `GET`/`PUT /api/settings/tak-mappings` surface used to
+ * live here (seeded from `TAK_COLOR_*`/`TAK_ROLE_*` env vars by a since-
+ * removed migration). It has been removed: these deployments set
+ * `TAK_COLOR_*`/`TAK_ROLE_*` from a file pulled in at deploy time (e.g. an
+ * S3-sourced env file), so a runtime-editable database override was a
+ * second, competing source of truth that the deployment pipeline never
+ * writes to -- an admin edit made through that UI would either be
+ * silently overwritten on the next deploy, or never converge with the
+ * three OTHER pages (`Dashboard.jsx`, `Teams.jsx`, `TeamDetail.jsx`) that
+ * always read the env-backed `GET /api/config/color-mappings`
+ * (`server/routes/config.js`) directly. All four surfaces now read that
+ * single env-backed endpoint; there is no PUT counterpart, by design --
+ * these are deploy-time constants, not settings a Global_Manager edits
+ * in-app. `ROLE_KEY_LABELS` below is retained ONLY as the source of
+ * `TAK_ROLE_VALUES`, the load-bearing allow-list of valid `TAK_Role`
+ * display values used elsewhere (`server/routes/teams.js`'s CSV/edit
+ * validation, `SiteConfig.getPublicConfig`'s `takRoleValues`) -- that
+ * fixed 8-name set is structural, unrelated to whether the per-role
+ * DESCRIPTION text is env- or database-sourced.
  */
 
-// Requirement 32.1's key set, mirroring task 54.1's migration exactly:
-// every `tak_color_*`/`tak_role_*` `system_config.config_key` seeded from
-// the `TAK_COLOR_*`/`TAK_ROLE_*` environment variables previously read
-// directly by `server/routes/config.js`'s `GET /color-mappings` handler.
-const COLOR_KEY_LABELS = {
-  tak_color_yellow: 'Yellow',
-  tak_color_cyan: 'Cyan',
-  tak_color_green: 'Green',
-  tak_color_red: 'Red',
-  tak_color_purple: 'Purple',
-  tak_color_orange: 'Orange',
-  tak_color_blue: 'Blue',
-  tak_color_magenta: 'Magenta',
-  tak_color_white: 'White',
-  tak_color_maroon: 'Maroon',
-  tak_color_dark_blue: 'Dark Blue',
-  tak_color_teal: 'Teal',
-  tak_color_dark_green: 'Dark Green',
-  tak_color_brown: 'Brown'
-};
-
+// The 8 valid TAK_Role display names (Requirement 13.4/13.5). This set is
+// structural/load-bearing (used by server/routes/teams.js's TAK_Role
+// validation and exposed via SiteConfig.getPublicConfig().takRoleValues),
+// independent of the removed DB-backed role-DESCRIPTION editing surface.
 const ROLE_KEY_LABELS = {
   tak_role_team_member: 'Team Member',
   tak_role_team_lead: 'Team Lead',
@@ -118,14 +94,9 @@ const ROLE_KEY_LABELS = {
   tak_role_hq: 'HQ'
 };
 
-// The full allow-list of config_keys this endpoint may read/write, used
-// both to build the SQL `IN (...)` filter for the GET and to validate
-// every key in a PUT's `updates` object before applying any of them.
-const TAK_MAPPING_CONFIG_KEYS = [...Object.keys(COLOR_KEY_LABELS), ...Object.keys(ROLE_KEY_LABELS)];
-
 // The full allow-list of TAK_Role display values (e.g. 'Team Member',
 // 'Team Lead', ...), used to validate a Member_List/CSV-import `TAK_Role`
-// edit against the set of roles this endpoint's ROLE_KEY_LABELS defines.
+// edit against the set of roles ROLE_KEY_LABELS defines.
 const TAK_ROLE_VALUES = Object.values(ROLE_KEY_LABELS);
 
 // Branding config_keys backed by site_config, seeded by this task's
@@ -214,122 +185,6 @@ router.put('/branding', authenticateToken, authorize, [
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to update branding settings');
     res.status(500).json({ error: 'Failed to update branding settings' });
-  }
-});
-
-// GET /api/settings/tak-mappings (Requirement 32.1, Global_Manager-only).
-// Mirrors GET /api/config/color-mappings's {colorMappings, roleDescriptions}
-// response shape exactly, but reads from system_config (task 54.1's seeded
-// rows) instead of process.env.
-router.get('/tak-mappings', authenticateToken, authorize, async (req, res) => {
-  try {
-    const placeholders = TAK_MAPPING_CONFIG_KEYS.map((_, i) => `$${i + 1}`).join(',');
-    const result = await pool.query(
-      `SELECT config_key, config_value FROM system_config WHERE config_key IN (${placeholders})`,
-      TAK_MAPPING_CONFIG_KEYS
-    );
-
-    const valuesByKey = {};
-    result.rows.forEach((row) => {
-      valuesByKey[row.config_key] = row.config_value;
-    });
-
-    const colorMappings = {};
-    Object.entries(COLOR_KEY_LABELS).forEach(([configKey, label]) => {
-      colorMappings[label] = valuesByKey[configKey] || '';
-    });
-
-    const roleDescriptions = {};
-    Object.entries(ROLE_KEY_LABELS).forEach(([configKey, label]) => {
-      roleDescriptions[label] = valuesByKey[configKey] || '';
-    });
-
-    res.json({ colorMappings, roleDescriptions });
-  } catch (error) {
-    getLogger().error({ err: error }, 'Failed to fetch TAK color/role mappings');
-    res.status(500).json({ error: 'Failed to fetch TAK color/role mappings' });
-  }
-});
-
-// PUT /api/settings/tak-mappings (Requirement 32.1, Global_Manager-only).
-// Updates one or more tak_color_*/tak_role_* system_config rows, keyed by
-// config_key. Every key in `updates` must be in the TAK_MAPPING_CONFIG_KEYS
-// allow-list; if any key is not, the entire request is rejected before
-// any row is updated.
-router.put('/tak-mappings', authenticateToken, authorize, [
-  body('updates').isObject().withMessage('updates must be an object keyed by config_key')
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({ errors: errors.array() });
-  }
-
-  const { updates } = req.body;
-  const keys = Object.keys(updates);
-
-  if (keys.length === 0) {
-    return res.status(400).json({ error: 'updates must contain at least one config_key' });
-  }
-
-  const invalidKeys = keys.filter((key) => !TAK_MAPPING_CONFIG_KEYS.includes(key));
-  if (invalidKeys.length > 0) {
-    return res.status(400).json({ error: `Unknown config_key(s): ${invalidKeys.join(', ')}` });
-  }
-
-  for (const key of keys) {
-    const value = updates[key];
-    if (typeof value !== 'string' || value.length > 255) {
-      return res.status(400).json({ error: `Value for ${key} must be a string of at most 255 characters` });
-    }
-  }
-
-  try {
-    await Promise.all(
-      keys.map((key) =>
-        pool.query(
-          'UPDATE system_config SET config_value = $1, updated_by = $2, updated_at = CURRENT_TIMESTAMP WHERE config_key = $3',
-          [updates[key], req.user.userId, key]
-        )
-      )
-    );
-
-    try {
-      await pool.query(
-        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
-        [req.user.userId, 'settings.update_mappings', 'settings', null, JSON.stringify({ keysUpdated: keys.length })]
-      );
-    } catch (auditErr) {
-      getLogger().error({ err: auditErr }, 'Failed to write audit log');
-    }
-
-    // Re-fetch to confirm the persisted state, e.g. in case a key was
-    // valid per the allow-list but not actually present as a row yet
-    // (should not normally happen once task 54.1's migration has run).
-    const placeholders = TAK_MAPPING_CONFIG_KEYS.map((_, i) => `$${i + 1}`).join(',');
-    const result = await pool.query(
-      `SELECT config_key, config_value FROM system_config WHERE config_key IN (${placeholders})`,
-      TAK_MAPPING_CONFIG_KEYS
-    );
-
-    const valuesByKey = {};
-    result.rows.forEach((row) => {
-      valuesByKey[row.config_key] = row.config_value;
-    });
-
-    const colorMappings = {};
-    Object.entries(COLOR_KEY_LABELS).forEach(([configKey, label]) => {
-      colorMappings[label] = valuesByKey[configKey] || '';
-    });
-
-    const roleDescriptions = {};
-    Object.entries(ROLE_KEY_LABELS).forEach(([configKey, label]) => {
-      roleDescriptions[label] = valuesByKey[configKey] || '';
-    });
-
-    res.json({ colorMappings, roleDescriptions });
-  } catch (error) {
-    getLogger().error({ err: error }, 'Failed to update TAK color/role mappings');
-    res.status(500).json({ error: 'Failed to update TAK color/role mappings' });
   }
 });
 
@@ -1100,8 +955,8 @@ function validateImportPayload(body) {
  *
  * `site_config` values are sanitized through the same safe-HTML subset
  * `SiteConfig.update` applies (Requirements 5.4-5.6); `system_config`
- * values are not (mirroring `setTakServerConfigValue`/the tak-mappings PUT
- * route above, neither of which sanitizes `system_config` values either).
+ * values are not (mirroring `setTakServerConfigValue` above, which does
+ * not sanitize `system_config` values either).
  *
  * @param {import('pg').PoolClient} client
  * @param {'system_config'|'site_config'} table
@@ -1200,10 +1055,8 @@ router.post('/import', authenticateToken, authorize, async (req, res) => {
 });
 
 module.exports = router;
-module.exports.COLOR_KEY_LABELS = COLOR_KEY_LABELS;
 module.exports.ROLE_KEY_LABELS = ROLE_KEY_LABELS;
 module.exports.TAK_ROLE_VALUES = TAK_ROLE_VALUES;
-module.exports.TAK_MAPPING_CONFIG_KEYS = TAK_MAPPING_CONFIG_KEYS;
 module.exports.BRANDING_CONFIG_KEYS = BRANDING_CONFIG_KEYS;
 module.exports.TAK_SERVER_CONFIG_KEYS = TAK_SERVER_CONFIG_KEYS;
 module.exports.getEffectiveTakServerConfigValue = getEffectiveTakServerConfigValue;

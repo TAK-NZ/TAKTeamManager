@@ -60,17 +60,18 @@ const { classifyFailure } = require('./failureClassification');
 // `createLogger` import pattern already established in
 // `GlobalChannelService.js`/`authentikSync.js`.
 const logger = require('../config/logger').createLogger('syncWorker');
-// Requirement 21.6/22.8 (task 43.1): the shared periodic sweep invoking
-// `VendorChannelService.expireGrants()` and
-// `DeploymentChannelService.deactivateExpired()`, started/stopped
-// alongside the poll loop and health server below (see `start()`/
-// `stop()`), per design.md's closing note on Section 17.
-const ExpiryScheduler = require('../services/ExpiryScheduler');
 // Requirement 25 (task 47.1): the Retention_Cleanup_Job, running on its
 // own scheduled interval (default 24h) inside the Sync_Worker process,
 // started/stopped alongside the poll loop, health server, and expiry
 // scheduler below (see `start()`/`stop()`), per design.md's Section 20.
 const RetentionCleanupJob = require('../services/RetentionCleanupJob');
+// cert-expiry-notifications Requirement 5 (task 6.2): the daily
+// certificate-expiry digest job, started/stopped alongside the poll
+// loop, health server, expiry scheduler, and retention cleanup job below
+// (see `start()`/`stop()`). Gated inside its OWN `start()` by BOTH
+// `CERT_EXPIRY_NOTIFICATIONS_ENABLED` and `DEVICE_MGMT_ENABLED` -- see
+// that file's own doc comment.
+const CertExpiryNotificationJob = require('../services/CertExpiryNotificationJob');
 // Requirement 26.3/26.4/26.5/26.8 (task 48.5): the TAK Server Marti
 // `certadmin` API client used by `revokeTakCertificates` below, and its
 // exported `matchesCreatorDn` predicate -- reused here (rather than
@@ -91,7 +92,7 @@ const { matchesCreatorDn } = TakServerService;
 // so the `revoke_tak_certificates` handler and the device-management jobs use
 // one credential mechanism and both pick up a rotated Admin_Credential without
 // a process restart (Requirement 2.8). Constructed unconditionally (like
-// `this.expiryScheduler`/`this.retentionCleanupJob`) -- constructing them opens
+// `this.retentionCleanupJob`) -- constructing them opens
 // no timer, reads no secret, and makes no network call; the
 // `isDeviceMgmtEnabled()` gate lives on the `start()` calls (task 8.2).
 // Feature device-management, Requirements 12.11/12.13 (task 24.3):
@@ -272,14 +273,23 @@ function revokeTargetDigest(sortedCertIds) {
  * user-scoped catalog -- i.e. re-targeting already-revoked ids.
  *
  * `validatePayloadSchema`'s `exactlyOneOf` has already rejected a payload
- * carrying both discriminators or neither (task 19.2), so the presence of
- * `client_uid` is unambiguous by the time either caller runs.
+ * carrying more than one discriminator or none (task 19.2), so the
+ * presence of `client_uid`/`cert_ids` is unambiguous by the time either
+ * caller runs.
+ *
+ * cert-expiry-notifications Requirement 8.2 (task 9.2): `cert_ids` is a
+ * THIRD discriminator, checked alongside the original two -- an array of
+ * TAK certificate ids that already IS the exact target set, needing no
+ * catalog matching at all (see `resolveRevokeTargets`'s `cert_ids`
+ * branch, below).
  *
  * @param {object} payload the parsed `revoke_tak_certificates` payload.
- * @returns {'client_uid'|'tak_usernames'} the payload shape.
+ * @returns {'client_uid'|'tak_usernames'|'cert_ids'} the payload shape.
  */
 function revokePayloadShape(payload) {
-  return payload.client_uid !== undefined ? 'client_uid' : 'tak_usernames';
+  if (payload.client_uid !== undefined) return 'client_uid';
+  if (payload.cert_ids !== undefined) return 'cert_ids';
+  return 'tak_usernames';
 }
 
 // Requirement 14.6: the heartbeat is considered stale (and the health
@@ -391,18 +401,20 @@ class SyncWorker {
     const parsedHealthPort = parseInt(process.env.SYNC_WORKER_HEALTH_PORT, 10);
     this.healthPort = Number.isNaN(parsedHealthPort) ? 3001 : parsedHealthPort;
 
-    // Requirement 21.6/22.8 (task 43.1): the shared vendor-grant/
-    // deployment-channel expiry scheduler, started/stopped alongside the
-    // poll loop and health server (see `start()`/`stop()` below).
-    this.expiryScheduler = new ExpiryScheduler();
-
     // Requirement 25 (task 47.1): the sync_operations/audit_logs
-    // Retention_Cleanup_Job, started/stopped alongside the poll loop,
-    // health server, and expiry scheduler (see `start()`/`stop()` below).
+    // Retention_Cleanup_Job, started/stopped alongside the poll loop and
+    // health server (see `start()`/`stop()` below).
     this.retentionCleanupJob = new RetentionCleanupJob();
 
+    // cert-expiry-notifications Requirement 5 (task 6.2): constructed
+    // unconditionally (like every other job above) -- opens no timer,
+    // reads no secret, and makes no network call until `start()` is
+    // called, and `start()` itself re-checks both required flags
+    // internally (see `CertExpiryNotificationJob.start()`).
+    this.certExpiryNotificationJob = new CertExpiryNotificationJob();
+
     // Requirement 26.3/26.4/26.5 (task 48.5): constructed once here
-    // (mirroring `this.expiryScheduler`/`this.retentionCleanupJob` above)
+    // (mirroring `this.retentionCleanupJob` above)
     // rather than per-operation, since `TakServerService`'s constructor
     // reads `TAK_SERVER_URL`/mTLS credential env vars and builds an
     // `https.Agent` once at construction time -- there is no benefit to
@@ -434,7 +446,7 @@ class SyncWorker {
     this.takServerService.setCredentialLoader(this.adminCredentialLoader);
 
     // Requirement 2.6/3.1/4.8 (task 8.1): the three device-management jobs,
-    // each following the same `ExpiryScheduler`/`RetentionCleanupJob` shape as
+    // each following the same `RetentionCleanupJob` shape as
     // the schedulers above. The refresh job drives the shared Loader; the
     // poller and the sync take the shared `TakServerService`, so a refreshed
     // credential applies to their Marti calls too. They are started (guarded by
@@ -462,17 +474,18 @@ class SyncWorker {
     // process's poll loop is still alive.
     this.startHealthServer();
 
-    // Requirement 21.6/22.8 (task 43.1): start the shared expiry
-    // scheduler alongside the poll loop and health server, so vendor
-    // channel grant expiry and deployment channel deactivation are swept
-    // on their own <=15-minute cadence independent of the poll loop.
-    this.expiryScheduler.start();
-
     // Requirement 25 (task 47.1): start the retention cleanup job
-    // alongside the poll loop, health server, and expiry scheduler, so
+    // alongside the poll loop and health server, so
     // sync_operations/audit_logs retention cleanup runs on its own
     // (default 24h) cadence independent of the poll loop.
     this.retentionCleanupJob.start();
+
+    // cert-expiry-notifications Requirement 5.2/5.3/5.4 (task 6.2): the
+    // job's own `start()` re-checks BOTH `CERT_EXPIRY_NOTIFICATIONS_ENABLED`
+    // and `DEVICE_MGMT_ENABLED` internally, matching this file's existing
+    // pattern of gating INSIDE `start()` for a flag-dependent job rather
+    // than wrapping the call site in an `if`.
+    this.certExpiryNotificationJob.start();
 
     // Feature device-management, Requirements 1.5/1.6/1.7/9.5 (task 8.2):
     // the three device-management jobs are started ONLY when
@@ -524,13 +537,15 @@ class SyncWorker {
 
     await this.stopHealthServer();
 
-    // Requirement 21.6/22.8 (task 43.1): stop the shared expiry scheduler
-    // alongside the health server.
-    this.expiryScheduler.stop();
-
     // Requirement 25 (task 47.1): stop the retention cleanup job
-    // alongside the expiry scheduler and health server.
+    // alongside the health server.
     this.retentionCleanupJob.stop();
+
+    // cert-expiry-notifications Requirement 5 (task 6.2): stopped
+    // UNCONDITIONALLY -- i.e. without re-checking either flag -- mirroring
+    // every other job's `stop()` convention here: idempotent, safe even
+    // if the job was never started.
+    this.certExpiryNotificationJob.stop();
 
     // Feature device-management (task 8.2): stopped UNCONDITIONALLY -- i.e.
     // without re-checking `isDeviceMgmtEnabled()`. Each job's `stop()` is
@@ -961,18 +976,6 @@ class SyncWorker {
 
       case 'update_channel_group':
         await this.updateChannelGroup(payload);
-        break;
-
-      case 'create_vendor_channel_group':
-        await this.createVendorChannelGroup(payload);
-        break;
-
-      case 'create_deployment_channel_group':
-        await this.createDeploymentChannelGroup(payload);
-        break;
-
-      case 'remove_all_members_from_group':
-        await this.removeAllMembersFromGroup(payload);
         break;
 
       case 'revoke_tak_certificates':
@@ -1910,246 +1913,6 @@ class SyncWorker {
   }
 
   /**
-   * Requirement 21.10 (task 40.1): creates a single Authentik `VND` group
-   * for the singleton `vendor_channels` row identified by
-   * `payload.vendor_channel_id`. Unlike BCH/region channels (which each
-   * create a read/write group pair via `createBchChannelGroups`/
-   * `createRegionChannelGroup`), the Vendor_Channel is a single group --
-   * design.md's Section 17 and requirements.md Requirement 21 Criterion
-   * 10 both describe enqueueing a Sync_Operation "to create the
-   * corresponding Authentik `VND` group" (singular), so this handler
-   * creates exactly one group, mirroring the shape of
-   * `updateRegionChannelGroup`'s single-group-id handling rather than
-   * `createRegionChannelGroup`'s read/write pair.
-   *
-   * On success, UPDATEs `vendor_channels.authentik_group_id` with the
-   * created group's Authentik pk, mirroring how `createBchChannelGroups`/
-   * `createRegionChannelGroup` update their respective tables' group-id
-   * columns after creating the group in Authentik.
-   */
-  async createVendorChannelGroup(payload) {
-    const { vendor_channel_id } = payload;
-
-    const channelResult = await this.pool.query(
-      'SELECT name, description FROM vendor_channels WHERE id = $1',
-      [vendor_channel_id]
-    );
-
-    if (channelResult.rows.length === 0) {
-      logger.debug({ vendor_channel_id }, 'No vendor channel found with this ID');
-      return;
-    }
-
-    const { name, description } = channelResult.rows[0];
-
-    logger.debug({ vendor_channel_id, name }, 'Creating vendor channel group');
-
-    const groupResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        name,
-        attributes: { channel_type: 'vendor', description }
-      })
-    });
-
-    if (!groupResponse.ok) {
-      const errorText = await groupResponse.text();
-      logger.error(
-        { vendor_channel_id, status: groupResponse.status, err: errorText },
-        'Failed to create vendor channel group'
-      );
-      const classification = classifyFailure(groupResponse.status);
-      throw new AuthentikApiError(
-        `Failed to create vendor channel group: ${groupResponse.status} ${errorText}`,
-        classification
-      );
-    }
-
-    const group = await groupResponse.json();
-
-    logger.debug({ vendor_channel_id, groupId: group.pk }, 'Created vendor channel group');
-
-    await this.pool.query(
-      'UPDATE vendor_channels SET authentik_group_id = $1 WHERE id = $2',
-      [group.pk, vendor_channel_id]
-    );
-  }
-
-  /**
-   * Requirement 22.4/22.11 (task 42.1): creates a single Authentik group
-   * for the `deployment_channels` row identified by
-   * `payload.deployment_channel_id`. Mirrors `createVendorChannelGroup`'s
-   * single-group shape (not the BCH/region read/write pair) since neither
-   * Requirement 22 nor design.md's Section 18 calls for a read/write
-   * split for deployment channels -- this applies identically to an
-   * `Overseas - ` prefixed channel and a Domestic_Mission_Channel, since
-   * `createDeploymentChannel` inserts both through the same
-   * `deployment_channels` table/row shape and enqueues this exact same
-   * operation type regardless of which naming pattern matched.
-   *
-   * On success, UPDATEs `deployment_channels.authentik_group_id` with the
-   * created group's Authentik pk, mirroring
-   * `createVendorChannelGroup`/`createBchChannelGroups`/
-   * `createRegionChannelGroup`'s post-create UPDATE.
-   */
-  async createDeploymentChannelGroup(payload) {
-    const { deployment_channel_id, channel_name } = payload;
-
-    const channelResult = await this.pool.query(
-      'SELECT name, description FROM deployment_channels WHERE id = $1',
-      [deployment_channel_id]
-    );
-
-    if (channelResult.rows.length === 0) {
-      logger.debug({ deployment_channel_id }, 'No deployment channel found with this ID');
-      return;
-    }
-
-    const { description } = channelResult.rows[0];
-    const groupName = channel_name || channelResult.rows[0].name;
-
-    logger.debug({ deployment_channel_id, groupName }, 'Creating deployment channel group');
-
-    const groupResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        name: groupName,
-        attributes: { channel_type: 'deployment', description }
-      })
-    });
-
-    if (!groupResponse.ok) {
-      const errorText = await groupResponse.text();
-      logger.error(
-        { deployment_channel_id, status: groupResponse.status, err: errorText },
-        'Failed to create deployment channel group'
-      );
-      const classification = classifyFailure(groupResponse.status);
-      throw new AuthentikApiError(
-        `Failed to create deployment channel group: ${groupResponse.status} ${errorText}`,
-        classification
-      );
-    }
-
-    const group = await groupResponse.json();
-
-    logger.debug({ deployment_channel_id, groupId: group.pk }, 'Created deployment channel group');
-
-    await this.pool.query(
-      'UPDATE deployment_channels SET authentik_group_id = $1 WHERE id = $2',
-      [group.pk, deployment_channel_id]
-    );
-  }
-
-  /**
-   * Requirement 22.8/22.9 (task 42.3): bulk-removes every member from the
-   * Authentik group identified by `payload.target_group_id`, enqueued by
-   * `DeploymentChannelService.deactivateExpired()` after that channel's
-   * `is_active` has already been set to `false` and its
-   * `channel_memberships` rows have already been deleted locally.
-   *
-   * Authentik's group API (`GroupViewSet` in
-   * `authentik/core/api/groups.py`) exposes `POST
-   * /core/groups/{id}/add_user/` and `POST /core/groups/{id}/remove_user/`
-   * -- each operating on exactly one user per call, mirroring this
-   * codebase's own `addUserToGroup`/`removeUserFromGroup` handlers above
-   * -- but no single "remove all members" action. This handler therefore:
-   *   1. `GET`s the group, whose serialized `users` field (a
-   *      `BulkPrimaryKeyRelatedField`, included by default -- Authentik's
-   *      `include_users` query param defaults to `true`) is the group's
-   *      current member pk list.
-   *   2. Calls `POST .../remove_user/` once per member pk, using the
-   *      exact same request shape as `removeUserFromGroup` above.
-   *
-   * Following `removeTeamChannelGroup`'s established per-item convention:
-   * a 404 for the group itself (already deleted in Authentik) is treated
-   * as an already-satisfied cleanup and returns early; a 404 for an
-   * individual member removal (removed by some other path between the
-   * `GET` and this call) is likewise a no-op continue rather than a
-   * failure. Any other non-2xx response classifies via `classifyFailure`
-   * and throws `AuthentikApiError`, aborting the remaining removals for
-   * this invocation -- a retry re-fetches the (now shorter) member list
-   * and resumes, so this is safely idempotent across retries.
-   */
-  async removeAllMembersFromGroup(payload) {
-    const { target_group_id: targetGroupId } = payload;
-
-    logger.debug(
-      { channelId: payload.channel_id, targetGroupId },
-      'Removing all members from Authentik group'
-    );
-
-    const groupResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${targetGroupId}/`, {
-      headers: {
-        'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
-        'Content-Type': 'application/json'
-      }
-    });
-
-    if (groupResponse.status === 404) {
-      logger.debug(
-        { channelId: payload.channel_id, targetGroupId },
-        'Authentik group already absent; removing all members is a no-op'
-      );
-      return;
-    }
-
-    if (!groupResponse.ok) {
-      const classification = classifyFailure(groupResponse.status);
-      throw new AuthentikApiError(
-        `Failed to fetch group members for group ${targetGroupId}: ${groupResponse.statusText}`,
-        classification
-      );
-    }
-
-    const group = await groupResponse.json();
-    const memberPks = Array.isArray(group.users) ? group.users : [];
-
-    for (const memberPk of memberPks) {
-      const removeResponse = await fetch(
-        `${process.env.AUTHENTIK_URL}/api/v3/core/groups/${targetGroupId}/remove_user/`,
-        {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({ pk: memberPk })
-        }
-      );
-
-      if (removeResponse.status === 404) {
-        logger.debug(
-          { channelId: payload.channel_id, targetGroupId, memberPk },
-          'Group member already absent; removal for this member is a no-op'
-        );
-        continue;
-      }
-
-      if (!removeResponse.ok) {
-        const classification = classifyFailure(removeResponse.status);
-        throw new AuthentikApiError(
-          `Failed to remove user ${memberPk} from group ${targetGroupId}: ${removeResponse.statusText}`,
-          classification
-        );
-      }
-    }
-
-    logger.debug(
-      { channelId: payload.channel_id, targetGroupId, memberCount: memberPks.length },
-      'Removed all members from Authentik group'
-    );
-  }
-
-  /**
    * Feature cloudtak-agency-groups (task 4.1): the `create_cloudtak_group`
    * handler. Both create and update do the SAME idempotent work
    * (create-or-reuse the group, set the Agency_Attributes authoritatively,
@@ -2917,10 +2680,27 @@ class SyncWorker {
    * catalog shape without the field) are still revoked; they simply have no
    * Device_Table row to flip.
    *
+   * cert-expiry-notifications Requirement 8.2 (task 9.2): a THIRD shape,
+   * `cert_ids` -- an array of TAK certificate ids the caller already
+   * knows are the exact target set (this feature's Superseding_Revoke:
+   * exactly the one certificate a renewal supersedes). Unlike the other
+   * two shapes, which must MATCH against the fetched catalog to turn a
+   * `client_uid`/username into cert ids, this shape already IS the cert
+   * id set -- `targetCertIds` is the supplied array directly (validated
+   * numeric, deduplicated via the `Set`, sorted via the same
+   * `sortCertIds` helper the other two branches call), with no catalog
+   * matching needed for RESOLUTION at all. `certificates` is still
+   * consulted here, purely to resolve `clientUids` for the audit
+   * record's logging context (which of the fetched certificates carry
+   * one of the target ids) -- mirroring what the `tak_usernames` branch
+   * already does, and keeping `resolveRevokeTargets` synchronous and
+   * catalog-driven for every shape alike.
+   *
    * @param {object} payload
    * @param {Array<object>} certificates the once-fetched TAK Server catalog --
-   *   `listCertificates()` for the user-scoped shape, the Live_Certificates for
-   *   the device-scoped one, per `fetchRevokeResolutionInputs`.
+   *   `listCertificates()` for the user-scoped and cert_ids-scoped shapes, the
+   *   Live_Certificates for the device-scoped one, per
+   *   `fetchRevokeResolutionInputs`.
    * @returns {{payloadShape: string, clientUid: string|null, targetCertIds: Array<number>,
    *   clientUids: Set<string>, unresolvedReason: string|null}} `unresolvedReason`
    *   is non-null only for a payload this cannot resolve to a target set at all
@@ -2931,10 +2711,39 @@ class SyncWorker {
     const clientUids = new Set();
     const certIds = new Set();
 
-    // The two shapes are mutually exclusive and `validatePayloadSchema`'s
-    // `exactlyOneOf` has already rejected a payload carrying both or neither,
-    // so the discriminator is unambiguous by the time it gets here.
-    if (revokePayloadShape(payload) === 'client_uid') {
+    // The three shapes are mutually exclusive and `validatePayloadSchema`'s
+    // `exactlyOneOf` has already rejected a payload carrying more than one
+    // or none, so the discriminator is unambiguous by the time it gets here.
+    const payloadShape = revokePayloadShape(payload);
+
+    if (payloadShape === 'cert_ids') {
+      for (const rawCertId of payload.cert_ids) {
+        const certId = Number(rawCertId);
+        if (Number.isFinite(certId)) {
+          certIds.add(certId);
+        }
+      }
+
+      // Resolve clientUids purely for audit-logging context, by looking
+      // up which fetched certificates carry one of the target ids --
+      // never used to determine the target set itself.
+      const targetCertIdSet = certIds;
+      for (const cert of certificates) {
+        if (targetCertIdSet.has(cert.id) && typeof cert.clientUid === 'string' && cert.clientUid.length > 0) {
+          clientUids.add(cert.clientUid);
+        }
+      }
+
+      return {
+        payloadShape: 'cert_ids',
+        clientUid: null,
+        targetCertIds: sortCertIds(certIds),
+        clientUids,
+        unresolvedReason: null
+      };
+    }
+
+    if (payloadShape === 'client_uid') {
       const targetClientUid = payload.client_uid;
 
       // A blank `client_uid` is schema-valid (`typeof '' === 'string'`) but

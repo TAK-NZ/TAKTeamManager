@@ -35,8 +35,7 @@
  * These env vars are read/defaulted and assigned onto `process.env`
  * BEFORE `../workers/syncWorker` is required -- and therefore before
  * `../config/database`'s module-level `pool` singleton (required
- * transitively via `ExpiryScheduler` -> `VendorChannelService`/
- * `DeploymentChannelService`, and via `RetentionCleanupJob`) is first
+ * transitively via `RetentionCleanupJob`) is first
  * constructed anywhere in this file's module graph -- and are restored
  * to their original values in `afterAll`, so this file's env
  * manipulation can never leak into another test file that happens to

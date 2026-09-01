@@ -88,8 +88,8 @@ function logAuthzFailure(req, reason) {
  * flowing through the `'*'` wildcard and Team_Admin access flowing
  * through this per-request, row-level check.
  *
- * Modelled directly on `channel_request:process` below: load the row named
- * by `:requestId`, pick the team column that gates it, delegate to
+ * Modelled on the same shape `channel:manage` below uses: load the row
+ * named by `:requestId`, pick the team column that gates it, delegate to
  * `Team.isAdmin` (which walks the Ancestor_Chain, so a Team_Admin above
  * the gating Team also qualifies). The only addition is that the gating
  * column depends on `request_type`:
@@ -350,7 +350,7 @@ const rowScopedResolvers = {
    * Global_Manager OR is an admin (per `Team.isAdmin`) of the specific
    * team named by the `:teamId` route param. Adding a member to a team is
    * the same authorization boundary as updating that team, so this
-   * mirrors `team:update` above exactly (BUG-015).
+   * mirrors `team:update` above exactly.
    *
    * @param {import('express').Request} req
    * @returns {Promise<boolean>}
@@ -532,8 +532,7 @@ const rowScopedResolvers = {
    *
    * `role = 'admin' AND inherited_from_team_id IS NULL` is the glossary's
    * Team_Admin condition, matching `Team.isAdmin`'s own filter
-   * (server/models/Team.js) and `BroadcastEmailService`'s
-   * `getAdministeredTeamIds` — an INHERITED admin row never confers admin
+   * (server/models/Team.js) — an INHERITED admin row never confers admin
    * status. Note the divergence from `server/routes/auth.js`'s `/auth/me`
    * team-admin flag, which uses the looser `role = 'admin'` with no
    * `inherited_from_team_id` filter: the stricter form is used here on
@@ -541,11 +540,9 @@ const rowScopedResolvers = {
    * `auth.js` is intentionally left unchanged.
    *
    * The query is issued through the module-scope `pool` import, the way
-   * `user:team:transfer` and `channel_request:process` above do, because
-   * neither existing helper fits: `Team.isAdmin` answers a per-team
-   * question and needs a `teamId`, and `BroadcastEmailService`'s
-   * `getAdministeredTeamIds` is module-private (not exported) as well as
-   * doing more work than a `LIMIT 1` existence check needs. Per this
+   * `user:team:transfer` below and `channel:manage` do, because
+   * `Team.isAdmin` answers a per-team question and needs a `teamId`,
+   * which doesn't fit this "any team at all" existence check. Per this
    * module's contract a throw propagates to
    * `isSatisfiedWithRowScopedChecks`, which logs it and fails closed, so
    * there is deliberately no local try/catch.
@@ -579,9 +576,8 @@ const rowScopedResolvers = {
    *
    * The destination leg is evaluated first because it needs no extra
    * query when it succeeds. Reading `req.body` here has precedent in
-   * `channel_request:create` and `team:create:root_or_sub`;
-   * `express.json()` runs before route middleware, so the body is
-   * populated by the time this runs.
+   * `team:create:root_or_sub`; `express.json()` runs before route
+   * middleware, so the body is populated by the time this runs.
    *
    * A `:userId` naming no `users` row, or naming a user with no
    * Direct_Membership, yields no source-team leg at all — such a request
@@ -637,75 +633,13 @@ const rowScopedResolvers = {
   'request:deny': resolveRequestActionPermission,
 
   /**
-   * `channel_request:create` — satisfied if the requesting user is a
-   * Global_Manager OR is an admin (per `Team.isAdmin`) of the team named
-   * by `req.body.teamId`. Task 45.4 (Requirement 23): submitting a
-   * channel request is restricted to a team's admin or a Global_Manager;
-   * `ChannelRequestService.requestChannel` itself further branches
-   * internally on Global_Manager status to decide immediate-vs-pending
-   * creation (Req 23.2/23.3), but a caller who is neither must be denied
-   * here before ever reaching that service.
-   *
-   * @param {import('express').Request} req
-   * @returns {Promise<boolean>}
-   */
-  'channel_request:create': async (req) => {
-    if (req.user && req.user.is_global_manager) {
-      return true;
-    }
-    const teamId = req.body && req.body.teamId;
-    if (!teamId) {
-      return false;
-    }
-    return Team.isAdmin(teamId, req.user && req.user.userId);
-  },
-
-  /**
-   * `channel_request:process` — satisfied if the requesting user is a
-   * Global_Manager OR is an admin (per `Team.isAdmin`) of the parent
-   * team of the `:requestId` route param's `channel_requests.team_id`
-   * (Req 23.4, reusing the exact sub-team-creation authorization shape
-   * from Requirement 4.1). Covers both approve and deny, since both
-   * routes share the same authorization rule per Req 23.4.
-   *
-   * A request id that does not resolve to an existing `channel_requests`
-   * row (already processed, or never existed) is treated as denied here
-   * rather than throwing -- the service-layer methods
-   * (`approveChannelRequest`/`denyChannelRequest`) are the authoritative
-   * source for the "already processed" 400 response (Req 23.8); this
-   * resolver only needs to know whether this specific requester is
-   * authorized to act on whichever team the row (if any) names.
-   *
-   * @param {import('express').Request} req
-   * @returns {Promise<boolean>}
-   */
-  'channel_request:process': async (req) => {
-    if (req.user && req.user.is_global_manager) {
-      return true;
-    }
-
-    const requestId = req.params && req.params.requestId;
-    const result = await pool.query(
-      'SELECT team_id FROM channel_requests WHERE id = $1',
-      [requestId]
-    );
-
-    if (result.rows.length === 0) {
-      return false;
-    }
-
-    return Team.isAdmin(result.rows[0].team_id, req.user && req.user.userId);
-  },
-
-  /**
    * Bugfix (Channels tab had no delete-channel or manage-members
    * action): `channel:manage` — satisfied if the requesting user is a
    * Global_Manager OR is an admin (per `Team.isAdmin`, so an admin of
    * any ancestor also qualifies) of the `:channelId` route param's
    * OWNING team, resolved via that channel's `channels.team_id` column.
-   * Mirrors `channel_request:process`'s exact shape immediately above
-   * (resolve the row, then delegate to `Team.isAdmin` on the team it
-   * names).
+   * Resolves the row, then delegates to `Team.isAdmin` on the team it
+   * names.
    *
    * A channel id that does not resolve to an existing `channels` row is
    * treated as denied here rather than throwing -- the route handlers
@@ -887,9 +821,8 @@ const rowScopedResolvers = {
    * before the route handler exists as far as the request is concerned, so
    * neither the `REVOKE` confirmation check nor `EventPublisher` is ever
    * reached on a denial. The route handler repeats the same assertion via
-   * `DeviceManagementService.assertCanRevokeManaged` (defense in depth,
-   * mirroring `MouService.recordCountersignature`'s double-gating), which
-   * is also what turns the two cases into the distinct client-facing
+   * `DeviceManagementService.assertCanRevokeManaged` (defense in depth),
+   * which is also what turns the two cases into the distinct client-facing
    * errors; this layer only answers permitted/denied.
    *
    * The managed-user leg is evaluated first so a caller with no

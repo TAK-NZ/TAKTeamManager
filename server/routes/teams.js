@@ -154,9 +154,9 @@ router.post('/', authenticateToken, authorize, [
   // .optional() only skips validation when the field is ABSENT, not when
   // it's present-but-null, so .isInt() was running against null and
   // failing every top-level team creation with a 400. Same fix already
-  // applied elsewhere for this exact bug class (see deploymentChannels.js,
-  // mou.js, vendorChannels.js) and the PUT /:teamId route just below,
-  // which already handles this correctly via a custom validator.
+  // applied elsewhere for this exact bug class (see deploymentChannels.js)
+  // and the PUT /:teamId route just below, which already handles this
+  // correctly via a custom validator.
   body('parentTeamId').optional({ nullable: true }).isInt(),
   body('callsignNameFormat').optional().isIn(['full_name', 'first_initial_last', 'first_last_initial', 'first_initial_dot_last', 'user_defined']),
   // Requirement 5.1/5.2 (task 8.2): basic request-shape validation only
@@ -782,7 +782,7 @@ router.patch('/:teamId/members/:userId', authenticateToken, authorize, [
       //
       // Deliberately does NOT apply `attributes.role` from
       // generateCallsign's result: that value is hardcoded to
-      // 'Team Member' (see BUG-029 in BUGS.md), and a callsign_suffix
+      // 'Team Member', and a callsign_suffix
       // edit must never clobber this user's separately-managed
       // tak_role -- only `callsign`/`color` are read from the result.
       //

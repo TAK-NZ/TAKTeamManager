@@ -521,6 +521,66 @@ describe('Dashboard "My Devices" card', () => {
     Array.from(devicesCard().querySelectorAll('tbody tr')).find((tr) => tr.textContent.includes(clientUid))
   const cellsOf = (tr) => Array.from(tr.querySelectorAll('td')).map((td) => td.textContent.trim())
 
+  // cert-expiry-notifications Requirement 6: the page-level renew banner
+  // above the device list.
+  const renewBannerText = () => (devicesCard()?.textContent.includes('Renew now') ? devicesCard().textContent : null)
+
+  it('renders no renew banner when every device is comfortably unexpiring (Requirement 6.3)', async () => {
+    await mount()
+
+    expect(renewBannerText()).toBeNull()
+  })
+
+  it('renders the renew banner when a device has an imminent-expiry certificate (Requirement 6.1)', async () => {
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: true, devices: [IMMINENT_DEVICE] })
+
+    await mount()
+
+    expect(renewBannerText()).not.toBeNull()
+    expect(renewBannerText()).toContain('expiring soon or expired')
+  })
+
+  it('renders the renew banner when a device has an already-expired certificate (Requirement 6.1)', async () => {
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: true, devices: [EXPIRED_DEVICE] })
+
+    await mount()
+
+    expect(renewBannerText()).not.toBeNull()
+  })
+
+  it('renders exactly one banner even when MULTIPLE devices are due, never one per device', async () => {
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: true, devices: [IMMINENT_DEVICE, EXPIRED_DEVICE] })
+
+    await mount()
+
+    const card = devicesCard()
+    const bannerCount = card.textContent.split('expiring soon or expired').length - 1
+    expect(bannerCount).toBe(1)
+  })
+
+  it('the renew banner\'s call-to-action links to /enrollment -- the SAME existing self-enrollment flow, no new route', async () => {
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: true, devices: [IMMINENT_DEVICE] })
+
+    await mount()
+
+    const card = devicesCard()
+    const renewLink = Array.from(card.querySelectorAll('a')).find((a) => a.textContent === 'Renew now')
+    expect(renewLink).toBeDefined()
+    expect(renewLink.getAttribute('href')).toBe('/enrollment')
+  })
+
+  it('renders no per-device-row Renew button distinct from the existing enrollment link (Requirement 6.2)', async () => {
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: true, devices: [IMMINENT_DEVICE] })
+
+    await mount()
+
+    const row = rowFor(IMMINENT_DEVICE.clientUid)
+    // The row's own buttons are only the existing Revoke action (icon-only,
+    // no text) -- no row-scoped "Renew" text/button exists anywhere in it.
+    const rowButtonLabels = Array.from(row.querySelectorAll('button')).map((b) => b.textContent.trim())
+    expect(rowButtonLabels).not.toContain('Renew')
+  })
+
   it('renders the card and lists the caller\'s own devices when the probe reports enabled (Reqs 5.1, 5.2)', async () => {
     await mount()
 

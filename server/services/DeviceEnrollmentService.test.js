@@ -472,7 +472,13 @@ describe('DeviceEnrollmentService.generateEnrollmentQrCode', () => {
   // `team_memberships` query `generateEnrollmentQrCode` already ran, so
   // this mock must keep answering it the second time too; and it now
   // also answers the `tak_devices` live-certificate-count query.
-  function mockUserAndMembershipLookup({ userRow, teamId, liveCertificateCount = 0 }) {
+  // `priorLiveCertRows` answers cert-expiry-notifications'
+  // Superseding_Revoke lookup (`SELECT cert_id FROM tak_devices WHERE
+  // user_id = $1 AND revoked = false`) -- distinct from the pre-existing
+  // `count(*)` liveCertificateCount read this helper already answered.
+  // Defaults to [] ("no prior live certificate") so every pre-existing
+  // call site of this helper is unaffected.
+  function mockUserAndMembershipLookup({ userRow, teamId, liveCertificateCount = 0, priorLiveCertRows = [] }) {
     pool.query.mockImplementation((sql) => {
       if (typeof sql === 'string' && sql.includes('FROM users WHERE id')) {
         return Promise.resolve({ rows: userRow ? [userRow] : [] });
@@ -480,8 +486,11 @@ describe('DeviceEnrollmentService.generateEnrollmentQrCode', () => {
       if (typeof sql === 'string' && sql.includes('FROM team_memberships')) {
         return Promise.resolve({ rows: teamId !== undefined ? [{ team_id: teamId }] : [] });
       }
-      if (typeof sql === 'string' && sql.includes('FROM tak_devices')) {
+      if (typeof sql === 'string' && sql.includes('count(*)') && sql.includes('FROM tak_devices')) {
         return Promise.resolve({ rows: [{ count: String(liveCertificateCount) }] });
+      }
+      if (typeof sql === 'string' && sql.includes('cert_id') && sql.includes('FROM tak_devices')) {
+        return Promise.resolve({ rows: priorLiveCertRows });
       }
       return Promise.resolve({ rows: [] });
     });
@@ -586,6 +595,54 @@ describe('DeviceEnrollmentService.generateEnrollmentQrCode', () => {
     ).rejects.toThrow(NotATeamOwnedDeviceError);
   });
 
+  /**
+   * cert-expiry-notifications Requirement 8 (task 9.6): the same
+   * Superseding_Revoke enqueue, for the Team-Owned_Device path.
+   */
+  describe('Superseding_Revoke enqueue (cert-expiry-notifications Requirement 8)', () => {
+    async function flushMicrotasks() {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+
+    it('enqueues revoke_tak_certificates with the one prior live certificate id when exactly one exists', async () => {
+      Team.isAdmin.mockResolvedValue(true);
+      mockUserAndMembershipLookup({ userRow: DEVICE_ROW, teamId: 5, priorLiveCertRows: [{ cert_id: 777 }] });
+
+      await DeviceEnrollmentService.generateEnrollmentQrCode(42, { userId: 1, is_global_manager: false });
+      await flushMicrotasks();
+
+      expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+        'revoke_tak_certificates',
+        { cert_ids: [777] },
+        1
+      );
+    });
+
+    it('enqueues nothing when no prior live certificate exists', async () => {
+      Team.isAdmin.mockResolvedValue(true);
+      mockUserAndMembershipLookup({ userRow: DEVICE_ROW, teamId: 5, priorLiveCertRows: [] });
+
+      await DeviceEnrollmentService.generateEnrollmentQrCode(42, { userId: 1, is_global_manager: false });
+      await flushMicrotasks();
+
+      expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+    });
+
+    it('a rejected enqueue does not propagate to or alter the successful QR-generation response', async () => {
+      Team.isAdmin.mockResolvedValue(true);
+      mockUserAndMembershipLookup({ userRow: DEVICE_ROW, teamId: 5, priorLiveCertRows: [{ cert_id: 777 }] });
+      EventPublisher.publishOperation.mockRejectedValue(new Error('enqueue failed'));
+
+      const result = await DeviceEnrollmentService.generateEnrollmentQrCode(42, { userId: 1, is_global_manager: false });
+      await flushMicrotasks();
+
+      expect(result.principalId).toBe(42);
+      expect(result.teamId).toBe(5);
+    });
+  });
+
   it('rejects with TakServerNotConfiguredError when TAK_SERVER_ENROLLMENT_URL is unset', async () => {
     delete process.env.TAK_SERVER_ENROLLMENT_URL;
     mockUserAndMembershipLookup({ userRow: DEVICE_ROW, teamId: 5 });
@@ -624,12 +681,26 @@ describe('DeviceEnrollmentService.generateSelfEnrollment', () => {
       key: 'super-secret-app-password'
     });
     UserAttributesService.generateCallsign.mockResolvedValue(null);
+    // Two DISTINCT `tak_devices` queries now run per enrollment: the
+    // pre-existing `count(*)` liveCertificateCount read (in
+    // #resolvePrincipalPreview) and cert-expiry-notifications' new
+    // `cert_id`-selecting Superseding_Revoke lookup (in
+    // #enqueueSupersedingRevoke) -- matched on the distinguishing
+    // `count(*)` substring so each answers correctly. Defaults to "no
+    // prior live certificate" for the Superseding_Revoke lookup so
+    // every pre-existing test in this describe block (written before
+    // that lookup existed) is unaffected; tests exercising the
+    // Superseding_Revoke behaviour itself override this via
+    // `pool.query.mockImplementationOnce`/a dedicated helper below.
     pool.query.mockImplementation((sql) => {
       if (typeof sql === 'string' && sql.includes('FROM team_memberships')) {
         return Promise.resolve({ rows: [] });
       }
-      if (typeof sql === 'string' && sql.includes('FROM tak_devices')) {
+      if (typeof sql === 'string' && sql.includes('count(*)') && sql.includes('FROM tak_devices')) {
         return Promise.resolve({ rows: [{ count: '0' }] });
+      }
+      if (typeof sql === 'string' && sql.includes('cert_id') && sql.includes('FROM tak_devices')) {
+        return Promise.resolve({ rows: [] });
       }
       return Promise.resolve({ rows: [] });
     });
@@ -682,6 +753,118 @@ describe('DeviceEnrollmentService.generateSelfEnrollment', () => {
 
     expect(User.findById).toHaveBeenCalledTimes(1);
     expect(User.findById).toHaveBeenCalledWith(43);
+  });
+
+  /**
+   * cert-expiry-notifications Requirement 8 (task 9.6): the
+   * Superseding_Revoke enqueue, fired after a successful self-enrollment
+   * mint. Awaited via a microtask flush (`await Promise.resolve()`
+   * twice) since the call site is deliberately fire-and-forget
+   * (`.catch(...)` at the call site, never awaited by the caller).
+   */
+  describe('Superseding_Revoke enqueue (cert-expiry-notifications Requirement 8)', () => {
+    async function flushMicrotasks() {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+
+    it('enqueues revoke_tak_certificates with exactly the one prior live certificate id when exactly one exists', async () => {
+      User.findById.mockResolvedValue(HUMAN_ROW);
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('FROM team_memberships')) return Promise.resolve({ rows: [] });
+        if (typeof sql === 'string' && sql.includes('count(*)') && sql.includes('FROM tak_devices')) {
+          return Promise.resolve({ rows: [{ count: '0' }] });
+        }
+        if (typeof sql === 'string' && sql.includes('cert_id') && sql.includes('FROM tak_devices')) {
+          return Promise.resolve({ rows: [{ cert_id: 555 }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      await DeviceEnrollmentService.generateSelfEnrollment({ userId: 43, is_global_manager: false });
+      await flushMicrotasks();
+
+      expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+        'revoke_tak_certificates',
+        { cert_ids: [555] },
+        43
+      );
+    });
+
+    it('enqueues nothing when no prior live certificate exists (ordinary first enrollment)', async () => {
+      User.findById.mockResolvedValue(HUMAN_ROW);
+      // Default mock from beforeEach already answers [] for the
+      // cert_id lookup -- no override needed.
+
+      await DeviceEnrollmentService.generateSelfEnrollment({ userId: 43, is_global_manager: false });
+      await flushMicrotasks();
+
+      expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+    });
+
+    it('enqueues nothing when MORE than one prior live certificate exists (ambiguous multi-device case)', async () => {
+      User.findById.mockResolvedValue(HUMAN_ROW);
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('FROM team_memberships')) return Promise.resolve({ rows: [] });
+        if (typeof sql === 'string' && sql.includes('count(*)') && sql.includes('FROM tak_devices')) {
+          return Promise.resolve({ rows: [{ count: '2' }] });
+        }
+        if (typeof sql === 'string' && sql.includes('cert_id') && sql.includes('FROM tak_devices')) {
+          return Promise.resolve({ rows: [{ cert_id: 111 }, { cert_id: 222 }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      await DeviceEnrollmentService.generateSelfEnrollment({ userId: 43, is_global_manager: false });
+      await flushMicrotasks();
+
+      expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+    });
+
+    it('never includes the just-minted certificate\'s own id, since the lookup only reads rows that existed BEFORE this mint', async () => {
+      User.findById.mockResolvedValue(HUMAN_ROW);
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('FROM team_memberships')) return Promise.resolve({ rows: [] });
+        if (typeof sql === 'string' && sql.includes('count(*)') && sql.includes('FROM tak_devices')) {
+          return Promise.resolve({ rows: [{ count: '0' }] });
+        }
+        if (typeof sql === 'string' && sql.includes('cert_id') && sql.includes('FROM tak_devices')) {
+          return Promise.resolve({ rows: [{ cert_id: 999 }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      await DeviceEnrollmentService.generateSelfEnrollment({ userId: 43, is_global_manager: false });
+      await flushMicrotasks();
+
+      const [, payload] = EventPublisher.publishOperation.mock.calls[0];
+      expect(payload.cert_ids).toEqual([999]);
+      expect(payload.cert_ids).not.toContain(undefined);
+    });
+
+    it('a rejected enqueue does not propagate to or alter the successful enrollment response', async () => {
+      User.findById.mockResolvedValue(HUMAN_ROW);
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('FROM team_memberships')) return Promise.resolve({ rows: [] });
+        if (typeof sql === 'string' && sql.includes('count(*)') && sql.includes('FROM tak_devices')) {
+          return Promise.resolve({ rows: [{ count: '0' }] });
+        }
+        if (typeof sql === 'string' && sql.includes('cert_id') && sql.includes('FROM tak_devices')) {
+          return Promise.resolve({ rows: [{ cert_id: 555 }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+      EventPublisher.publishOperation.mockRejectedValue(new Error('enqueue failed'));
+
+      const result = await DeviceEnrollmentService.generateSelfEnrollment({ userId: 43, is_global_manager: false });
+      await flushMicrotasks();
+
+      // The enrollment call itself never rejected, and returned its
+      // normal successful shape.
+      expect(result.principalId).toBe(43);
+      expect(result.atakEnrollmentUri).toBeDefined();
+    });
   });
 });
 
@@ -856,6 +1039,26 @@ describe('DeviceEnrollmentService.listTeamDevices', () => {
 
     const [sql] = pool.query.mock.calls[0];
     expect(sql.toLowerCase()).not.toMatch(/\bemail\b/);
+  });
+
+  // Bugfix (admins had no way to see a device's certificate expiring soon
+  // on the Team Devices tab): `expiresAt` -- the SOONEST `expires_at` among
+  // a device's own live certificates -- is added to the same derived-table
+  // join `liveCertificateCount` already uses, no second query.
+  it('resolves expiresAt as the row\'s soonest live-certificate expiry, and null for a device with no live certificate', async () => {
+    Team.isAdmin.mockResolvedValue(true);
+    mockDevicesQuery([
+      { device_user_id: 1, username: 'AUK-D0000AA', device_label: null, callsign_suffix: null, tak_role: 'Team Member', created_at: '2024-01-01T00:00:00.000Z', live_certificate_count: 1, expires_at: '2026-04-01T00:00:00.000Z' },
+      { device_user_id: 2, username: 'AUK-D0000BB', device_label: null, callsign_suffix: null, tak_role: 'Team Member', created_at: '2024-01-02T00:00:00.000Z', live_certificate_count: 0, expires_at: null }
+    ]);
+
+    const result = await DeviceEnrollmentService.listTeamDevices(5, { userId: 1, is_global_manager: false });
+
+    expect(result.devices[0].expiresAt).toBe('2026-04-01T00:00:00.000Z');
+    expect(result.devices[1].expiresAt).toBeNull();
+
+    const [sql] = pool.query.mock.calls[0];
+    expect(sql).toContain('MIN(expires_at) AS earliest_expires_at');
   });
 
   it('scopes the listing to direct membership and Team_Owned_Devices only, echoing back the teamId parameter rather than re-deriving it per row', async () => {
@@ -1192,6 +1395,7 @@ describe('DeviceEnrollmentService.listAllDevices', () => {
         team_name: 'Auckland',
         direct_membership_org_id: 5,
         live_certificate_count: 2,
+        expires_at: '2026-04-01T00:00:00.000Z',
         in_scope: true,
         total_count: '1'
       }
@@ -1216,6 +1420,7 @@ describe('DeviceEnrollmentService.listAllDevices', () => {
       createdAt: '2024-01-01T00:00:00.000Z',
       accountStatus: 'active',
       liveCertificateCount: 2,
+      expiresAt: '2026-04-01T00:00:00.000Z',
       canManage: true
     });
     expect(result.devices[0]).not.toHaveProperty('email');
@@ -1329,7 +1534,47 @@ describe('DeviceEnrollmentService.listAllDevices', () => {
     );
 
     const [, params] = pool.query.mock.calls.find(([sql]) => sql.includes('FROM users u'));
-    expect(params).toEqual([[], '%tanker%', true, 10, 10]);
+    // cert-expiry-notifications task 14.1: two additive parameters,
+    // expiringOnly (defaulting to false when not requested) and the
+    // resolved expiryWarningDays threshold (defaulting to 30 when
+    // DEVICE_MGMT_EXPIRY_WARNING_DAYS is unset).
+    expect(params).toEqual([[], '%tanker%', true, 10, 10, false, 30]);
+  });
+
+  // Bugfix (admins had no way to see a device's certificate expiring soon
+  // in the org-wide /devices listing): same soonest-live-certificate
+  // resolution as listTeamDevices, via the same derived-table join.
+  it('resolves expiresAt as the row\'s soonest live-certificate expiry, and null for a device with no live certificate', async () => {
+    DirectoryScopeService.resolveScope.mockResolvedValue(DirectoryScopeService.UNSCOPED);
+    mockCandidatesQuery([
+      {
+        device_user_id: 1,
+        username: 'AUK-D0000AA',
+        device_label: null,
+        callsign_suffix: null,
+        tak_role: 'Team Member',
+        created_at: '2024-01-01T00:00:00.000Z',
+        account_status: 'active',
+        origin_org_id: null,
+        team_id: 5,
+        team_name: 'Auckland',
+        direct_membership_org_id: 5,
+        live_certificate_count: 0,
+        expires_at: null,
+        in_scope: true,
+        total_count: '1'
+      }
+    ]);
+
+    const result = await DeviceEnrollmentService.listAllDevices(
+      { userId: 1, is_global_manager: true },
+      { page: 1, pageSize: 50 }
+    );
+
+    expect(result.devices[0].expiresAt).toBeNull();
+
+    const [sql] = pool.query.mock.calls.find(([q]) => q.includes('FROM users u'));
+    expect(sql).toContain('MIN(expires_at) AS earliest_expires_at');
   });
 
   it('returns zero total and an empty device array when the candidates CTE yields no rows', async () => {
@@ -1359,5 +1604,101 @@ describe('DeviceEnrollmentService.listAllDevices', () => {
 
     expect(Team.getAncestorChain).toHaveBeenCalledTimes(1);
     expect(Team.getAncestorChain).toHaveBeenCalledWith(5);
+  });
+
+  /**
+   * cert-expiry-notifications Requirement 7.3(b) (task 14.1): the
+   * `expiringOnly` filter, threaded into the SQL as two additive
+   * parameters.
+   */
+  describe('expiringOnly filter (cert-expiry-notifications Requirement 7.3(b))', () => {
+    const ORIGINAL_WARNING_DAYS = process.env.DEVICE_MGMT_EXPIRY_WARNING_DAYS;
+
+    afterEach(() => {
+      if (ORIGINAL_WARNING_DAYS === undefined) {
+        delete process.env.DEVICE_MGMT_EXPIRY_WARNING_DAYS;
+      } else {
+        process.env.DEVICE_MGMT_EXPIRY_WARNING_DAYS = ORIGINAL_WARNING_DAYS;
+      }
+    });
+
+    it('passes expiringOnly=false and the default 30-day threshold when not requested', async () => {
+      delete process.env.DEVICE_MGMT_EXPIRY_WARNING_DAYS;
+      DirectoryScopeService.resolveScope.mockResolvedValue(DirectoryScopeService.UNSCOPED);
+      mockCandidatesQuery([]);
+
+      await DeviceEnrollmentService.listAllDevices(
+        { userId: 1, is_global_manager: true },
+        { page: 1, pageSize: 50 }
+      );
+
+      const [sql, params] = pool.query.mock.calls.find(([q]) => q.includes('FROM users u'));
+      expect(sql).toContain('$6::boolean');
+      expect(params[params.length - 2]).toBe(false);
+      expect(params[params.length - 1]).toBe(30);
+    });
+
+    it('passes expiringOnly=true and the configured DEVICE_MGMT_EXPIRY_WARNING_DAYS threshold when requested', async () => {
+      process.env.DEVICE_MGMT_EXPIRY_WARNING_DAYS = '45';
+      DirectoryScopeService.resolveScope.mockResolvedValue(DirectoryScopeService.UNSCOPED);
+      mockCandidatesQuery([]);
+
+      await DeviceEnrollmentService.listAllDevices(
+        { userId: 1, is_global_manager: true },
+        { page: 1, pageSize: 50, expiringOnly: true }
+      );
+
+      const [, params] = pool.query.mock.calls.find(([q]) => q.includes('FROM users u'));
+      expect(params[params.length - 2]).toBe(true);
+      expect(params[params.length - 1]).toBe(45);
+    });
+
+    it.each(['', '0', '-5', 'not-a-number'])(
+      'falls back to the 30-day default when DEVICE_MGMT_EXPIRY_WARNING_DAYS=%p',
+      async (value) => {
+        process.env.DEVICE_MGMT_EXPIRY_WARNING_DAYS = value;
+        DirectoryScopeService.resolveScope.mockResolvedValue(DirectoryScopeService.UNSCOPED);
+        mockCandidatesQuery([]);
+
+        await DeviceEnrollmentService.listAllDevices(
+          { userId: 1, is_global_manager: true },
+          { page: 1, pageSize: 50, expiringOnly: true }
+        );
+
+        const [, params] = pool.query.mock.calls.find(([q]) => q.includes('FROM users u'));
+        expect(params[params.length - 1]).toBe(30);
+      }
+    );
+
+    it('introduces no new authorization rule -- canManage/scoping is resolved identically regardless of expiringOnly', async () => {
+      DirectoryScopeService.resolveScope.mockResolvedValue({ organisationIds: [5] });
+      mockCandidatesQuery([
+        {
+          device_user_id: 1,
+          username: 'AUK-D0000AA',
+          device_label: null,
+          callsign_suffix: null,
+          tak_role: 'Team Member',
+          created_at: '2024-01-01T00:00:00.000Z',
+          account_status: 'active',
+          origin_org_id: 5,
+          team_id: 5,
+          team_name: 'Auckland',
+          direct_membership_org_id: 5,
+          live_certificate_count: 1,
+          expires_at: '2024-06-01T00:00:00.000Z',
+          in_scope: true,
+          total_count: '1'
+        }
+      ]);
+      Team.getManagedTeamIds.mockResolvedValue(new Set([5]));
+
+      const result = await DeviceEnrollmentService.listAllDevices(
+        { userId: 1, is_global_manager: false },
+        { page: 1, pageSize: 50, expiringOnly: true }
+      );
+
+      expect(result.devices[0].canManage).toBe(true);
+    });
   });
 });

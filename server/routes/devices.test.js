@@ -248,7 +248,7 @@ describe('GET /api/devices', () => {
     expect(res.body.pagination).toEqual({ page: 1, pageSize: 50, total: 1 });
     expect(DeviceEnrollmentService.listAllDevices).toHaveBeenCalledWith(
       mockUser,
-      { page: 1, pageSize: 50, search: undefined }
+      { page: 1, pageSize: 50, search: undefined, expiringOnly: false }
     );
   });
 
@@ -264,8 +264,60 @@ describe('GET /api/devices', () => {
     expect(res.status).toBe(200);
     expect(DeviceEnrollmentService.listAllDevices).toHaveBeenCalledWith(
       mockUser,
-      { page: 2, pageSize: 10, search: 'tanker' }
+      { page: 2, pageSize: 10, search: 'tanker', expiringOnly: false }
     );
+  });
+
+  /**
+   * cert-expiry-notifications Requirement 7.3(b) (task 14.1): the
+   * expiringOnly query param, threaded through to the service.
+   */
+  describe('expiringOnly query param', () => {
+    it('passes expiringOnly: true only for the exact string "true"', async () => {
+      asGlobalManager();
+      DeviceEnrollmentService.listAllDevices.mockResolvedValue({
+        devices: [],
+        pagination: { page: 1, pageSize: 50, total: 0 }
+      });
+
+      const res = await request(app).get('/api/devices').query({ expiringOnly: 'true' });
+
+      expect(res.status).toBe(200);
+      expect(DeviceEnrollmentService.listAllDevices).toHaveBeenCalledWith(
+        mockUser,
+        { page: 1, pageSize: 50, search: undefined, expiringOnly: true }
+      );
+    });
+
+    it.each(['TRUE', '1', 'yes', ''])('treats the non-exact value %p as false', async (value) => {
+      asGlobalManager();
+      DeviceEnrollmentService.listAllDevices.mockResolvedValue({
+        devices: [],
+        pagination: { page: 1, pageSize: 50, total: 0 }
+      });
+
+      await request(app).get('/api/devices').query({ expiringOnly: value });
+
+      expect(DeviceEnrollmentService.listAllDevices).toHaveBeenCalledWith(
+        mockUser,
+        expect.objectContaining({ expiringOnly: false })
+      );
+    });
+
+    it('defaults to false when the param is absent entirely', async () => {
+      asGlobalManager();
+      DeviceEnrollmentService.listAllDevices.mockResolvedValue({
+        devices: [],
+        pagination: { page: 1, pageSize: 50, total: 0 }
+      });
+
+      await request(app).get('/api/devices');
+
+      expect(DeviceEnrollmentService.listAllDevices).toHaveBeenCalledWith(
+        mockUser,
+        expect.objectContaining({ expiringOnly: false })
+      );
+    });
   });
 
   it('allows a Team_Admin (non-global-manager) to reach the handler', async () => {

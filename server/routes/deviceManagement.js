@@ -21,7 +21,7 @@ const router = express.Router();
  * every Device_Table read to the service, and maps the service's named
  * error classes to HTTP statuses via the same
  * `ERROR_STATUS_BY_NAME`/`handleServiceError` pattern already used by
- * `server/routes/devices.js`/`server/routes/mou.js`. No business logic and
+ * `server/routes/devices.js`. No business logic and
  * no SQL against `tak_devices` lives here.
  *
  * This is a DIFFERENT feature from `server/routes/devices.js`

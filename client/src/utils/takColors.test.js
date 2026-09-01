@@ -52,7 +52,7 @@ describe('getTakColorHex', () => {
 
   it('drops the three non-canonical entries the old hand-copied maps carried (Pink, Gray, Black)', () => {
     // None of these three is a real, assignable TAK_Color (none appears
-    // in server/routes/settings.js's COLOR_KEY_LABELS or any TAK_COLOR_*
+    // in server/routes/config.js's colorMappings object or any TAK_COLOR_*
     // environment variable), so they must not resolve to a colour of
     // their own -- each falls through to the same default as any other
     // unrecognised name.

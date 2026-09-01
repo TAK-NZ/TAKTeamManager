@@ -5,12 +5,9 @@ import FormattedDate, { DATE_PRECISION, TOOLTIP_SIDES } from '../components/Form
 import { getVariableHints } from '../utils/templateVariableHints'
 import { buildTemplateUpdatePayload, validateTemplateDraft } from '../utils/templateUpdatePayload'
 import { unzipExportedArchive, isImportPayloadShape } from '../utils/settingsImportTransform'
-import { colorLabelToConfigKey, roleLabelToConfigKey } from '../utils/takMappingKeys'
 import ExcludedDomainsManager from '../components/ExcludedDomainsManager'
 
 export default function Admin({ user }) {
-  const [organizationMappings, setOrganizationMappings] = useState({})
-  const [roleDescriptions, setRoleDescriptions] = useState({})
   const [stats, setStats] = useState({ totalUsers: 0, totalTeams: 0 })
   const [syncStatus, setSyncStatus] = useState(null)
   const [syncing, setSyncing] = useState(false)
@@ -71,30 +68,10 @@ export default function Admin({ user }) {
     // "Bearer null", and none of these raw calls set
     // `withCredentials: true` either, so the real session cookie was never
     // sent. Every one of these calls has been failing with 401 the entire
-    // time -- which is why the whole page's stats cards and the Color
-    // Mappings/Role Descriptions tabs never actually loaded real data.
-    // Replaced throughout with the shared, correctly-configured `api`
-    // axios instance via its API wrapper functions.
-    // Bugfix (BUG-014): this used to read `configAPI.getColorMappings()` ->
-    // GET /api/config/color-mappings, a legacy read-only endpoint backed
-    // by TAK_COLOR_*/TAK_ROLE_* environment variables with no PUT
-    // counterpart at all. Edits therefore updated local React state only
-    // and silently reverted on reload -- there was never a way to persist
-    // them regardless of the save handlers below. `settingsAPI.
-    // getTakMappings()` -> GET /api/settings/tak-mappings reads the same
-    // {colorMappings, roleDescriptions} shape from the DATABASE-backed
-    // system_config rows that PUT /api/settings/tak-mappings actually
-    // writes, so a save now round-trips correctly.
-    const fetchConfig = async () => {
-      try {
-        const response = await settingsAPI.getTakMappings()
-        setOrganizationMappings(response.data.colorMappings)
-        setRoleDescriptions(response.data.roleDescriptions)
-      } catch (error) {
-        console.error('Failed to fetch config:', error)
-      }
-    }
-
+    // time -- which is why the whole page's stats cards never actually
+    // loaded real data. Replaced throughout with the shared,
+    // correctly-configured `api` axios instance via its API wrapper
+    // functions.
     const fetchStats = async () => {
       try {
         const [usersResponse, teamsResponse] = await Promise.all([
@@ -157,25 +134,12 @@ export default function Admin({ user }) {
       }
     }
 
-    fetchConfig()
     fetchStats()
     fetchSyncStatus()
     fetchSiteConfig()
     fetchTemplateList()
   }, [])
-  const [activeTab, setActiveTab] = useState('colors')
-  const [editingColor, setEditingColor] = useState(null)
-  const [editingRole, setEditingRole] = useState(null)
-  const [tempColorValue, setTempColorValue] = useState('')
-  const [tempRoleValue, setTempRoleValue] = useState('')
-  // Bugfix (BUG-014): per-row save-in-flight guard and a surfaced error for
-  // a failed Colour Mappings / Role Descriptions save. Previously these
-  // saves never called the API at all, so nothing could ever fail visibly
-  // -- an admin would believe the edit was saved right up until the next
-  // page load silently reverted it. `mappingSaveError` is a single slot
-  // (not keyed per row) since only one row can be in edit mode at a time.
-  const [savingMapping, setSavingMapping] = useState(false)
-  const [mappingSaveError, setMappingSaveError] = useState(null)
+  const [activeTab, setActiveTab] = useState('site')
 
   // --- Bulk Import (Team CSV) state (Requirements 9.14, 14.1) ---
   const [bulkImportFile, setBulkImportFile] = useState(null)
@@ -202,85 +166,6 @@ export default function Admin({ user }) {
   const [importError, setImportError] = useState(null)
   const [importing, setImporting] = useState(false)
   const settingsImportFileInputRef = useRef(null)
-
-  const handleEditColor = (colorName) => {
-    setMappingSaveError(null)
-    setEditingColor(colorName)
-    setTempColorValue(organizationMappings[colorName])
-  }
-
-  // Bugfix (BUG-014): previously this only called setOrganizationMappings,
-  // which updates local React state and nothing else -- no request was
-  // ever sent, so the "saved" value lived only in memory and reverted the
-  // moment the page reloaded. Now persists to the DATABASE-backed
-  // system_config row via PUT /api/settings/tak-mappings (keyed by
-  // config_key, hence the label->key lookup) before updating local state,
-  // and on failure leaves editingColor/tempColorValue untouched so the
-  // operator's unsaved edit is still visible and retryable.
-  const handleSaveColor = async (colorName) => {
-    const configKey = colorLabelToConfigKey(colorName)
-    if (!configKey) {
-      setMappingSaveError(`Unrecognised colour "${colorName}" -- cannot save.`)
-      return
-    }
-
-    setSavingMapping(true)
-    setMappingSaveError(null)
-    try {
-      await settingsAPI.updateTakMappings({ [configKey]: tempColorValue })
-      setOrganizationMappings(prev => ({ ...prev, [colorName]: tempColorValue }))
-      setEditingColor(null)
-      setTempColorValue('')
-    } catch (error) {
-      console.error('Failed to save colour mapping:', error)
-      setMappingSaveError('Failed to save the colour mapping. Your change was not saved.')
-    } finally {
-      setSavingMapping(false)
-    }
-  }
-
-  const handleCancelColorEdit = () => {
-    setMappingSaveError(null)
-    setEditingColor(null)
-    setTempColorValue('')
-  }
-
-  const handleEditRole = (roleName) => {
-    setMappingSaveError(null)
-    setEditingRole(roleName)
-    setTempRoleValue(roleDescriptions[roleName])
-  }
-
-  // Bugfix (BUG-014): same fix as handleSaveColor above, for the Role
-  // Descriptions tab -- previously local-state-only, now persisted via
-  // PUT /api/settings/tak-mappings.
-  const handleSaveRole = async (roleName) => {
-    const configKey = roleLabelToConfigKey(roleName)
-    if (!configKey) {
-      setMappingSaveError(`Unrecognised role "${roleName}" -- cannot save.`)
-      return
-    }
-
-    setSavingMapping(true)
-    setMappingSaveError(null)
-    try {
-      await settingsAPI.updateTakMappings({ [configKey]: tempRoleValue })
-      setRoleDescriptions(prev => ({ ...prev, [roleName]: tempRoleValue }))
-      setEditingRole(null)
-      setTempRoleValue('')
-    } catch (error) {
-      console.error('Failed to save role description:', error)
-      setMappingSaveError('Failed to save the role description. Your change was not saved.')
-    } finally {
-      setSavingMapping(false)
-    }
-  }
-
-  const handleCancelRoleEdit = () => {
-    setMappingSaveError(null)
-    setEditingRole(null)
-    setTempRoleValue('')
-  }
 
   const handleEditConfig = (configKey) => {
     const config = siteConfig.find(c => c.config_key === configKey)
@@ -712,26 +597,6 @@ export default function Admin({ user }) {
         <div className="border-b border-gray-200 dark:border-gray-700">
           <nav className="-mb-px flex space-x-8">
             <button
-              onClick={() => setActiveTab('colors')}
-              className={`py-2 px-1 border-b-2 font-medium text-sm ${
-                activeTab === 'colors'
-                  ? 'border-primary-500 text-primary-600 dark:text-primary-400'
-                  : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:border-gray-300'
-              }`}
-            >
-              Colour Mappings
-            </button>
-            <button
-              onClick={() => setActiveTab('roles')}
-              className={`py-2 px-1 border-b-2 font-medium text-sm ${
-                activeTab === 'roles'
-                  ? 'border-primary-500 text-primary-600 dark:text-primary-400'
-                  : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:border-gray-300'
-              }`}
-            >
-              Role Descriptions
-            </button>
-            <button
               onClick={() => setActiveTab('site')}
               className={`py-2 px-1 border-b-2 font-medium text-sm ${
                 activeTab === 'site'
@@ -785,157 +650,6 @@ export default function Admin({ user }) {
         </div>
 
         <div className="mt-4">
-          {activeTab === 'colors' && (
-            <div>
-              <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
-                Configure how TAK colour names map to organisation names.
-              </p>
-              {/* Bugfix (BUG-014): a failed save must be visible -- previously
-                  there was no way for a save to fail at all, since none was
-                  ever attempted. */}
-              {mappingSaveError && (
-                <div className="rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-900/30 p-3 mb-4">
-                  <p className="text-sm text-red-700 dark:text-red-300">{mappingSaveError}</p>
-                </div>
-              )}
-              <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                <thead className="bg-gray-50 dark:bg-gray-700">
-                  <tr>
-                    <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
-                      Color
-                    </th>
-                    <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
-                      Organisation
-                    </th>
-                    <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
-                      Actions
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                  {Object.entries(organizationMappings).map(([colorName, orgName]) => (
-                    <tr key={colorName}>
-                      <td className="px-3 py-2 text-sm font-medium text-gray-900 dark:text-gray-100">
-                        {colorName}
-                      </td>
-                      <td className="px-3 py-2 text-sm text-gray-900 dark:text-gray-100">
-                        {editingColor === colorName ? (
-                          <input
-                            type="text"
-                            value={tempColorValue}
-                            onChange={(e) => setTempColorValue(e.target.value)}
-                            className="w-full px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
-                          />
-                        ) : (
-                          orgName || 'Not set'
-                        )}
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        {editingColor === colorName ? (
-                          <div className="flex justify-end space-x-1">
-                            <button
-                              onClick={() => handleSaveColor(colorName)}
-                              disabled={savingMapping}
-                              className="text-green-600 hover:text-green-900 disabled:opacity-50"
-                            >
-                              <CheckIcon className="h-4 w-4" />
-                            </button>
-                            <button
-                              onClick={handleCancelColorEdit}
-                              disabled={savingMapping}
-                              className="text-red-600 hover:text-red-900 disabled:opacity-50"
-                            >
-                              <XMarkIcon className="h-4 w-4" />
-                            </button>
-                          </div>
-                        ) : (
-                          <button onClick={() => handleEditColor(colorName)} className="text-primary-600 hover:text-primary-900">
-                            <PencilIcon className="h-4 w-4" />
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-
-          {activeTab === 'roles' && (
-            <div>
-              <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
-                Configure descriptions for TAK roles that appear as tooltips.
-              </p>
-              {/* Bugfix (BUG-014): same shared save-error slot as the Colour
-                  Mappings tab above (mappingSaveError is not tab-scoped). */}
-              {mappingSaveError && (
-                <div className="rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-900/30 p-3 mb-4">
-                  <p className="text-sm text-red-700 dark:text-red-300">{mappingSaveError}</p>
-                </div>
-              )}
-              <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                <thead className="bg-gray-50 dark:bg-gray-700">
-                  <tr>
-                    <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
-                      Role
-                    </th>
-                    <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
-                      Description
-                    </th>
-                    <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
-                      Actions
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                  {Object.entries(roleDescriptions).map(([roleName, description]) => (
-                    <tr key={roleName}>
-                      <td className="px-3 py-2 text-sm font-medium text-gray-900 dark:text-gray-100">
-                        {roleName}
-                      </td>
-                      <td className="px-3 py-2 text-sm text-gray-900 dark:text-gray-100">
-                        {editingRole === roleName ? (
-                          <textarea
-                            value={tempRoleValue}
-                            onChange={(e) => setTempRoleValue(e.target.value)}
-                            className="w-full px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
-                            rows={2}
-                          />
-                        ) : (
-                          description || 'No description set'
-                        )}
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        {editingRole === roleName ? (
-                          <div className="flex justify-end space-x-1">
-                            <button
-                              onClick={() => handleSaveRole(roleName)}
-                              disabled={savingMapping}
-                              className="text-green-600 hover:text-green-900 disabled:opacity-50"
-                            >
-                              <CheckIcon className="h-4 w-4" />
-                            </button>
-                            <button
-                              onClick={handleCancelRoleEdit}
-                              disabled={savingMapping}
-                              className="text-red-600 hover:text-red-900 disabled:opacity-50"
-                            >
-                              <XMarkIcon className="h-4 w-4" />
-                            </button>
-                          </div>
-                        ) : (
-                          <button onClick={() => handleEditRole(roleName)} className="text-primary-600 hover:text-primary-900">
-                            <PencilIcon className="h-4 w-4" />
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-
           {activeTab === 'site' && (
             <div>
               <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">

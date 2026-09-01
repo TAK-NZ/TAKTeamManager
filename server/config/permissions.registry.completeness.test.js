@@ -103,16 +103,12 @@ function buildTestApp() {
   app.use('/api', require('../routes/signup'));
   app.use('/api', require('../routes/orgDomains'));
   app.use('/api/requests', require('../routes/requests'));
-  app.use('/api/channel-requests', require('../routes/channelRequests'));
   app.use('/api/config', require('../routes/config'));
   app.use('/api/sync', require('../routes/sync'));
   app.use('/api/operations', require('../routes/operations'));
   app.use('/api/global-channels', require('../routes/globalChannels'));
-  app.use('/api/vendor-channels', require('../routes/vendorChannels'));
-  app.use('/api/deployment-channels', require('../routes/deploymentChannels'));
   app.use('/api/audit-logs', require('../routes/auditLogs'));
   app.use('/api/settings', require('../routes/settings'));
-  app.use('/api/mou', require('../routes/mou'));
   app.use('/api/communications', require('../routes/communications'));
   app.use('/api/devices', require('../routes/devices'));
   app.use('/api/enrollment', require('../routes/enrollment'));

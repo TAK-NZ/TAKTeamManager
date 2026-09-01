@@ -111,6 +111,37 @@ describe('Devices page', () => {
     expect(container.textContent).not.toContain('@')
   })
 
+  // Bugfix (admins had no way to see a device's certificate expiring soon
+  // on the org-wide /devices page): DeviceExpiryLine reuses DeviceListRow's
+  // own classification, so an imminent expiry renders bold-red with a
+  // warning marker here too.
+  describe('certificate expiry highlighting (bugfix)', () => {
+    it('renders nothing extra for a device with no expiresAt', async () => {
+      await mountWith([deviceRow({ expiresAt: null })])
+
+      expect(container.textContent).not.toContain('Expires soon')
+      expect(container.textContent).not.toContain('Expired')
+    })
+
+    it('highlights an imminently-expiring certificate as bold red with an "Expires soon" marker', async () => {
+      const soon = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString()
+      await mountWith([deviceRow({ expiresAt: soon })])
+
+      expect(container.textContent).toContain('Expires soon')
+      const marker = container.querySelector('span.sr-only')
+      expect(marker).not.toBeNull()
+      expect(marker.textContent).toBe('Expires soon')
+    })
+
+    it('highlights an already-expired certificate with an "Expired" marker instead', async () => {
+      const past = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString()
+      await mountWith([deviceRow({ expiresAt: past })])
+
+      expect(container.textContent).toContain('Expired')
+      expect(container.textContent).not.toContain('Expires soon')
+    })
+  })
+
   it('shows a loading spinner before the fetch resolves, then the list', async () => {
     let resolveFetch
     devicesAPI.getAll.mockReturnValue(new Promise((resolve) => { resolveFetch = resolve }))

@@ -9,15 +9,16 @@
  * This is now the one place that fact lives.
  *
  * The 14 keys are exactly the canonical TAK_Color set the server treats
- * as configurable -- `COLOR_KEY_LABELS` in `server/routes/settings.js`
- * (and the `TAK_COLOR_*` environment variables it is seeded from) -- so a
- * key here is never invented independently of what an Organisation can
- * actually be assigned. The hex values are the ATAK app's own RGB
- * palette for each named colour, not an approximation chosen for looks.
+ * as configurable -- the `colorMappings` object `server/routes/config.js`'s
+ * `GET /color-mappings` builds from the `TAK_COLOR_*` environment
+ * variables -- so a key here is never invented independently of what an
+ * Organisation can actually be assigned. The hex values are the ATAK
+ * app's own RGB palette for each named colour, not an approximation
+ * chosen for looks.
  *
  * `Pink`, `Gray`, and `Black`, present in the three previous hand-copied
  * maps, are dropped here: none of the three is a real, assignable TAK
- * Color (none appears in `COLOR_KEY_LABELS` or any `TAK_COLOR_*`
+ * Color (none appears in that `colorMappings` object or any `TAK_COLOR_*`
  * variable), so keeping them here would let an unreal colour render a
  * swatch. An unrecognised name -- including those three, and the literal
  * string `'None'` a teamless user's cached colour carries -- still falls

@@ -12,10 +12,10 @@
  * be caught by the "success" tests failing with 403 instead of 200.
  *
  * `SiteConfig` (branding, backed by `site_config`) and `pool.query`
- * (TAK color/role mappings, backed by `system_config`) are mocked at the
- * data-access boundary, following the same pattern already used by
- * `server/models/SiteConfig.test.js` and `server/routes/auditLogs.test.js`
- * respectively.
+ * (TAK Server settings/export/import, backed by `system_config`) are
+ * mocked at the data-access boundary, following the same pattern already
+ * used by `server/models/SiteConfig.test.js` and
+ * `server/routes/auditLogs.test.js` respectively.
  */
 
 jest.mock('../config/database', () => ({
@@ -180,95 +180,6 @@ describe('GET/PUT /api/settings/branding', () => {
 
     expect(res.status).toBe(403);
     expect(SiteConfig.update).not.toHaveBeenCalled();
-  });
-});
-
-describe('GET/PUT /api/settings/tak-mappings', () => {
-  let app;
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-    mockUser = { id: 'authentik-1', userId: 1, is_global_manager: true };
-    app = buildApp();
-  });
-
-  it('GET reshapes system_config rows into {colorMappings, roleDescriptions}, including a task-54.1-seeded value', async () => {
-    pool.query.mockResolvedValue({
-      rows: [
-        { config_key: 'tak_color_yellow', config_value: 'Fire' },
-        { config_key: 'tak_role_team_lead', config_value: 'Squad leader' }
-      ]
-    });
-
-    const res = await request(app).get('/api/settings/tak-mappings');
-
-    expect(res.status).toBe(200);
-    expect(res.body.colorMappings.Yellow).toBe('Fire');
-    expect(res.body.colorMappings.Cyan).toBe('');
-    expect(res.body.roleDescriptions['Team Lead']).toBe('Squad leader');
-    expect(res.body.roleDescriptions['Team Member']).toBe('');
-
-    const [sql, params] = pool.query.mock.calls[0];
-    expect(sql).toContain('FROM system_config');
-    expect(params).toContain('tak_color_yellow');
-    expect(params).toContain('tak_role_hq');
-  });
-
-  it('PUT updates one or more system_config rows by config_key and returns the refreshed mappings', async () => {
-    pool.query.mockImplementation((sql) => {
-      if (sql.startsWith('UPDATE system_config')) {
-        return Promise.resolve({ rows: [] });
-      }
-      return Promise.resolve({
-        rows: [{ config_key: 'tak_color_yellow', config_value: 'Updated Org' }]
-      });
-    });
-
-    const res = await request(app)
-      .put('/api/settings/tak-mappings')
-      .send({ updates: { tak_color_yellow: 'Updated Org' } });
-
-    expect(res.status).toBe(200);
-    expect(res.body.colorMappings.Yellow).toBe('Updated Org');
-
-    const updateCall = pool.query.mock.calls.find(([sql]) => sql.startsWith('UPDATE system_config'));
-    expect(updateCall[1]).toEqual(['Updated Org', 1, 'tak_color_yellow']);
-  });
-
-  it('PUT rejects an unknown config_key without updating any row', async () => {
-    const res = await request(app)
-      .put('/api/settings/tak-mappings')
-      .send({ updates: { not_a_real_key: 'x' } });
-
-    expect(res.status).toBe(400);
-    expect(pool.query).not.toHaveBeenCalled();
-  });
-
-  it('PUT rejects an empty updates object', async () => {
-    const res = await request(app).put('/api/settings/tak-mappings').send({ updates: {} });
-
-    expect(res.status).toBe(400);
-    expect(pool.query).not.toHaveBeenCalled();
-  });
-
-  it('rejects a non-Global_Manager caller with 403 on GET and never queries system_config', async () => {
-    mockUser = { id: 'authentik-2', userId: 2, is_global_manager: false };
-
-    const res = await request(app).get('/api/settings/tak-mappings');
-
-    expect(res.status).toBe(403);
-    expect(pool.query).not.toHaveBeenCalled();
-  });
-
-  it('rejects a non-Global_Manager caller with 403 on PUT and never queries system_config', async () => {
-    mockUser = { id: 'authentik-2', userId: 2, is_global_manager: false };
-
-    const res = await request(app)
-      .put('/api/settings/tak-mappings')
-      .send({ updates: { tak_color_yellow: 'Should Not Apply' } });
-
-    expect(res.status).toBe(403);
-    expect(pool.query).not.toHaveBeenCalled();
   });
 });
 
@@ -483,7 +394,6 @@ describe('GET /api/settings/export', () => {
       if (sql.includes('FROM system_config')) {
         return Promise.resolve({
           rows: [
-            { config_key: 'tak_color_yellow', config_value: 'Fire', description: null },
             // A passphrase row should never be selected by this route's
             // query in the first place (it is not in the allow-list), but
             // this mock also proves that even if it *were* returned by a
@@ -525,7 +435,7 @@ describe('GET /api/settings/export', () => {
 
     const settingsJson = JSON.parse(zip.readAsText('settings.json'));
     expect(settingsJson.systemConfig).toEqual(
-      expect.arrayContaining([{ config_key: 'tak_color_yellow', config_value: 'Fire', description: null }])
+      expect.arrayContaining([{ config_key: 'tak_server_url', config_value: 'https://tak.example.com', description: null }])
     );
     expect(settingsJson.siteConfig).toEqual(
       expect.arrayContaining([{ config_key: 'organization_display_name', config_value: 'Acme Response', description: null }])
@@ -773,7 +683,7 @@ describe('POST /api/settings/import', () => {
       .post('/api/settings/import')
       .send({
         systemConfig: [
-          { config_key: 'tak_color_yellow', config_value: 'Fire' }
+          { config_key: 'tak_server_url', config_value: 'https://tak.example.com' }
         ],
         siteConfig: [
           { config_key: 'organization_display_name', config_value: 'Acme Response' }
@@ -798,8 +708,8 @@ describe('POST /api/settings/import', () => {
     const systemConfigUpsert = mockClient.query.mock.calls.find(
       ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO system_config')
     );
-    expect(systemConfigUpsert[1][0]).toBe('tak_color_yellow');
-    expect(systemConfigUpsert[1][1]).toBe('Fire');
+    expect(systemConfigUpsert[1][0]).toBe('tak_server_url');
+    expect(systemConfigUpsert[1][1]).toBe('https://tak.example.com');
     expect(systemConfigUpsert[1][3]).toBe(1); // updated_by = req.user.userId
 
     const siteConfigUpsert = mockClient.query.mock.calls.find(
@@ -832,7 +742,7 @@ describe('POST /api/settings/import', () => {
       .post('/api/settings/import')
       .send({
         systemConfig: [
-          { config_key: 'tak_color_yellow', config_value: 'Fire' },
+          { config_key: 'tak_server_url', config_value: 'https://tak.example.com' },
           { config_key: 'not_an_allowed_key', config_value: 'x' }
         ],
         siteConfig: []
@@ -864,7 +774,7 @@ describe('POST /api/settings/import', () => {
     const res = await request(app)
       .post('/api/settings/import')
       .send({
-        systemConfig: [{ config_key: 'tak_color_yellow' }],
+        systemConfig: [{ config_key: 'tak_server_url' }],
         siteConfig: []
       });
 
@@ -923,7 +833,7 @@ describe('POST /api/settings/import', () => {
     const res = await request(app)
       .post('/api/settings/import')
       .send({
-        systemConfig: [{ config_key: 'tak_color_yellow', config_value: 'Fire' }],
+        systemConfig: [{ config_key: 'tak_server_url', config_value: 'https://tak.example.com' }],
         siteConfig: [{ config_key: 'organization_display_name', config_value: 'Acme' }]
       });
 

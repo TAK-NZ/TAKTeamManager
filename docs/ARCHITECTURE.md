@@ -190,5 +190,4 @@ Every dense table (Teams, Team Detail's tabs, Team Devices) renders as a stacked
 
 - `.kiro/steering/` — living conventions (stack/commands, code placement, product glossary, server/client conventions, feature flags, testing).
 - `.kiro/specs/` — ten completed feature specs, cited heavily in code comments by requirement number. History, not current documentation — a later spec overrules an earlier one where they conflict.
-- `BUGS.md` — a periodically re-verified audit of known open/fixed issues.
 - `docs/END-USER-DOCS.md` — how a team member or team admin actually uses the product.

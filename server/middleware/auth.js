@@ -37,15 +37,13 @@ function logAuthFailure(req, reason) {
  * independent of sending any HTTP response.
  *
  * This is `authenticateToken`'s own JWT verification + revocation check +
- * user-cache lookup logic, extracted so it can be reused by
- * `server/middleware/requireCurrentAgreement.js` (BUG-010): that
- * middleware is mounted globally in `server/index.js`, ahead of every
- * route's own per-route `authenticateToken` mount, so `req.user` is not
- * yet populated at that point in the chain. Rather than relying on
- * `req.user` having already been set by a downstream middleware that
- * hasn't run yet, it calls this helper directly to resolve the user for
- * its own purposes, without rejecting the request itself on failure --
- * that responsibility stays with `authenticateToken`, below.
+ * user-cache lookup logic, extracted into its own helper below so
+ * `authenticateToken` is a thin wrapper that maps a failure reason to an
+ * HTTP response, without duplicating the resolution logic itself. (It
+ * was also reused by `server/middleware/requireCurrentAgreement.js`, the
+ * MOU login-time agreement gate; that middleware and the feature it
+ * gated have since been removed in their entirety, but this extraction
+ * remains useful in its own right.)
  *
  * @param {import('express').Request} req
  * @returns {Promise<{user: object|null, reason?: string}>} `user` is

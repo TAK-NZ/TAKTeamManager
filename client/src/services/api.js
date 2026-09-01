@@ -205,6 +205,18 @@ export const teamsAPI = {
 
 export const bulkImportAPI = {
   importTeams: (formData) => api.post('/bulk-import/teams', formData, { headers: { 'Content-Type': 'multipart/form-data' } }),
+  // CSV user import: formData carries `csv` and,
+  // optionally, `teamId` (a team-scoped upload's fixed target team,
+  // used as a fallback for any row whose own `teamId` column is blank)
+  // -- a caller reads and appends these fields, this wrapper does not
+  // build the FormData itself, matching importTeams's own convention.
+  // Read-only: makes no Authentik call and no DB write.
+  previewUsers: (formData) => api.post('/bulk-import/users/preview', formData, { headers: { 'Content-Type': 'multipart/form-data' } }),
+  // Same formData shape as previewUsers, plus an optional `rowNumbers`
+  // field (a JSON-encoded array of 1-based row numbers from a prior
+  // previewUsers response) so a caller commits exactly the rows an
+  // operator approved, re-uploading the identical file.
+  importUsers: (formData) => api.post('/bulk-import/users', formData, { headers: { 'Content-Type': 'multipart/form-data' } }),
 };
 
 export const usersAPI = {
@@ -397,17 +409,6 @@ export const settingsAPI = {
   exportSettings: () => api.get('/settings/export', { responseType: 'blob' }),
   // payload: { systemConfig, siteConfig, emailTemplates? }
   importSettings: (payload) => api.post('/settings/import', payload),
-  // Bugfix (BUG-014): the Admin page's Colour Mappings / Role Descriptions
-  // tabs must read/write the DATABASE-backed system_config rows through
-  // these two endpoints, not the legacy env-var-backed
-  // GET /api/config/color-mappings (configAPI.getColorMappings), which has
-  // no PUT counterpart at all -- that mismatch is why edits used to appear
-  // to save (local state updated) but silently revert on reload.
-  // Response/request shape for both: { colorMappings: {...}, roleDescriptions: {...} }.
-  getTakMappings: () => api.get('/settings/tak-mappings'),
-  // updates: { [config_key]: newValue, ... } -- keyed by the raw
-  // tak_color_*/tak_role_* config_key, not the display label.
-  updateTakMappings: (updates) => api.put('/settings/tak-mappings', { updates }),
 };
 
 // --- Device management (device-management spec) ---
@@ -503,9 +504,13 @@ export const enrollmentAPI = {
 export const devicesAPI = {
   // Org-wide Team_Owned_Device listing backing the `/devices` page,
   // mirroring `usersAPI.getAll()`'s own shape: `{ devices, pagination }`.
-  // `params` is `{ page?, pageSize?, search? }`; `stripEmptyParams` drops
-  // an absent/empty value rather than sending it as a literal empty
-  // string, matching `auditLogsAPI.getAuditLogs`'s own convention.
+  // `params` is `{ page?, pageSize?, search?, expiringOnly? }` --
+  // `expiringOnly` (cert-expiry-notifications Requirement 7.3(b)) narrows
+  // the listing to devices whose live certificate is already imminent or
+  // expired, backing the `/tasks` page's "Team devices needing renewal"
+  // section. `stripEmptyParams` drops an absent/empty value rather than
+  // sending it as a literal empty string, matching `auditLogsAPI.getAuditLogs`'s
+  // own convention.
   getAll: (params = {}) => api.get('/devices', { params: stripEmptyParams(params) }),
 
   // Creates a brand-new Team_Owned_Device for `teamId` (Requirement 27

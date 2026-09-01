@@ -508,7 +508,7 @@ describe('TeamMembershipService.addUserToTeam / removeUserFromTeam - task 58.4 (
   });
 });
 
-describe('TeamMembershipService.removeUserFromTeam - externally-provided client (BUG-016 / Requirement 17.5)', () => {
+describe('TeamMembershipService.removeUserFromTeam - externally-provided client (Requirement 17.5)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });

@@ -1,6 +1,6 @@
 /**
  * Test for the `/templates` static-file mount (Requirement 29 Criterion
- * 1, BUG-011).
+ * 1).
  *
  * `public/templates/user-import-template.csv` and
  * `public/templates/team-import-template.csv` exist on disk but were
@@ -27,7 +27,7 @@ function buildApp() {
   return app;
 }
 
-describe('/templates static mount (Requirement 29.1, BUG-011)', () => {
+describe('/templates static mount (Requirement 29.1)', () => {
   it('serves the user import CSV template with a 200 status', async () => {
     const app = buildApp();
     const res = await request(app).get('/templates/user-import-template.csv');

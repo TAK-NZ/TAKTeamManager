@@ -1,6 +1,6 @@
 /**
  * Real-Postgres integration tests for access-request approve/deny
- * (BUG-020 / task 58.6, Requirement 12.5):
+ * (task 58.6, Requirement 12.5):
  *
  *   "Integration tests ... for at least the following API routes: ...
  *   access-request approve/deny (a success case and a case where the
@@ -142,7 +142,7 @@ async function insertAccessRequest(overrides = {}) {
     target_team_id: null,
     current_team_id: null,
     requested_role: null,
-    justification: 'BUG-020 integration test'
+    justification: 'integration test'
   };
   const row = { ...base, ...overrides };
 
@@ -180,7 +180,7 @@ describe('Access-request approve/deny against a real Postgres database (Requirem
       throw new Error(
         `Real Postgres test database is not reachable at ` +
           `${process.env.DB_HOST}:${process.env.DB_PORT}/${process.env.DB_NAME} ` +
-          `(user "${process.env.DB_USER}"). This integration test (task 58.6, BUG-020) ` +
+          `(user "${process.env.DB_USER}"). This integration test (task 58.6) ` +
           `requires a real, running, already-migrated Postgres instance -- it deliberately ` +
           `does not mock "../config/database", since the whole point is to prove real ` +
           `approve/deny behavior against real, persisted access_requests/team_memberships ` +
@@ -318,7 +318,7 @@ describe('Access-request approve/deny against a real Postgres database (Requirem
 
     const res = await request(app)
       .post(`/api/requests/${accessRequest.id}/approve`)
-      .send({ additionalDetails: 'approved by BUG-020 integration test' });
+      .send({ additionalDetails: 'approved by integration test' });
 
     expect(res.status).toBe(200);
 
@@ -358,13 +358,13 @@ describe('Access-request approve/deny against a real Postgres database (Requirem
 
     const res = await request(app)
       .post(`/api/requests/${accessRequest.id}/deny`)
-      .send({ denialReason: 'denied by BUG-020 integration test' });
+      .send({ denialReason: 'denied by integration test' });
 
     expect(res.status).toBe(200);
 
     const dbRequest = await pool.query('SELECT * FROM access_requests WHERE id = $1', [accessRequest.id]);
     expect(dbRequest.rows[0].status).toBe('denied');
-    expect(dbRequest.rows[0].denial_reason).toBe('denied by BUG-020 integration test');
+    expect(dbRequest.rows[0].denial_reason).toBe('denied by integration test');
     expect(dbRequest.rows[0].processed_by).toBe(adminActor.id);
 
     // Denial must never change the user's actual role -- still 'member',

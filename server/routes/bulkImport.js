@@ -46,6 +46,11 @@ const router = express.Router();
  *
  * --- Authorization ---
  *
+ * `POST /users/preview`: a read-only dry run over
+ * the identical upload, sharing `POST /users`'s Permission_Registry
+ * identifier and authorization semantics -- see its own route comment
+ * below.
+ *
  * `POST /users` (Requirement 29.2-29.4, 29.6): `BulkImportService
  * .importUsers` already performs its own per-row authorization
  * internally (`Team.isAdmin(row.teamId, importingUser) OR
@@ -68,9 +73,8 @@ const router = express.Router();
  * admin might administer, mirroring Requirement 4.5's root-team-create
  * restriction. This route's Permission_Registry identifier
  * (`bulk_import:teams`) is therefore a SEPARATE identifier held ONLY by
- * `roleDefaults.global_manager`'s wildcard (defense in depth, mirroring
- * `mou:manage`'s Global_Manager-only gating in `server/routes/mou.js`):
- * in practice a non-Global_Manager caller is denied at the
+ * `roleDefaults.global_manager`'s wildcard (defense in depth): in
+ * practice a non-Global_Manager caller is denied at the
  * `authorize.js`/Permission_Registry layer before
  * `BulkImportService.importTeams` is ever invoked, so its own internal
  * `BulkImportAuthorizationError` never actually fires over HTTP through
@@ -114,18 +118,80 @@ function handleUpload(uploadMiddleware) {
   };
 }
 
+// Bugfix: parses the optional `teamId`/`rowNumbers`
+// multipart form fields shared by POST /users/preview and POST /users
+// below. `teamId` backs the team-scoped import surface (Team_Detail's
+// "Import Users" action already knows its own team and never asks the
+// operator to type one); `rowNumbers` backs the confirm step, letting
+// a caller commit exactly the rows an operator approved in the preview
+// response, from a JSON-encoded array of 1-based row numbers.
+function parseOptionalTeamId(value) {
+  if (value === undefined || value === null || String(value).trim() === '') {
+    return null;
+  }
+  return value;
+}
+
+function parseOptionalRowNumbers(value) {
+  if (value === undefined || value === null || String(value).trim() === '') {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+// POST /api/bulk-import/users/preview (preview-then-confirm). Accepts the same `csv` multipart field (plus an
+// optional `teamId` field for a team-scoped upload) and delegates to
+// `BulkImportService.previewUsers` -- a READ-ONLY dry run: no Authentik
+// call, no DB write, no audit log entry (nothing has happened yet).
+// Shares the SAME Permission_Registry identifier as `POST /users`
+// (`bulk_import:users`), since previewing is strictly less privileged
+// than actually importing and gating it any tighter would let an
+// operator who is authorized to import be denied merely previewing.
+router.post('/users/preview', authenticateToken, authorize, handleUpload(csvUpload.single('csv')), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'A CSV file is required (multipart field name: csv)' });
+  }
+
+  try {
+    const result = await BulkImportService.previewUsers(req.file.buffer, req.user, parseOptionalTeamId(req.body.teamId));
+    res.status(200).json(result);
+  } catch (error) {
+    getLogger().error({ err: error }, 'Failed to preview user CSV import');
+    res.status(500).json({ error: 'Failed to preview user CSV import' });
+  }
+});
+
 // POST /api/bulk-import/users (Requirement 29.2-29.4, 29.6). Accepts a
 // `csv` multipart field, delegates to `BulkImportService.importUsers`,
 // and returns its full {successCount, failureCount, results} per-row
 // summary with 200 (Requirement 29.6: a per-row result summary, not a
 // single pass/fail for the batch).
+//
+// Bugfix: also accepts optional `teamId` (a
+// team-scoped upload's fixed target team, used as `defaultTeamId` for
+// any row whose own `teamId` column is blank) and `rowNumbers` (a
+// JSON-encoded array of 1-based row numbers to actually commit -- every
+// other row in the uploaded file is skipped, letting a caller re-upload
+// the exact same file it already previewed and commit only the rows an
+// operator approved).
 router.post('/users', authenticateToken, authorize, handleUpload(csvUpload.single('csv')), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'A CSV file is required (multipart field name: csv)' });
   }
 
   try {
-    const result = await BulkImportService.importUsers(req.file.buffer, req.user);
+    const result = await BulkImportService.importUsers(req.file.buffer, req.user, {
+      defaultTeamId: parseOptionalTeamId(req.body.teamId),
+      rowNumbers: parseOptionalRowNumbers(req.body.rowNumbers)
+    });
 
     try {
       await pool.query(

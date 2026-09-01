@@ -19,6 +19,24 @@
 const MAX_TEAM_DEPTH = 5;
 
 /**
+ * The sentinel `audit_logs.user_id`/Sync_Operation `created_by` value used
+ * to attribute an automated, system-initiated action (never a real admin)
+ * -- e.g. `authentikSync.js`'s Reconciliation_Sweep writing
+ * `user.orphaned`/`user.suspended_externally`/`user.unsuspended_externally`
+ * rows. `-1` rather than `NULL`: `NULL` already means "no attribution
+ * recorded" elsewhere in this schema, and this sentinel needs to
+ * POSITIVELY distinguish "the system did this" from that absence, not be
+ * confused with it. `audit_logs.user_id` intentionally carries no FK
+ * constraint to `users.id`, so this value never needs a matching row.
+ *
+ * Originally declared on the now-removed `VendorChannelService` (Requirement
+ * 21, Vendor Time-Limited Channel Access); relocated here once that feature
+ * was removed, since `authentikSync.js`'s own use of it is unrelated to
+ * vendor channels and must not disappear along with that service.
+ */
+const SYSTEM_USER_ID = -1;
+
+/**
  * region-channel-tiers: maps a `region_channels.tier` value ('response' or
  * 'support') to the Authentik group-name prefix used for that tier
  * (`tak_Response...`/`tak_Support...`). 'response' is the ES-only
@@ -110,6 +128,7 @@ const BCH_CHANNEL_CATEGORY_PREFIX = Object.freeze({
 
 module.exports = {
   MAX_TEAM_DEPTH,
+  SYSTEM_USER_ID,
   REGION_CHANNEL_TIER_PREFIX,
   REGION_CHANNEL_TIER_DESCRIPTION_QUALIFIER,
   BCH_CHANNEL_CATEGORY_PREFIX

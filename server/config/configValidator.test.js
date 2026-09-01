@@ -768,7 +768,7 @@ describe('Property 9: JWT expiry duration bounds (isValidJwtExpiry)', () => {
 });
 
 /**
- * Requirement 15.5 (BUG-018): WHERE the App or Sync_Worker is started
+ * Requirement 15.5: WHERE the App or Sync_Worker is started
  * with NODE_ENV=production, a warning identifying that TLS certificate
  * validation is disabled for the database pool must be logged at
  * startup, mirroring `server/config/database.js`'s unconditional
@@ -776,7 +776,7 @@ describe('Property 9: JWT expiry duration bounds (isValidJwtExpiry)', () => {
  * This must be a warning only -- it must never cause `validateConfig` to
  * exit non-zero.
  */
-describe('isDatabaseTlsCertificateValidationDisabled / warnIfDatabaseTlsCertificateValidationDisabled (Requirement 15.5, BUG-018)', () => {
+describe('isDatabaseTlsCertificateValidationDisabled / warnIfDatabaseTlsCertificateValidationDisabled (Requirement 15.5)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });
@@ -802,7 +802,7 @@ describe('isDatabaseTlsCertificateValidationDisabled / warnIfDatabaseTlsCertific
   });
 });
 
-describe('validateConfig (Requirement 15.5 TLS certificate validation warning integration, BUG-018)', () => {
+describe('validateConfig (Requirement 15.5 TLS certificate validation warning integration)', () => {
   let exitSpy;
 
   beforeEach(() => {
@@ -844,12 +844,12 @@ describe('validateConfig (Requirement 15.5 TLS certificate validation warning in
 });
 
 /**
- * Requirement 1 Criterion 5 (BUG-019): correct APP_URL/FRONTEND_URL
+ * Requirement 1 Criterion 5: correct APP_URL/FRONTEND_URL
  * configuration alone must not be treated as sufficient evidence that
  * authentication is functional -- there must be an explicit startup
  * assertion that a route module is mounted at '/api/auth'.
  */
-describe('isAuthRouteMounted / assertAuthRouteMounted (Requirement 1 Criterion 5, BUG-019)', () => {
+describe('isAuthRouteMounted / assertAuthRouteMounted (Requirement 1 Criterion 5)', () => {
   const express = require('express');
 
   beforeEach(() => {

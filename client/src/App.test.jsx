@@ -253,3 +253,79 @@ describe('App startup installs the presentation config (Requirements 18.7, 18.11
     expect(configAPI.getPublic).toHaveBeenCalledTimes(1)
   })
 })
+
+// cert-expiry-notifications Requirement 7.1: /requests stays reachable via a
+// redirect to /tasks, rather than becoming a broken link, for any existing
+// bookmark. Mounted the same way as the "renders a signed-in session"
+// case above (a signed-in, non-Global_Manager session), since the redirect
+// itself is unconditional and needs no particular role.
+describe('cert-expiry-notifications: /requests redirects to /tasks (Requirement 7.1)', () => {
+  let container
+  let root
+  let matchMediaStubbed = false
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    vi.clearAllMocks()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    if (typeof window.matchMedia !== 'function') {
+      window.matchMedia = () => ({
+        matches: false,
+        addEventListener() {},
+        removeEventListener() {},
+        addListener() {},
+        removeListener() {}
+      })
+      matchMediaStubbed = true
+    }
+    authAPI.getProfile.mockResolvedValue({
+      data: { user: { id: 7, email: 'ada@example.com', is_global_manager: false } }
+    })
+    configAPI.getPublic.mockResolvedValue({ data: {} })
+    requestsAPI.getPending.mockResolvedValue({ data: { requests: [] } })
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    if (matchMediaStubbed) {
+      delete window.matchMedia
+      matchMediaStubbed = false
+    }
+    localStorage.removeItem('theme')
+    vi.restoreAllMocks()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  it('navigating to /requests renders the Tasks page (via redirect), not a blank/unknown route', async () => {
+    root = createRoot(container)
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={['/requests']}>
+          <App />
+        </MemoryRouter>
+      )
+    })
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    // The redirect lands on /tasks, which renders the Requests.jsx page
+    // component (unchanged filename) -- observable here as the nav's
+    // "Tasks" item being the active one, rather than the catch-all
+    // Dashboard redirect a genuinely unknown path would hit.
+    const activeLink = Array.from(container.querySelectorAll('a')).find((a) =>
+      a.className.includes('bg-primary-100')
+    )
+    expect(activeLink?.textContent.trim()).toContain('Tasks')
+  })
+})

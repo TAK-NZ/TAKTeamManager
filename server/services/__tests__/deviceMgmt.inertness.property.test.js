@@ -209,7 +209,6 @@ function stubPollLoop(worker) {
   worker.updateHeartbeat = jest.fn().mockResolvedValue();
   worker.startHealthServer = jest.fn();
   worker.stopHealthServer = jest.fn().mockResolvedValue();
-  worker.expiryScheduler = { start: jest.fn(), stop: jest.fn() };
   worker.retentionCleanupJob = { start: jest.fn(), stop: jest.fn() };
   worker.sleep = jest.fn().mockImplementation(() => {
     worker.isRunning = false;

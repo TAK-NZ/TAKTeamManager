@@ -812,14 +812,11 @@ class Team {
    * returned Set, rather than calling `isAdmin` per row (which would
    * re-run the recursive walk once per row instead of once per request).
    *
-   * No existing helper already returns this: `BroadcastEmailService
-   * .getAdministeredTeamIds` returns only the DIRECT admin-team set with
-   * no descendant expansion (by its own documented design, for a
-   * different, narrower authorization rule), and `DeviceManagementService
+   * No existing helper already returns this: `DeviceManagementService
    * .isManagedUser` answers a per-user existence question via a
    * materialized-inherited-row join rather than building an explicit team
-   * set at all. Neither is reused here because both are deliberately
-   * NARROWER than "every team `Team.isAdmin` would say yes to".
+   * set at all, which is deliberately NARROWER than "every team
+   * `Team.isAdmin` would say yes to" and so is not reused here.
    *
    * @param {number|string} userId
    * @returns {Promise<Set<number>>} every managed team id, `teamId`s as
@@ -1201,8 +1198,8 @@ class Team {
       // (Organisations and Sub_Teams alike). A Sub_Team prefix edit that
       // collides with another team's prefix hits this constraint --
       // translated into a typed, callsign_prefix-specific rejection
-      // rather than the update's own generic 500, mirroring
-      // `MouService`'s `23505` -> typed-error translation.
+      // rather than the update's own generic 500 (this codebase's
+      // established `23505` -> typed-error translation convention).
       if (error.code === '23505' && error.constraint === 'idx_teams_callsign_prefix') {
         throw new CallsignPrefixConflictError(callsign_prefix);
       }

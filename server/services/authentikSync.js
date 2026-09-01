@@ -5,7 +5,7 @@ const { createLogger } = require('../config/logger');
 const { normaliseAuthentikEmail } = require('../utils/authentikEmail');
 const { isIgnoredAuthentikUsername } = require('../config/authentikSyncIgnore');
 const EventPublisher = require('./EventPublisher');
-const { SYSTEM_USER_ID } = require('./VendorChannelService');
+const { SYSTEM_USER_ID } = require('../config/constants');
 
 const logger = createLogger('authentikSync');
 

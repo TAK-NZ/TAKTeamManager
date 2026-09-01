@@ -1,9 +1,12 @@
-import { useState, useEffect } from 'react'
-import { CheckIcon, XMarkIcon, ClockIcon } from '@heroicons/react/24/outline'
+import { useState, useEffect, useCallback } from 'react'
+import { Link } from 'react-router-dom'
+import { CheckIcon, XMarkIcon, ClockIcon, InformationCircleIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
-import { requestsAPI } from '../services/api'
+import { requestsAPI, deviceManagementAPI, devicesAPI } from '../services/api'
 import OrgInterestRequests from '../components/OrgInterestRequests'
 import FormattedDate, { DATE_PRECISION, TOOLTIP_SIDES } from '../components/FormattedDate'
+import { EXPIRY_STATES, classifyExpiry, getExpiryWarningDays } from '../utils/expiryWarning'
+import EnrollmentView from './EnrollmentView'
 
 // Requirement 11.11/11.12: pure helper computing the initial per-request
 // "Callsign Suffix" input value map from a `GET /api/requests/pending`
@@ -38,6 +41,18 @@ export function formatPersonName(firstName, lastName) {
   return [firstName, lastName].filter(Boolean).join(' ').trim()
 }
 
+// cert-expiry-notifications Requirement 7.3(a): filters a self-owned device
+// list down to only those whose live certificate classifies as imminent or
+// expired -- the SAME classification/threshold the Dashboard renew banner
+// and every device list's own highlighting already use. Extracted as a
+// standalone function so the filter rule is unit-testable without
+// rendering the component.
+export function filterDevicesNeedingRenewal(deviceList) {
+  return (deviceList || []).filter(
+    (device) => classifyExpiry(device.expiresAt, getExpiryWarningDays(), Date.now()) !== EXPIRY_STATES.NONE
+  )
+}
+
 export default function Requests({ user }) {
   const [requests, setRequests] = useState([])
   const [loading, setLoading] = useState(true)
@@ -56,6 +71,59 @@ export default function Requests({ user }) {
   // Denial reason modal state
   const [denyingRequestId, setDenyingRequestId] = useState(null)
   const [denialReason, setDenialReason] = useState('')
+
+  // cert-expiry-notifications Requirement 7.3(a): the current viewer's own
+  // devices needing renewal, visible to every user regardless of admin
+  // status. Reuses the SAME probe `Dashboard.jsx`'s "My Devices" card
+  // already calls -- `deviceManagementAPI.getMyDevices()` 404s (device
+  // management disabled) exactly the same way `probeEnabled()`'s own
+  // wrapped call does, so a 404 here is treated identically: no section,
+  // no error surfaced.
+  const [myDevicesNeedingRenewal, setMyDevicesNeedingRenewal] = useState([])
+  // cert-expiry-notifications Requirement 7.3(b): Team-Owned_Devices
+  // needing renewal across every team the viewer administers, visible only
+  // to a Team_Admin/Global_Manager.
+  const [teamDevicesNeedingRenewal, setTeamDevicesNeedingRenewal] = useState([])
+  const [enrollingDevice, setEnrollingDevice] = useState(null)
+  const canManageTeams = Boolean(user?.isAdmin || user?.isTeamAdmin || user?.is_global_manager)
+
+  const fetchMyDevicesNeedingRenewal = useCallback(async () => {
+    try {
+      const response = await deviceManagementAPI.getMyDevices()
+      setMyDevicesNeedingRenewal(filterDevicesNeedingRenewal(response.data?.devices))
+    } catch (error) {
+      // Requirement 7.3(a): device management may simply be disabled
+      // (404) -- an ordinary, silent "no section" outcome, matching
+      // Dashboard.jsx's own probeEnabled() convention. Any other failure
+      // is logged but likewise renders no section rather than an error
+      // block, since this is an additive convenience section on a page
+      // whose primary purpose (access requests) must keep working
+      // regardless.
+      if (error?.response?.status !== 404) {
+        console.error('Failed to fetch my devices for renewal check:', error)
+      }
+      setMyDevicesNeedingRenewal([])
+    }
+  }, [])
+
+  const fetchTeamDevicesNeedingRenewal = useCallback(async () => {
+    if (!canManageTeams) {
+      setTeamDevicesNeedingRenewal([])
+      return
+    }
+    try {
+      const response = await devicesAPI.getAll({ expiringOnly: true, pageSize: 200 })
+      setTeamDevicesNeedingRenewal(response.data?.devices || [])
+    } catch (error) {
+      console.error('Failed to fetch team devices for renewal check:', error)
+      setTeamDevicesNeedingRenewal([])
+    }
+  }, [canManageTeams])
+
+  useEffect(() => {
+    fetchMyDevicesNeedingRenewal()
+    fetchTeamDevicesNeedingRenewal()
+  }, [fetchMyDevicesNeedingRenewal, fetchTeamDevicesNeedingRenewal])
 
   useEffect(() => {
     const fetchRequests = async () => {
@@ -176,9 +244,95 @@ export default function Requests({ user }) {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Access Requests</h1>
+        <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Tasks</h1>
         <p className="text-gray-600 dark:text-gray-400">Review and approve team access requests from new users.</p>
       </div>
+
+      {/* cert-expiry-notifications Requirement 7.3(a): the current viewer's
+          own devices needing renewal. Visible to every user; rendered
+          first per Requirement 7.3's fixed section ordering. */}
+      {myDevicesNeedingRenewal.length > 0 && (
+        <div className="card">
+          <h2 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4 flex items-center">
+            <InformationCircleIcon className="h-5 w-5 mr-2 text-amber-600 dark:text-amber-400" aria-hidden="true" />
+            My certificates needing renewal
+          </h2>
+          <div className="divide-y divide-gray-200 dark:divide-gray-700">
+            {myDevicesNeedingRenewal.map((device) => (
+              <div
+                key={device.clientUid}
+                className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 py-3"
+              >
+                <div className="text-sm text-gray-700 dark:text-gray-300">
+                  <span className="font-medium">{device.username}</span>
+                  {' -- expires '}
+                  <FormattedDate
+                    value={device.expiresAt}
+                    fallback="Unknown"
+                    precision={DATE_PRECISION.DATE}
+                    side={TOOLTIP_SIDES.RIGHT}
+                  />
+                </div>
+                {/* Requirement 6.2/7.4: no per-device mint action for a
+                    self-owned device -- links to the SAME /enrollment flow
+                    the Dashboard renew banner already uses, since a
+                    self-service mint is not scoped to one existing
+                    certificate row. */}
+                <Link to="/enrollment" className="btn-primary text-sm self-start sm:self-auto">
+                  Renew
+                </Link>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* cert-expiry-notifications Requirement 7.3(b): Team-Owned_Devices
+          needing renewal across every team the viewer administers.
+          Visible only to a Team_Admin/Global_Manager; rendered second,
+          ahead of the existing pending-access-request/Org_Interest
+          sections. */}
+      {canManageTeams && teamDevicesNeedingRenewal.length > 0 && (
+        <div className="card">
+          <h2 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4 flex items-center">
+            <InformationCircleIcon className="h-5 w-5 mr-2 text-amber-600 dark:text-amber-400" aria-hidden="true" />
+            Team devices needing renewal
+          </h2>
+          <div className="divide-y divide-gray-200 dark:divide-gray-700">
+            {teamDevicesNeedingRenewal.map((device) => (
+              <div
+                key={device.deviceUserId}
+                className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 py-3"
+              >
+                <div className="text-sm text-gray-700 dark:text-gray-300">
+                  <span className="font-medium">{device.deviceLabel || device.username}</span>
+                  {device.teamName && (
+                    <span className="text-gray-500 dark:text-gray-400"> ({device.teamName})</span>
+                  )}
+                  {' -- expires '}
+                  <FormattedDate
+                    value={device.expiresAt}
+                    fallback="Unknown"
+                    precision={DATE_PRECISION.DATE}
+                    side={TOOLTIP_SIDES.RIGHT}
+                  />
+                </div>
+                {/* Requirement 7.4: the SAME enrollment/QR-generation flow
+                    /devices and a Team Devices tab already open for this
+                    device -- no new minting code path. */}
+                <button
+                  type="button"
+                  onClick={() => setEnrollingDevice(device)}
+                  className="btn-primary text-sm self-start sm:self-auto"
+                  disabled={!device.canManage}
+                >
+                  Renew
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {requests.length === 0 ? (
         <div className="card text-center py-12">
@@ -400,6 +554,51 @@ export default function Requests({ user }) {
       {user?.is_global_manager && (
         <div className="card">
           <OrgInterestRequests />
+        </div>
+      )}
+
+      {/* cert-expiry-notifications Requirement 7.4/7.6: the SAME
+          Enrollment_View modal Devices.jsx/TeamDeviceList.jsx already open
+          for a Team_Owned_Device's Renew action -- no new minting code
+          path. On close, the section's own list is refetched so a
+          successfully renewed device (its certificate now well outside
+          the expiry window) drops out without a full page reload. */}
+      {enrollingDevice && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center sm:p-4 z-50">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="renew-device-title"
+            className="bg-white dark:bg-gray-800 shadow-xl w-full h-full sm:rounded-lg sm:max-w-3xl sm:h-auto sm:max-h-[90vh] overflow-y-auto"
+          >
+            <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
+              <h3 id="renew-device-title" className="text-xl font-semibold text-gray-900 dark:text-gray-100">
+                Renew {enrollingDevice.deviceLabel || enrollingDevice.username}
+              </h3>
+              <button
+                onClick={() => {
+                  setEnrollingDevice(null)
+                  fetchTeamDevicesNeedingRenewal()
+                }}
+                className="text-gray-400 hover:text-gray-500 dark:hover:text-gray-300"
+                aria-label="Close"
+              >
+                <XMarkIcon className="h-6 w-6" />
+              </button>
+            </div>
+            <div className="p-6">
+              <EnrollmentView
+                fetchEnrollment={async () => {
+                  const response = await devicesAPI.generateQrCode(enrollingDevice.deviceUserId)
+                  return response.data.qrCode
+                }}
+                fetchPreview={async () => {
+                  const response = await devicesAPI.previewQrCode(enrollingDevice.deviceUserId)
+                  return response.data.preview
+                }}
+              />
+            </div>
+          </div>
         </div>
       )}
 

@@ -168,7 +168,13 @@ function App() {
           <Route path="/teams/:teamId" element={<TeamDetail user={user} refreshUser={refreshUser} />} />
           <Route path="/users" element={<Users user={user} />} />
           <Route path="/devices" element={<Devices user={user} />} />
-          <Route path="/requests" element={<Requests user={user} />} />
+          {/* cert-expiry-notifications Requirement 7.1: renamed from
+              /requests to /tasks (the page now also lists certificate
+              renewals, not just access requests). /requests stays
+              reachable as a redirect rather than a broken link for any
+              existing bookmark/link. */}
+          <Route path="/tasks" element={<Requests user={user} />} />
+          <Route path="/requests" element={<Navigate to="/tasks" replace />} />
           <Route path="/global-channels" element={<GlobalChannels user={user} />} />
           <Route path="/admin" element={<Admin user={user} />} />
           <Route path="/audit-logs" element={<AuditLogs user={user} />} />

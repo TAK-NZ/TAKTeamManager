@@ -198,7 +198,7 @@ describe('no client QR dependency, and no new environment variable for this feat
     expect(qrPackageNames).toEqual([]);
   });
 
-  it('introduces exactly one NEW environment variable across the feature\'s server files -- TAK_SERVER_ENROLLMENT_URL (a dedicated enrollment host, deliberately distinct from the Marti certadmin API\'s TAK_SERVER_URL) -- plus the pre-existing AUTHENTIK_URL/AUTHENTIK_API_TOKEN compensating-delete pair', () => {
+  it('introduces exactly one NEW environment variable across the feature\'s server files -- TAK_SERVER_ENROLLMENT_URL (a dedicated enrollment host, deliberately distinct from the Marti certadmin API\'s TAK_SERVER_URL) -- plus the pre-existing AUTHENTIK_URL/AUTHENTIK_API_TOKEN compensating-delete pair, and (cert-expiry-notifications Requirement 7.3(b), a LATER spec) DEVICE_MGMT_EXPIRY_WARNING_DAYS', () => {
     // Every server module this feature touches or introduces. Scanned for
     // `process.env.` reads. TAK_SERVER_ENROLLMENT_URL is the one NEW
     // variable this feature's enrollment-generation path reads (a later
@@ -214,6 +214,17 @@ describe('no client QR dependency, and no new environment variable for this feat
     // compensating-delete site), already documented in `.env.example`,
     // and not new to this feature. No ENROLLMENT_*/MANAGED_IDENTIFIER_*-
     // shaped variable is introduced.
+    //
+    // cert-expiry-notifications Requirement 7.3(b) (a LATER spec, which
+    // per this codebase's own convention overrules an earlier one where
+    // they conflict) added `listAllDevices`'s `expiringOnly` filter to
+    // `DeviceEnrollmentService.js`, which reads the PRE-EXISTING,
+    // already-documented `DEVICE_MGMT_EXPIRY_WARNING_DAYS` (the same
+    // threshold `classifyExpiry` already applies client-side) to compute
+    // the SQL boundary -- not a new, undocumented, or secret-shaped
+    // variable, so this guard's intent (catch an undocumented server env
+    // var creeping into this feature's files) is unaffected; only the
+    // exact set this ONE test asserts needed widening.
     const featureFiles = [
       'server/routes/enrollment.js',
       'server/routes/devices.js',
@@ -241,17 +252,24 @@ describe('no client QR dependency, and no new environment variable for this feat
     // found by the scan, so this assertion is measuring something.
     expect(foundVars.has('TAK_SERVER_ENROLLMENT_URL')).toBe(true);
 
-    const expectedVars = ['AUTHENTIK_API_TOKEN', 'AUTHENTIK_URL', 'TAK_SERVER_ENROLLMENT_URL'];
+    const expectedVars = [
+      'AUTHENTIK_API_TOKEN',
+      'AUTHENTIK_URL',
+      'TAK_SERVER_ENROLLMENT_URL',
+      'DEVICE_MGMT_EXPIRY_WARNING_DAYS'
+    ];
     expect(Array.from(foundVars).sort()).toEqual(expectedVars.sort());
 
     // AUTHENTIK_URL/AUTHENTIK_API_TOKEN are documented as literal keys
     // in .env.example already (pre-existing). TAK_SERVER_ENROLLMENT_URL
     // is documented there with a literal `TAK_SERVER_ENROLLMENT_URL=`
-    // line and a safe (empty) default.
+    // line and a safe (empty) default. DEVICE_MGMT_EXPIRY_WARNING_DAYS is
+    // likewise pre-existing, documented with a safe (30) default.
     const envExample = fs.readFileSync(path.join(REPO_ROOT, '.env.example'), 'utf8');
     expect(envExample).toMatch(/^AUTHENTIK_URL=/m);
     expect(envExample).toMatch(/^AUTHENTIK_API_TOKEN=/m);
     expect(envExample).toMatch(/^TAK_SERVER_ENROLLMENT_URL=/m);
+    expect(envExample).toMatch(/^DEVICE_MGMT_EXPIRY_WARNING_DAYS=/m);
   });
 
   it('does not add a new ENROLLMENT_* or MANAGED_IDENTIFIER_* variable to .env.example', () => {

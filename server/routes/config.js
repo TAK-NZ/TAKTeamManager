@@ -86,7 +86,7 @@ router.put('/:key', authenticateToken, authorize, [
     // req.user.userId is the local users.id -- site_config.updated_by
     // is a foreign key to that column, NOT the Authentik id (req.user.id).
     // Using req.user.id here caused every save to fail with a foreign-key
-    // violation (BUG: Site Content tab, same class of bug as BUG-015).
+    // violation on the Site Content tab.
     const updatedConfig = await SiteConfig.update(key, value, req.user.userId);
     if (!updatedConfig) {
       return res.status(404).json({ error: 'Configuration key not found' });

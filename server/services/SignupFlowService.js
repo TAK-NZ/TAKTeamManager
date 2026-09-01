@@ -237,6 +237,18 @@ class SignupFlowService {
            SELECT id, name, callsign_prefix FROM ancestors WHERE parent_team_id IS NULL
        ) org ON true
        WHERE t.can_join = true
+         AND t.visibility = 'public'
+         AND NOT EXISTS (
+           WITH RECURSIVE visibility_ancestors AS (
+             SELECT parent_team_id FROM teams WHERE id = t.id
+             UNION ALL
+             SELECT p.parent_team_id FROM teams p
+             JOIN visibility_ancestors a ON p.id = a.parent_team_id
+           )
+           SELECT 1 FROM teams anc
+           JOIN visibility_ancestors a ON anc.id = a.parent_team_id
+           WHERE anc.visibility = 'private'
+         )
          AND (
              NOT EXISTS (SELECT 1 FROM signup_codes sc WHERE sc.team_id = t.id)
              OR EXISTS (SELECT 1 FROM signup_codes sc WHERE sc.team_id = t.id AND sc.code = $1)
@@ -325,6 +337,18 @@ class SignupFlowService {
        ) org ON true
        WHERE t.id = $1
          AND t.can_join = true
+         AND t.visibility = 'public'
+         AND NOT EXISTS (
+           WITH RECURSIVE visibility_ancestors AS (
+             SELECT parent_team_id FROM teams WHERE id = t.id
+             UNION ALL
+             SELECT p.parent_team_id FROM teams p
+             JOIN visibility_ancestors a ON p.id = a.parent_team_id
+           )
+           SELECT 1 FROM teams anc
+           JOIN visibility_ancestors a ON anc.id = a.parent_team_id
+           WHERE anc.visibility = 'private'
+         )
          AND (
              NOT EXISTS (SELECT 1 FROM signup_codes sc WHERE sc.team_id = t.id)
              OR EXISTS (SELECT 1 FROM signup_codes sc WHERE sc.team_id = t.id AND sc.code = $2)

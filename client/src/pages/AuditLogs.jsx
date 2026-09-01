@@ -440,13 +440,13 @@ export default function AuditLogs({ user }) {
                       {/* Bugfix: same "never show the raw internal id"
                           fix as the User column above -- resource_id is
                           an implementation detail (a bch_channels.id, a
-                          channel_requests.id, etc.), not something an
+                          deployment_channels.id, etc.), not something an
                           admin should ever have to look up manually. The
                           server (server/routes/auditLogs.js) now resolves
                           every nameable resource_type to a real name;
                           anything it can't resolve (already deleted, or a
                           resource_type with no meaningful name of its
-                          own, e.g. a vendor_channel_grant) reads as '—'
+                          own, e.g. a sync operation) reads as '—'
                           rather than a bare number. */}
                       {row.resource_name || '—'}
                     </td>

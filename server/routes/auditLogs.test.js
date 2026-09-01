@@ -125,21 +125,21 @@ describe('GET /api/audit-logs filtering and pagination', () => {
   it('filters by action alone', async () => {
     mockRowsAndCount([], 0);
 
-    await request(app).get('/api/audit-logs').query({ action: 'vendor_channel_grant_created' });
+    await request(app).get('/api/audit-logs').query({ action: 'bch_channel.create' });
 
     const dataCall = pool.query.mock.calls.find(([sql]) => sql.includes('FROM audit_logs') && !sql.includes('COUNT'));
     expect(dataCall[0]).toContain('action = $1');
-    expect(dataCall[1]).toEqual(['vendor_channel_grant_created', 50, 0]);
+    expect(dataCall[1]).toEqual(['bch_channel.create', 50, 0]);
   });
 
   it('filters by resourceType alone', async () => {
     mockRowsAndCount([], 0);
 
-    await request(app).get('/api/audit-logs').query({ resourceType: 'vendor_channel_grant' });
+    await request(app).get('/api/audit-logs').query({ resourceType: 'bch_channel' });
 
     const dataCall = pool.query.mock.calls.find(([sql]) => sql.includes('FROM audit_logs') && !sql.includes('COUNT'));
     expect(dataCall[0]).toContain('resource_type = $1');
-    expect(dataCall[1]).toEqual(['vendor_channel_grant', 50, 0]);
+    expect(dataCall[1]).toEqual(['bch_channel', 50, 0]);
   });
 
   it('filters by teamId alone, matching team-scoped resource_type rows only', async () => {
@@ -169,8 +169,8 @@ describe('GET /api/audit-logs filtering and pagination', () => {
 
     await request(app).get('/api/audit-logs').query({
       userEmail: 'test@example.com',
-      action: 'vendor_channel_grant_created',
-      resourceType: 'vendor_channel_grant',
+      action: 'bch_channel.create',
+      resourceType: 'bch_channel',
       startDate: '2024-01-01',
       endDate: '2024-01-31'
     });
@@ -183,8 +183,8 @@ describe('GET /api/audit-logs filtering and pagination', () => {
     expect(dataCall[0]).toContain('created_at <= $5');
     expect(dataCall[1]).toEqual([
       'test@example.com',
-      'vendor_channel_grant_created',
-      'vendor_channel_grant',
+      'bch_channel.create',
+      'bch_channel',
       '2024-01-01',
       '2024-01-31',
       50,
@@ -227,11 +227,10 @@ describe('GET /api/audit-logs filtering and pagination', () => {
 
 /**
  * Bugfix (a raw internal id is meaningless to an admin reviewing the
- * log -- the same complaint BUG-024 already fixed for the User column):
+ * log -- the same complaint already fixed for the User column):
  * `GET /api/audit-logs` resolves a `resource_id` to a human-readable
  * `resource_name` for every `resource_type` that carries one, including
- * the ones added here (`bch_channel`, `region_channel`,
- * `deployment_channel`, `channel_request`, `mou_document`) alongside the
+ * the ones added here (`bch_channel`, `region_channel`) alongside the
  * pre-existing `team`/`user`/`channel`/`access_request` handling. A
  * `resource_type` this route has no name-resolution rule for (or a
  * resolvable id whose row has since been deleted) must resolve to
@@ -281,10 +280,7 @@ describe('GET /api/audit-logs resolves resource_name for every nameable resource
 
   it.each([
     ['bch_channel', 'bch_channels', { id: 5, display_name: 'BCH - Ops' }, 'BCH - Ops'],
-    ['region_channel', 'region_channels', { id: 6, display_name: 'North - Alpha' }, 'North - Alpha'],
-    ['deployment_channel', 'deployment_channels', { id: 7, name: 'Exercise Southern Storm' }, 'Exercise Southern Storm'],
-    ['channel_request', 'channel_requests', { id: 8, custom_suffix: 'Ops' }, 'Ops'],
-    ['mou_document', 'mou_documents', { id: 9, title: 'Volunteer Agreement 2026' }, 'Volunteer Agreement 2026']
+    ['region_channel', 'region_channels', { id: 6, display_name: 'North - Alpha' }, 'North - Alpha']
   ])('resolves a %s resource_id to its real name via %s', async (resourceType, table, lookupRow, expectedName) => {
     const rows = [{
       id: 1,
@@ -325,12 +321,12 @@ describe('GET /api/audit-logs resolves resource_name for every nameable resource
     expect(res.body.auditLogs[0].resource_name).not.toBe(999);
   });
 
-  it('resolves resource_name to null for a resource_type with no meaningful name of its own (e.g. a vendor_channel_grant)', async () => {
+  it('resolves resource_name to null for a resource_type with no meaningful name of its own (e.g. a sync operation)', async () => {
     const rows = [{
       id: 1,
       user_id: 1,
-      action: 'vendor_channel_grant_created',
-      resource_type: 'vendor_channel_grant',
+      action: 'sync.trigger',
+      resource_type: 'sync',
       resource_id: 42,
       details: null,
       created_at: '2024-01-01'
@@ -450,15 +446,15 @@ describe('GET /api/audit-logs/export.csv headers and content', () => {
 
     await request(app).get('/api/audit-logs/export.csv').query({
       userEmail: 'test@example.com',
-      action: 'vendor_channel_grant_created',
-      resourceType: 'vendor_channel_grant'
+      action: 'deployment_channel.create',
+      resourceType: 'deployment_channel'
     });
 
     const dataCall = pool.query.mock.calls.find(([sql]) => sql.includes('FROM audit_logs') && sql.includes('LEFT JOIN users'));
     expect(dataCall[0]).toContain('users.email = $1');
     expect(dataCall[0]).toContain('audit_logs.action = $2');
     expect(dataCall[0]).toContain('audit_logs.resource_type = $3');
-    expect(dataCall[1]).toEqual(['test@example.com', 'vendor_channel_grant_created', 'vendor_channel_grant', 500, 0]);
+    expect(dataCall[1]).toEqual(['test@example.com', 'deployment_channel.create', 'deployment_channel', 500, 0]);
   });
 
   it('orders results by created_at DESC (with id DESC tiebreak), matching the JSON route', async () => {

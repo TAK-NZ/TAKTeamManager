@@ -614,7 +614,7 @@ describe('UserAttributesService.updateTeamUserAttributes - never writes callsign
     expect(rosterCall[0]).toMatch(/tm\.inherited_from_team_id IS NULL/);
   });
 
-  it('the user_cache UPDATE call never references callsign_suffix', async () => {
+  it('the user_cache UPDATE call never references callsign_suffix or tak_role', async () => {
     await UserAttributesService.updateTeamUserAttributes(TEAM_ID);
 
     const userCacheCalls = pool.query.mock.calls.filter(
@@ -626,7 +626,11 @@ describe('UserAttributesService.updateTeamUserAttributes - never writes callsign
       expect(sql).not.toMatch(/callsign_suffix/);
       expect(sql).toMatch(/tak_callsign/);
       expect(sql).toMatch(/tak_color/);
-      expect(sql).toMatch(/tak_role/);
+      // `computeCallsignAttributes` returns a hardcoded `role: 'Team
+      // Member'` -- role is not team-derived, so this UPDATE must never
+      // touch tak_role, which would clobber every affected user's real
+      // role with that placeholder.
+      expect(sql).not.toMatch(/tak_role/);
     }
   });
 

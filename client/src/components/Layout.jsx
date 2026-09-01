@@ -53,10 +53,16 @@ const getNavigation = (user) => {
     baseNavigation.push({ name: 'Devices', href: '/devices', icon: DeviceTabletIcon })
   }
   
-  if (user?.isAdmin || user?.isTeamAdmin) {
-    baseNavigation.push({ name: 'Requests', href: '/requests', icon: ClipboardDocumentListIcon })
-  }
-  
+  // cert-expiry-notifications Requirement 7.2: renamed from "Requests" to
+  // "Tasks" (the page now also lists certificate renewals due for the
+  // viewer, not just access requests an admin acts on) and moved OUT of
+  // the admin-only gate above -- every authenticated user needs to reach
+  // /tasks to see their own renewal section, regardless of admin status.
+  // The pending-request BADGE COUNT below keeps its own separate
+  // isAdmin/isTeamAdmin gate (Requirement 7.7) -- lifting the nav item's
+  // gate does not widen who that count is fetched for.
+  baseNavigation.push({ name: 'Tasks', href: '/tasks', icon: ClipboardDocumentListIcon })
+
   if (user?.is_global_manager) {
     baseNavigation.push({ name: 'Global Channels', href: '/global-channels', icon: SignalIcon })
     baseNavigation.push({ name: 'Audit Log', href: '/audit-logs', icon: DocumentMagnifyingGlassIcon })
@@ -112,7 +118,19 @@ export default function Layout({ children, user }) {
   const [pendingRequestCount, setPendingRequestCount] = useState(0)
 
   useEffect(() => {
-    if (!user?.isAdmin && !user?.is_global_manager) return
+    // cert-expiry-notifications Requirement 7.7: this gate now also
+    // covers `isTeamAdmin` (previously missing here -- `isAdmin` and
+    // `is_global_manager` are ALIASES of the same cached `is_admin`
+    // column per this app's own domain rules, so the pre-existing
+    // `!user?.isAdmin && !user?.is_global_manager` check tested the SAME
+    // flag twice and never excluded a plain Team_Admin, who could
+    // legitimately have a nonzero count too). Independent of the /tasks
+    // nav item's own visibility, which is now unconditional (Requirement
+    // 7.2) -- this is NOT a 403-avoidance fix (GET /api/requests/pending
+    // is not admin-scoped server-side), it exists so a plain member's
+    // Layout mount does not repeatedly poll an endpoint that can only
+    // ever resolve to a count of zero for them.
+    if (!user?.isAdmin && !user?.isTeamAdmin && !user?.is_global_manager) return
 
     const fetchPendingCount = async () => {
       // Two independent request systems feed this one badge: the
@@ -183,7 +201,6 @@ export default function Layout({ children, user }) {
         redirectUrl = response.data.redirectUrl
       }
     } finally {
-      localStorage.removeItem('token')
       window.location.href = redirectUrl
     }
   }
@@ -229,7 +246,7 @@ export default function Layout({ children, user }) {
               >
                 <span className="relative mr-3">
                   <item.icon className="h-6 w-6" />
-                  {item.name === 'Requests' && pendingRequestCount > 0 && (
+                  {item.name === 'Tasks' && pendingRequestCount > 0 && (
                     <span className="absolute -top-1 -right-1 flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-red-600 px-0.5 text-[10px] font-bold text-white">
                       {pendingRequestCount > 99 ? '99+' : pendingRequestCount}
                     </span>
@@ -266,7 +283,7 @@ export default function Layout({ children, user }) {
               >
                 <span className="relative mr-3">
                   <item.icon className="h-6 w-6" />
-                  {item.name === 'Requests' && pendingRequestCount > 0 && (
+                  {item.name === 'Tasks' && pendingRequestCount > 0 && (
                     <span className="absolute -top-1 -right-1 flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-red-600 px-0.5 text-[10px] font-bold text-white">
                       {pendingRequestCount > 99 ? '99+' : pendingRequestCount}
                     </span>

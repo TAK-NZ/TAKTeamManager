@@ -468,16 +468,75 @@ function getRequiredField(row, field) {
   return String(value).trim();
 }
 
-function parseRowTeamId(row) {
+/**
+ * Bugfix (team-scoped user import): a row's own
+ * `teamId` column still wins when present, but a caller uploading from
+ * a team-scoped surface (Team_Detail's "Import Users" action) already
+ * knows the target team -- `defaultTeamId` lets that caller omit the
+ * column from the CSV entirely rather than making every row repeat a
+ * value the surrounding UI already fixed. `defaultTeamId` is a plain
+ * convenience, not a new trust boundary: `importUserRow`'s existing
+ * per-row `Team.isAdmin` check runs against whichever value comes out
+ * of this function either way, so a caller passing a `defaultTeamId`
+ * they do not actually administer still has every row rejected exactly
+ * as if they had typed it into the CSV themselves.
+ *
+ * @param {Record<string, string>} row
+ * @param {number|string|null} [defaultTeamId]
+ * @returns {number}
+ * @throws {BulkImportRowError} when neither the row nor `defaultTeamId`
+ *   supplies a value, or the resolved value isn't a positive integer.
+ */
+function parseRowTeamId(row, defaultTeamId = null) {
   const raw = row.teamId;
-  if (raw === undefined || raw === null || String(raw).trim() === '') {
+  const hasRowValue = raw !== undefined && raw !== null && String(raw).trim() !== '';
+  const source = hasRowValue ? raw : defaultTeamId;
+  if (source === undefined || source === null || String(source).trim() === '') {
     throw new BulkImportRowError('Missing required field: teamId');
   }
-  const teamId = Number.parseInt(String(raw).trim(), 10);
+  const teamId = Number.parseInt(String(source).trim(), 10);
   if (!Number.isInteger(teamId) || teamId <= 0) {
-    throw new BulkImportRowError(`Invalid teamId: ${raw}`);
+    throw new BulkImportRowError(`Invalid teamId: ${source}`);
   }
   return teamId;
+}
+
+/**
+ * Bugfix (duplicate-username/email flagging):
+ * resolves the exact username a row would be created under -- the SAME
+ * `email` verbatim `importUserRow` itself passes as `requestedUsername`
+ * (matching `POST /api/users/create-and-add`'s own `requestedUsername:
+ * email` derivation, `server/routes/users.js`) -- WITHOUT running the
+ * pseudonymous-username minting path
+ * (`UserProvisioningService.resolveNewUserIdentity`). A
+ * Pseudonymous_Organisation mints a fresh username at creation time
+ * regardless of this CSV-derived value, so it can never collide with an
+ * existing one; this resolver exists only to compute the SAME value a
+ * non-pseudonymous row would actually be created under, for duplicate
+ * detection during preview.
+ *
+ * There is deliberately no CSV `username` column: since a
+ * non-pseudonymous username is always the account's own email, a
+ * separate column could only ever disagree with `email` (an operator
+ * error) or repeat it -- neither is useful, and it invited confusion
+ * with a Pseudonymous_Organisation's minted username, which ignores
+ * this value entirely regardless.
+ *
+ * @param {Record<string, string>} row
+ * @returns {string} lower-cased, for case-insensitive comparison -- the
+ *   same casing `users_username_key` and `users_email_key` themselves
+ *   are NOT declared case-insensitive on in the schema, but a
+ *   non-pseudonymous username IS the email, so this is really just
+ *   `previewRowEmail` under another name; kept as a separate function
+ *   so a future divergence (should one ever become legitimate) has an
+ *   obvious single place to change.
+ */
+function previewRowUsername(row) {
+  return readOptionalField(row, 'email').toLowerCase();
+}
+
+function previewRowEmail(row) {
+  return readOptionalField(row, 'email').toLowerCase();
 }
 
 /**
@@ -554,20 +613,39 @@ class BulkImportService {
    *
    * @param {Buffer|string} csvBuffer - the raw CSV file contents.
    * @param {{userId?: number, is_global_manager?: boolean}} importingUser
+   * @param {object} [options]
+   * @param {number|string|null} [options.defaultTeamId] - Bugfix
+   *   (team-scoped import): used for any row whose own `teamId` column
+   *   is blank/absent. See `parseRowTeamId`'s own doc comment.
+   * @param {number[]|null} [options.rowNumbers] - Bugfix
+   *   (preview-then-confirm): when supplied, ONLY these 1-based row
+   *   numbers (as computed by a prior `previewUsers` call over the same
+   *   file) are processed; every other row is skipped entirely -- no
+   *   Authentik call, no DB write, no entry in `results`. Lets a caller
+   *   commit exactly the rows an operator reviewed and approved in the
+   *   preview step, even though the full original file (including rows
+   *   the operator never asked to import, e.g. flagged duplicates) is
+   *   re-uploaded unchanged for the commit call. `null`/omitted
+   *   processes every row, matching this method's pre-existing
+   *   behaviour exactly.
    * @returns {Promise<{successCount: number, failureCount: number, results: Array<{row: number, success: boolean, userId?: number, error?: string}>}>}
    */
-  static async importUsers(csvBuffer, importingUser) {
+  static async importUsers(csvBuffer, importingUser, { defaultTeamId = null, rowNumbers = null } = {}) {
     const results = [];
     let successCount = 0;
     let failureCount = 0;
     let rowNumber = 0;
+    const allowedRowNumbers = rowNumbers ? new Set(rowNumbers.map(Number)) : null;
 
     const parser = parse(csvBuffer, { columns: true, trim: true, skip_empty_lines: true });
 
     for await (const row of parser) {
       rowNumber++;
+      if (allowedRowNumbers && !allowedRowNumbers.has(rowNumber)) {
+        continue;
+      }
       try {
-        const outcome = await BulkImportService.importUserRow(row, importingUser);
+        const outcome = await BulkImportService.importUserRow(row, importingUser, defaultTeamId);
         results.push({ row: rowNumber, success: true, userId: outcome.localUserId });
         successCount++;
       } catch (error) {
@@ -581,6 +659,181 @@ class BulkImportService {
     }
 
     return { successCount, failureCount, results };
+  }
+
+  /**
+   * Bugfix (preview-then-confirm CSV user import,
+   * plus flagging a row that would fail on a duplicate username/email
+   * before it ever reaches Authentik): a READ-ONLY dry run over the
+   * same CSV shape `importUsers` accepts -- no Authentik call, no DB
+   * write -- that classifies every row so a caller can render a
+   * before-you-commit preview (new / already-exists / duplicate-within-
+   * this-file / invalid / unauthorized) and let the operator choose
+   * exactly which `row` numbers to actually commit via `importUsers`'s
+   * `rowNumbers` option.
+   *
+   * Per-row classification, in priority order (a row gets exactly one
+   * status):
+   *   - `'invalid'`: a required field is missing, or the resolved
+   *     `teamId` isn't a positive integer -- the same checks
+   *     `importUserRow` performs, reused here via the same helpers
+   *     (`getRequiredField`/`parseRowTeamId`) so preview and commit can
+   *     never disagree about what counts as invalid.
+   *   - `'unauthorized'`: the importing user is not a Global_Manager and
+   *     does not administer the row's resolved `teamId` (`Team.isAdmin`,
+   *     the same check `importUserRow` performs).
+   *   - `'duplicate_in_file'`: a PRIOR row in this same upload already
+   *     resolved to the same username or email (case-insensitively --
+   *     see `previewRowUsername`/`previewRowEmail`). The first
+   *     occurrence of a value is never flagged this way; only every
+   *     later occurrence is.
+   *   - `'duplicate_existing'`: the row's resolved username or email
+   *     already exists in `users`, per ONE batched query issued after
+   *     the whole file is parsed (Requirement: no N+1 -- see
+   *     `server-conventions`'s "Resolve per-row lookups for a list in
+   *     ONE batched query").
+   *   - `'new'`: none of the above -- this row would be created by a
+   *     subsequent `importUsers` call carrying its `row` number.
+   *
+   * A row's authorization/validity is checked BEFORE its duplicate
+   * status, so an invalid or unauthorized row is never additionally
+   * reported as a duplicate -- each row carries exactly one status, and
+   * an operator sees exactly one reason it would not import cleanly.
+   *
+   * @param {Buffer|string} csvBuffer
+   * @param {{userId?: number, is_global_manager?: boolean}} importingUser
+   * @param {number|string|null} [defaultTeamId] - same fallback
+   *   `importUsers`'s own `defaultTeamId` option applies; passed through
+   *   identically so preview and commit resolve `teamId` the same way
+   *   for the same row.
+   * @returns {Promise<{rows: Array<{
+   *   row: number,
+   *   status: 'new'|'duplicate_existing'|'duplicate_in_file'|'invalid'|'unauthorized',
+   *   email?: string,
+   *   username?: string,
+   *   teamId?: number,
+   *   firstName?: string,
+   *   lastName?: string,
+   *   reason?: string
+   * }>}>}
+   */
+  static async previewUsers(csvBuffer, importingUser, defaultTeamId = null) {
+    const parsedRows = [];
+    const parser = parse(csvBuffer, { columns: true, trim: true, skip_empty_lines: true });
+    for await (const row of parser) {
+      parsedRows.push(row);
+    }
+
+    const isGlobalManager = Boolean(importingUser?.is_global_manager);
+
+    // --- Phase 1: per-row validation/authorization, and computation of
+    // each valid row's comparison username/email -- no I/O beyond
+    // Team.isAdmin (already required for authorization, same as the
+    // commit path). ---
+    const classified = [];
+    for (let index = 0; index < parsedRows.length; index++) {
+      const row = parsedRows[index];
+      const rowNumber = index + 1;
+      const base = {
+        row: rowNumber,
+        email: readOptionalField(row, 'email') || undefined,
+        firstName: readOptionalField(row, 'firstName') || undefined,
+        lastName: readOptionalField(row, 'lastName') || undefined
+      };
+
+      let teamId;
+      try {
+        teamId = parseRowTeamId(row, defaultTeamId);
+        getRequiredField(row, 'email');
+        getRequiredField(row, 'firstName');
+        getRequiredField(row, 'lastName');
+      } catch (error) {
+        classified.push({ ...base, status: 'invalid', reason: error.message });
+        continue;
+      }
+
+      if (!isGlobalManager) {
+        const isAdmin = await Team.isAdmin(teamId, importingUser?.userId);
+        if (!isAdmin) {
+          classified.push({
+            ...base,
+            teamId,
+            status: 'unauthorized',
+            reason: `Unauthorized: importing user does not administer team ${teamId}`
+          });
+          continue;
+        }
+      }
+
+      classified.push({
+        ...base,
+        teamId,
+        // Bugfix: a non-pseudonymous username is always the account's
+        // email verbatim (matching `importUserRow`'s own
+        // `requestedUsername`), so `username` and `email` collapse to
+        // the SAME comparison value here -- `previewRowUsername`/
+        // `previewRowEmail` are kept as two named calls (rather than
+        // one) so a future legitimate divergence has an obvious single
+        // place to change, without this phase needing to know about it.
+        username: previewRowUsername(row) || undefined,
+        _compareEmail: previewRowEmail(row)
+      });
+    }
+
+    // --- Phase 2: duplicate-within-file detection, over rows that
+    // survived Phase 1 (a row already classified invalid/unauthorized
+    // never contributes a "first occurrence" or gets re-flagged). Since
+    // `username` and `email` are the same value, checking one Set
+    // catches both. ---
+    const seenEmails = new Set();
+    for (const entry of classified) {
+      if (entry.status) {
+        continue;
+      }
+      const emailKey = entry._compareEmail;
+      if (emailKey && seenEmails.has(emailKey)) {
+        entry.status = 'duplicate_in_file';
+      }
+      if (emailKey) seenEmails.add(emailKey);
+    }
+
+    // --- Phase 3: duplicate-against-existing-DB detection, ONE batched
+    // query covering every still-unclassified row's email. Still
+    // matches against BOTH `username` and `email` columns server-side
+    // (a pre-existing row could hold a legacy/pseudonymous username
+    // that happens to equal this email), even though this preview only
+    // ever generates one comparison value for a non-pseudonymous row. ---
+    const pendingEmails = classified.filter((e) => !e.status && e._compareEmail).map((e) => e._compareEmail);
+    let existingUsernames = new Set();
+    let existingEmails = new Set();
+    if (pendingEmails.length > 0) {
+      const result = await pool.query(
+        'SELECT LOWER(username) AS username, LOWER(email) AS email FROM users WHERE LOWER(username) = ANY($1) OR LOWER(email) = ANY($1)',
+        [pendingEmails]
+      );
+      existingUsernames = new Set(result.rows.map((r) => r.username));
+      existingEmails = new Set(result.rows.map((r) => r.email));
+    }
+
+    for (const entry of classified) {
+      if (entry.status) {
+        continue;
+      }
+      const isDuplicateExisting =
+        existingUsernames.has(entry._compareEmail) || existingEmails.has(entry._compareEmail);
+      entry.status = isDuplicateExisting ? 'duplicate_existing' : 'new';
+      if (isDuplicateExisting) {
+        entry.reason = 'A user with this username or email already exists';
+      }
+    }
+
+    // Strip the internal-only comparison field before returning.
+    const rows = classified.map((entry) => {
+      const rest = { ...entry };
+      delete rest._compareEmail;
+      return rest;
+    });
+    return { rows };
   }
 
   /**
@@ -814,14 +1067,17 @@ class BulkImportService {
    *
    * @param {Record<string, string>} row - a parsed CSV row, keyed by
    *   header name (`email`, `firstName`, `lastName`, `teamId`, and an
-   *   optional `username`).
+   *   optional `callsignSuffix`). There is deliberately no `username`
+   *   column -- see `previewRowUsername`'s doc comment.
    * @param {{userId?: number, is_global_manager?: boolean}} importingUser
+   * @param {number|string|null} [defaultTeamId] - see `parseRowTeamId`'s
+   *   own doc comment.
    * @returns {Promise<{localUserId: number, queuedGroups: number}>}
    * @throws {BulkImportRowError} on missing/invalid fields or
    *   insufficient per-row authorization.
    */
-  static async importUserRow(row, importingUser) {
-    const teamId = parseRowTeamId(row);
+  static async importUserRow(row, importingUser, defaultTeamId = null) {
+    const teamId = parseRowTeamId(row, defaultTeamId);
 
     // Requirement 29.3-29.4: per-row authorization, checked before any
     // Authentik API call or database write for this row. A team admin
@@ -838,7 +1094,15 @@ class BulkImportService {
     const email = getRequiredField(row, 'email');
     const firstName = getRequiredField(row, 'firstName');
     const lastName = getRequiredField(row, 'lastName');
-    const requestedUsername = (row.username && String(row.username).trim()) || email.split('@')[0];
+    // Bugfix: a non-pseudonymous username is the account's email
+    // verbatim -- matching `POST /api/users/create-and-add`'s own
+    // `requestedUsername: email` derivation (`server/routes/users.js`),
+    // rather than this route's former `email.split('@')[0]` local-part
+    // derivation, which disagreed with single-user creation for the
+    // exact same input and served no purpose a CSV `username` column
+    // could usefully override (a Pseudonymous_Organisation ignores it
+    // entirely regardless -- see `resolveNewUserIdentity` below).
+    const requestedUsername = email;
     // Requirement 11.6, 11.7, 11.14 (task 22.2): optional callsignSuffix
     // CSV column, read via the same readOptionalField helper already
     // used for visibility/callsignPrefix (task 18.2).
@@ -849,10 +1113,9 @@ class BulkImportService {
     // the single Phase-0 choke point, BEFORE Phase 1's Authentik call --
     // the same "avoid orphaning an Authentik user for a
     // request-validation failure" reasoning as the two route entry
-    // points. `requestedUsername` is the existing `row.username ||
-    // email.split('@')[0]` derivation, passed IN rather than used
-    // directly, so a Pseudonymous_Organisation can override it with a
-    // minted Pseudonymous_Username. Under a policy-disabled
+    // points. `requestedUsername` (== `email`) is passed IN rather than
+    // used directly, so a Pseudonymous_Organisation can override it
+    // with a minted Pseudonymous_Username. Under a policy-disabled
     // Organisation the resolver returns it verbatim (Criterion 6.8).
     // A thrown CallsignSuffixRequiredError/CallsignSuffixConflictError/
     // OrganisationPrefixMissingError/ManagedIdentifierExhaustionError

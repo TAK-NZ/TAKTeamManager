@@ -22,9 +22,9 @@ const router = express.Router();
  * `users.id` -- see `server/middleware/auth.js` -- and
  * `req.user.is_global_manager`), calls the service, and maps the
  * service's named error classes to the appropriate HTTP status code,
- * mirroring the exact `ERROR_STATUS_BY_NAME`/`handleServiceError` pattern
- * already used by `server/routes/mou.js`/`server/routes/vendorChannels.js`.
- * No business logic lives here.
+ * mirroring the `ERROR_STATUS_BY_NAME`/`handleServiceError` pattern
+ * already established elsewhere in this codebase (e.g.
+ * `server/routes/deploymentChannels.js`). No business logic lives here.
  *
  * Authorization (Requirement 27 Criterion 3 -- "team admin OR
  * Global_Manager"): `DeviceEnrollmentService.assertAuthorized` already
@@ -35,9 +35,8 @@ const router = express.Router();
  * duplicate that fine-grained check -- it only gates general reachability
  * via the `device:manage` permission identifier, which is deliberately
  * placed in BOTH `roleDefaults.global_manager` (automatically, via the
- * wildcard) AND `roleDefaults.authenticated_user` (explicitly), mirroring
- * exactly how `mou:sign` is set up for `POST /api/mou/:documentId/sign`.
- * This is intentional and NOT a bug: a team admin who is not a
+ * wildcard) AND `roleDefaults.authenticated_user` (explicitly). This is
+ * intentional and NOT a bug: a team admin who is not a
  * Global_Manager must still be able to reach these routes to create/
  * enroll devices for their own team, and the service's own
  * `assertAuthorized` call is what rejects a caller who is neither an
@@ -273,8 +272,13 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
   try {
     const { page, pageSize } = req.pagination;
     const { search } = req.query;
+    // cert-expiry-notifications Requirement 7.3(b): only the exact string
+    // "true" narrows the listing, matching this codebase's boolean-env/
+    // query-param convention elsewhere -- any other value (including
+    // "1"/"TRUE") is treated as absent/false, never partially truthy.
+    const expiringOnly = req.query.expiringOnly === 'true';
 
-    const result = await DeviceEnrollmentService.listAllDevices(req.user, { page, pageSize, search });
+    const result = await DeviceEnrollmentService.listAllDevices(req.user, { page, pageSize, search, expiringOnly });
 
     res.json(result);
   } catch (error) {

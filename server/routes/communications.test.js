@@ -10,8 +10,7 @@
  * for each request is exercised for real rather than assumed.
  *
  * `pool.query` is mocked at the data-access boundary (`../config/database`),
- * following the same pattern already used by `server/routes/settings.test.js`
- * for its `tak-mappings` endpoints.
+ * following the same pattern already used by `server/routes/settings.test.js`.
  *
  * Covers (per task 52.2's scope): GET existing template (success), GET
  * nonexistent key (404), PUT updates fields successfully, PUT on
@@ -46,34 +45,10 @@ jest.mock('../services/EmailService', () => {
   }));
 });
 
-// `POST /api/communications/send` (task 52.4): `BroadcastEmailService` is
-// mocked at the class-method boundary, mirroring the `EmailService` mock
-// above, so the route's authorization-error-mapping/response-shaping
-// logic can be exercised without depending on `BroadcastEmailService`'s
-// own DB-backed recipient resolution and scoping checks (those are
-// covered by `BroadcastEmailService.test.js` itself).
-const mockBroadcastSend = jest.fn();
-jest.mock('../services/BroadcastEmailService', () => {
-  class BroadcastAuthorizationError extends Error {
-    constructor(message) {
-      super(message);
-      this.name = 'BroadcastAuthorizationError';
-    }
-  }
-
-  const MockBroadcastEmailService = jest.fn().mockImplementation(() => ({
-    send: mockBroadcastSend
-  }));
-  MockBroadcastEmailService.BroadcastAuthorizationError = BroadcastAuthorizationError;
-
-  return MockBroadcastEmailService;
-});
-
 const express = require('express');
 const request = require('supertest');
 const pool = require('../config/database');
 const communicationsRouter = require('./communications');
-const { BroadcastAuthorizationError } = require('../services/BroadcastEmailService');
 
 function buildApp() {
   const app = express();
@@ -373,106 +348,3 @@ describe('POST /api/communications/test-email', () => {
   });
 });
 
-/**
- * `POST /api/communications/send` (Requirement 30.1, task 52.4).
- *
- * `BroadcastEmailService.send` is mocked at the class-method boundary
- * (see the `jest.mock('../services/BroadcastEmailService', ...)`
- * declaration near the top of this file) -- this route is a thin HTTP
- * wrapper around that service, so these tests exercise the route's own
- * request validation, the `communication:broadcast:send` permission
- * identifier's reachability for BOTH a Global_Manager and a
- * non-Global_Manager (team admin) caller, and its
- * `BroadcastAuthorizationError` -> 403 error mapping, without depending
- * on `BroadcastEmailService`'s own DB-backed recipient resolution.
- */
-describe('POST /api/communications/send', () => {
-  let app;
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-    mockUser = { id: 'authentik-1', userId: 1, is_global_manager: true };
-    app = buildApp();
-  });
-
-  it('sends a broadcast to all users for a Global_Manager caller and returns sentCount only', async () => {
-    mockBroadcastSend.mockResolvedValue({
-      sentCount: 3,
-      recipients: ['a@example.com', 'b@example.com', 'c@example.com']
-    });
-
-    const res = await request(app)
-      .post('/api/communications/send')
-      .send({ filter: { allUsers: true }, templateKey: 'admin_notification_digest' });
-
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ sentCount: 3 });
-    expect(res.body.recipients).toBeUndefined();
-    expect(mockBroadcastSend).toHaveBeenCalledWith(
-      { allUsers: true },
-      mockUser,
-      'admin_notification_digest',
-      {}
-    );
-  });
-
-  it('permits a non-Global_Manager (team admin) caller to send within their scope', async () => {
-    mockUser = { id: 'authentik-2', userId: 2, is_global_manager: false };
-    mockBroadcastSend.mockResolvedValue({ sentCount: 2, recipients: ['a@example.com', 'b@example.com'] });
-
-    const res = await request(app)
-      .post('/api/communications/send')
-      .send({ filter: { teamIds: [5] }, templateKey: 'admin_notification_digest', variables: { foo: 'bar' } });
-
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ sentCount: 2 });
-    expect(mockBroadcastSend).toHaveBeenCalledWith(
-      { teamIds: [5] },
-      mockUser,
-      'admin_notification_digest',
-      { foo: 'bar' }
-    );
-  });
-
-  it('maps a BroadcastAuthorizationError from an out-of-scope team-admin filter to 403', async () => {
-    mockUser = { id: 'authentik-2', userId: 2, is_global_manager: false };
-    mockBroadcastSend.mockRejectedValue(
-      new BroadcastAuthorizationError('Broadcast email filter includes users outside the team(s) you administer')
-    );
-
-    const res = await request(app)
-      .post('/api/communications/send')
-      .send({ filter: { allUsers: true }, templateKey: 'admin_notification_digest' });
-
-    expect(res.status).toBe(403);
-    expect(res.body.error).toMatch(/outside the team/);
-  });
-
-  it('rejects a missing templateKey with 400 and never calls send', async () => {
-    const res = await request(app)
-      .post('/api/communications/send')
-      .send({ filter: { allUsers: true } });
-
-    expect(res.status).toBe(400);
-    expect(mockBroadcastSend).not.toHaveBeenCalled();
-  });
-
-  it('rejects an empty-string templateKey with 400 and never calls send', async () => {
-    const res = await request(app)
-      .post('/api/communications/send')
-      .send({ filter: { allUsers: true }, templateKey: '' });
-
-    expect(res.status).toBe(400);
-    expect(mockBroadcastSend).not.toHaveBeenCalled();
-  });
-
-  it('surfaces a non-authorization service failure as a 500', async () => {
-    mockBroadcastSend.mockRejectedValue(new Error('DB unreachable'));
-
-    const res = await request(app)
-      .post('/api/communications/send')
-      .send({ filter: { allUsers: true }, templateKey: 'admin_notification_digest' });
-
-    expect(res.status).toBe(500);
-  });
-});

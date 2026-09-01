@@ -187,6 +187,49 @@ describe('TeamDeviceList (mounted)', () => {
     expect(container.textContent).toContain('3 active TAK Server certificates')
   })
 
+  // Bugfix (admins had no way to see a device's certificate expiring soon
+  // on the Team Devices tab): DeviceExpiryLine reuses DeviceListRow's own
+  // classification, so this tab highlights an imminent/expired certificate
+  // the same way the Dashboard "My Devices" card already does.
+  describe('certificate expiry highlighting (bugfix)', () => {
+    it('renders nothing extra for a device with no expiresAt', async () => {
+      devicesAPI.getTeamDevices.mockResolvedValue({
+        data: { devices: [{ deviceUserId: 1, username: 'AUK-D7K3QMX', deviceLabel: 'Engine 4 Tablet', teamId: 5, createdAt: '2025-01-02T03:04:05Z', liveCertificateCount: 0, expiresAt: null }] }
+      })
+
+      root = createRoot(container)
+      await act(async () => {
+        root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+      })
+      await act(async () => {
+        await Promise.resolve()
+      })
+
+      expect(container.textContent).not.toContain('Expires soon')
+      expect(container.textContent).not.toContain('Expired')
+    })
+
+    it('highlights an imminently-expiring certificate as bold red with an "Expires soon" marker', async () => {
+      const soon = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString()
+      devicesAPI.getTeamDevices.mockResolvedValue({
+        data: { devices: [{ deviceUserId: 1, username: 'AUK-D7K3QMX', deviceLabel: 'Engine 4 Tablet', teamId: 5, createdAt: '2025-01-02T03:04:05Z', liveCertificateCount: 1, expiresAt: soon }] }
+      })
+
+      root = createRoot(container)
+      await act(async () => {
+        root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+      })
+      await act(async () => {
+        await Promise.resolve()
+      })
+
+      expect(container.textContent).toContain('Expires soon')
+      const marker = container.querySelector('span.sr-only')
+      expect(marker).not.toBeNull()
+      expect(marker.textContent).toBe('Expires soon')
+    })
+  })
+
   // Bugfix (list-width reduction, consistency with Members/Team Admins):
   // this tab now shows Device+username, TAK Callsign & Role, Added,
   // Actions -- the "TAK Callsign & Role" column/label is new, and the

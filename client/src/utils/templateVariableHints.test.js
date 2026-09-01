@@ -16,8 +16,14 @@ import { TEMPLATE_VARIABLE_HINTS, getVariableHints } from './templateVariableHin
 // (own-property lookup) rather than by calling getVariableHints again, so the
 // property is an independent statement about the accessor rather than a
 // restatement of it.
+//
+// Extended by cert-expiry-notifications task 7.2 to cover the two new
+// digest keys added since this file was first written -- KNOWN_KEYS is
+// no longer "the seven" but the comment above KNOWN_KEYS itself carries
+// the current count.
 
-// The seven currently seeded Template_Keys (design.md / Requirements glossary).
+// The currently seeded Template_Keys (design.md / Requirements glossary),
+// plus the two cert-expiry-notifications digest keys (task 7.2).
 const KNOWN_KEYS = [
   'access_request_verification',
   'access_request_approved',
@@ -25,7 +31,9 @@ const KNOWN_KEYS = [
   'admin_notification_digest',
   'signup_pending_review',
   'signup_already_active',
-  'team_transfer_completed'
+  'team_transfer_completed',
+  'cert_expiry_self_digest',
+  'cert_expiry_team_digest'
 ]
 
 // True iff `key` is an own enumerable Template_Key of the hints map -- the
@@ -72,7 +80,7 @@ describe('templateVariableHints Property 5: Variable hints never break editing (
 
 describe('templateVariableHints examples', () => {
   // Each known key returns its exact advisory list (Requirement 5.1).
-  it('each of the seven known keys returns exactly its mapped advisory list', () => {
+  it('each of the nine known keys returns exactly its mapped advisory list', () => {
     expect(getVariableHints('access_request_verification')).toEqual([
       'first_name', 'verification_link', 'team_path', 'expiry_hours'
     ])
@@ -93,6 +101,13 @@ describe('templateVariableHints examples', () => {
     ])
     expect(getVariableHints('team_transfer_completed')).toEqual([
       'first_name', 'team_path', 'callsign', 'username'
+    ])
+    // cert-expiry-notifications Requirements 3.3, 4.3 (task 7.2).
+    expect(getVariableHints('cert_expiry_self_digest')).toEqual([
+      'first_name', 'device_list', 'revoke_hint_url'
+    ])
+    expect(getVariableHints('cert_expiry_team_digest')).toEqual([
+      'first_name', 'team_sections', 'revoke_hint_url'
     ])
   })
 

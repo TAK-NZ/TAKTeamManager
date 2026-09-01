@@ -5,7 +5,8 @@ import { MemoryRouter } from 'react-router-dom';
 import Requests, {
   getInitialCallsignSuffixMap,
   extractCallsignSuffixConflictError,
-  formatPersonName
+  formatPersonName,
+  filterDevicesNeedingRenewal
 } from './Requests.jsx';
 import Layout from '../components/Layout.jsx';
 import { ThemeProvider } from '../contexts/ThemeContext.jsx';
@@ -13,7 +14,7 @@ import FormattedDate, {
   DATE_PRECISION,
   TOOLTIP_SIDES
 } from '../components/FormattedDate.jsx';
-import { requestsAPI } from '../services/api';
+import { requestsAPI, deviceManagementAPI, devicesAPI, configAPI } from '../services/api';
 import { formatDate } from '../utils/dateFormat';
 import toast from 'react-hot-toast';
 
@@ -48,11 +49,23 @@ vi.mock('../services/api', () => ({
     approveRequest: vi.fn(),
     denyRequest: vi.fn()
   },
+  // cert-expiry-notifications Requirement 7.3: the two new renewal-section
+  // data sources this page now also fetches.
+  deviceManagementAPI: { getMyDevices: vi.fn() },
+  devicesAPI: {
+    getAll: vi.fn(),
+    generateQrCode: vi.fn(),
+    previewQrCode: vi.fn()
+  },
   // Layout.jsx imports authAPI, OrgInterestRequests.jsx imports adminAPI.
   // Neither is exercised here, but a named import of a missing export from
   // a mocked ES module is a load-time failure, so both are present.
   authAPI: { logout: vi.fn() },
-  adminAPI: {}
+  adminAPI: {},
+  // The Renew action's modal mounts the real EnrollmentView.jsx, which
+  // reads configAPI.getPublic() on mount (unrelated to this feature) --
+  // present here so that render path doesn't throw.
+  configAPI: { getPublic: vi.fn().mockResolvedValue({ data: {} }) }
 }));
 
 vi.mock('react-hot-toast', () => ({
@@ -131,6 +144,22 @@ describe('extractCallsignSuffixConflictError', () => {
     expect(extractCallsignSuffixConflictError(new Error('Network Error'))).toBeNull();
   });
 });
+describe('filterDevicesNeedingRenewal (cert-expiry-notifications Requirement 7.3(a))', () => {
+  it('keeps only a device whose certificate is imminent or expired', () => {
+    const dueSoon = { clientUid: 'a', expiresAt: new Date(Date.now() + 1 * 24 * 60 * 60 * 1000).toISOString() }
+    const expired = { clientUid: 'b', expiresAt: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString() }
+    const fine = { clientUid: 'c', expiresAt: new Date(Date.now() + 730 * 24 * 60 * 60 * 1000).toISOString() }
+
+    expect(filterDevicesNeedingRenewal([dueSoon, expired, fine])).toEqual([dueSoon, expired])
+  })
+
+  it('returns an empty array for an empty or absent list', () => {
+    expect(filterDevicesNeedingRenewal([])).toEqual([])
+    expect(filterDevicesNeedingRenewal(undefined)).toEqual([])
+    expect(filterDevicesNeedingRenewal(null)).toEqual([])
+  })
+})
+
 describe('formatPersonName (Req 16.1)', () => {
   it('joins the first and last name of the Transferred_User / Initiating_Admin', () => {
     expect(formatPersonName('Ada', 'Lovelace')).toBe('Ada Lovelace')
@@ -218,6 +247,12 @@ describe('Requests page team_change card (mounted)', () => {
     })
     requestsAPI.approveRequest.mockResolvedValue({ data: {} })
     requestsAPI.denyRequest.mockResolvedValue({ data: {} })
+    // cert-expiry-notifications Requirement 7.3: default to "nothing due"
+    // for both new renewal sections, so every pre-existing test in this
+    // file (written before these sections existed) sees them render
+    // nothing, matching its original assumptions.
+    deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    devicesAPI.getAll.mockResolvedValue({ data: { devices: [], pagination: { page: 1, pageSize: 200, total: 0 } } })
   })
 
   afterEach(async () => {
@@ -244,7 +279,15 @@ describe('Requests page team_change card (mounted)', () => {
     })
   }
 
-  const mountPage = (user = TEAM_ADMIN) => mount(<Requests user={user} />)
+  // cert-expiry-notifications Requirement 7.3(a)'s renewal section renders
+  // a react-router-dom `<Link>`, so every mount (not just the
+  // already-Router-wrapped mountPageInLayout below) needs a Router in
+  // scope now, even for a test whose renewal section stays empty.
+  const mountPage = (user = TEAM_ADMIN) => mount(
+    <MemoryRouter initialEntries={['/tasks']}>
+      <Requests user={user} />
+    </MemoryRouter>
+  )
 
   // Requirement 16.5's badge lives in Layout.jsx, which derives it from the
   // same requestsAPI.getPending() the page uses. Mounting the page inside
@@ -670,6 +713,220 @@ describe('Requests page team_change card (mounted)', () => {
         tableRoot.unmount()
       })
       tableContainer.remove()
+    })
+  })
+})
+
+/**
+ * cert-expiry-notifications Requirement 7.3/7.4/7.6 (task 14.5): the two
+ * new renewal-list sections and their render conditions.
+ */
+describe('Requests page renewal sections (cert-expiry-notifications 7.3, 7.4, 7.6)', () => {
+  let container
+  let root
+  let matchMediaStubbed = false
+
+  const PLAIN_MEMBER = { userId: 42, isAdmin: false, isTeamAdmin: false, is_global_manager: false }
+  const GLOBAL_MANAGER = { userId: 1, isAdmin: true, is_global_manager: true }
+
+  const SELF_DEVICE_DUE = {
+    clientUid: 'ANDROID-self-due-1',
+    username: 'jdoe-phone',
+    expiresAt: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString() // already expired
+  }
+  const SELF_DEVICE_FINE = {
+    clientUid: 'ANDROID-self-fine-1',
+    username: 'jdoe-tablet',
+    expiresAt: new Date(Date.now() + 730 * 24 * 60 * 60 * 1000).toISOString() // 2 years out
+  }
+
+  const TEAM_DEVICE_DUE = {
+    deviceUserId: 501,
+    username: 'AUK-D0000AA',
+    deviceLabel: null,
+    teamName: 'Auckland',
+    expiresAt: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
+    canManage: true
+  }
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    vi.clearAllMocks()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    if (typeof window.matchMedia !== 'function') {
+      window.matchMedia = () => ({
+        matches: false,
+        addEventListener() {},
+        removeEventListener() {},
+        addListener() {},
+        removeListener() {}
+      })
+      matchMediaStubbed = true
+    }
+    requestsAPI.getPending.mockResolvedValue({ data: { requests: [] } })
+    deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    devicesAPI.getAll.mockResolvedValue({ data: { devices: [], pagination: { page: 1, pageSize: 200, total: 0 } } })
+    // vi.clearAllMocks() above also clears the module-level default this
+    // mock was given at definition time -- re-set it here, since the
+    // Renew action's modal mounts the real EnrollmentView.jsx, which
+    // reads configAPI.getPublic() on mount.
+    configAPI.getPublic.mockResolvedValue({ data: {} })
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    if (matchMediaStubbed) {
+      delete window.matchMedia
+      matchMediaStubbed = false
+    }
+    localStorage.removeItem('theme')
+    vi.restoreAllMocks()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  const mount = async (user) => {
+    root = createRoot(container)
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={['/tasks']}>
+          <Requests user={user} />
+        </MemoryRouter>
+      )
+    })
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+  }
+
+  const cards = () => Array.from(container.querySelectorAll('.card'))
+  const sectionCard = (heading) => cards().find((card) => card.querySelector('h2')?.textContent.includes(heading))
+
+  describe('My certificates needing renewal (Requirement 7.3(a))', () => {
+    it('renders nothing when the caller has no device needing renewal', async () => {
+      deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [SELF_DEVICE_FINE] } })
+
+      await mount(PLAIN_MEMBER)
+
+      expect(sectionCard('My certificates needing renewal')).toBeUndefined()
+    })
+
+    it('renders the section for a plain member with a due device (visible to everyone)', async () => {
+      deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [SELF_DEVICE_DUE, SELF_DEVICE_FINE] } })
+
+      await mount(PLAIN_MEMBER)
+
+      const card = sectionCard('My certificates needing renewal')
+      expect(card).toBeDefined()
+      expect(card.textContent).toContain(SELF_DEVICE_DUE.username)
+      expect(card.textContent).not.toContain(SELF_DEVICE_FINE.username)
+    })
+
+    it('renders no section at all when device management is disabled (404)', async () => {
+      deviceManagementAPI.getMyDevices.mockRejectedValue(
+        Object.assign(new Error('Not Found'), { response: { status: 404 } })
+      )
+
+      await mount(PLAIN_MEMBER)
+
+      expect(sectionCard('My certificates needing renewal')).toBeUndefined()
+    })
+
+    it('the Renew action links to /enrollment -- the same self-service flow, no new route (Requirement 6.2/7.4)', async () => {
+      deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [SELF_DEVICE_DUE] } })
+
+      await mount(PLAIN_MEMBER)
+
+      const card = sectionCard('My certificates needing renewal')
+      const renewLink = Array.from(card.querySelectorAll('a')).find((a) => a.textContent.trim() === 'Renew')
+      expect(renewLink.getAttribute('href')).toBe('/enrollment')
+    })
+  })
+
+  describe('Team devices needing renewal (Requirement 7.3(b))', () => {
+    it('is never fetched/rendered for a plain, non-admin member', async () => {
+      await mount(PLAIN_MEMBER)
+
+      expect(devicesAPI.getAll).not.toHaveBeenCalled()
+      expect(sectionCard('Team devices needing renewal')).toBeUndefined()
+    })
+
+    it('renders for a Team_Admin with a due team device', async () => {
+      devicesAPI.getAll.mockResolvedValue({
+        data: { devices: [TEAM_DEVICE_DUE], pagination: { page: 1, pageSize: 200, total: 1 } }
+      })
+
+      await mount(TEAM_ADMIN)
+
+      expect(devicesAPI.getAll).toHaveBeenCalledWith(expect.objectContaining({ expiringOnly: true }))
+      const card = sectionCard('Team devices needing renewal')
+      expect(card).toBeDefined()
+      expect(card.textContent).toContain(TEAM_DEVICE_DUE.username)
+      expect(card.textContent).toContain(TEAM_DEVICE_DUE.teamName)
+    })
+
+    it('renders for a Global_Manager too', async () => {
+      devicesAPI.getAll.mockResolvedValue({
+        data: { devices: [TEAM_DEVICE_DUE], pagination: { page: 1, pageSize: 200, total: 1 } }
+      })
+
+      await mount(GLOBAL_MANAGER)
+
+      expect(sectionCard('Team devices needing renewal')).toBeDefined()
+    })
+
+    it('renders no section when the fetch resolves an empty list', async () => {
+      await mount(TEAM_ADMIN)
+
+      expect(sectionCard('Team devices needing renewal')).toBeUndefined()
+    })
+
+    it('the Renew action opens the enrollment/QR-generation modal, calling devicesAPI.generateQrCode for that device', async () => {
+      devicesAPI.getAll.mockResolvedValue({
+        data: { devices: [TEAM_DEVICE_DUE], pagination: { page: 1, pageSize: 200, total: 1 } }
+      })
+      devicesAPI.previewQrCode.mockResolvedValue({ data: { preview: { host: 'tak.example.com' } } })
+      devicesAPI.generateQrCode.mockResolvedValue({ data: { qrCode: {} } })
+
+      await mount(TEAM_ADMIN)
+
+      const card = sectionCard('Team devices needing renewal')
+      const renewButton = Array.from(card.querySelectorAll('button')).find((b) => b.textContent.trim() === 'Renew')
+      await act(async () => {
+        renewButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+
+      expect(container.querySelector('[aria-labelledby="renew-device-title"]')).not.toBeNull()
+      expect(devicesAPI.previewQrCode).toHaveBeenCalledWith(TEAM_DEVICE_DUE.deviceUserId)
+    })
+  })
+
+  describe('sections do not disturb the existing pending-request/OrgInterestRequests sections (Requirement 7.3 ordering)', () => {
+    it('the existing "No pending requests" empty state still renders when both new sections are also empty', async () => {
+      await mount(TEAM_ADMIN)
+
+      expect(container.textContent).toContain('No pending requests')
+    })
+
+    it('a due self-device section renders ABOVE the existing pending-requests content in DOM order', async () => {
+      deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [SELF_DEVICE_DUE] } })
+
+      await mount(TEAM_ADMIN)
+
+      const allCards = cards()
+      const selfSectionIndex = allCards.indexOf(sectionCard('My certificates needing renewal'))
+      const emptyStateIndex = allCards.findIndex((c) => c.textContent.includes('No pending requests'))
+      expect(selfSectionIndex).toBeGreaterThanOrEqual(0)
+      expect(emptyStateIndex).toBeGreaterThan(selfSectionIndex)
     })
   })
 })

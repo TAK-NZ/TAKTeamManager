@@ -1,3 +1,3 @@
-email,firstName,lastName,teamId,username (optional)
-jane.doe@example.org,Jane,Doe,1,jdoe
-john.smith@example.org,John,Smith,2,
+email,firstName,lastName,teamId
+jane.doe@example.org,Jane,Doe,1
+john.smith@example.org,John,Smith,2

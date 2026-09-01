@@ -19,9 +19,8 @@ const router = express.Router();
  *
  * Mirrors `server/routes/devices.js`'s `ERROR_STATUS_BY_NAME`/
  * `handleServiceError` pattern verbatim rather than sharing it -- that
- * file's own header comment cites `server/routes/mou.js`/
- * `server/routes/vendorChannels.js` as precedent for per-route-file
- * duplication of this pattern.
+ * file's own header comment cites this per-route-file duplication of the
+ * pattern as an established convention.
  */
 
 /**

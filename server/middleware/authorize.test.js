@@ -463,7 +463,7 @@ describe('authorize (bugfix: team:update re-parent requires admin of the destina
 });
 
 /**
- * BUG-015: `team:members:add` had no row-scoped resolver at all, so every
+ * `team:members:add` had no row-scoped resolver at all, so every
  * non-global-manager team admin was denied with 403 on
  * `POST /api/teams/:teamId/members` before the route's own
  * `requireTeamAdmin` middleware ever ran. This suite mirrors the existing
@@ -471,7 +471,7 @@ describe('authorize (bugfix: team:update re-parent requires admin of the destina
  * `rowScopedResolvers['team:members:add']` (Global_Manager OR
  * `Team.isAdmin(:teamId, req.user.userId)`) behaves correctly.
  */
-describe('authorize (BUG-015: team:members:add row-scoped resolver)', () => {
+describe('authorize: team:members:add row-scoped resolver', () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });
@@ -1330,7 +1330,7 @@ describe('authorize (user:read:team_admin resolver for the user-directory listin
  * symptom was the Add Member dialog's Callsign Suffix field staying empty
  * because the preview 403'd.
  *
- * Mirrors the `team:members:add` (BUG-015) coverage above, with the one
+ * Mirrors the `team:members:add` coverage above, with the one
  * difference that the team is named in the request BODY rather than a
  * route param -- hence the `.send({ teamId })` calls and the
  * missing-body-teamId case.

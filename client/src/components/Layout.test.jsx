@@ -7,12 +7,14 @@ import Layout from './Layout.jsx'
 import { ThemeProvider } from '../contexts/ThemeContext.jsx'
 import { requestsAPI, adminAPI } from '../services/api'
 
-// Bugfix (pending-requests-badge): the nav "Requests" badge used to count
-// ONLY access_requests-backed requests (requestsAPI.getPending), leaving a
-// Global_Manager with a pending Org_Interest_Request (a wholly separate
-// `org_interest_requests` table, surfaced today only via the /requests
-// page's own OrgInterestRequests panel) seeing no badge at all -- even
-// though that same request was visibly listed on /requests. This file
+// Bugfix (pending-requests-badge): the nav "Tasks" badge (renamed from
+// "Requests" by cert-expiry-notifications Requirement 7.2 -- see the
+// dedicated describe block below for that rename's own coverage) used to
+// count ONLY access_requests-backed requests (requestsAPI.getPending),
+// leaving a Global_Manager with a pending Org_Interest_Request (a wholly
+// separate `org_interest_requests` table, surfaced today only via the
+// /tasks page's own OrgInterestRequests panel) seeing no badge at all --
+// even though that same request was visibly listed on /tasks. This file
 // asserts the fix: for a Global_Manager, the badge sums BOTH counts; for
 // any other admin (no admin:org_interest:read permission), it reads ONLY
 // the access_requests count and never calls adminAPI.getOrgInterest at
@@ -111,7 +113,7 @@ describe('Layout top-bar desktop alignment (bugfix, regressed twice)', () => {
   })
 })
 
-describe('Layout "Requests" nav badge (bugfix: pending-requests-badge)', () => {
+describe('Layout "Tasks" nav badge (bugfix: pending-requests-badge; renamed by cert-expiry-notifications)', () => {
   let container
   let root
   let matchMediaStubbed = false
@@ -175,15 +177,15 @@ describe('Layout "Requests" nav badge (bugfix: pending-requests-badge)', () => {
   }
 
   const requestsBadgeText = () => {
-    // The nav item's own text ("Requests") trails the badge's digits in
+    // The nav item's own text ("Tasks") trails the badge's digits in
     // the DOM (the badge span is nested inside the icon's wrapper, which
     // sits before the visible label text), so a link's textContent reads
-    // e.g. "3Requests" when a badge is present -- matched on `endsWith`
+    // e.g. "3Tasks" when a badge is present -- matched on `endsWith`
     // rather than `startsWith` for that reason. Both the mobile and
     // desktop copies of the sidebar render one each; they always agree,
     // so the first match is sufficient.
     const requestsLink = Array.from(container.querySelectorAll('a')).find(
-      (a) => a.textContent.trim().endsWith('Requests')
+      (a) => a.textContent.trim().endsWith('Tasks')
     )
     const badge = requestsLink?.querySelector('span.bg-red-600')
     return badge ? badge.textContent.trim() : null
@@ -235,5 +237,108 @@ describe('Layout "Requests" nav badge (bugfix: pending-requests-badge)', () => {
     await mount(GLOBAL_MANAGER)
 
     expect(requestsBadgeText()).toBe('1')
+  })
+})
+
+/**
+ * cert-expiry-notifications Requirements 7.2, 7.7: the /tasks nav item is
+ * now visible to every authenticated user, but the badge-count fetch
+ * keeps its own, now-corrected gate (isAdmin/isTeamAdmin/is_global_manager,
+ * not just the first and last of those three, which were aliases of the
+ * same underlying flag).
+ */
+describe('Layout "Tasks" nav item visibility and badge-fetch gating (cert-expiry-notifications 7.2, 7.7)', () => {
+  let container
+  let root
+  let matchMediaStubbed = false
+
+  const PLAIN_USER = { userId: 99, isAdmin: false, isTeamAdmin: false, is_global_manager: false }
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    vi.clearAllMocks()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    if (typeof window.matchMedia !== 'function') {
+      window.matchMedia = () => ({
+        matches: false,
+        addEventListener() {},
+        removeEventListener() {},
+        addListener() {},
+        removeListener() {}
+      })
+      matchMediaStubbed = true
+    }
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    if (matchMediaStubbed) {
+      delete window.matchMedia
+      matchMediaStubbed = false
+    }
+    localStorage.removeItem('theme')
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  const mount = async (user) => {
+    root = createRoot(container)
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={['/dashboard']}>
+          <ThemeProvider>
+            <Layout user={user}>
+              <div />
+            </Layout>
+          </ThemeProvider>
+        </MemoryRouter>
+      )
+    })
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+  }
+
+  const tasksNavLink = () =>
+    Array.from(container.querySelectorAll('a')).find((a) => a.textContent.trim().endsWith('Tasks'))
+
+  it('renders the Tasks nav item for a plain, non-admin user (Requirement 7.2)', async () => {
+    await mount(PLAIN_USER)
+
+    expect(tasksNavLink()).not.toBeUndefined()
+    expect(tasksNavLink().getAttribute('href')).toBe('/tasks')
+  })
+
+  it('a plain, non-admin user\'s mount issues no requestsAPI.getPending/adminAPI.getOrgInterest call (Requirement 7.7)', async () => {
+    await mount(PLAIN_USER)
+
+    expect(requestsAPI.getPending).not.toHaveBeenCalled()
+    expect(adminAPI.getOrgInterest).not.toHaveBeenCalled()
+  })
+
+  it('a plain Team_Admin (isTeamAdmin only, no isAdmin/is_global_manager) STILL fetches the badge count', async () => {
+    requestsAPI.getPending.mockResolvedValue({ data: { requests: [{ id: 1 }] } })
+
+    await mount(TEAM_ADMIN)
+
+    expect(requestsAPI.getPending).toHaveBeenCalledTimes(1)
+  })
+
+  it('a Global_Manager still gets both the nav item and the badge fetch', async () => {
+    requestsAPI.getPending.mockResolvedValue({ data: { requests: [] } })
+    adminAPI.getOrgInterest.mockResolvedValue({ data: { requests: [] } })
+
+    await mount(GLOBAL_MANAGER)
+
+    expect(tasksNavLink()).not.toBeUndefined()
+    expect(requestsAPI.getPending).toHaveBeenCalledTimes(1)
   })
 })

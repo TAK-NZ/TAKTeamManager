@@ -267,60 +267,6 @@ module.exports = {
     }
   },
 
-  // Requirement 21.10 (task 40.1): enqueued by
-  // `VendorChannelService.createVendorChannel` after inserting the
-  // singleton `vendor_channels` row. `vendor_channel_id` is the newly
-  // inserted row's id -- the Sync_Worker handler
-  // `createVendorChannelGroup` (in `syncWorker.js`) creates a single
-  // Authentik `VND` group (not a read/write pair, unlike BCH/region
-  // channels) and, on success, UPDATEs `vendor_channels.authentik_group_id`
-  // with the created group's Authentik pk.
-  create_vendor_channel_group: {
-    requiredFields: {
-      vendor_channel_id: 'number'
-    }
-  },
-
-  // Requirement 22.4/22.11 (task 42.1): enqueued by
-  // `DeploymentChannelService.createDeploymentChannel` after inserting
-  // the `deployment_channels` row, within the same transaction.
-  // `deployment_channel_id` is the newly inserted row's id;
-  // `channel_name` is the (already-validated) Deployment_Channel name --
-  // either `Overseas - `-prefixed or matching the domestic
-  // `[COUNTRY]-[FUNCTION]-[REGION]-[SUFFIX]` pattern. The Sync_Worker
-  // handler `createDeploymentChannelGroup` (in `syncWorker.js`) creates a
-  // single Authentik group for this channel -- mirroring the single-group
-  // pattern used by `create_vendor_channel_group`/`create_region_channel_group`
-  // rather than the read/write pair used by BCH channels, since neither
-  // Requirement 22 nor `design.md`'s Section 18 calls for a
-  // read/write split for deployment channels -- and, on success, UPDATEs
-  // `deployment_channels.authentik_group_id` with the created group's pk.
-  create_deployment_channel_group: {
-    requiredFields: {
-      deployment_channel_id: 'number',
-      channel_name: 'string'
-    }
-  },
-
-  // Requirement 22.8/22.9 (task 42.3): enqueued by
-  // `DeploymentChannelService.deactivateExpired()` once per
-  // newly-deactivated `deployment_channels` row, AFTER that row's
-  // `is_active` has already been set to `false` and its
-  // `channel_memberships` rows have already been deleted from the local
-  // database. `channel_id` is the (still-existing, now-inactive) local
-  // `deployment_channels.id`, kept only for logging/traceability --
-  // mirroring `remove_team_channel_group`'s `channel_id` field -- since
-  // the Sync_Worker handler `removeAllMembersFromGroup` (in
-  // `syncWorker.js`) acts solely on `target_group_id`. `target_group_id`
-  // is the channel's Authentik group id: bulk-removing every member from
-  // that group is this operation's entire purpose.
-  remove_all_members_from_group: {
-    requiredFields: {
-      channel_id: 'number',
-      target_group_id: 'string'
-    }
-  },
-
   // Requirement 26.6/26.7 (task 48.4): enqueued from three call sites --
   // (1) `TakCertificateRevocationService.revokeUserTakCertificates`'s
   // explicit single-user revoke action, (2)
@@ -355,18 +301,37 @@ module.exports = {
   //   revokes every certificate the named users hold:
   //     { tak_usernames: ['alice'], target_user_id: 42 }
   //
-  // The two discriminators are declared under `exactlyOneOf` rather than
-  // `requiredFields`/`optionalFields`, because neither is required on its
-  // own yet a payload carrying both (or neither) is ambiguous about what
-  // to revoke and must be rejected up front rather than silently resolved
-  // by the handler's branch order. `target_user_id` stays optional in both
-  // shapes -- the device-scoped routes (task 19.4) always send it, the
-  // team-level bulk enqueue still cannot. The handler branch that reads
-  // `client_uid` is task 19.3; this entry only widens what validates.
+  // The three discriminators are declared under `exactlyOneOf` rather than
+  // `requiredFields`/`optionalFields`, because none is required on its
+  // own yet a payload carrying more than one (or none) is ambiguous about
+  // what to revoke and must be rejected up front rather than silently
+  // resolved by the handler's branch order. `target_user_id` stays
+  // optional across all three shapes -- the device-scoped routes (task
+  // 19.4) always send it, the team-level bulk enqueue still cannot, and
+  // this feature's Superseding_Revoke call site (below) has no single
+  // target_user_id to attribute the operation to beyond its own
+  // `created_by`. The handler branch that reads `client_uid` is task
+  // 19.3; this entry only widens what validates.
+  //
+  // cert-expiry-notifications Requirement 8.2 (task 9.1): `cert_ids`,
+  // a THIRD discriminator -- an array of TAK certificate ids (numbers) --
+  // added for the Superseding_Revoke step `DeviceEnrollmentService
+  // .#enqueueSupersedingRevoke` enqueues after a renewal mints a new
+  // certificate on a `client_uid` that already held a live one. Unlike
+  // `client_uid` (which resolves to every live certificate on that
+  // Device) and `tak_usernames` (which resolves to every live
+  // certificate a user holds across every Device), `cert_ids` already IS
+  // the exact target certificate id set -- SyncWorker.resolveRevokeTargets
+  // resolves it directly against the supplied array, with no catalog
+  // matching needed at all, so a renewal's Superseding_Revoke can name
+  // exactly the ONE superseded certificate it means to retire, never
+  // every certificate on that client_uid (which would also revoke the
+  // brand-new one just minted).
   revoke_tak_certificates: {
     exactlyOneOf: {
       client_uid: 'string',
-      tak_usernames: 'object'
+      tak_usernames: 'object',
+      cert_ids: 'object'
     },
     optionalFields: {
       target_user_id: 'number'

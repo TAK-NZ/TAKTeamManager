@@ -529,9 +529,6 @@ describe('Property 3: Payload validation failures never schedule a retry', () =>
     // custom channel's Authentik/LDAP description): enqueued by
     // Channel.updateCustomChannel.
     update_channel_group: 'updateChannelGroup',
-    create_vendor_channel_group: 'createVendorChannelGroup',
-    create_deployment_channel_group: 'createDeploymentChannelGroup',
-    remove_all_members_from_group: 'removeAllMembersFromGroup',
     revoke_tak_certificates: 'revokeTakCertificates',
     // Feature cloudtak-agency-groups (tasks 4.1/4.2): create/update share
     // `ensureCloudTakGroup`; delete's handler `deleteCloudTakGroup` is
@@ -1902,470 +1899,6 @@ describe('SyncWorker Authentik failure classification wiring', () => {
       expect(insertCall).toBeUndefined();
     });
   });
-
-  /**
-   * Requirement 21.10 (task 40.1): `createVendorChannelGroup` creates a
-   * single Authentik `VND` group for the `vendor_channels` row
-   * identified by `payload.vendor_channel_id` (unlike BCH/region
-   * channels, which create a read/write group pair), and on success
-   * UPDATEs `vendor_channels.authentik_group_id` with the created
-   * group's Authentik pk. Follows the same
-   * fetch/`AuthentikApiError`/`classifyFailure` pattern as every other
-   * Authentik-calling handler above.
-   */
-  describe('createVendorChannelGroup', () => {
-    const baseOperation = {
-      id: 'op-vendor-channel-1',
-      operation_type: 'create_vendor_channel_group',
-      retry_count: 0,
-      max_retries: 48,
-      correlation_id: 'corr-vendor-channel-1',
-      payload: { vendor_channel_id: 55 }
-    };
-
-    beforeEach(() => {
-      // First query in the handler looks up name/description; subsequent
-      // queries (the UPDATE, or the terminal-status UPDATE from
-      // executeOperationSafely) return an empty row set, which is fine
-      // since those UPDATEs don't inspect the result.
-      worker.pool.query = jest.fn().mockImplementation((sql) => {
-        if (typeof sql === 'string' && sql.includes('SELECT name, description FROM vendor_channels')) {
-          return Promise.resolve({ rows: [{ name: 'VND', description: null }] });
-        }
-        return Promise.resolve({ rows: [] });
-      });
-    });
-
-    it('creates exactly one group and updates vendor_channels.authentik_group_id on success', async () => {
-      global.fetch = jest.fn().mockResolvedValue({
-        ok: true,
-        status: 201,
-        json: async () => ({ pk: 999 })
-      });
-
-      await worker.executeOperationSafely({ ...baseOperation });
-
-      expect(global.fetch).toHaveBeenCalledTimes(1);
-      expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining('/core/groups/'),
-        expect.objectContaining({ method: 'POST' })
-      );
-
-      const updateCall = worker.pool.query.mock.calls.find(
-        ([sql]) => typeof sql === 'string' && sql.includes('UPDATE vendor_channels SET authentik_group_id')
-      );
-      expect(updateCall).toBeDefined();
-      expect(updateCall[1]).toEqual([999, 55]);
-
-      const terminalCall = worker.pool.query.mock.calls.find(
-        ([sql]) => typeof sql === 'string' && sql.includes('completed')
-      );
-      expect(terminalCall).toBeDefined();
-      expect(terminalCall[1][0]).toBe('completed');
-    });
-
-    it('results in a markPermanentlyFailed-style UPDATE (failed/permanent, no next_retry_at/retry_count) on a 4xx response', async () => {
-      global.fetch = jest.fn().mockResolvedValue({
-        ok: false,
-        status: 400,
-        statusText: 'Bad Request',
-        text: async () => 'group name already exists'
-      });
-
-      await worker.executeOperationSafely({ ...baseOperation });
-
-      const terminalCall = worker.pool.query.mock.calls.find(
-        ([sql]) => typeof sql === 'string' && sql.includes('failure_category')
-      );
-      expect(terminalCall).toBeDefined();
-      expect(terminalCall[0]).not.toContain('next_retry_at');
-      expect(terminalCall[0]).not.toContain('retry_count');
-      expect(terminalCall[1][0]).toBe('failed');
-      expect(terminalCall[1][1]).toBe('permanent');
-
-      // No UPDATE to authentik_group_id should have occurred.
-      const updateCall = worker.pool.query.mock.calls.find(
-        ([sql]) => typeof sql === 'string' && sql.includes('UPDATE vendor_channels SET authentik_group_id')
-      );
-      expect(updateCall).toBeUndefined();
-    });
-
-    it('results in the existing handleOperationError retryable path on a 5xx response', async () => {
-      global.fetch = jest.fn().mockResolvedValue({
-        ok: false,
-        status: 503,
-        statusText: 'Service Unavailable',
-        text: async () => 'upstream error'
-      });
-
-      await worker.executeOperationSafely({ ...baseOperation });
-
-      const terminalCall = worker.pool.query.mock.calls.find(
-        ([sql]) => typeof sql === 'string' && sql.includes('next_retry_at')
-      );
-      expect(terminalCall).toBeDefined();
-      expect(terminalCall[1][0]).toBe('pending');
-    });
-
-    it('treats a rejected fetch (network error) as retryable', async () => {
-      global.fetch = jest.fn().mockRejectedValue(new Error('ECONNREFUSED'));
-
-      await worker.executeOperationSafely({ ...baseOperation });
-
-      const terminalCall = worker.pool.query.mock.calls.find(
-        ([sql]) => typeof sql === 'string' && sql.includes('next_retry_at')
-      );
-      expect(terminalCall).toBeDefined();
-      expect(terminalCall[1][0]).toBe('pending');
-    });
-
-    it('is a no-op (no fetch call, no failure) when the vendor_channels row no longer exists', async () => {
-      worker.pool.query = jest.fn().mockImplementation((sql) => {
-        if (typeof sql === 'string' && sql.includes('SELECT name, description FROM vendor_channels')) {
-          return Promise.resolve({ rows: [] });
-        }
-        return Promise.resolve({ rows: [] });
-      });
-      global.fetch = jest.fn();
-
-      await worker.executeOperationSafely({ ...baseOperation });
-
-      expect(global.fetch).not.toHaveBeenCalled();
-      const terminalCall = worker.pool.query.mock.calls.find(
-        ([sql]) => typeof sql === 'string' && sql.includes('completed')
-      );
-      expect(terminalCall).toBeDefined();
-    });
-  });
-
-  /**
-   * Requirement 22.4/22.11 (task 42.1): `createDeploymentChannelGroup`
-   * creates a single Authentik group for the `deployment_channels` row
-   * identified by `payload.deployment_channel_id` (mirroring
-   * `createVendorChannelGroup`'s single-group shape rather than the
-   * BCH/region read/write pair), and on success UPDATEs
-   * `deployment_channels.authentik_group_id` with the created group's
-   * Authentik pk. Follows the same
-   * fetch/`AuthentikApiError`/`classifyFailure` pattern as every other
-   * Authentik-calling handler above.
-   */
-  describe('createDeploymentChannelGroup', () => {
-    const baseOperation = {
-      id: 'op-deployment-channel-1',
-      operation_type: 'create_deployment_channel_group',
-      retry_count: 0,
-      max_retries: 48,
-      correlation_id: 'corr-deployment-channel-1',
-      payload: { deployment_channel_id: 77, channel_name: 'Overseas - Tonga' }
-    };
-
-    beforeEach(() => {
-      worker.pool.query = jest.fn().mockImplementation((sql) => {
-        if (typeof sql === 'string' && sql.includes('SELECT name, description FROM deployment_channels')) {
-          return Promise.resolve({ rows: [{ name: 'Overseas - Tonga', description: 'Tonga deployment' }] });
-        }
-        return Promise.resolve({ rows: [] });
-      });
-    });
-
-    it('creates exactly one group and updates deployment_channels.authentik_group_id on success', async () => {
-      global.fetch = jest.fn().mockResolvedValue({
-        ok: true,
-        status: 201,
-        json: async () => ({ pk: 888 })
-      });
-
-      await worker.executeOperationSafely({ ...baseOperation });
-
-      expect(global.fetch).toHaveBeenCalledTimes(1);
-      expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining('/core/groups/'),
-        expect.objectContaining({ method: 'POST' })
-      );
-
-      const updateCall = worker.pool.query.mock.calls.find(
-        ([sql]) => typeof sql === 'string' && sql.includes('UPDATE deployment_channels SET authentik_group_id')
-      );
-      expect(updateCall).toBeDefined();
-      expect(updateCall[1]).toEqual([888, 77]);
-
-      const terminalCall = worker.pool.query.mock.calls.find(
-        ([sql]) => typeof sql === 'string' && sql.includes('completed')
-      );
-      expect(terminalCall).toBeDefined();
-      expect(terminalCall[1][0]).toBe('completed');
-    });
-
-    it('results in a markPermanentlyFailed-style UPDATE (failed/permanent, no next_retry_at/retry_count) on a 4xx response', async () => {
-      global.fetch = jest.fn().mockResolvedValue({
-        ok: false,
-        status: 400,
-        statusText: 'Bad Request',
-        text: async () => 'group name already exists'
-      });
-
-      await worker.executeOperationSafely({ ...baseOperation });
-
-      const terminalCall = worker.pool.query.mock.calls.find(
-        ([sql]) => typeof sql === 'string' && sql.includes('failure_category')
-      );
-      expect(terminalCall).toBeDefined();
-      expect(terminalCall[0]).not.toContain('next_retry_at');
-      expect(terminalCall[0]).not.toContain('retry_count');
-      expect(terminalCall[1][0]).toBe('failed');
-      expect(terminalCall[1][1]).toBe('permanent');
-
-      const updateCall = worker.pool.query.mock.calls.find(
-        ([sql]) => typeof sql === 'string' && sql.includes('UPDATE deployment_channels SET authentik_group_id')
-      );
-      expect(updateCall).toBeUndefined();
-    });
-
-    it('results in the existing handleOperationError retryable path on a 5xx response', async () => {
-      global.fetch = jest.fn().mockResolvedValue({
-        ok: false,
-        status: 503,
-        statusText: 'Service Unavailable',
-        text: async () => 'upstream error'
-      });
-
-      await worker.executeOperationSafely({ ...baseOperation });
-
-      const terminalCall = worker.pool.query.mock.calls.find(
-        ([sql]) => typeof sql === 'string' && sql.includes('next_retry_at')
-      );
-      expect(terminalCall).toBeDefined();
-      expect(terminalCall[1][0]).toBe('pending');
-    });
-
-    it('treats a rejected fetch (network error) as retryable', async () => {
-      global.fetch = jest.fn().mockRejectedValue(new Error('ECONNREFUSED'));
-
-      await worker.executeOperationSafely({ ...baseOperation });
-
-      const terminalCall = worker.pool.query.mock.calls.find(
-        ([sql]) => typeof sql === 'string' && sql.includes('next_retry_at')
-      );
-      expect(terminalCall).toBeDefined();
-      expect(terminalCall[1][0]).toBe('pending');
-    });
-
-    it('is a no-op (no fetch call, no failure) when the deployment_channels row no longer exists', async () => {
-      worker.pool.query = jest.fn().mockImplementation((sql) => {
-        if (typeof sql === 'string' && sql.includes('SELECT name, description FROM deployment_channels')) {
-          return Promise.resolve({ rows: [] });
-        }
-        return Promise.resolve({ rows: [] });
-      });
-      global.fetch = jest.fn();
-
-      await worker.executeOperationSafely({ ...baseOperation });
-
-      expect(global.fetch).not.toHaveBeenCalled();
-      const terminalCall = worker.pool.query.mock.calls.find(
-        ([sql]) => typeof sql === 'string' && sql.includes('completed')
-      );
-      expect(terminalCall).toBeDefined();
-    });
-  });
-
-  /**
-   * Requirement 22.8/22.9 (task 42.3): `removeAllMembersFromGroup` bulk-
-   * removes every member from the Authentik group identified by
-   * `payload.target_group_id`, enqueued by
-   * `DeploymentChannelService.deactivateExpired()`. Authentik's group API
-   * has no single "remove all members" endpoint, so the handler fetches
-   * the group (whose `users` field carries the member pk list) and then
-   * calls `POST .../remove_user/` once per member, following the same
-   * fetch/`AuthentikApiError`/`classifyFailure` pattern as every other
-   * Authentik-calling handler above.
-   */
-  describe('removeAllMembersFromGroup', () => {
-    const baseOperation = {
-      id: 'op-remove-all-members-1',
-      operation_type: 'remove_all_members_from_group',
-      retry_count: 0,
-      max_retries: 48,
-      correlation_id: 'corr-remove-all-members-1',
-      payload: { channel_id: 42, target_group_id: 'grp-deploy-42' }
-    };
-
-    it('fetches the group members and removes each one, then completes successfully', async () => {
-      global.fetch = jest.fn().mockImplementation((url, options) => {
-        if (!options || options.method === undefined) {
-          // GET group detail (no explicit method set)
-          return Promise.resolve({
-            ok: true,
-            status: 200,
-            json: async () => ({ pk: 'grp-deploy-42', users: [10, 11, 12] })
-          });
-        }
-        return Promise.resolve({ ok: true, status: 204 });
-      });
-
-      await worker.executeOperationSafely({ ...baseOperation });
-
-      expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining('/core/groups/grp-deploy-42/'),
-        expect.not.objectContaining({ method: expect.anything() })
-      );
-      expect(global.fetch).toHaveBeenCalledTimes(4); // 1 GET + 3 remove_user POSTs
-
-      for (const memberPk of [10, 11, 12]) {
-        expect(global.fetch).toHaveBeenCalledWith(
-          expect.stringContaining('/core/groups/grp-deploy-42/remove_user/'),
-          expect.objectContaining({
-            method: 'POST',
-            body: JSON.stringify({ pk: memberPk })
-          })
-        );
-      }
-
-      const terminalCall = worker.pool.query.mock.calls.find(
-        ([sql]) => typeof sql === 'string' && sql.includes('completed')
-      );
-      expect(terminalCall).toBeDefined();
-      expect(terminalCall[1][0]).toBe('completed');
-    });
-
-    it('completes successfully with no remove_user calls when the group has no members', async () => {
-      global.fetch = jest.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: async () => ({ pk: 'grp-deploy-42', users: [] })
-      });
-
-      await worker.executeOperationSafely({ ...baseOperation });
-
-      expect(global.fetch).toHaveBeenCalledTimes(1);
-      const terminalCall = worker.pool.query.mock.calls.find(
-        ([sql]) => typeof sql === 'string' && sql.includes('completed')
-      );
-      expect(terminalCall).toBeDefined();
-    });
-
-    it('is a no-op (success, no remove_user calls) when the group itself is already absent (404)', async () => {
-      global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 404, statusText: 'Not Found' });
-
-      await worker.executeOperationSafely({ ...baseOperation });
-
-      expect(global.fetch).toHaveBeenCalledTimes(1);
-      const terminalCall = worker.pool.query.mock.calls.find(
-        ([sql]) => typeof sql === 'string' && sql.includes('completed')
-      );
-      expect(terminalCall).toBeDefined();
-    });
-
-    it('treats a 404 on an individual remove_user call as a no-op and continues to the next member', async () => {
-      let callCount = 0;
-      // Sequenced on call ORDER alone, so neither `url` nor `options` is read
-      // here -- declared params would both be unused, and this file's other
-      // order-only fetch doubles take none either.
-      global.fetch = jest.fn().mockImplementation(() => {
-        callCount += 1;
-        if (callCount === 1) {
-          return Promise.resolve({
-            ok: true,
-            status: 200,
-            json: async () => ({ pk: 'grp-deploy-42', users: [10, 11] })
-          });
-        }
-        if (callCount === 2) {
-          return Promise.resolve({ ok: false, status: 404, statusText: 'Not Found' });
-        }
-        return Promise.resolve({ ok: true, status: 204 });
-      });
-
-      await worker.executeOperationSafely({ ...baseOperation });
-
-      expect(global.fetch).toHaveBeenCalledTimes(3); // 1 GET + 2 remove_user attempts
-      const terminalCall = worker.pool.query.mock.calls.find(
-        ([sql]) => typeof sql === 'string' && sql.includes('completed')
-      );
-      expect(terminalCall).toBeDefined();
-    });
-
-    it('results in a markPermanentlyFailed-style UPDATE (failed/permanent, no next_retry_at/retry_count) on a 4xx response from the group fetch', async () => {
-      global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 400, statusText: 'Bad Request' });
-
-      await worker.executeOperationSafely({ ...baseOperation });
-
-      expect(worker.pool.query).toHaveBeenCalledTimes(1);
-      const [sql, params] = worker.pool.query.mock.calls[0];
-      expect(sql).toContain('failure_category');
-      expect(sql).not.toContain('next_retry_at');
-      expect(sql).not.toContain('retry_count');
-      expect(params[0]).toBe('failed');
-      expect(params[1]).toBe('permanent');
-    });
-
-    it('results in a markPermanentlyFailed-style UPDATE on a 4xx response from an individual remove_user call', async () => {
-      let callCount = 0;
-      global.fetch = jest.fn().mockImplementation(() => {
-        callCount += 1;
-        if (callCount === 1) {
-          return Promise.resolve({
-            ok: true,
-            status: 200,
-            json: async () => ({ pk: 'grp-deploy-42', users: [10] })
-          });
-        }
-        return Promise.resolve({ ok: false, status: 403, statusText: 'Forbidden' });
-      });
-
-      await worker.executeOperationSafely({ ...baseOperation });
-
-      expect(worker.pool.query).toHaveBeenCalledTimes(1);
-      const [sql, params] = worker.pool.query.mock.calls[0];
-      expect(sql).toContain('failure_category');
-      expect(params[0]).toBe('failed');
-      expect(params[1]).toBe('permanent');
-    });
-
-    it('results in the existing handleOperationError retryable path on a 5xx response from the group fetch', async () => {
-      global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 503, statusText: 'Service Unavailable' });
-
-      await worker.executeOperationSafely({ ...baseOperation });
-
-      expect(worker.pool.query).toHaveBeenCalledTimes(1);
-      const [sql, params] = worker.pool.query.mock.calls[0];
-      expect(sql).toContain('next_retry_at');
-      expect(params[0]).toBe('pending');
-    });
-
-    it('results in the existing handleOperationError retryable path on a 5xx response from an individual remove_user call', async () => {
-      let callCount = 0;
-      global.fetch = jest.fn().mockImplementation(() => {
-        callCount += 1;
-        if (callCount === 1) {
-          return Promise.resolve({
-            ok: true,
-            status: 200,
-            json: async () => ({ pk: 'grp-deploy-42', users: [10] })
-          });
-        }
-        return Promise.resolve({ ok: false, status: 500, statusText: 'Internal Server Error' });
-      });
-
-      await worker.executeOperationSafely({ ...baseOperation });
-
-      expect(worker.pool.query).toHaveBeenCalledTimes(1);
-      const [sql, params] = worker.pool.query.mock.calls[0];
-      expect(sql).toContain('next_retry_at');
-      expect(params[0]).toBe('pending');
-    });
-
-    it('treats a rejected fetch (network error) as retryable', async () => {
-      global.fetch = jest.fn().mockRejectedValue(new Error('ECONNREFUSED'));
-
-      await worker.executeOperationSafely({ ...baseOperation });
-
-      expect(worker.pool.query).toHaveBeenCalledTimes(1);
-      const [sql, params] = worker.pool.query.mock.calls[0];
-      expect(sql).toContain('next_retry_at');
-      expect(params[0]).toBe('pending');
-    });
-  });
 });
 
 /**
@@ -2880,12 +2413,9 @@ describe('SyncWorker heartbeat upsert', () => {
     jest.clearAllMocks();
     worker = new SyncWorker();
     worker.pool.query = jest.fn().mockResolvedValue({ rows: [] });
-    // Requirement 21.6/22.8: avoid starting a real ExpiryScheduler
-    // (with a live setInterval) when exercising the real start() loop
-    // in this describe block's tests below.
-    worker.expiryScheduler = { start: jest.fn(), stop: jest.fn() };
-    // Requirement 25 (task 47.1): likewise avoid starting a real
-    // RetentionCleanupJob (with a live setInterval) here.
+    // Requirement 25 (task 47.1): avoid starting a real
+    // RetentionCleanupJob (with a live setInterval) when exercising the
+    // real start() loop in this describe block's tests below.
     worker.retentionCleanupJob = { start: jest.fn(), stop: jest.fn() };
   });
 
@@ -3082,7 +2612,6 @@ describe('SyncWorker lightweight health server', () => {
     worker.updateHeartbeat = jest.fn().mockResolvedValue();
     worker.startHealthServer = jest.fn();
     worker.stopHealthServer = jest.fn().mockResolvedValue();
-    worker.expiryScheduler = { start: jest.fn(), stop: jest.fn() };
     worker.retentionCleanupJob = { start: jest.fn(), stop: jest.fn() };
     worker.sleep = jest.fn().mockImplementation(() => {
       worker.isRunning = false;
@@ -3098,57 +2627,10 @@ describe('SyncWorker lightweight health server', () => {
 });
 
 /**
- * Requirement 21.6/22.8 (task 43.1): `SyncWorker.start()`/`stop()` start
- * and stop the shared `ExpiryScheduler` alongside the health server,
+ * Requirement 25 (task 47.1): `SyncWorker.start()`/`stop()` start and
+ * stop the shared `RetentionCleanupJob` alongside the health server,
  * mirroring how `startHealthServer()`/`stopHealthServer()` are already
  * called there.
- */
-describe('SyncWorker ExpiryScheduler wiring', () => {
-  let worker;
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-    worker = new SyncWorker();
-    worker.pool.query = jest.fn().mockResolvedValue({ rows: [] });
-  });
-
-  it('constructs an ExpiryScheduler instance', () => {
-    expect(worker.expiryScheduler).toBeDefined();
-    expect(typeof worker.expiryScheduler.start).toBe('function');
-    expect(typeof worker.expiryScheduler.stop).toBe('function');
-  });
-
-  it('start() calls expiryScheduler.start()', async () => {
-    worker.processNextOperation = jest.fn().mockResolvedValue();
-    worker.updateHeartbeat = jest.fn().mockResolvedValue();
-    worker.startHealthServer = jest.fn();
-    worker.expiryScheduler = { start: jest.fn(), stop: jest.fn() };
-    worker.sleep = jest.fn().mockImplementation(() => {
-      worker.isRunning = false;
-      return Promise.resolve();
-    });
-
-    await worker.start();
-
-    expect(worker.expiryScheduler.start).toHaveBeenCalledTimes(1);
-  });
-
-  it('stop() calls expiryScheduler.stop()', async () => {
-    worker.stopHealthServer = jest.fn().mockResolvedValue();
-    worker.expiryScheduler = { start: jest.fn(), stop: jest.fn() };
-
-    await worker.stop();
-
-    expect(worker.expiryScheduler.stop).toHaveBeenCalledTimes(1);
-  });
-});
-
-/**
- * Requirement 25 (task 47.1): `SyncWorker.start()`/`stop()` start and
- * stop the shared `RetentionCleanupJob` alongside the health server and
- * `ExpiryScheduler`, mirroring how `startHealthServer()`/
- * `stopHealthServer()`/`expiryScheduler.start()`/`expiryScheduler.stop()`
- * are already called there.
  */
 describe('SyncWorker RetentionCleanupJob wiring', () => {
   let worker;
@@ -3169,7 +2651,6 @@ describe('SyncWorker RetentionCleanupJob wiring', () => {
     worker.processNextOperation = jest.fn().mockResolvedValue();
     worker.updateHeartbeat = jest.fn().mockResolvedValue();
     worker.startHealthServer = jest.fn();
-    worker.expiryScheduler = { start: jest.fn(), stop: jest.fn() };
     worker.retentionCleanupJob = { start: jest.fn(), stop: jest.fn() };
     worker.sleep = jest.fn().mockImplementation(() => {
       worker.isRunning = false;
@@ -3183,12 +2664,60 @@ describe('SyncWorker RetentionCleanupJob wiring', () => {
 
   it('stop() calls retentionCleanupJob.stop()', async () => {
     worker.stopHealthServer = jest.fn().mockResolvedValue();
-    worker.expiryScheduler = { start: jest.fn(), stop: jest.fn() };
     worker.retentionCleanupJob = { start: jest.fn(), stop: jest.fn() };
 
     await worker.stop();
 
     expect(worker.retentionCleanupJob.stop).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * cert-expiry-notifications Requirement 5 (task 6.4): `SyncWorker.start()`/
+ * `stop()` start and stop the shared `CertExpiryNotificationJob`
+ * alongside the health server and `RetentionCleanupJob`, mirroring how
+ * the RetentionCleanupJob wiring tests above already cover the
+ * identical shape.
+ */
+describe('SyncWorker CertExpiryNotificationJob wiring', () => {
+  let worker;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    worker = new SyncWorker();
+    worker.pool.query = jest.fn().mockResolvedValue({ rows: [] });
+  });
+
+  it('constructs a CertExpiryNotificationJob instance', () => {
+    expect(worker.certExpiryNotificationJob).toBeDefined();
+    expect(typeof worker.certExpiryNotificationJob.start).toBe('function');
+    expect(typeof worker.certExpiryNotificationJob.stop).toBe('function');
+  });
+
+  it('start() calls certExpiryNotificationJob.start()', async () => {
+    worker.processNextOperation = jest.fn().mockResolvedValue();
+    worker.updateHeartbeat = jest.fn().mockResolvedValue();
+    worker.startHealthServer = jest.fn();
+    worker.retentionCleanupJob = { start: jest.fn(), stop: jest.fn() };
+    worker.certExpiryNotificationJob = { start: jest.fn(), stop: jest.fn() };
+    worker.sleep = jest.fn().mockImplementation(() => {
+      worker.isRunning = false;
+      return Promise.resolve();
+    });
+
+    await worker.start();
+
+    expect(worker.certExpiryNotificationJob.start).toHaveBeenCalledTimes(1);
+  });
+
+  it('stop() calls certExpiryNotificationJob.stop()', async () => {
+    worker.stopHealthServer = jest.fn().mockResolvedValue();
+    worker.retentionCleanupJob = { start: jest.fn(), stop: jest.fn() };
+    worker.certExpiryNotificationJob = { start: jest.fn(), stop: jest.fn() };
+
+    await worker.stop();
+
+    expect(worker.certExpiryNotificationJob.stop).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -3895,10 +3424,10 @@ describe('Property 7: Create/update attribute idempotence', () => {
  *    `AdminCredentialLoader` attached to it, so a rotated Admin_Credential
  *    applies to revocation and device management alike without a restart.
  *
- * The `start()`-driving stubs mirror the existing `ExpiryScheduler`/
- * `RetentionCleanupJob` wiring tests above: the poll loop is a `while
- * (this.isRunning)` loop, so `sleep` is stubbed to clear `isRunning` and let
- * `start()` resolve after exactly one cycle.
+ * The `start()`-driving stubs mirror the existing `RetentionCleanupJob`
+ * wiring tests above: the poll loop is a `while (this.isRunning)` loop, so
+ * `sleep` is stubbed to clear `isRunning` and let `start()` resolve after
+ * exactly one cycle.
  */
 describe('SyncWorker device-management job wiring', () => {
   let worker;
@@ -3912,7 +3441,6 @@ describe('SyncWorker device-management job wiring', () => {
     w.updateHeartbeat = jest.fn().mockResolvedValue();
     w.startHealthServer = jest.fn();
     w.stopHealthServer = jest.fn().mockResolvedValue();
-    w.expiryScheduler = { start: jest.fn(), stop: jest.fn() };
     w.retentionCleanupJob = { start: jest.fn(), stop: jest.fn() };
     w.sleep = jest.fn().mockImplementation(() => {
       w.isRunning = false;
@@ -4043,8 +3571,8 @@ describe('SyncWorker device-management job wiring', () => {
 
       // All-or-nothing (9.5): none started, never a partial mix.
       expect(deviceJobStartCounts(worker)).toEqual([0, 0, 0]);
-      // The non-device schedulers are unaffected by the flag.
-      expect(worker.expiryScheduler.start).toHaveBeenCalledTimes(1);
+      // The retention cleanup job is unaffected by DEVICE_MGMT_ENABLED --
+      // it has its own, always-on schedule.
       expect(worker.retentionCleanupJob.start).toHaveBeenCalledTimes(1);
     }
   );
@@ -5156,6 +4684,122 @@ describe('SyncWorker.revokeTakCertificates revocation rails (12.11-12.16)', () =
       // `client_uid` reaches `markDevicesRevoked` legitimately.
       const [uids] = markSpy.mock.calls[0];
       expect(new Set(Array.from(uids))).toEqual(new Set([PHONE, TABLET]));
+    });
+  });
+
+  /**
+   * cert-expiry-notifications Requirement 8.2 (task 9.3): the `cert_ids`
+   * discriminator, resolved directly against the supplied certificate id
+   * array with no catalog matching -- unlike `client_uid`/`tak_usernames`,
+   * which must MATCH against the fetched catalog to arrive at a target
+   * set, this shape already IS the target set.
+   */
+  describe('cert_ids-scoped target selection (Superseding_Revoke, cert-expiry-notifications 8.2)', () => {
+    const SUPERSEDED_ID = 100;
+    const OTHER_LIVE_ID = 200;
+    const OWNER_DN = 'CN=alice,OU=TAK-NZ';
+    const OWNER_UID = 'uid-alice-phone';
+
+    function cert_idsCatalog() {
+      return [
+        makeCert({ id: SUPERSEDED_ID, creatorDn: OWNER_DN, clientUid: OWNER_UID }),
+        makeCert({ id: OTHER_LIVE_ID, creatorDn: OWNER_DN, clientUid: OWNER_UID })
+      ];
+    }
+
+    beforeEach(() => {
+      arm();
+      process.env.DEVICE_MGMT_REVOKE_MAX_CERTS = '50';
+      worker.takServerService.listCertificates.mockResolvedValue(cert_idsCatalog());
+      worker.takServerService.listLiveCertificates.mockResolvedValue(cert_idsCatalog());
+    });
+
+    it('revokes exactly the supplied cert_ids and no other certificate on the same client_uid/catalog', async () => {
+      await worker.revokeTakCertificates(
+        { cert_ids: [SUPERSEDED_ID] },
+        operationRow({ payload: { cert_ids: [SUPERSEDED_ID] } })
+      );
+
+      expect(worker.takServerService.revokeCertificates).toHaveBeenCalledTimes(1);
+      expect(worker.takServerService.revokeCertificates).toHaveBeenCalledWith([SUPERSEDED_ID]);
+
+      const [revokedIds] = worker.takServerService.revokeCertificates.mock.calls[0];
+      expect(revokedIds).not.toContain(OTHER_LIVE_ID);
+    });
+
+    it('resolves from listCertificates (the full catalog), never listLiveCertificates -- matching the user-scoped shape\'s fetch, not the device-scoped one', async () => {
+      await worker.revokeTakCertificates(
+        { cert_ids: [SUPERSEDED_ID] },
+        operationRow({ payload: { cert_ids: [SUPERSEDED_ID] } })
+      );
+
+      expect(worker.takServerService.listCertificates).toHaveBeenCalledTimes(1);
+      expect(worker.takServerService.listLiveCertificates).not.toHaveBeenCalled();
+    });
+
+    it('bypasses catalog matching for target resolution: the target set is exactly the supplied array regardless of what the catalog contains', async () => {
+      // A catalog that does not even contain the superseded id -- the target
+      // set must still be exactly what was supplied, not narrowed to what the
+      // catalog happens to list.
+      worker.takServerService.listCertificates.mockResolvedValue([
+        makeCert({ id: OTHER_LIVE_ID, creatorDn: OWNER_DN, clientUid: OWNER_UID })
+      ]);
+
+      await worker.revokeTakCertificates(
+        { cert_ids: [SUPERSEDED_ID] },
+        operationRow({ payload: { cert_ids: [SUPERSEDED_ID] } })
+      );
+
+      expect(worker.takServerService.revokeCertificates).toHaveBeenCalledWith([SUPERSEDED_ID]);
+    });
+
+    it('still applies sortCertIds ordering to a multi-id cert_ids payload', async () => {
+      await worker.revokeTakCertificates(
+        { cert_ids: [OTHER_LIVE_ID, SUPERSEDED_ID] },
+        operationRow({ payload: { cert_ids: [OTHER_LIVE_ID, SUPERSEDED_ID] } })
+      );
+
+      expect(worker.takServerService.revokeCertificates).toHaveBeenCalledWith(
+        [SUPERSEDED_ID, OTHER_LIVE_ID].sort((a, b) => a - b)
+      );
+    });
+
+    it('resolves clientUids for the audit record purely for logging context, from the fetched catalog', async () => {
+      await worker.revokeTakCertificates(
+        { cert_ids: [SUPERSEDED_ID] },
+        operationRow({ payload: { cert_ids: [SUPERSEDED_ID] } })
+      );
+
+      const record = auditRecord();
+      expect(record.payloadShape).toBe('cert_ids');
+      expect(record.clientUid).toBeNull();
+      expect(record.resolvedClientUids).toEqual([OWNER_UID]);
+    });
+
+    it('flips the Device_Table revoked flag for the resolved clientUid after a confirmed revoke', async () => {
+      await worker.revokeTakCertificates(
+        { cert_ids: [SUPERSEDED_ID] },
+        operationRow({ payload: { cert_ids: [SUPERSEDED_ID] } })
+      );
+
+      const [, params] = revokeUpdateCall();
+      expect(params[0]).toEqual([OWNER_UID]);
+      expect(auditResult().revokedFlagFlipped).toBe(true);
+    });
+
+    it('the existing two shapes\' tests remain unaffected by this addition (user-scoped still spans every Device)', async () => {
+      worker.takServerService.listCertificates.mockResolvedValue([
+        makeCert({ id: 1, creatorDn: OWNER_DN, clientUid: 'uid-alice-phone' }),
+        makeCert({ id: 2, creatorDn: OWNER_DN, clientUid: 'uid-alice-tablet' })
+      ]);
+
+      await worker.revokeTakCertificates(
+        { tak_usernames: ['alice'] },
+        operationRow({ payload: { tak_usernames: ['alice'] } })
+      );
+
+      expect(worker.takServerService.revokeCertificates).toHaveBeenCalledWith([1, 2]);
+      expect(auditRecord().payloadShape).toBe('tak_usernames');
     });
   });
 });

@@ -186,6 +186,72 @@ function computeDeviceRowState(device) {
 }
 
 /**
+ * Bugfix (Devices.jsx / TeamDeviceList.jsx had no certificate-expiry
+ * highlighting at all): a standalone "Expires: <date>" line reusing the
+ * SAME classification (`classifyExpiry`/`getExpiryWarningDays`) and the
+ * SAME bold-red-text-plus-warning-glyph-plus-`sr-only`-text convention
+ * `DeviceListRow`'s own Expires line already establishes -- so a device
+ * surfaced through the org-wide `/devices` page or a single team's Devices
+ * tab is classified identically to the same device shown on the Dashboard
+ * "My Devices" card or in `UserDevicesModal`. Neither of those two callers
+ * has an "Issued" line or a shared Certificate column to slot into (they
+ * have no per-device Issued date to show at all), so this is a lighter,
+ * standalone rendering rather than a reuse of the Certificate column's
+ * exact JSX -- the CLASSIFICATION is shared, not the layout.
+ *
+ * Renders NOTHING when `expiresAt` is absent, mirroring
+ * `MultipleCertificateWarning`'s own "additive, nothing to say" contract:
+ * a device that has never held a live certificate (a brand-new,
+ * unenrolled Team_Owned_Device) has nothing to show here, and forcing an
+ * "Expires: Unknown" line onto every such row would be noise on exactly
+ * the rows least likely to need this warning at all.
+ *
+ * @param {object} props
+ * @param {string|null|undefined} props.expiresAt the device's soonest
+ *   live-certificate expiry (`DeviceEnrollmentService.listTeamDevices`/
+ *   `listAllDevices`' own `expiresAt` field), or absent for a device with
+ *   no live certificate.
+ */
+export function DeviceExpiryLine({ expiresAt }) {
+  if (!expiresAt) {
+    return null
+  }
+
+  const expiryMarker = EXPIRY_MARKERS[classifyExpiry(expiresAt, getExpiryWarningDays(), Date.now())]
+
+  return (
+    <div
+      className={`flex items-center gap-1.5 text-xs ${
+        expiryMarker ? 'font-bold text-red-600 dark:text-red-400' : 'text-gray-500 dark:text-gray-400'
+      }`}
+    >
+      <span>Expires</span>{' '}
+      <FormattedDate
+        value={expiresAt}
+        fallback="Unknown"
+        precision={DATE_PRECISION.DATE_TIME}
+        side={TOOLTIP_SIDES.RIGHT}
+      />
+      {expiryMarker && (
+        <span className="relative group inline-flex" tabIndex={0}>
+          <ExclamationTriangleIcon
+            className="h-4 w-4 text-red-600 dark:text-red-400 cursor-help"
+            aria-hidden="true"
+          />
+          <span className="sr-only">{expiryMarker}</span>
+          <span
+            aria-hidden="true"
+            className="absolute left-full top-1/2 transform -translate-y-1/2 ml-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10"
+          >
+            {expiryMarker}
+          </span>
+        </span>
+      )}
+    </div>
+  )
+}
+
+/**
  * The `<thead>` row for a device table (see the file header for why it lives
  * beside the body row).
  *

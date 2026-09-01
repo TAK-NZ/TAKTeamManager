@@ -12,7 +12,7 @@
  *  - how Express detects HTTPS via `X-Forwarded-Proto` -- consulted by
  *    `helmet`'s HSTS logic and `req.secure`.
  *
- * See BUGS.md NOTE-001 for the defect this addresses: with no `trust
+ * This addresses the following defect: with no `trust
  * proxy` configuration at all, `req.ip` resolves to the immediate TCP
  * peer's address for every request. Locally that's harmless (nothing
  * sits in front of the App), but behind a real reverse proxy/load

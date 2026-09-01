@@ -21,7 +21,9 @@ export const TEMPLATE_VARIABLE_HINTS = {
   admin_notification_digest: ['pending_count', 'request_list'],
   signup_pending_review: ['first_name', 'team_path'],
   signup_already_active: ['first_name', 'username'],
-  team_transfer_completed: ['first_name', 'team_path', 'callsign', 'username']
+  team_transfer_completed: ['first_name', 'team_path', 'callsign', 'username'],
+  cert_expiry_self_digest: ['first_name', 'device_list', 'revoke_hint_url'],
+  cert_expiry_team_digest: ['first_name', 'team_sections', 'revoke_hint_url']
 }
 
 /**

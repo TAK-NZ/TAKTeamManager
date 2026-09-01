@@ -570,12 +570,21 @@ class DeviceEnrollmentService {
    *
    * @param {number|string} teamId
    * @param {{userId?: number, is_global_manager?: boolean}} actingUser
-   * @returns {Promise<{devices: Array<{deviceUserId: number, username: string, deviceLabel: string|null, callsignSuffix: string|null, takRole: string, callsign: string|null, teamId: number|string, createdAt: string, accountStatus: 'active'|'suspended'|'orphaned', liveCertificateCount: number}>}>}
+   * @returns {Promise<{devices: Array<{deviceUserId: number, username: string, deviceLabel: string|null, callsignSuffix: string|null, takRole: string, callsign: string|null, teamId: number|string, createdAt: string, accountStatus: 'active'|'suspended'|'orphaned', liveCertificateCount: number, expiresAt: string|null}>}>}
    * @throws {DeviceEnrollmentAuthorizationError}
    */
   static async listTeamDevices(teamId, actingUser) {
     await DeviceEnrollmentService.assertAuthorized(teamId, actingUser);
 
+    // `expiresAt` (added alongside the pre-existing `live_certificate_count`
+    // aggregate, same derived-table join, no second query): the SOONEST
+    // `expires_at` among this device's own LIVE (non-revoked) certificates
+    // -- `MIN(...)`, not the newest -- since the certificate that lapses
+    // FIRST is the one an admin needs to act on. `NULL` when the device
+    // holds no live certificate at all (a brand-new device that has never
+    // been enrolled, or one whose only certificate was revoked), which the
+    // client's `classifyExpiry` already treats as "no highlighting" --
+    // exactly the right behaviour for a device with nothing to warn about.
     const result = await pool.query(
       `SELECT u.id AS device_user_id,
               u.username AS username,
@@ -584,11 +593,12 @@ class DeviceEnrollmentService {
               u.tak_role AS tak_role,
               u.created_at AS created_at,
               u.account_status AS account_status,
-              COALESCE(certs.live_certificate_count, 0) AS live_certificate_count
+              COALESCE(certs.live_certificate_count, 0) AS live_certificate_count,
+              certs.earliest_expires_at AS expires_at
        FROM users u
        JOIN team_memberships tm ON tm.user_id = u.id AND tm.inherited_from_team_id IS NULL
        LEFT JOIN (
-         SELECT user_id, COUNT(*)::int AS live_certificate_count
+         SELECT user_id, COUNT(*)::int AS live_certificate_count, MIN(expires_at) AS earliest_expires_at
          FROM tak_devices
          WHERE user_id IS NOT NULL AND revoked = false
          GROUP BY user_id
@@ -636,7 +646,8 @@ class DeviceEnrollmentService {
       teamId,
       createdAt: row.created_at,
       accountStatus: row.account_status,
-      liveCertificateCount: row.live_certificate_count
+      liveCertificateCount: row.live_certificate_count,
+      expiresAt: row.expires_at
     }));
 
     return { devices };
@@ -672,13 +683,41 @@ class DeviceEnrollmentService {
    * `team_id` against `Team.getManagedTeamIds(actingUser.userId)`, resolved
    * ONCE for the whole page rather than per row.
    *
+   * `expiresAt` (added alongside `liveCertificateCount`, same derived-table
+   * join, no second query): the soonest `expires_at` among this device's
+   * own live certificates, `null` when it holds none. Lets the client
+   * highlight an imminent/expired certificate the same way `DeviceListRow`
+   * already does for a human's own device list -- see `expiryWarning.js`'s
+   * `classifyExpiry`.
+   *
+   * cert-expiry-notifications Requirement 7.3(b) (task 14.1): `expiringOnly`
+   * narrows the result to devices whose live certificate `classifyExpiry`s
+   * as imminent or expired on the client -- the SAME threshold the
+   * Dashboard renew banner and every device list's highlighting already
+   * use (`DEVICE_MGMT_EXPIRY_WARNING_DAYS`). Read directly here (rather
+   * than via `SiteConfig.getPublicConfig()`, which resolves the WHOLE
+   * public-config row set) with the identical `parseInt(...) > 0 ?
+   * ... : default` discipline that file's own resolution already uses,
+   * so the two stay in lockstep without adding a cross-module
+   * dependency for one scalar. This filter introduces no new
+   * authorization rule -- it only adds a WHERE predicate on top of the
+   * SAME `canManage`/scoping logic every other caller of this method
+   * already gets.
+   *
    * @param {{userId?: number, is_global_manager?: boolean}} actingUser
-   * @param {{page: number, pageSize: number, search?: string}} pageParams
-   * @returns {Promise<{devices: Array<{deviceUserId: number, username: string, deviceLabel: string|null, callsignSuffix: string|null, takRole: string, callsign: string|null, teamId: number|null, teamName: string|null, createdAt: string, accountStatus: 'active'|'suspended'|'orphaned', liveCertificateCount: number, canManage: boolean}>, pagination: {page: number, pageSize: number, total: number}}>}
+   * @param {{page: number, pageSize: number, search?: string, expiringOnly?: boolean}} pageParams
+   * @returns {Promise<{devices: Array<{deviceUserId: number, username: string, deviceLabel: string|null, callsignSuffix: string|null, takRole: string, callsign: string|null, teamId: number|null, teamName: string|null, createdAt: string, accountStatus: 'active'|'suspended'|'orphaned', liveCertificateCount: number, expiresAt: string|null, canManage: boolean}>, pagination: {page: number, pageSize: number, total: number}}>}
    */
-  static async listAllDevices(actingUser, { page, pageSize, search } = {}) {
+  static async listAllDevices(actingUser, { page, pageSize, search, expiringOnly = false } = {}) {
     const offset = (page - 1) * pageSize;
     const searchTerm = typeof search === 'string' ? search.trim() : '';
+
+    const DEFAULT_EXPIRY_WARNING_DAYS = 30;
+    const parsedExpiryWarningDays = parseInt(process.env.DEVICE_MGMT_EXPIRY_WARNING_DAYS, 10);
+    const expiryWarningDays =
+      Number.isFinite(parsedExpiryWarningDays) && parsedExpiryWarningDays > 0
+        ? parsedExpiryWarningDays
+        : DEFAULT_EXPIRY_WARNING_DAYS;
 
     const scope = await DirectoryScopeService.resolveScope(actingUser);
     const isUnscoped = scope === DirectoryScopeService.UNSCOPED;
@@ -722,6 +761,7 @@ class DeviceEnrollmentService {
                END AS team_name,
                root.root_id AS direct_membership_org_id,
                COALESCE(certs.live_certificate_count, 0) AS live_certificate_count,
+               certs.earliest_expires_at AS expires_at,
                (COALESCE(u.origin_org_id = ANY($1::int[]), false)
                 OR COALESCE(root.root_id = ANY($1::int[]), false)) AS in_scope
         FROM users u
@@ -729,13 +769,21 @@ class DeviceEnrollmentService {
         JOIN teams t ON tm.team_id = t.id
         LEFT JOIN team_root root ON root.team_id = t.id AND root.parent_team_id IS NULL
         LEFT JOIN (
-          SELECT user_id, COUNT(*)::int AS live_certificate_count
+          SELECT user_id, COUNT(*)::int AS live_certificate_count, MIN(expires_at) AS earliest_expires_at
           FROM tak_devices
           WHERE user_id IS NOT NULL AND revoked = false
           GROUP BY user_id
         ) certs ON certs.user_id = u.id
         WHERE u.is_team_device = true
           AND ($2::text IS NULL OR u.username ILIKE $2 OR u.device_label ILIKE $2)
+          -- cert-expiry-notifications Requirement 7.3(b): when expiringOnly
+          -- is requested, narrow to a device whose SOONEST live certificate
+          -- is already expired or expires within expiryWarningDays -- the
+          -- same imminent/expired classification classifyExpiry applies
+          -- client-side, computed here in SQL for this one filter rather
+          -- than fetching every device to filter client-side.
+          AND ($6::boolean = false OR certs.earliest_expires_at IS NOT NULL)
+          AND ($6::boolean = false OR certs.earliest_expires_at <= NOW() + ($7::int * INTERVAL '1 day'))
       ),
       counted AS (
         SELECT c.*, COUNT(*) FILTER (WHERE $3::boolean OR c.in_scope) OVER () AS total_count
@@ -748,7 +796,7 @@ class DeviceEnrollmentService {
       LIMIT $4 OFFSET $5
     `;
 
-    params.push(isUnscoped, pageSize, offset);
+    params.push(isUnscoped, pageSize, offset, expiringOnly, expiryWarningDays);
 
     const result = await pool.query(query, params);
 
@@ -824,6 +872,7 @@ class DeviceEnrollmentService {
         createdAt: row.created_at,
         accountStatus: row.account_status,
         liveCertificateCount: row.live_certificate_count,
+        expiresAt: row.expires_at,
         canManage: managedTeamIds === null ? true : managedTeamIds.has(row.team_id)
       };
     });
@@ -1444,6 +1493,17 @@ class DeviceEnrollmentService {
       'Enrollment generated'
     );
 
+    // cert-expiry-notifications Requirement 8: the new certificate has
+    // just been minted above -- enqueue a Superseding_Revoke for
+    // whatever certificate it replaces, fire-and-forget so a failure
+    // here can never fail this (already-successful) enrollment
+    // response. Passed the PRINCIPAL's own users.id -- see
+    // #enqueueSupersedingRevoke's own doc comment for why that id,
+    // rather than any TAK-Server-assigned device identifier, is used.
+    DeviceEnrollmentService.#enqueueSupersedingRevoke(principal.id, actingUserId).catch((err) =>
+      logger.error({ err, principalId: principal.id }, 'Failed to enqueue Superseding_Revoke after enrollment')
+    );
+
     return {
       ...preview,
       expiresAt: token.expires,
@@ -1453,6 +1513,71 @@ class DeviceEnrollmentService {
       atakQrDataUrl,
       itakQrDataUrl
     };
+  }
+
+  /**
+   * cert-expiry-notifications Requirement 8: enqueues a Revoke_Operation
+   * for the certificate a just-completed enrollment mint SUPERSEDES --
+   * so a renewal actually retires the certificate it replaces instead of
+   * silently leaving it live alongside the new one.
+   *
+   * Keyed on `userId` (the principal's own `users.id`), NOT on any
+   * TAK-Server-assigned per-certificate device identifier: neither
+   * `generateSelfEnrollment` nor `generateEnrollmentQrCode` has one in
+   * hand at mint time -- TAK Server assigns it only once the physical
+   * device actually uses the minted token. `tak_devices.user_id` is
+   * read directly (the row `DeviceSync` already keeps current) rather
+   * than issuing a fresh TAK Server API call (Requirement 8.6).
+   *
+   * Three outcomes:
+   *   - Zero live rows: an ordinary first enrollment. No enqueue, no log
+   *     beyond debug level -- not an error or anomaly (Requirement 8.5).
+   *   - Exactly one live row: THAT certificate is unambiguously what
+   *     this mint replaces. Enqueues `revoke_tak_certificates` with the
+   *     `cert_ids` discriminator (Requirement 8.1, 8.3).
+   *   - More than one live row: a Self-Owned_Device principal may
+   *     legitimately hold several live devices at once (ATAK, iTAK,
+   *     CloudTAK, a second personal device). Which one THIS mint is
+   *     meant to replace is genuinely ambiguous, and guessing wrong
+   *     would revoke a certificate still in active use -- so this is a
+   *     deliberate no-op, logged informationally, never as an error
+   *     (Requirement 8.2).
+   *
+   * The Revoke_Operation itself is subject to the EXISTING
+   * `DEVICE_MGMT_REVOKE_ENABLED` arming flag and Revoke_Blast_Radius_Cap
+   * exactly as every other caller of `revoke_tak_certificates` already
+   * is (Requirement 8.4) -- no new gating logic here.
+   *
+   * @param {number|string} userId - the principal's own `users.id`.
+   * @param {number|null} actingUserId
+   * @returns {Promise<void>}
+   */
+  static async #enqueueSupersedingRevoke(userId, actingUserId) {
+    const { rows } = await pool.query(
+      'SELECT cert_id FROM tak_devices WHERE user_id = $1 AND revoked = false',
+      [userId]
+    );
+
+    if (rows.length === 0) {
+      logger.debug({ userId }, 'No prior live certificate to supersede; ordinary first enrollment');
+      return;
+    }
+
+    if (rows.length > 1) {
+      logger.info(
+        { userId, liveCertificateCount: rows.length },
+        'Skipping Superseding_Revoke: principal holds more than one live certificate, which one this mint replaces is ambiguous'
+      );
+      return;
+    }
+
+    const supersededCertId = rows[0].cert_id;
+    await EventPublisher.publishOperation(
+      'revoke_tak_certificates',
+      { cert_ids: [supersededCertId] },
+      actingUserId
+    );
+    logger.info({ userId, supersededCertId }, 'Enqueued Superseding_Revoke for renewed certificate');
   }
 
   /**

@@ -19,7 +19,7 @@ const { getTrustProxyHops } = require('./config/trustProxy');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// BUGS.md NOTE-001: tells Express how many `X-Forwarded-For` hops to
+// Tells Express how many `X-Forwarded-For` hops to
 // trust when resolving `req.ip`/`req.ips` (and how it detects HTTPS via
 // `X-Forwarded-Proto`, consulted by helmet's HSTS logic). Defaults to 0
 // (trust nothing) via `getTrustProxyHops`, which is correct for local/
@@ -115,8 +115,8 @@ app.set('trust proxy', getTrustProxyHops());
   // `TakServerService`.
   app.use('/uploads', express.static(process.env.UPLOADS_DIR || path.join(__dirname, 'uploads/branding')));
 
-  // Serve downloadable CSV bulk-import templates (Requirement 29.1,
-  // BUG-011): `public/templates/user-import-template.csv` and
+  // Serve downloadable CSV bulk-import templates (Requirement 29.1):
+  // `public/templates/user-import-template.csv` and
   // `public/templates/team-import-template.csv` exist on disk but were
   // never reachable over HTTP -- the `client/dist` static mount above
   // only serves the built client, and the `/uploads` mount above only
@@ -148,21 +148,6 @@ app.set('trust proxy', getTrustProxyHops());
   // 55.4).
   app.use(require('./middleware/publicRouteBootstrap'));
 
-  // Login-time user agreement gate (Requirement 28 Criteria 6-7):
-  // mounted globally, mirroring `publicRouteBootstrap`'s "always runs"
-  // precedent immediately above. `req.user` is not yet populated at this
-  // router-mount-level point in the chain (each route file mounts its own
-  // `authenticateToken`/`authorize` pair further down, per `authorize.js`'s
-  // header comment). BUG-010 fix: `requireCurrentAgreement` no longer
-  // relies on `req.user` being set here -- it independently resolves the
-  // current user from the `tak_session` cookie itself (reusing
-  // `server/middleware/auth.js`'s `resolveUserFromRequest`), so the gate
-  // is actually enforced at this global mount point, not just when this
-  // same middleware is mounted per-route after `authenticateToken`/
-  // `authorize` (as `server/routes/mou.js` also does, task 50.5). See
-  // that file's header comment for the full reasoning.
-  app.use(require('./middleware/requireCurrentAgreement'));
-
   // Routes
   app.use('/api/auth', require('./routes/auth'));
   app.use('/api/teams', require('./routes/teams'));
@@ -172,16 +157,12 @@ app.set('trust proxy', getTrustProxyHops());
   app.use('/api', require('./routes/signup'));
   app.use('/api', require('./routes/orgDomains'));
   app.use('/api/requests', require('./routes/requests'));
-  app.use('/api/channel-requests', require('./routes/channelRequests'));
   app.use('/api/config', require('./routes/config'));
   app.use('/api/sync', require('./routes/sync'));
   app.use('/api/operations', require('./routes/operations'));
   app.use('/api/global-channels', require('./routes/globalChannels'));
-  app.use('/api/vendor-channels', require('./routes/vendorChannels'));
-  app.use('/api/deployment-channels', require('./routes/deploymentChannels'));
   app.use('/api/audit-logs', require('./routes/auditLogs'));
   app.use('/api/settings', require('./routes/settings'));
-  app.use('/api/mou', require('./routes/mou'));
   app.use('/api/communications', require('./routes/communications'));
   app.use('/api/devices', require('./routes/devices'));
   app.use('/api/enrollment', require('./routes/enrollment'));

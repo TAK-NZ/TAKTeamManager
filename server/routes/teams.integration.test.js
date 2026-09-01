@@ -1,6 +1,6 @@
 /**
  * Real-Postgres integration tests for team creation and team membership
- * add (BUG-020 / task 58.6, Requirement 12.5):
+ * add (task 58.6, Requirement 12.5):
  *
  *   "Integration tests ... for at least the following API routes: team
  *   creation (a success case and a validation-failure case), team
@@ -127,7 +127,7 @@ describe('POST /api/teams against a real Postgres database (Requirement 12.5, ta
       throw new Error(
         `Real Postgres test database is not reachable at ` +
           `${process.env.DB_HOST}:${process.env.DB_PORT}/${process.env.DB_NAME} ` +
-          `(user "${process.env.DB_USER}"). This integration test (task 58.6, BUG-020) ` +
+          `(user "${process.env.DB_USER}"). This integration test (task 58.6) ` +
           `requires a real, running, already-migrated Postgres instance -- it deliberately ` +
           `does not mock "../config/database", since the whole point is to prove real ` +
           `POST /api/teams behavior against real, persisted rows. ` +
@@ -164,7 +164,7 @@ describe('POST /api/teams against a real Postgres database (Requirement 12.5, ta
     // what this test itself verifies (a real teams row persisting).
     const res = await request(app)
       .post('/api/teams')
-      .send({ name: teamName, description: 'Created by BUG-020 integration test', callsignPrefix: 'ITT' });
+      .send({ name: teamName, description: 'Created by integration test', callsignPrefix: 'ITT' });
 
     expect(res.status).toBe(201);
     expect(res.body.team).toBeDefined();
@@ -268,7 +268,7 @@ describe('POST /api/teams/:teamId/members against a real Postgres database (Requ
     // A real user with a real team_memberships row with role='admin' for
     // `team` -- a genuine team admin, per `Team.isAdmin`, of `team` only
     // (NOT `otherTeam`), and NOT a Global_Manager -- matching the exact
-    // BUG-015 scenario this route's authorization is meant to support
+    // scenario this route's authorization is meant to support
     // ("a team admin adding a member to their own team").
     const adminUsername = `membership-admin-${crypto.randomUUID()}`;
     const adminResult = await pool.query(

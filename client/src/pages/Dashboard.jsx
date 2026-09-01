@@ -6,6 +6,7 @@ import { buildFolderTree } from '../utils/channelTree'
 import { getTakColorHex } from '../utils/takColors'
 import RevokeDeviceDialog from '../components/RevokeDeviceDialog'
 import DeviceListRow, { DeviceListHeader, DeviceListCard } from '../components/DeviceListRow'
+import { EXPIRY_STATES, classifyExpiry, getExpiryWarningDays } from '../utils/expiryWarning'
 
 // --- The Visibility_Pause_Pattern (device-management Requirements 19.1-19.3) ---
 //
@@ -251,24 +252,33 @@ export default function Dashboard({ user }) {
         // and the chevron is now purely decorative (no onClick/button of
         // its own), matching the plain-folder row's own pattern exactly.
         items.push(
+          // Bugfix (mobile horizontal scroll on /dashboard): same fix as
+          // the plain-channel row below -- `flex-col sm:flex-row` stacks
+          // the permission badges beneath the name/description on mobile
+          // instead of forcing both onto one non-wrapping row, and
+          // `min-w-0`/`break-words` let a long name/description actually
+          // wrap instead of pushing the row (and the whole page) wider
+          // than the viewport. `cursor-pointer`/`onClick` stay on this
+          // outer div either way -- the whole row is still the toggle
+          // target regardless of how its content stacks.
           <div
             key={folderPath}
-            className="flex items-center justify-between p-3 bg-gray-100 dark:bg-gray-700 rounded-lg ml-3 sm:ml-6 cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-600"
+            className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 p-3 bg-gray-100 dark:bg-gray-700 rounded-lg ml-3 sm:ml-6 cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-600"
             onClick={() => toggleFolder(folderPath)}
           >
-            <div className="flex items-center flex-1">
+            <div className="flex items-center flex-1 min-w-0">
               <ChevronRightSmall className={`h-4 w-4 text-gray-500 dark:text-gray-300 transition-transform mr-2 flex-shrink-0 ${isExpanded ? 'rotate-90' : ''}`} />
-              <div className="flex-1">
+              <div className="flex-1 min-w-0">
                 <div className="flex items-center">
                   <SignalIcon className="h-4 w-4 text-gray-900 dark:text-gray-100 mr-1.5 flex-shrink-0" />
-                  <h3 className="font-medium text-gray-900 dark:text-gray-100">{parentChannel.display_name}</h3>
+                  <h3 className="font-medium text-gray-900 dark:text-gray-100 break-words">{parentChannel.display_name}</h3>
                 </div>
-                <p className="text-sm text-gray-600 dark:text-gray-300">
+                <p className="text-sm text-gray-600 dark:text-gray-300 break-words">
                   {parentChannel.description}
                 </p>
               </div>
             </div>
-            <div className="flex items-center space-x-2">
+            <div className="flex items-center flex-wrap gap-2">
               {parentChannel.permissions.includes('read') && (
                 <div className="relative group">
                   <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-blue-100 text-blue-800 rounded cursor-help">
@@ -345,17 +355,27 @@ export default function Dashboard({ user }) {
     const parentChannelNames = new Set(Object.keys(tree.folders))
     tree.channels.filter(c => !parentChannelNames.has(c.display_name)).forEach(channel => {
       items.push(
-        <div key={channel.id} className="flex items-center justify-between p-3 bg-gray-100 dark:bg-gray-700 rounded-lg ml-3 sm:ml-6">
-          <div className="flex-1">
+        // Bugfix (mobile horizontal scroll on /dashboard): this row used to
+        // be a single non-wrapping `flex items-center justify-between` with
+        // no `min-w-0`/`break-words` on the name/description and no
+        // stacking for the permission badges -- so a channel name plus 1-3
+        // badges could together exceed a phone's viewport width and force
+        // the whole card (and page) wider than the screen. `flex-col
+        // sm:flex-row` stacks the badges below the name/description on
+        // mobile instead of squeezing both into one row, matching
+        // `GlobalChannels.jsx`'s identical channel row and this same page's
+        // own Expandable_Channel_Row fix just below.
+        <div key={channel.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 p-3 bg-gray-100 dark:bg-gray-700 rounded-lg ml-3 sm:ml-6">
+          <div className="flex-1 min-w-0">
             <div className="flex items-center">
               <SignalIcon className="h-4 w-4 text-gray-900 dark:text-gray-100 mr-1.5 flex-shrink-0" />
-              <h3 className="font-medium text-gray-900 dark:text-gray-100">{channel.display_name}</h3>
+              <h3 className="font-medium text-gray-900 dark:text-gray-100 break-words">{channel.display_name}</h3>
             </div>
-            <p className="text-sm text-gray-500 dark:text-gray-300">
+            <p className="text-sm text-gray-500 dark:text-gray-300 break-words">
               {channel.description}
             </p>
           </div>
-          <div className="flex items-center space-x-2">
+          <div className="flex items-center flex-wrap gap-2">
             {channel.permissions.includes('read') && (
               <div className="relative group">
                 <span className="inline-flex items-center px-2 py-1 text-xs font-medium bg-blue-100 text-blue-800 rounded cursor-help">
@@ -601,9 +621,29 @@ export default function Dashboard({ user }) {
                 <dd className="flex items-center text-sm text-gray-900 dark:text-gray-100">
                   {freshUser.takRole}
                   {roleDescriptions[freshUser.takRole] && (
+                    // Bugfix (mobile horizontal scroll on /dashboard): this
+                    // tooltip's text is an ADMIN-CONFIGURABLE role
+                    // description (TAK_ROLE_* / system_config), which can
+                    // run to 100+ characters -- see .env.example's seeded
+                    // values. `whitespace-nowrap` with no width bound
+                    // rendered that as one unbroken line several hundred
+                    // pixels wide. Even hidden at `opacity-0`, an absolutely
+                    // positioned element's box still counts toward its
+                    // ancestors' scrollable overflow, and nothing between
+                    // this tooltip and <body> clips `overflow-x` (`.card`
+                    // has no `overflow` rule) -- so on a phone-width
+                    // viewport that invisible box extended the PAGE's own
+                    // scrollable width well past the right edge, which is
+                    // exactly "white space on the right that lets you
+                    // scroll" with nothing visibly overflowing. `whitespace-
+                    // normal w-64` matches the bounded-width convention
+                    // every other multi-word tooltip in the app already
+                    // uses (`InfoTooltip.jsx`, `TeamDetail.jsx`,
+                    // `Teams.jsx`) -- this was the one holdout still using
+                    // the old unbounded pattern.
                     <div className="relative group ml-1">
                       <InformationCircleIcon className="h-4 w-4 text-gray-400 cursor-help" />
-                      <div className="absolute left-full top-1/2 transform -translate-y-1/2 ml-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10">
+                      <div className="absolute left-full top-1/2 transform -translate-y-1/2 ml-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-normal w-64 z-10">
                         {roleDescriptions[freshUser.takRole]}
                       </div>
                     </div>
@@ -691,7 +731,10 @@ export default function Dashboard({ user }) {
               </div>
             </div>
             <div className="sm:ml-auto">
-              <Link to="/requests" className="btn-primary block text-center sm:inline-block">
+              {/* cert-expiry-notifications Requirement 7.1: points directly
+                  at the renamed /tasks route rather than relying on the
+                  /requests redirect for a link this codebase itself owns. */}
+              <Link to="/tasks" className="btn-primary block text-center sm:inline-block">
                 Review Requests
               </Link>
             </div>
@@ -721,6 +764,35 @@ export default function Dashboard({ user }) {
           {devicesError && (
             <p role="alert" className="text-sm text-red-600 dark:text-red-400 mb-4">
               {devicesError}
+            </p>
+          )}
+
+          {/* cert-expiry-notifications Requirement 6: a page-level renew
+              prompt, rendered only when at least one device's live
+              certificate classifies as imminent or expired -- the SAME
+              classification/threshold DeviceListRow/DeviceListCard already
+              use below for their own per-row highlighting, no new threshold
+              introduced. Deliberately NOT a per-device-row "Renew" button
+              (Requirement 6.2): a self-service enrollment mint is not
+              scoped to one existing certificate row, so a per-row button
+              would misrepresent what clicking it actually does. The
+              call-to-action is the SAME /enrollment link "Add Device"
+              already points at -- reusing MultipleCertificateWarning.jsx's
+              amber-informational-banner treatment (text-carried state,
+              InformationCircleIcon, non-alert). */}
+          {devices.some(
+            (device) =>
+              classifyExpiry(device.expiresAt, getExpiryWarningDays(), Date.now()) !== EXPIRY_STATES.NONE
+          ) && (
+            <p className="flex items-center gap-1.5 text-sm text-amber-700 dark:text-amber-400 mb-4">
+              <InformationCircleIcon className="h-4 w-4 flex-shrink-0" aria-hidden="true" />
+              <span>
+                One or more of your devices has a certificate expiring soon or expired.{' '}
+                <Link to="/enrollment" className="font-medium underline hover:no-underline">
+                  Renew now
+                </Link>
+                .
+              </span>
             </p>
           )}
 
