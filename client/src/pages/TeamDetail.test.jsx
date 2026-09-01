@@ -2370,3 +2370,125 @@ describe('Permanently Delete User: authentikAccountDeleted toast (bugfix: silent
     expect(block).not.toContain('certificateRevocationDryRun')
   })
 })
+
+// Orgs & Teams multi-select: Members tab bulk actions (Resend, Transfer,
+// Suspend/Unsuspend, Delete -- Edit and Enroll device deliberately
+// excluded, per the user's own request). Source-contract tests only,
+// per this file's established convention (no @testing-library/react in
+// this project).
+describe('Members tab multi-select (bulk actions)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  it('imports the shared bulk-confirmation dialogs', () => {
+    expect(source).toContain("import BulkConfirmDialog from '../components/BulkConfirmDialog'")
+    expect(source).toContain("import BulkTransferDialog from '../components/BulkTransferDialog'")
+  })
+
+  it('tracks selection as a Set of member.id, independent of the single-row dialogs\' own state', () => {
+    expect(source).toContain('const [selectedMemberIds, setSelectedMemberIds] = useState(() => new Set())')
+    expect(source).toContain('const [bulkAction, setBulkAction] = useState(null)')
+  })
+
+  it('clears the selection whenever the active tab changes', () => {
+    expect(source).toContain("onClick={() => { setActiveTab(tab.id); clearMemberSelection() }}")
+  })
+
+  it('de-duplicates an admin row (present in both members and admins) in the selected set', () => {
+    const index = source.indexOf('const selectedMembers = ')
+    expect(index).toBeGreaterThan(-1)
+    const block = source.slice(index, index + 400)
+    expect(block).toContain('selectedMembersUnique')
+    expect(block).toContain('new Map(selectedMembers.map((m) => [m.id, m]))')
+  })
+
+  it('select-all targets only the current filtered/paginated view (paginatedData), not the full tab list', () => {
+    const index = source.indexOf('const allVisibleMemberIdsSelected =')
+    expect(index).toBeGreaterThan(-1)
+    expect(source.slice(index, index + 200)).toContain('paginatedData')
+
+    const toggleIndex = source.indexOf('const toggleSelectAllVisibleMembers = ')
+    expect(toggleIndex).toBeGreaterThan(-1)
+    const toggleBlock = source.slice(toggleIndex, source.indexOf('\n  }', toggleIndex))
+    expect(toggleBlock).toContain('paginatedData.forEach')
+  })
+
+  it('checkBulkEligibility blocks Suspend when any selected row is orphaned or already suspended', () => {
+    const index = source.indexOf('const checkBulkEligibility = (action) => {')
+    expect(index).toBeGreaterThan(-1)
+    const fnEnd = source.indexOf('\n  }', index)
+    const block = source.slice(index, fnEnd)
+
+    expect(block).toContain("action === 'suspend'")
+    expect(block).toContain("m.account_status === 'orphaned' || m.account_status === 'suspended'")
+    expect(block).toContain("action === 'unsuspend'")
+    expect(block).toContain("m.account_status === 'orphaned' || m.account_status !== 'suspended'")
+  })
+
+  it('checkBulkEligibility blocks Delete outright for a non-Global_Manager, matching the single-row action\'s own restriction', () => {
+    const index = source.indexOf('const checkBulkEligibility = (action) => {')
+    const fnEnd = source.indexOf('\n  }', index)
+    const block = source.slice(index, fnEnd)
+
+    expect(block).toContain("action === 'delete' && !user?.isAdmin")
+  })
+
+  it('handleBulkActionClick blocks the action via a toast (never opening a dialog) when the eligibility pre-screen fails', () => {
+    const index = source.indexOf('const handleBulkActionClick = (action) => {')
+    expect(index).toBeGreaterThan(-1)
+    const block = source.slice(index, source.indexOf('\n  }', index))
+
+    expect(block).toContain('checkBulkEligibility(action)')
+    expect(block).toContain('toast.error(ineligibleMessage)')
+    expect(block).toContain('return')
+    expect(block).toContain('setBulkAction(action)')
+  })
+
+  it('hides the bulk Delete button entirely for a non-Global_Manager, rather than showing it disabled', () => {
+    const index = source.indexOf("handleBulkActionClick('delete')")
+    expect(index).toBeGreaterThan(-1)
+    const before = source.slice(Math.max(0, index - 300), index)
+    expect(before).toContain('user?.isAdmin')
+  })
+
+  it('renders a checkbox in both the desktop table row and the mobile card, sharing the same selectedMemberIds state', () => {
+    expect(source).toContain('checked={selectedMemberIds.has(member.id)}')
+    expect(source).toContain('onChange={() => toggleMemberSelected(member.id)}')
+    // Appears twice: once in the sm:hidden card block, once in the
+    // hidden sm:block table block.
+    const occurrences = source.split('checked={selectedMemberIds.has(member.id)}').length - 1
+    expect(occurrences).toBe(2)
+  })
+
+  it('wires each bulk dialog to its own usersAPI bulk endpoint', () => {
+    expect(source).toContain('usersAPI.bulkResendWelcome(ids, team.id)')
+    expect(source).toContain('usersAPI.bulkSuspend(ids)')
+    expect(source).toContain('usersAPI.bulkUnsuspend(ids)')
+    expect(source).toContain('usersAPI.bulkRemoveFromTeam(ids, team.id)')
+  })
+
+  it('uses literal-word type-to-confirm (SUSPEND/DELETE) for the two destructive-feeling bulk actions, and the plain tier for the other two', () => {
+    const suspendIndex = source.indexOf("title=\"Suspend Accounts\"")
+    expect(suspendIndex).toBeGreaterThan(-1)
+    expect(source.slice(suspendIndex, suspendIndex + 200)).toContain('literalWord="SUSPEND"')
+
+    const deleteIndex = source.indexOf('title="Permanently Delete Users"')
+    expect(deleteIndex).toBeGreaterThan(-1)
+    expect(source.slice(deleteIndex, deleteIndex + 200)).toContain('literalWord="DELETE"')
+
+    const unsuspendIndex = source.indexOf('title="Unsuspend Accounts"')
+    expect(unsuspendIndex).toBeGreaterThan(-1)
+    expect(source.slice(unsuspendIndex, unsuspendIndex + 200)).not.toContain('literalWord')
+
+    const resendIndex = source.indexOf('title="Resend Welcome Email"')
+    expect(resendIndex).toBeGreaterThan(-1)
+    expect(source.slice(resendIndex, resendIndex + 200)).not.toContain('literalWord')
+  })
+
+  it('refreshes the member list and clears the selection once a bulk action completes', () => {
+    const index = source.indexOf('const handleBulkActionCompleted = () => {')
+    expect(index).toBeGreaterThan(-1)
+    const block = source.slice(index, source.indexOf('\n  }', index))
+    expect(block).toContain('clearMemberSelection()')
+    expect(block).toContain('refreshMembers()')
+  })
+})

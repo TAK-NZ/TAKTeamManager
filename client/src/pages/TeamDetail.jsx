@@ -15,6 +15,8 @@ import UserDevicesModal, { useDeviceManagementEnabled } from '../components/User
 import TeamDeviceList, { deviceDisplayName } from '../components/TeamDeviceList'
 import AddTeamDeviceDialog from '../components/AddTeamDeviceDialog'
 import BulkImportUsersDialog from '../components/BulkImportUsersDialog'
+import BulkConfirmDialog from '../components/BulkConfirmDialog'
+import BulkTransferDialog from '../components/BulkTransferDialog'
 import MoreOptionsMenu from '../components/MoreOptionsMenu'
 import { tabAria } from '../components/Tabs'
 import MemberEditRow, {
@@ -476,6 +478,22 @@ export default function TeamDetail({ user, refreshUser }) {
   // and the row's current `account_status` decides which one this action
   // opens.
   const [suspendingMember, setSuspendingMember] = useState(null)
+  // Orgs & Teams multi-select: the Members tab's own selection, a `Set`
+  // of `member.id`. Deliberately independent of the Team Admins tab's
+  // selection (which does not exist -- multi-select was scoped to the
+  // Members tab only) and cleared whenever the active tab changes, so a
+  // stale selection can never carry into a different tab's rows or
+  // survive a page navigation back to Members. Select-all targets only
+  // `paginatedData` (the current filtered/paginated view), matching
+  // every other list-level control on this page which already operates
+  // on that same slice.
+  const [selectedMemberIds, setSelectedMemberIds] = useState(() => new Set())
+  // The bulk action currently open ({'suspend'|'unsuspend'|'resend'|
+  // 'delete'|'transfer'}), or null -- drives which dialog renders below.
+  // Distinct from the single-row `suspendingMember`/`resendingWelcomeTo`/
+  // etc. state above: those dialogs are unaffected by this feature and
+  // keep acting on exactly one row.
+  const [bulkAction, setBulkAction] = useState(null)
   // The device surfaces exist only WHILE the server-side DEVICE_MGMT_ENABLED
   // flag is on, and that flag is never exposed through /api/config/public
   // (Requirement 1.4), so the affordance is gated on the reachability probe.
@@ -1034,6 +1052,95 @@ export default function TeamDetail({ user, refreshUser }) {
     }
   }
 
+  // --- Orgs & Teams multi-select: Members tab bulk actions ---
+  //
+  // Toggles a single row's selection. `member.id` is the local `users.id`
+  // every action below is keyed on, exactly matching the id
+  // `MemberActions`' individual buttons already act on.
+  const toggleMemberSelected = (memberId) => {
+    setSelectedMemberIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(memberId)) {
+        next.delete(memberId)
+      } else {
+        next.add(memberId)
+      }
+      return next
+    })
+  }
+
+  const clearMemberSelection = () => setSelectedMemberIds(new Set())
+
+  const selectedMembers = [...members, ...admins].filter((m) => selectedMemberIds.has(m.id))
+  // De-duplicated by id: an admin row appears in both `members` and
+  // `admins` (an admin is still a member underneath), so without this a
+  // selected admin would be listed/acted on twice.
+  const selectedMembersUnique = Array.from(new Map(selectedMembers.map((m) => [m.id, m])).values())
+
+  const memberLabel = (member) =>
+    [member.first_name, member.last_name].filter(Boolean).join(' ') || member.email || member.username || `#${member.id}`
+
+  // Eligibility pre-screen (option b, per the user's own decision):
+  // clicking a bulk action checks the CURRENT selection against that
+  // action's requirements using data already in the row list, entirely
+  // client-side. Any ineligible row blocks the action outright -- no
+  // dialog opens, no partial execution -- naming which rows and why, so
+  // the operator can narrow the selection and retry rather than
+  // discovering a partial failure only after confirming. The server
+  // still re-validates every row defensively regardless (never trusted
+  // client-only); this screen exists purely to avoid a round trip whose
+  // outcome is already knowable from data on screen.
+  //
+  // Returns `null` when every selected row is eligible, or a message
+  // naming the ineligible rows otherwise.
+  const checkBulkEligibility = (action) => {
+    if (selectedMembersUnique.length === 0) {
+      return 'Select at least one member first.'
+    }
+
+    if (action === 'suspend') {
+      const ineligible = selectedMembersUnique.filter(
+        (m) => m.account_status === 'orphaned' || m.account_status === 'suspended'
+      )
+      if (ineligible.length > 0) {
+        return `Cannot suspend: ${ineligible.map(memberLabel).join(', ')} ${ineligible.length === 1 ? 'is' : 'are'} already suspended or has no Authentik identity (orphaned). Deselect ${ineligible.length === 1 ? 'them' : 'them'} and try again.`
+      }
+    }
+
+    if (action === 'unsuspend') {
+      const ineligible = selectedMembersUnique.filter(
+        (m) => m.account_status === 'orphaned' || m.account_status !== 'suspended'
+      )
+      if (ineligible.length > 0) {
+        return `Cannot unsuspend: ${ineligible.map(memberLabel).join(', ')} ${ineligible.length === 1 ? 'is' : 'are'} not currently suspended. Deselect them and try again.`
+      }
+    }
+
+    if (action === 'delete' && !user?.isAdmin) {
+      return 'Only a Global_Manager may permanently delete a user.'
+    }
+
+    return null
+  }
+
+  // Opens a bulk action, blocking outright (via a toast, no dialog) when
+  // the eligibility pre-screen above finds any ineligible row.
+  const handleBulkActionClick = (action) => {
+    const ineligibleMessage = checkBulkEligibility(action)
+    if (ineligibleMessage) {
+      toast.error(ineligibleMessage)
+      return
+    }
+    setBulkAction(action)
+  }
+
+  const closeBulkAction = () => setBulkAction(null)
+
+  const handleBulkActionCompleted = () => {
+    clearMemberSelection()
+    refreshMembers()
+  }
+
   // Requirements 11.13, 11.16, 13.2, 13.3, 13.4, 13.6, 14.2, 14.3 (task
   // 33.2): submits the inline edit form's current values to
   // `PATCH /api/teams/:teamId/members/:userId`. Email is never included
@@ -1384,6 +1491,26 @@ export default function TeamDetail({ user, refreshUser }) {
   const totalPages = Math.ceil(currentData.length / itemsPerPage)
   const startIndex = (currentPages[activeTab] - 1) * itemsPerPage
   const paginatedData = currentData.slice(startIndex, startIndex + itemsPerPage)
+
+  // Select-all targets only the CURRENT filtered/paginated view
+  // (`paginatedData`), matching every other list-level control on this
+  // page (search, sort, pagination) which already operates on that same
+  // slice rather than the tab's full unfiltered list.
+  const allVisibleMemberIdsSelected =
+    paginatedData.length > 0 && paginatedData.every((member) => selectedMemberIds.has(member.id))
+
+  const toggleSelectAllVisibleMembers = () => {
+    setSelectedMemberIds((prev) => {
+      if (allVisibleMemberIdsSelected) {
+        const next = new Set(prev)
+        paginatedData.forEach((member) => next.delete(member.id))
+        return next
+      }
+      const next = new Set(prev)
+      paginatedData.forEach((member) => next.add(member.id))
+      return next
+    })
+  }
 
   const handleSort = (field) => {
     const currentSortField = sortFields[activeTab]
@@ -1745,7 +1872,7 @@ export default function TeamDetail({ user, refreshUser }) {
               return (
                 <button
                   key={tab.id}
-                  onClick={() => setActiveTab(tab.id)}
+                  onClick={() => { setActiveTab(tab.id); clearMemberSelection() }}
                   aria-label={accessibleName}
                   title={accessibleName}
                   {...tabAria(activeTab, tab.id)}
@@ -1820,6 +1947,73 @@ export default function TeamDetail({ user, refreshUser }) {
               layout. */}
           {activeTab === 'members' && (
             <>
+              {/* Orgs & Teams multi-select: the bulk-action toolbar,
+                  shown only once at least one row is selected (never
+                  rendered otherwise, so it never competes for space
+                  with the search bar above on an empty selection).
+                  Every action here is available to every eligible
+                  selection regardless of screen width -- unlike the
+                  icon-only-below-`sm:` header buttons elsewhere on this
+                  page, there are too many bulk actions to compress into
+                  icons without losing legibility, so this toolbar wraps
+                  onto multiple lines on a narrow phone instead. */}
+              {canManageTeam && selectedMembersUnique.length > 0 && (
+                <div className="mb-4 flex flex-wrap items-center gap-2 rounded-md border border-primary-200 dark:border-primary-800 bg-primary-50 dark:bg-primary-900/20 p-3">
+                  <span className="text-sm font-medium text-gray-700 dark:text-gray-300 mr-2">
+                    {selectedMembersUnique.length} selected
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleBulkActionClick('resend')}
+                    className="btn-secondary px-3 py-1.5 text-sm"
+                  >
+                    Resend Welcome Email
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleBulkActionClick('transfer')}
+                    className="btn-secondary px-3 py-1.5 text-sm"
+                  >
+                    Transfer
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleBulkActionClick('suspend')}
+                    className="btn-secondary px-3 py-1.5 text-sm"
+                  >
+                    Suspend
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleBulkActionClick('unsuspend')}
+                    className="btn-secondary px-3 py-1.5 text-sm"
+                  >
+                    Unsuspend
+                  </button>
+                  {/* Delete user is Global_Manager-only server-side with
+                      no Team_Admin resolver at all (matching the
+                      single-row action's own restriction) -- hidden
+                      entirely for a non-Global_Manager, per the user's
+                      own decision, rather than shown-but-disabled. */}
+                  {user?.isAdmin && (
+                    <button
+                      type="button"
+                      onClick={() => handleBulkActionClick('delete')}
+                      className="btn-danger px-3 py-1.5 text-sm"
+                    >
+                      Delete
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={clearMemberSelection}
+                    className="text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300 underline ml-auto"
+                  >
+                    Clear selection
+                  </button>
+                </div>
+              )}
+
               <div className="sm:hidden divide-y divide-gray-200 dark:divide-gray-700">
                 {paginatedData.map((member) => (
                   editingMemberId === member.id ? (
@@ -1842,18 +2036,33 @@ export default function TeamDetail({ user, refreshUser }) {
                   ) : (
                     <div key={member.id} className="p-4 space-y-2 text-sm">
                       <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <p className="font-medium text-gray-900 dark:text-gray-100 break-words">
-                            {member.first_name} {member.last_name}
-                          </p>
-                          {/* Bugfix (list-width reduction): username shown
-                              underneath the name, matching Users.jsx's own
-                              name/username stacking -- and, for an
-                              Organisation using pseudonymous usernames,
-                              the username itself is the only per-member
-                              identifier this card carries at all now that
-                              email is gone from it. */}
-                          <p className="text-xs text-gray-500 dark:text-gray-400 font-mono break-all">{member.username}</p>
+                        <div className="flex items-start gap-3 min-w-0">
+                          {/* Orgs & Teams multi-select: same checkbox as
+                              the desktop table's row, sharing the SAME
+                              selectedMemberIds Set -- toggling either
+                              surface updates the same underlying state. */}
+                          {canManageTeam && (
+                            <input
+                              type="checkbox"
+                              checked={selectedMemberIds.has(member.id)}
+                              onChange={() => toggleMemberSelected(member.id)}
+                              aria-label={`Select ${memberLabel(member)}`}
+                              className="mt-1 rounded border-gray-300 dark:border-gray-600 flex-shrink-0"
+                            />
+                          )}
+                          <div className="min-w-0">
+                            <p className="font-medium text-gray-900 dark:text-gray-100 break-words">
+                              {member.first_name} {member.last_name}
+                            </p>
+                            {/* Bugfix (list-width reduction): username shown
+                                underneath the name, matching Users.jsx's own
+                                name/username stacking -- and, for an
+                                Organisation using pseudonymous usernames,
+                                the username itself is the only per-member
+                                identifier this card carries at all now that
+                                email is gone from it. */}
+                            <p className="text-xs text-gray-500 dark:text-gray-400 font-mono break-all">{member.username}</p>
+                          </div>
                         </div>
                         {member.inherited_from_team_name ? (
                           <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-blue-100 text-blue-800 dark:bg-blue-600 dark:text-blue-200 flex-shrink-0">
@@ -1909,6 +2118,24 @@ export default function TeamDetail({ user, refreshUser }) {
               <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                 <thead className="bg-gray-50 dark:bg-gray-800">
                   <tr>
+                    {/* Orgs & Teams multi-select: header select-all,
+                        targeting only the current filtered/paginated
+                        view (paginatedData), matching every other
+                        list-level control on this page. Only rendered
+                        when the caller can act on this tab at all --
+                        selecting rows is pointless without any bulk
+                        action to apply to them. */}
+                    {canManageTeam && (
+                      <th className="px-3 py-3 text-left">
+                        <input
+                          type="checkbox"
+                          checked={allVisibleMemberIdsSelected}
+                          onChange={toggleSelectAllVisibleMembers}
+                          aria-label="Select all visible members"
+                          className="rounded border-gray-300 dark:border-gray-600"
+                        />
+                      </th>
+                    )}
                     <th onClick={() => handleSort('first_name')} className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700">
                       <div className="flex items-center space-x-1">
                         <span>Name</span>
@@ -1937,7 +2164,7 @@ export default function TeamDetail({ user, refreshUser }) {
                     editingMemberId === member.id ? (
                       <MemberEditRow
                         key={member.id}
-                        colSpan={5}
+                        colSpan={canManageTeam ? 6 : 5}
                         form={memberEditForm}
                         setForm={setMemberEditForm}
                         takRoleValues={takRoleValues}
@@ -1948,6 +2175,17 @@ export default function TeamDetail({ user, refreshUser }) {
                       />
                     ) : (
                       <tr key={member.id} className="hover:bg-gray-50 dark:hover:bg-gray-800">
+                        {canManageTeam && (
+                          <td className="px-3 py-4 whitespace-nowrap">
+                            <input
+                              type="checkbox"
+                              checked={selectedMemberIds.has(member.id)}
+                              onChange={() => toggleMemberSelected(member.id)}
+                              aria-label={`Select ${memberLabel(member)}`}
+                              className="rounded border-gray-300 dark:border-gray-600"
+                            />
+                          </td>
+                        )}
                         <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">
                           {member.first_name} {member.last_name}
                           {/* account-lifecycle-management Requirement
@@ -3842,6 +4080,99 @@ export default function TeamDetail({ user, refreshUser }) {
           targetUsername={suspendingMember.member.username}
           onClose={() => setSuspendingMember(null)}
           onCompleted={refreshMembersAfterSuspend}
+        />
+      )}
+
+      {/* Orgs & Teams multi-select: bulk-action dialogs, all built on
+          the eligibility-screened `selectedMembersUnique` set --
+          `handleBulkActionClick` never opens one of these unless every
+          selected row already passed that action's requirements, so
+          the server-side per-row re-check succeeds for every row in the
+          normal case. */}
+      {bulkAction === 'resend' && (
+        <BulkConfirmDialog
+          title="Resend Welcome Email"
+          rows={selectedMembersUnique.map((m) => ({ id: m.id, label: memberLabel(m) }))}
+          description={<p>Resend the welcome email to {selectedMembersUnique.length} selected member{selectedMembersUnique.length !== 1 ? 's' : ''}?</p>}
+          onClose={closeBulkAction}
+          onConfirm={async (ids) => (await usersAPI.bulkResendWelcome(ids, team.id)).data}
+          renderRowResult={(result) => (result.success ? 'Welcome email resent' : result.error)}
+          resultRowId={(result) => result.userId}
+          onCompleted={handleBulkActionCompleted}
+        />
+      )}
+
+      {bulkAction === 'suspend' && (
+        <BulkConfirmDialog
+          title="Suspend Accounts"
+          tone="danger"
+          literalWord="SUSPEND"
+          rows={selectedMembersUnique.map((m) => ({ id: m.id, label: memberLabel(m) }))}
+          description={
+            <>
+              <p>Suspend {selectedMembersUnique.length} selected account{selectedMembersUnique.length !== 1 ? 's' : ''}?</p>
+              <p className="text-amber-700 dark:text-amber-400">
+                This locks each account's Authentik identity and revokes every live TAK Server certificate it currently
+                holds. It can be undone later, but a revoked certificate cannot be restored -- re-enrollment issues a new
+                one.
+              </p>
+            </>
+          }
+          onClose={closeBulkAction}
+          onConfirm={async (ids) => (await usersAPI.bulkSuspend(ids)).data}
+          renderRowResult={(result) => (result.success ? 'Account suspended' : result.error)}
+          resultRowId={(result) => result.userId}
+          onCompleted={handleBulkActionCompleted}
+        />
+      )}
+
+      {bulkAction === 'unsuspend' && (
+        <BulkConfirmDialog
+          title="Unsuspend Accounts"
+          rows={selectedMembersUnique.map((m) => ({ id: m.id, label: memberLabel(m) }))}
+          description={<p>Unsuspend {selectedMembersUnique.length} selected account{selectedMembersUnique.length !== 1 ? 's' : ''}? No certificate is restored automatically -- anyone who needs one again will need to re-enroll.</p>}
+          onClose={closeBulkAction}
+          onConfirm={async (ids) => (await usersAPI.bulkUnsuspend(ids)).data}
+          renderRowResult={(result) => (result.success ? 'Account unsuspended' : result.error)}
+          resultRowId={(result) => result.userId}
+          onCompleted={handleBulkActionCompleted}
+        />
+      )}
+
+      {bulkAction === 'delete' && (
+        <BulkConfirmDialog
+          title="Permanently Delete Users"
+          tone="danger"
+          literalWord="DELETE"
+          rows={selectedMembersUnique.map((m) => ({ id: m.id, label: memberLabel(m) }))}
+          description={
+            <>
+              <p>Permanently delete {selectedMembersUnique.length} selected user{selectedMembersUnique.length !== 1 ? 's' : ''}? This action cannot be undone.</p>
+              <p>Each user will be removed from all teams and channels, and their account will be deleted from the system and from the identity provider.</p>
+            </>
+          }
+          onClose={closeBulkAction}
+          onConfirm={async (ids) => (await usersAPI.bulkRemoveFromTeam(ids, team.id)).data}
+          renderRowResult={(result) => {
+            if (!result.success) {
+              return result.error
+            }
+            return result.authentikAccountDeleted === false
+              ? 'Deleted, but their Authentik account could not be removed immediately (cleanup queued)'
+              : 'Permanently deleted'
+          }}
+          resultRowId={(result) => result.userId}
+          onCompleted={handleBulkActionCompleted}
+        />
+      )}
+
+      {bulkAction === 'transfer' && (
+        <BulkTransferDialog
+          members={selectedMembersUnique}
+          team={team}
+          user={user}
+          onClose={closeBulkAction}
+          onCompleted={handleBulkActionCompleted}
         />
       )}
 

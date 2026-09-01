@@ -386,4 +386,60 @@ router.delete('/:deviceUserId', authenticateToken, authorize, [
   }
 });
 
+/**
+ * bulk-actions (Team Devices tab multi-select): the same delete as the
+ * single-item route above, applied to an array of `deviceUserId`s.
+ * Shares `device:manage` with every other device route -- reachable
+ * broadly, with `DeviceEnrollmentService.deleteDevice`'s own
+ * `assertAuthorized` call (Global_Manager OR `Team.isAdmin` of the
+ * device's team) performing the REAL per-row authorization, exactly as
+ * it already does for the single-item route. One device's failure
+ * (not found, not authorized, or an unexpected error) never affects any
+ * other device in the batch -- see the module doc comment's per-row
+ * result-array convention, matching `BulkImportService`'s own shape.
+ */
+router.post('/bulk-delete', authenticateToken, authorize, [
+  body('deviceUserIds').isArray({ min: 1 }),
+  body('deviceUserIds.*').isInt({ min: 1 })
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
+  const deviceUserIds = req.body.deviceUserIds.map((id) => Number(id));
+  const results = [];
+  let successCount = 0;
+  let failureCount = 0;
+
+  for (const deviceUserId of deviceUserIds) {
+    try {
+      await DeviceEnrollmentService.deleteDevice(deviceUserId, req.user);
+
+      try {
+        await pool.query(
+          `INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [req.user.userId, 'device.delete', 'user', deviceUserId, null]
+        );
+      } catch (auditErr) {
+        getLogger().error({ err: auditErr }, 'Failed to write audit log');
+      }
+
+      results.push({ deviceUserId, success: true });
+      successCount++;
+    } catch (error) {
+      const status = ERROR_STATUS_BY_NAME[error.name];
+      const message = status ? error.message : 'Failed to delete team-owned device';
+      if (!status) {
+        getLogger().error({ err: error, deviceUserId }, 'Failed to bulk-delete team-owned device');
+      }
+      results.push({ deviceUserId, success: false, error: message });
+      failureCount++;
+    }
+  }
+
+  res.json({ successCount, failureCount, results });
+});
+
 module.exports = router;

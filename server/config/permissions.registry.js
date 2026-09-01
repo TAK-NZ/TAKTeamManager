@@ -175,6 +175,30 @@ const routes = {
   'POST /api/users/:userId/suspend': ['user:suspend'],
   'POST /api/users/:userId/unsuspend': ['user:suspend'],
 
+  // --- Bulk member-action endpoints (Orgs & Teams multi-select) ---
+  // None of these routes has a `:userId`/`:teamId` route param for a
+  // row-scoped resolver to key on -- the subject is an ARRAY of user
+  // ids. Each therefore uses a COARSE identifier (any authenticated
+  // Team_Admin or Global_Manager may reach the route at all) with the
+  // REAL per-row authorization performed inside the handler itself,
+  // mirroring `bulk_import:users`' own shape exactly (see that
+  // identifier's comment above) -- previewing/importing users, and now
+  // bulk-acting on them, are both "reachable broadly, authorized
+  // per-row" capabilities. Each new identifier below is placed in
+  // `roleDefaults.authenticated_user` for the same reason
+  // `bulk_import:users` is: the row-scoped check that actually matters
+  // happens inside the route, not at this gate.
+  'POST /api/users/bulk-suspend': ['user:bulk_suspend'],
+  'POST /api/users/bulk-unsuspend': ['user:bulk_suspend'],
+  'POST /api/users/bulk-resend-welcome': ['user:bulk_resend_welcome'],
+  'POST /api/users/bulk-transfer': ['user:bulk_transfer'],
+  // Global_Manager-only for the ENTIRE batch, matching
+  // `user:team:remove`'s own deliberately resolver-less shape (see that
+  // identifier's own comment above) -- NOT placed in
+  // `roleDefaults.authenticated_user`, so only the '*' wildcard
+  // satisfies it, exactly like `user:team:remove`.
+  'POST /api/users/bulk-remove-from-team': ['user:bulk_remove_from_team'],
+
   // --- /api/channels (server/routes/channels.js) ---
   'GET /api/channels/descriptions': ['channel:read'],
   'POST /api/channels/custom': ['channel:create:custom'],
@@ -203,8 +227,10 @@ const routes = {
   'DELETE /api/channels/:channelId': ['channel:manage'],
 
   // --- /api/requests (server/routes/requests.js) ---
-  // `POST /api/requests/team-access` runs without `authenticateToken`
-  // (public) and is tracked in publicRoutes.js instead, not here.
+  // `POST /api/requests/team-access`, `/initiate`, `/available-teams` are
+  // registered by server/routes/signup.js (mounted at bare '/api', ahead
+  // of this router) and run without `authenticateToken` (public); they
+  // are tracked in publicRoutes.js instead, not here.
   'GET /api/requests/pending': ['request:read'],
   'POST /api/requests/:requestId/approve': ['request:approve'],
   'POST /api/requests/:requestId/deny': ['request:deny'],
@@ -345,6 +371,12 @@ const routes = {
   // them.
   'PATCH /api/devices/:deviceUserId': ['device:manage'],
   'DELETE /api/devices/:deviceUserId': ['device:manage'],
+  // bulk-actions (Team Devices tab multi-select): shares `device:manage`
+  // with every other device route -- `DeviceEnrollmentService
+  // .deleteDevice`'s own `assertAuthorized` call performs the REAL
+  // per-row authorization for each id in the array, exactly as it
+  // already does for the single-item route above.
+  'POST /api/devices/bulk-delete': ['device:manage'],
   // Client UX correction: the preview counterpart of the QR-code route
   // above, resolving the same subject with the same authorization rule
   // (DeviceEnrollmentService.assertAuthorized, internally) but minting no
@@ -521,6 +553,14 @@ const roleDefaults = {
     'device:manage',
     'bulk_import:users',
     'config:read:mappings',
+    // Bulk member-action endpoints (Orgs & Teams multi-select): reachable
+    // broadly, real per-row authorization performed inside the route
+    // handler -- see those identifiers' own comments above.
+    // 'user:bulk_remove_from_team' is DELIBERATELY absent (Global_Manager
+    // -only, matching 'user:team:remove').
+    'user:bulk_suspend',
+    'user:bulk_resend_welcome',
+    'user:bulk_transfer',
     // device-management Requirements 5.1, 7.1: the two SELF-scoped
     // device-management identifiers. Their only subject is the caller's
     // own `req.user.userId`, so a static grant here cannot widen what a

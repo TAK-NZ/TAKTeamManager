@@ -262,6 +262,32 @@ export const usersAPI = {
   // `userId` names no account.
   suspendAccount: (userId) => api.post(`/users/${userId}/suspend`),
   unsuspendAccount: (userId) => api.post(`/users/${userId}/unsuspend`),
+
+  // Orgs & Teams multi-select bulk actions. Every one of these resolves
+  // 200 with { successCount, failureCount, results: [{userId, success,
+  // error?, ...}] } -- one row's failure never affects any other row's
+  // outcome, mirroring `bulkImportAPI`'s own per-row result shape. The
+  // caller is expected to have already screened eligibility client-side
+  // (see the Members tab's pre-screen before opening any bulk-confirm
+  // dialog); the server re-validates per row regardless, so a stale
+  // client-side screen still surfaces as a per-row failure rather than
+  // a false success.
+  bulkSuspend: (userIds) => api.post('/users/bulk-suspend', { userIds }),
+  bulkUnsuspend: (userIds) => api.post('/users/bulk-unsuspend', { userIds }),
+  bulkResendWelcome: (userIds, teamId) => api.post('/users/bulk-resend-welcome', { userIds, teamId }),
+  // data: { targetTeamId, justification?, callsignSuffix? } -- same
+  // shape as the single-item `transfer` call above, applied to every id
+  // in `userIds`. A row that lands on the Dual_Admin path is completed
+  // immediately; a row that needs approval creates its own pending
+  // Transfer_Request -- the two outcomes are distinguished per-row via
+  // each result's own `status` field, not a batch-wide status.
+  bulkTransfer: (userIds, data) => api.post('/users/bulk-transfer', { userIds, ...data }),
+  // Global_Manager-only for the ENTIRE batch (matching `removeFromTeam`'s
+  // own Global_Manager-only, resolver-less authorization) -- a
+  // non-Global_Manager caller is rejected outright with 403 before any
+  // row is read, never a per-row failure the way the other bulk actions
+  // report an authorization denial.
+  bulkRemoveFromTeam: (userIds, teamId) => api.post('/users/bulk-remove-from-team', { userIds, teamId }),
 };
 
 export const channelsAPI = {
@@ -293,7 +319,6 @@ export const requestsAPI = {
   getPending: () => api.get('/requests/pending'),
   approveRequest: (requestId, data) => api.post(`/requests/${requestId}/approve`, data),
   denyRequest: (requestId, data) => api.post(`/requests/${requestId}/deny`, data),
-  verifyEmail: (token) => api.get(`/requests/verify/${token}`),
 };
 
 export const configAPI = {
@@ -547,6 +572,13 @@ export const devicesAPI = {
   // an existing device (team membership, Authentik user, and local
   // account).
   delete: (deviceUserId) => api.delete(`/devices/${deviceUserId}`),
+
+  // Team Devices tab multi-select: the same delete as `delete` above,
+  // applied to every id in `deviceUserIds`. Resolves 200 with
+  // { successCount, failureCount, results: [{deviceUserId, success,
+  // error?}] } -- one device's failure never affects any other
+  // device's outcome, mirroring `usersAPI`'s own bulk-action shape.
+  bulkDelete: (deviceUserIds) => api.post('/devices/bulk-delete', { deviceUserIds }),
 };
 
 export default api;

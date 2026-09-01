@@ -2193,63 +2193,607 @@ router.post('/:userId/unsuspend', authenticateToken, authorize, async (req, res)
   }
 });
 
+/**
+ * bulk-actions: the shared core of `POST /:userId/resend-welcome`, so the
+ * single-item route and `POST /bulk-resend-welcome` below send the
+ * IDENTICAL email with no duplicated logic. Throws on a missing user
+ * (`userId` names no `users` row) -- both call sites map that to a 404
+ * (single-item) or a per-row failure (bulk).
+ *
+ * @param {number|string} userId
+ * @param {number|string|null} teamId
+ * @param {number|null} actingUserId - for the audit_logs row.
+ * @returns {Promise<{email: string}>}
+ */
+async function sendWelcomeEmailToUser(userId, teamId, actingUserId) {
+  const userResult = await pool.query(
+    'SELECT u.id, u.email, u.first_name, u.last_name, uc.tak_callsign FROM users u LEFT JOIN user_cache uc ON uc.authentik_id = u.authentik_user_id::text WHERE u.id = $1',
+    [userId]
+  );
+  if (userResult.rows.length === 0) {
+    const notFound = new Error('User not found');
+    notFound.name = 'ResendWelcomeUserNotFoundError';
+    throw notFound;
+  }
+  const user = userResult.rows[0];
+
+  let teamPath = '';
+  if (teamId) {
+    try {
+      const ancestors = await Team.getAncestorChain(teamId);
+      if (ancestors.length > 0) {
+        const root = ancestors[ancestors.length - 1];
+        const team = ancestors[0];
+        teamPath = ancestors.length > 1
+          ? `${root.callsign_prefix || root.name} - ${team.name}`
+          : (team.callsign_prefix || team.name);
+      }
+    } catch (e) {
+      const teamResult = await pool.query('SELECT name FROM teams WHERE id = $1', [teamId]);
+      if (teamResult.rows.length > 0) teamPath = teamResult.rows[0].name;
+    }
+  }
+
+  const emailService = new EmailService();
+  await emailService.sendApprovalEmail(user.email, {
+    teamPath,
+    username: user.email,
+    callsign: user.tak_callsign || 'Will be assigned',
+    firstName: user.first_name || ''
+  });
+
+  try {
+    await pool.query(
+      'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+      [actingUserId, 'user.resend_welcome', 'user', parseInt(userId, 10), JSON.stringify({ email: user.email })]
+    );
+  } catch (auditErr) {
+    getLogger().error({ err: auditErr }, 'Failed to write audit log');
+  }
+
+  return { email: user.email };
+}
+
 // Resend welcome/approval email to user
 router.post('/:userId/resend-welcome', authenticateToken, authorize, async (req, res) => {
   try {
     const { userId } = req.params;
     const { teamId } = req.body;
-
-    // Get user details
-    const userResult = await pool.query(
-      'SELECT u.id, u.email, u.first_name, u.last_name, uc.tak_callsign FROM users u LEFT JOIN user_cache uc ON uc.authentik_id = u.authentik_user_id::text WHERE u.id = $1',
-      [userId]
-    );
-    if (userResult.rows.length === 0) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-    const user = userResult.rows[0];
-
-    // Build team path display name
-    let teamPath = '';
-    if (teamId) {
-      try {
-        const ancestors = await Team.getAncestorChain(teamId);
-        if (ancestors.length > 0) {
-          const root = ancestors[ancestors.length - 1];
-          const team = ancestors[0];
-          teamPath = ancestors.length > 1
-            ? `${root.callsign_prefix || root.name} - ${team.name}`
-            : (team.callsign_prefix || team.name);
-        }
-      } catch (e) {
-        // fallback: just use team name directly
-        const teamResult = await pool.query('SELECT name FROM teams WHERE id = $1', [teamId]);
-        if (teamResult.rows.length > 0) teamPath = teamResult.rows[0].name;
-      }
-    }
-
-    const emailService = new EmailService();
-    await emailService.sendApprovalEmail(user.email, {
-      teamPath,
-      username: user.email,
-      callsign: user.tak_callsign || 'Will be assigned',
-      firstName: user.first_name || ''
-    });
-
-    try {
-      await pool.query(
-        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
-        [req.user.userId, 'user.resend_welcome', 'user', parseInt(userId, 10), JSON.stringify({ email: user.email })]
-      );
-    } catch (auditErr) {
-      getLogger().error({ err: auditErr }, 'Failed to write audit log');
-    }
-
+    await sendWelcomeEmailToUser(userId, teamId, req.user.userId);
     res.json({ message: 'Welcome email resent successfully' });
   } catch (error) {
+    if (error.name === 'ResendWelcomeUserNotFoundError') {
+      return res.status(404).json({ error: 'User not found' });
+    }
     getLogger().error({ err: error }, 'Failed to resend welcome email');
     res.status(500).json({ error: 'Failed to resend welcome email' });
   }
+});
+
+// ---------------------------------------------------------------------
+// Bulk member-action endpoints (Orgs & Teams multi-select).
+//
+// Every route below accepts `{ userIds: number[] }` (plus whatever extra
+// fields the single-item counterpart needs) and returns
+// `{ successCount, failureCount, results: [{userId, success, ...}] }`,
+// mirroring `BulkImportService`'s own per-row result-array convention --
+// never an all-or-nothing transaction, so one row's failure never affects
+// any other row's outcome.
+//
+// None of these routes has a `:userId`/`:teamId` URL param for the
+// Authorization_Middleware's row-scoped resolvers to key on (the subject
+// is an ARRAY), so each route's Permission_Registry identifier is
+// deliberately COARSE ("is this caller an admin of *something*, or a
+// Global_Manager" -- the same shape `user:read:team_admin`'s resolver
+// already uses for the same reason). The REAL per-row authorization is
+// performed HERE, inside each loop, reusing the exact same primitive
+// (`Team.isAdmin`) the corresponding single-item resolver in
+// `authorize.js` uses -- an unauthorized row is recorded as that row's
+// own failure, exactly like `BulkImportService.importUserRow`'s own
+// per-row `Team.isAdmin` check, never a whole-batch 403. A client that
+// already screened eligibility will see every row succeed in the normal
+// case; this defensive re-check exists because a client-side screen is
+// never trusted as the actual authorization boundary.
+// ---------------------------------------------------------------------
+
+function parseBulkUserIds(body) {
+  if (!Array.isArray(body?.userIds) || body.userIds.length === 0) {
+    return null;
+  }
+  const ids = body.userIds.map((id) => Number(id));
+  if (ids.some((id) => !Number.isInteger(id) || id < 1)) {
+    return null;
+  }
+  return ids;
+}
+
+/**
+ * Mirrors the `user:suspend` resolver's own check (`authorize.js`)
+ * exactly: Global_Manager, or an admin of the target's Direct_Membership
+ * team.
+ */
+async function isAuthorizedForSuspendAction(targetUserId, actorId, actorIsGlobalManager) {
+  if (actorIsGlobalManager) {
+    return true;
+  }
+  const membershipResult = await pool.query(
+    'SELECT team_id FROM team_memberships WHERE user_id = $1 AND inherited_from_team_id IS NULL',
+    [targetUserId]
+  );
+  const teamId = membershipResult.rows[0]?.team_id;
+  if (teamId === undefined) {
+    return false;
+  }
+  return Team.isAdmin(teamId, actorId);
+}
+
+router.post('/bulk-suspend', authenticateToken, authorize, async (req, res) => {
+  const userIds = parseBulkUserIds(req.body);
+  if (!userIds) {
+    return res.status(400).json({ error: 'userIds must be a non-empty array of positive integers' });
+  }
+
+  const actorId = req.user.userId;
+  const actorIsGlobalManager = !!req.user.is_global_manager;
+  const results = [];
+  let successCount = 0;
+  let failureCount = 0;
+
+  for (const targetUserId of userIds) {
+    try {
+      const authorized = await isAuthorizedForSuspendAction(targetUserId, actorId, actorIsGlobalManager);
+      if (!authorized) {
+        results.push({ userId: targetUserId, success: false, error: 'You do not have permission to suspend this account' });
+        failureCount++;
+        continue;
+      }
+      const outcome = await AccountLifecycleService.suspendAccount(targetUserId, req.user);
+      results.push({ userId: targetUserId, success: true, accountStatus: outcome.accountStatus });
+      successCount++;
+    } catch (error) {
+      let message = 'Failed to suspend account';
+      if (error instanceof TargetUserNotFoundError) {
+        message = 'User not found';
+      } else if (error instanceof AccountAlreadySuspendedError || error instanceof AccountOrphanedError) {
+        message = error.message;
+      } else {
+        getLogger().error({ err: error, targetUserId }, 'Failed to bulk-suspend account');
+      }
+      results.push({ userId: targetUserId, success: false, error: message });
+      failureCount++;
+    }
+  }
+
+  res.json({ successCount, failureCount, results });
+});
+
+router.post('/bulk-unsuspend', authenticateToken, authorize, async (req, res) => {
+  const userIds = parseBulkUserIds(req.body);
+  if (!userIds) {
+    return res.status(400).json({ error: 'userIds must be a non-empty array of positive integers' });
+  }
+
+  const actorId = req.user.userId;
+  const actorIsGlobalManager = !!req.user.is_global_manager;
+  const results = [];
+  let successCount = 0;
+  let failureCount = 0;
+
+  for (const targetUserId of userIds) {
+    try {
+      // 'user:suspend' covers both suspend AND unsuspend -- the same
+      // authorization question asked twice, not two different
+      // capabilities -- see that resolver's own doc comment.
+      const authorized = await isAuthorizedForSuspendAction(targetUserId, actorId, actorIsGlobalManager);
+      if (!authorized) {
+        results.push({ userId: targetUserId, success: false, error: 'You do not have permission to unsuspend this account' });
+        failureCount++;
+        continue;
+      }
+      const outcome = await AccountLifecycleService.unsuspendAccount(targetUserId, req.user);
+      results.push({ userId: targetUserId, success: true, accountStatus: outcome.accountStatus });
+      successCount++;
+    } catch (error) {
+      let message = 'Failed to unsuspend account';
+      if (error instanceof TargetUserNotFoundError) {
+        message = 'User not found';
+      } else if (error instanceof AccountOrphanedError || error instanceof AccountNotSuspendedError) {
+        message = error.message;
+      } else {
+        getLogger().error({ err: error, targetUserId }, 'Failed to bulk-unsuspend account');
+      }
+      results.push({ userId: targetUserId, success: false, error: message });
+      failureCount++;
+    }
+  }
+
+  res.json({ successCount, failureCount, results });
+});
+
+router.post('/bulk-resend-welcome', authenticateToken, authorize, async (req, res) => {
+  const userIds = parseBulkUserIds(req.body);
+  if (!userIds) {
+    return res.status(400).json({ error: 'userIds must be a non-empty array of positive integers' });
+  }
+  const { teamId } = req.body;
+  const actorId = req.user.userId;
+  const actorIsGlobalManager = !!req.user.is_global_manager;
+  const results = [];
+  let successCount = 0;
+  let failureCount = 0;
+
+  for (const targetUserId of userIds) {
+    try {
+      // Mirrors the `user:resend_welcome:team_admin` resolver exactly:
+      // Global_Manager, or an admin of at least one of the target's
+      // current teams.
+      let authorized = actorIsGlobalManager;
+      if (!authorized) {
+        const userTeams = await User.getTeamMemberships(targetUserId);
+        for (const team of userTeams) {
+          if (await Team.isAdmin(team.id, actorId)) {
+            authorized = true;
+            break;
+          }
+        }
+      }
+      if (!authorized) {
+        results.push({ userId: targetUserId, success: false, error: 'You do not have permission to resend a welcome email to this account' });
+        failureCount++;
+        continue;
+      }
+      await sendWelcomeEmailToUser(targetUserId, teamId, actorId);
+      results.push({ userId: targetUserId, success: true });
+      successCount++;
+    } catch (error) {
+      const message = error.name === 'ResendWelcomeUserNotFoundError' ? 'User not found' : 'Failed to resend welcome email';
+      if (error.name !== 'ResendWelcomeUserNotFoundError') {
+        getLogger().error({ err: error, targetUserId }, 'Failed to bulk-resend welcome email');
+      }
+      results.push({ userId: targetUserId, success: false, error: message });
+      failureCount++;
+    }
+  }
+
+  res.json({ successCount, failureCount, results });
+});
+
+/**
+ * Mirrors `POST /:userId/transfer`'s steps 1-9 (see that route's own doc
+ * comment above) for exactly ONE user, but returns a `{status, error?,
+ * body?}` result instead of writing to `res` directly, so
+ * `POST /bulk-transfer` below can call it per row inside a try/catch
+ * without one row's rejection aborting the batch. A thrown typed error
+ * (`SelfTransferError`/`NoCurrentTeamError`/etc.) is mapped by the
+ * caller via the existing, already-exported `transferErrorResponse`
+ * helper -- the SAME mapping the single-item route's own catch block
+ * uses -- so the two routes can never disagree about what a given typed
+ * error means.
+ *
+ * The one addition beyond a straight mirror: an explicit per-row
+ * authorization check at the top, reproducing the `user:team:transfer`
+ * resolver's own rule (Global_Manager, or a Team_Admin of EITHER side)
+ * -- the single-item route gets this for free from that resolver
+ * running before its handler; this route's subject is an array, so
+ * there is no single `:userId` for the resolver to key on.
+ *
+ * @param {number} transferredUserId
+ * @param {{targetTeamId: number, justification?: string, callsignSuffix?: string}} body
+ * @param {number} actorId
+ * @param {boolean} actorIsGlobalManager
+ * @returns {Promise<{status: number, error?: string, body?: object}>}
+ */
+async function transferOneUserForBulk(transferredUserId, { targetTeamId, justification, callsignSuffix }, actorId, actorIsGlobalManager) {
+  const membershipResult = await pool.query(
+    'SELECT team_id, role FROM team_memberships WHERE user_id = $1 AND inherited_from_team_id IS NULL',
+    [transferredUserId]
+  );
+  const membership = membershipResult.rows[0] || null;
+
+  let initiatorAdminsSource = false;
+  let initiatorAdminsDestination = false;
+  if (!actorIsGlobalManager) {
+    initiatorAdminsSource = membership ? await Team.isAdmin(membership.team_id, actorId) : false;
+    initiatorAdminsDestination = await Team.isAdmin(targetTeamId, actorId);
+    if (!initiatorAdminsSource && !initiatorAdminsDestination) {
+      return { status: 403, error: 'You do not have permission to transfer this user' };
+    }
+  }
+
+  if (transferredUserId === actorId) {
+    throw new SelfTransferError(actorId);
+  }
+
+  const userResult = await pool.query('SELECT id FROM users WHERE id = $1', [transferredUserId]);
+  if (userResult.rows.length === 0) {
+    return { status: 404, error: 'User not found' };
+  }
+
+  const teamResult = await pool.query('SELECT id FROM teams WHERE id = $1', [targetTeamId]);
+  if (teamResult.rows.length === 0) {
+    return { status: 400, error: 'Target team not found' };
+  }
+
+  if (!membership) {
+    throw new NoCurrentTeamError(transferredUserId);
+  }
+  const sourceTeamId = membership.team_id;
+  const demotedFromAdmin = membership.role === 'admin';
+  if (sourceTeamId === targetTeamId) {
+    throw new AlreadyInDestinationTeamError(transferredUserId, targetTeamId);
+  }
+
+  const [sourceChain, destinationChain] = await Promise.all([
+    Team.getAncestorChain(sourceTeamId),
+    Team.getAncestorChain(targetTeamId)
+  ]);
+
+  if (sourceChain[0].id !== destinationChain[0].id && !actorIsGlobalManager) {
+    throw new CrossOrganisationTransferError(sourceChain[0].id, destinationChain[0].id);
+  }
+
+  const pendingResult = await pool.query(
+    `SELECT id
+       FROM access_requests
+      WHERE request_type = 'team_change'
+        AND status = 'pending'
+        AND existing_user_id = $1`,
+    [transferredUserId]
+  );
+  if (pendingResult.rows.length > 0) {
+    return { status: 409, error: PENDING_TRANSFER_CONFLICT_MESSAGE };
+  }
+
+  const isDualAdmin = actorIsGlobalManager || (initiatorAdminsSource && initiatorAdminsDestination);
+
+  if (isDualAdmin) {
+    const client = await pool.connect();
+    let outcome;
+    try {
+      await client.query('BEGIN');
+      outcome = await TeamTransferService.executeTransfer(client, {
+        userId: transferredUserId,
+        destinationTeamId: targetTeamId,
+        actorId,
+        actorIsGlobalManager,
+        callsignSuffix: callsignSuffix || null,
+        requestCallsignSuffix: null
+      });
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+
+    const effects = await TeamTransferService.applyPostCommitEffects(outcome);
+    return {
+      status: 200,
+      body: {
+        status: 'completed',
+        demotedFromAdmin: outcome.demotedFromAdmin,
+        callsign: effects.callsign,
+        destinationTeamPath: formatTeamPathForResponse(destinationChain),
+        revokedChannelCount: outcome.revokedChannelIds.length
+      }
+    };
+  }
+
+  const approvalTeamId = initiatorAdminsDestination ? sourceTeamId : targetTeamId;
+  const approvalChain = initiatorAdminsDestination ? sourceChain : destinationChain;
+  const approvalTeamName = approvalChain[approvalChain.length - 1].name;
+
+  const initiatorResult = await pool.query('SELECT email, first_name, last_name FROM users WHERE id = $1', [actorId]);
+  const initiator = initiatorResult.rows[0] || {};
+
+  const assignedAdminResult = await pool.query(
+    `SELECT user_id
+       FROM team_memberships
+      WHERE team_id = $1
+        AND role = 'admin'
+        AND inherited_from_team_id IS NULL
+      ORDER BY user_id ASC
+      LIMIT 1`,
+    [approvalTeamId]
+  );
+
+  const insertResult = await pool.query(
+    `INSERT INTO access_requests (
+       request_type, requester_email, requester_first_name, requester_last_name,
+       existing_user_id, current_team_id, target_team_id, approval_team_id,
+       initiated_by, assigned_to_admin, justification, callsign_suffix,
+       status, email_verified
+     ) VALUES ('team_change', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending', true)
+     RETURNING id`,
+    [
+      initiator.email || null,
+      initiator.first_name ?? null,
+      initiator.last_name ?? null,
+      transferredUserId,
+      sourceTeamId,
+      targetTeamId,
+      approvalTeamId,
+      actorId,
+      assignedAdminResult.rows[0]?.user_id ?? null,
+      justification || null,
+      callsignSuffix || null
+    ]
+  );
+
+  return {
+    status: 202,
+    body: {
+      status: 'pending_approval',
+      requestId: insertResult.rows[0].id,
+      demotedFromAdmin,
+      approvalTeamId,
+      approvalTeamName
+    }
+  };
+}
+
+router.post('/bulk-transfer', authenticateToken, authorize, [
+  body('userIds').isArray({ min: 1 }),
+  body('userIds.*').isInt({ min: 1 }),
+  body('targetTeamId').isInt({ min: 1 }).toInt(),
+  body('justification').optional().trim().isLength({ max: 500 }),
+  body('callsignSuffix').optional().trim().isLength({ max: 255 })
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
+  const userIds = parseBulkUserIds(req.body);
+  if (!userIds) {
+    return res.status(400).json({ error: 'userIds must be a non-empty array of positive integers' });
+  }
+
+  const actorId = req.user.userId;
+  const actorIsGlobalManager = !!req.user.is_global_manager;
+  const { targetTeamId, justification, callsignSuffix } = req.body;
+  const results = [];
+  let successCount = 0;
+  let failureCount = 0;
+
+  for (const transferredUserId of userIds) {
+    try {
+      const outcome = await transferOneUserForBulk(
+        transferredUserId,
+        { targetTeamId, justification, callsignSuffix },
+        actorId,
+        actorIsGlobalManager
+      );
+      if (outcome.status < 300) {
+        results.push({ userId: transferredUserId, success: true, ...outcome.body });
+        successCount++;
+      } else {
+        results.push({ userId: transferredUserId, success: false, error: outcome.error });
+        failureCount++;
+      }
+    } catch (error) {
+      const mapped = transferErrorResponse(error);
+      const message = mapped ? mapped.error : 'Failed to transfer user';
+      if (!mapped) {
+        getLogger().error({ err: error, transferredUserId, targetTeamId }, 'Failed to bulk-transfer user');
+      }
+      results.push({ userId: transferredUserId, success: false, error: message });
+      failureCount++;
+    }
+  }
+
+  res.json({ successCount, failureCount, results });
+});
+
+/**
+ * Global_Manager-only for the ENTIRE batch, matching
+ * `DELETE /api/users/remove-from-team/:userId`'s own deliberately
+ * resolver-less, wildcard-only authorization exactly (see that route's
+ * `user:team:remove` Permission_Registry entry and its
+ * `REVIEWED_GLOBAL_MANAGER_ONLY` documentation in
+ * `permissions.registry.test.js`). Widening who may permanently delete
+ * an account is a separate decision that has not been made; this bulk
+ * route inherits that same restriction rather than loosening it as a
+ * side effect of adding batching -- checked ONCE, up front, not
+ * per-row, since there is no Team_Admin path to fall back to at all.
+ */
+router.post('/bulk-remove-from-team', authenticateToken, authorize, [
+  body('userIds').isArray({ min: 1 }),
+  body('userIds.*').isInt({ min: 1 }),
+  body('teamId').isInt()
+], async (req, res) => {
+  if (!req.user.is_global_manager) {
+    return res.status(403).json({ error: 'Only a Global_Manager may permanently delete a user' });
+  }
+
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
+  const userIds = parseBulkUserIds(req.body);
+  if (!userIds) {
+    return res.status(400).json({ error: 'userIds must be a non-empty array of positive integers' });
+  }
+  // `teamId` is validated above (matching the single-item route's own
+  // required field) but not read here: `removeUserFromTeam` deletes
+  // EVERY team_memberships row for a user regardless of team, exactly
+  // as the single-item route's own comment on that call explains.
+  const results = [];
+  let successCount = 0;
+  let failureCount = 0;
+
+  for (const userId of userIds) {
+    try {
+      const userResult = await pool.query('SELECT authentik_user_id FROM users WHERE id = $1', [userId]);
+      if (userResult.rows.length === 0) {
+        results.push({ userId, success: false, error: 'User not found' });
+        failureCount++;
+        continue;
+      }
+      const authentikUserId = userResult.rows[0].authentik_user_id;
+
+      await TeamMembershipService.removeUserFromTeam(userId, req.user.userId);
+
+      const certificateRevocationDryRun = !isDeviceMgmtRevokeEnabled();
+
+      await UserAttributesService.clearUserAttributes(authentikUserId);
+
+      let authentikAccountDeleted = true;
+      try {
+        const deleteResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
+        });
+        if (!deleteResponse.ok && deleteResponse.status !== 404) {
+          throw new Error(`Authentik delete responded with status ${deleteResponse.status}`);
+        }
+      } catch (deleteErr) {
+        getLogger().error({ err: deleteErr, userId }, 'Failed to delete user from Authentik during bulk remove');
+        authentikAccountDeleted = false;
+        try {
+          await EventPublisher.publishOperation(
+            'cleanup_orphaned_authentik_user',
+            { authentik_user_id: authentikUserId },
+            req.user.userId
+          );
+        } catch (enqueueErr) {
+          getLogger().error(
+            { err: enqueueErr, authentikUserId },
+            'Failed to enqueue cleanup_orphaned_authentik_user compensating operation during bulk remove'
+          );
+        }
+      }
+
+      await pool.query('DELETE FROM user_cache WHERE authentik_id = $1', [String(authentikUserId)]);
+      await pool.query('DELETE FROM users WHERE id = $1', [userId]);
+
+      try {
+        await pool.query(
+          'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+          [
+            req.user.userId,
+            'user.remove_from_team',
+            'user',
+            userId,
+            JSON.stringify({ authentikAccountDeleted, certificateRevocationDryRun })
+          ]
+        );
+      } catch (auditErr) {
+        getLogger().error({ err: auditErr }, 'Failed to write audit log');
+      }
+
+      results.push({ userId, success: true, authentikAccountDeleted, certificateRevocationDryRun });
+      successCount++;
+    } catch (error) {
+      getLogger().error({ err: error, userId }, 'Failed to bulk-remove user from team');
+      results.push({ userId, success: false, error: error.message || 'Failed to remove user' });
+      failureCount++;
+    }
+  }
+
+  res.json({ successCount, failureCount, results });
 });
 
 module.exports = router;

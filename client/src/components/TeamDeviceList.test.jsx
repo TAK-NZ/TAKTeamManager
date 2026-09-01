@@ -6,7 +6,7 @@ import TeamDeviceList, {
   deviceDisplayName,
   interpretTeamDeviceListError,
 } from './TeamDeviceList.jsx'
-import { devicesAPI, usersAPI } from '../services/api'
+import { devicesAPI, usersAPI, teamsAPI } from '../services/api'
 
 // takserver-enrollment Requirements 5.9, 5.10, 14.7 (task 11.2)
 //
@@ -18,16 +18,28 @@ globalThis.React = React
 vi.mock('../services/api', () => ({
   devicesAPI: {
     getTeamDevices: vi.fn(),
+    delete: vi.fn(),
+    bulkDelete: vi.fn(),
   },
   // account-lifecycle-management Requirement 1.11: stubbed because
   // `SuspendAccountDialog` (rendered by this component) imports
   // `usersAPI` from this same mocked module -- a named import of a
   // missing export from a mocked ES module is a load-time failure, per
   // this project's mock-hygiene convention, even on a test that never
-  // opens that dialog.
+  // opens that dialog. `bulkSuspend`/`bulkUnsuspend`/`bulkTransfer` are
+  // stubbed for the same reason: Orgs & Teams multi-select's
+  // `BulkConfirmDialog`/`BulkTransferDialog` (also rendered by this
+  // component) reach them, even though no test in this file opens a
+  // bulk-action dialog.
   usersAPI: {
     suspendAccount: vi.fn(),
     unsuspendAccount: vi.fn(),
+    bulkSuspend: vi.fn(),
+    bulkUnsuspend: vi.fn(),
+    bulkTransfer: vi.fn(),
+  },
+  teamsAPI: {
+    getMyTeams: vi.fn(),
   },
 }))
 
@@ -270,9 +282,11 @@ describe('TeamDeviceList (mounted)', () => {
     // plain "Added"-only informational column are gone; "Username" is
     // no longer its OWN column header (it now renders stacked under the
     // device name).
+    // Orgs & Teams multi-select: a leading select-all checkbox column
+    // (empty header text) now precedes the original four.
     const table = container.querySelector('table')
     const headerCells = [...table.querySelectorAll('thead th')].map((th) => th.textContent.trim())
-    expect(headerCells).toEqual(['Device', 'TAK Callsign & Role', 'Added', 'Actions'])
+    expect(headerCells).toEqual(['', 'Device', 'TAK Callsign & Role', 'Added', 'Actions'])
   })
 
   it('falls back to "-" for the callsign and "Team Member" for the role when a device carries neither', async () => {
@@ -684,6 +698,364 @@ describe('TeamDeviceList (mounted)', () => {
 
       expect(usersAPI.suspendAccount).toHaveBeenCalledWith(1)
       expect(devicesAPI.getTeamDevices).toHaveBeenCalledTimes(2)
+    })
+  })
+
+  // Bugfix (type-to-confirm consistency): permanently deleting a device
+  // now requires typing its own username, matching "Permanently Delete
+  // User"/"Delete Channel"/"Delete Sub-Team"'s established pattern for
+  // permanent deletion, rather than a plain Cancel/Confirm dialog.
+  describe('Delete device (type-to-confirm bugfix)', () => {
+    const baseDevice = {
+      deviceUserId: 1,
+      username: 'AUK-D7K3QMX',
+      deviceLabel: 'Engine 4 Tablet',
+      teamId: 5,
+      createdAt: '2024-01-01T00:00:00Z',
+      liveCertificateCount: 1,
+      accountStatus: 'active',
+    }
+
+    function setInputValue(input, value) {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+      setter.call(input, value)
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+
+    it("disables the Confirm button until the device's exact username is typed", async () => {
+      devicesAPI.getTeamDevices.mockResolvedValue({ data: { devices: [{ ...baseDevice }] } })
+
+      root = createRoot(container)
+      await act(async () => {
+        root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+      })
+      await act(async () => {
+        await Promise.resolve()
+      })
+
+      const deleteButton = container.querySelector('button[title="Delete device"]')
+      await act(async () => {
+        deleteButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+
+      const dialog = container.querySelector('#delete-device-title').closest('[role="dialog"]')
+      const confirmButton = dialog.querySelector('button.btn-danger')
+      expect(confirmButton.disabled).toBe(true)
+
+      const confirmInput = dialog.querySelector('#delete-device-confirm')
+      await act(async () => {
+        setInputValue(confirmInput, 'wrong-value')
+      })
+      expect(confirmButton.disabled).toBe(true)
+
+      await act(async () => {
+        setInputValue(confirmInput, baseDevice.username)
+      })
+      expect(confirmButton.disabled).toBe(false)
+
+      expect(devicesAPI.delete).not.toHaveBeenCalled()
+    })
+
+    it('calls devicesAPI.delete only once the exact username has been typed and Confirm is clicked', async () => {
+      devicesAPI.getTeamDevices.mockResolvedValue({ data: { devices: [{ ...baseDevice }] } })
+      devicesAPI.delete.mockResolvedValue({ data: {} })
+
+      root = createRoot(container)
+      await act(async () => {
+        root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+      })
+      await act(async () => {
+        await Promise.resolve()
+      })
+
+      const deleteButton = container.querySelector('button[title="Delete device"]')
+      await act(async () => {
+        deleteButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+
+      const dialog = container.querySelector('#delete-device-title').closest('[role="dialog"]')
+      const confirmInput = dialog.querySelector('#delete-device-confirm')
+      await act(async () => {
+        setInputValue(confirmInput, baseDevice.username)
+      })
+
+      const confirmButton = dialog.querySelector('button.btn-danger')
+      await act(async () => {
+        confirmButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+      await act(async () => {
+        await Promise.resolve()
+      })
+
+      expect(devicesAPI.delete).toHaveBeenCalledWith(1)
+    })
+
+    it('resets the typed confirmation value after Cancel, so reopening never starts pre-filled', async () => {
+      devicesAPI.getTeamDevices.mockResolvedValue({ data: { devices: [{ ...baseDevice }] } })
+
+      root = createRoot(container)
+      await act(async () => {
+        root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+      })
+      await act(async () => {
+        await Promise.resolve()
+      })
+
+      const deleteButton = container.querySelector('button[title="Delete device"]')
+      await act(async () => {
+        deleteButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+
+      let dialog = container.querySelector('#delete-device-title').closest('[role="dialog"]')
+      let confirmInput = dialog.querySelector('#delete-device-confirm')
+      await act(async () => {
+        setInputValue(confirmInput, baseDevice.username)
+      })
+
+      const cancelButton = dialog.querySelector('button.btn-secondary')
+      await act(async () => {
+        cancelButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+
+      await act(async () => {
+        deleteButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+
+      dialog = container.querySelector('#delete-device-title').closest('[role="dialog"]')
+      confirmInput = dialog.querySelector('#delete-device-confirm')
+      expect(confirmInput.value).toBe('')
+      const confirmButton = dialog.querySelector('button.btn-danger')
+      expect(confirmButton.disabled).toBe(true)
+    })
+  })
+
+  // Orgs & Teams multi-select: Team Devices tab bulk actions (Transfer/
+  // Suspend/Unsuspend/Delete only -- Edit and Enroll are excluded, per
+  // the user's own request).
+  describe('Multi-select bulk actions (Transfer/Suspend/Unsuspend/Delete)', () => {
+    const activeDevice = {
+      deviceUserId: 1,
+      username: 'AUK-D7K3QMX',
+      deviceLabel: 'Engine 4 Tablet',
+      teamId: 5,
+      createdAt: '2024-01-01T00:00:00Z',
+      liveCertificateCount: 0,
+      accountStatus: 'active',
+    }
+    const suspendedDevice = {
+      deviceUserId: 2,
+      username: 'AUK-X9Q2WPLM',
+      deviceLabel: 'Ladder 1 Tablet',
+      teamId: 5,
+      createdAt: '2024-01-01T00:00:00Z',
+      liveCertificateCount: 0,
+      accountStatus: 'suspended',
+    }
+    const orphanedDevice = {
+      deviceUserId: 3,
+      username: 'AUK-Z3K7RTQP',
+      deviceLabel: 'Rescue 2 Tablet',
+      teamId: 5,
+      createdAt: '2024-01-01T00:00:00Z',
+      liveCertificateCount: 0,
+      accountStatus: 'orphaned',
+    }
+
+    const checkboxFor = (device) => container.querySelector(`input[aria-label="Select ${deviceDisplayName(device)}"]`)
+    const clickCheckbox = async (device) => {
+      await act(async () => {
+        checkboxFor(device).dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+    }
+    const findButtonByText = (text) => Array.from(container.querySelectorAll('button')).find((b) => b.textContent === text)
+
+    it('shows no toolbar until at least one device is selected', async () => {
+      devicesAPI.getTeamDevices.mockResolvedValue({ data: { devices: [{ ...activeDevice }] } })
+      root = createRoot(container)
+      await act(async () => {
+        root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+      })
+      await act(async () => { await Promise.resolve() })
+
+      expect(container.textContent).not.toContain('selected')
+      expect(findButtonByText('Transfer')).toBeUndefined()
+    })
+
+    it('shows the toolbar with a selection count once a device is checked, and clears it via "Clear selection"', async () => {
+      devicesAPI.getTeamDevices.mockResolvedValue({ data: { devices: [{ ...activeDevice }] } })
+      root = createRoot(container)
+      await act(async () => {
+        root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+      })
+      await act(async () => { await Promise.resolve() })
+
+      await clickCheckbox(activeDevice)
+      expect(container.textContent).toContain('1 selected')
+      expect(findButtonByText('Transfer')).not.toBeUndefined()
+      expect(findButtonByText('Suspend')).not.toBeUndefined()
+      expect(findButtonByText('Unsuspend')).not.toBeUndefined()
+      expect(findButtonByText('Delete')).not.toBeUndefined()
+
+      await click(findButtonByText('Clear selection'))
+      expect(container.textContent).not.toContain('selected')
+      expect(checkboxFor(activeDevice).checked).toBe(false)
+    })
+
+    async function click(el) {
+      await act(async () => {
+        el.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+    }
+
+    it('blocks Suspend outright (via toast, no dialog) when the selection includes an orphaned or already-suspended device', async () => {
+      devicesAPI.getTeamDevices.mockResolvedValue({
+        data: { devices: [{ ...activeDevice }, { ...suspendedDevice }] }
+      })
+      root = createRoot(container)
+      await act(async () => {
+        root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+      })
+      await act(async () => { await Promise.resolve() })
+
+      await clickCheckbox(activeDevice)
+      await clickCheckbox(suspendedDevice)
+      await click(findButtonByText('Suspend'))
+
+      // Blocked outright: no bulk-confirm dialog opens.
+      expect(container.querySelector('#bulk-confirm-title')).toBeNull()
+    })
+
+    it('opens the type-to-confirm Suspend dialog when every selected device is eligible, and calls usersAPI.bulkSuspend with every selected id', async () => {
+      devicesAPI.getTeamDevices.mockResolvedValue({ data: { devices: [{ ...activeDevice }] } })
+      usersAPI.bulkSuspend.mockResolvedValue({
+        data: { successCount: 1, failureCount: 0, results: [{ userId: 1, success: true }] }
+      })
+
+      root = createRoot(container)
+      await act(async () => {
+        root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+      })
+      await act(async () => { await Promise.resolve() })
+
+      await clickCheckbox(activeDevice)
+      await click(findButtonByText('Suspend'))
+
+      const dialog = container.querySelector('#bulk-confirm-title').closest('[role="dialog"]')
+      expect(dialog).not.toBeNull()
+      const confirmButton = dialog.querySelector('button.btn-danger')
+      expect(confirmButton.disabled).toBe(true)
+
+      const input = dialog.querySelector('#bulk-confirm-input')
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+      await act(async () => {
+        setter.call(input, 'SUSPEND')
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      await click(dialog.querySelector('button.btn-danger'))
+
+      expect(usersAPI.bulkSuspend).toHaveBeenCalledWith([1])
+    })
+
+    it('blocks Unsuspend outright when the selection includes a non-suspended device', async () => {
+      devicesAPI.getTeamDevices.mockResolvedValue({ data: { devices: [{ ...activeDevice }] } })
+      root = createRoot(container)
+      await act(async () => {
+        root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+      })
+      await act(async () => { await Promise.resolve() })
+
+      await clickCheckbox(activeDevice)
+      await click(findButtonByText('Unsuspend'))
+
+      expect(container.querySelector('#bulk-confirm-title')).toBeNull()
+    })
+
+    it('opens the plain Unsuspend dialog (no type-to-confirm) when every selected device is suspended', async () => {
+      devicesAPI.getTeamDevices.mockResolvedValue({ data: { devices: [{ ...suspendedDevice }] } })
+      usersAPI.bulkUnsuspend.mockResolvedValue({
+        data: { successCount: 1, failureCount: 0, results: [{ userId: 2, success: true }] }
+      })
+
+      root = createRoot(container)
+      await act(async () => {
+        root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+      })
+      await act(async () => { await Promise.resolve() })
+
+      await clickCheckbox(suspendedDevice)
+      await click(findButtonByText('Unsuspend'))
+
+      const dialog = container.querySelector('#bulk-confirm-title').closest('[role="dialog"]')
+      expect(dialog.querySelector('#bulk-confirm-input')).toBeNull()
+      await click(dialog.querySelector('button.btn-primary'))
+
+      expect(usersAPI.bulkUnsuspend).toHaveBeenCalledWith([2])
+    })
+
+    it('opens the type-to-confirm Delete dialog and calls devicesAPI.bulkDelete with every selected deviceUserId, with no Global_Manager-only restriction', async () => {
+      devicesAPI.getTeamDevices.mockResolvedValue({ data: { devices: [{ ...activeDevice }, { ...orphanedDevice }] } })
+      devicesAPI.bulkDelete.mockResolvedValue({
+        data: { successCount: 2, failureCount: 0, results: [{ deviceUserId: 1, success: true }, { deviceUserId: 3, success: true }] }
+      })
+
+      root = createRoot(container)
+      await act(async () => {
+        root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+      })
+      await act(async () => { await Promise.resolve() })
+
+      await clickCheckbox(activeDevice)
+      await clickCheckbox(orphanedDevice)
+      await click(findButtonByText('Delete'))
+
+      const dialog = container.querySelector('#bulk-confirm-title').closest('[role="dialog"]')
+      const input = dialog.querySelector('#bulk-confirm-input')
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+      await act(async () => {
+        setter.call(input, 'DELETE')
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      await click(dialog.querySelector('button.btn-danger'))
+
+      expect(devicesAPI.bulkDelete).toHaveBeenCalledWith([1, 3])
+    })
+
+    it('opens BulkTransferDialog, adapting each selected device via toTransferMember', async () => {
+      devicesAPI.getTeamDevices.mockResolvedValue({ data: { devices: [{ ...activeDevice }] } })
+      teamsAPI.getMyTeams.mockResolvedValue({ data: { teams: [] } })
+
+      root = createRoot(container)
+      await act(async () => {
+        root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+      })
+      await act(async () => { await Promise.resolve() })
+
+      await clickCheckbox(activeDevice)
+      await click(findButtonByText('Transfer'))
+      await act(async () => { await Promise.resolve() })
+
+      expect(container.querySelector('#bulk-transfer-title')).not.toBeNull()
+      expect(container.textContent).toContain(deviceDisplayName(activeDevice))
+    })
+
+    it('checking the same device in the mobile card and desktop table toggles the identical selectedDeviceIds entry', async () => {
+      devicesAPI.getTeamDevices.mockResolvedValue({ data: { devices: [{ ...activeDevice }] } })
+      root = createRoot(container)
+      await act(async () => {
+        root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+      })
+      await act(async () => { await Promise.resolve() })
+
+      const checkboxes = container.querySelectorAll(`input[aria-label="Select ${deviceDisplayName(activeDevice)}"]`)
+      // One in the sm:hidden card block, one in the hidden sm:block table.
+      expect(checkboxes.length).toBe(2)
+
+      await act(async () => {
+        checkboxes[0].dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+      // Both checkboxes reflect the SAME underlying Set.
+      expect(checkboxes[0].checked).toBe(true)
+      expect(checkboxes[1].checked).toBe(true)
     })
   })
 })

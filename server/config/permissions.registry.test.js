@@ -417,7 +417,7 @@ describe('registry completeness: every required identifier is satisfiable', () =
    * `users`/`user_cache` rows outright, so widening who may destroy an
    * account is a separate decision that has not been made.
    */
-  const REVIEWED_GLOBAL_MANAGER_ONLY = ['user:team:remove'];
+  const REVIEWED_GLOBAL_MANAGER_ONLY = ['user:team:remove', 'user:bulk_remove_from_team'];
 
   /**
    * UNREVIEWED pre-existing exceptions. Each of these is satisfiable only

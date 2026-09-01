@@ -1,12 +1,14 @@
 import { useState, useEffect, useCallback } from 'react'
 import { DeviceTabletIcon, MagnifyingGlassIcon, PencilIcon, ArrowRightCircleIcon, QrCodeIcon, TrashIcon, XMarkIcon, LockClosedIcon, LockOpenIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
-import { devicesAPI } from '../services/api'
+import { devicesAPI, usersAPI } from '../services/api'
 import FormattedDate, { DATE_PRECISION } from './FormattedDate'
 import MultipleCertificateWarning from './MultipleCertificateWarning'
 import { DeviceExpiryLine } from './DeviceListRow'
 import TransferMemberDialog from './TransferMemberDialog'
 import SuspendAccountDialog from './SuspendAccountDialog'
+import BulkConfirmDialog from './BulkConfirmDialog'
+import BulkTransferDialog from './BulkTransferDialog'
 import { describeAccountStatusBadge } from '../utils/accountStatusBadge'
 
 /**
@@ -451,6 +453,15 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
   const [transferringDevice, setTransferringDevice] = useState(null)
   const [deletingDevice, setDeletingDevice] = useState(null)
   const [deleting, setDeleting] = useState(false)
+  // Bugfix (type-to-confirm consistency): permanently deleting a device
+  // used to be a plain Cancel/Confirm dialog -- every OTHER permanent
+  // deletion in this app ("Permanently Delete User", "Delete Channel",
+  // "Delete Sub-Team") requires typing the target's own identifying
+  // field first. A device has no email the way a human member does, so
+  // it types its own `username` instead -- the same field
+  // `SuspendAccountDialog` already types against for this exact row
+  // (`targetUsername={device.username}`), case-sensitive, no trim.
+  const [deleteConfirmInput, setDeleteConfirmInput] = useState('')
   // account-lifecycle-management Requirement 1.11: the Team Devices row
   // whose Suspend/Unsuspend confirmation is open, or null when closed.
   // `{ device, mode }` mirrors `TeamDetail.jsx`'s own `suspendingMember`
@@ -458,6 +469,17 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
   // directions, and the row's current `accountStatus` decides which one
   // this action opens.
   const [suspendingDevice, setSuspendingDevice] = useState(null)
+  // Orgs & Teams multi-select: this tab's own selection, a `Set` of
+  // `deviceUserId` -- self-contained state, matching how this component
+  // already owns its own fetch/dialogs independently of `TeamDetail.jsx`
+  // (see the module doc comment above). Edit and Enroll are excluded
+  // from bulk actions, per the same scoping the Members tab's own
+  // multi-select uses; only Transfer/Suspend/Unsuspend/Delete are
+  // offered here.
+  const [selectedDeviceIds, setSelectedDeviceIds] = useState(() => new Set())
+  // The bulk action currently open ('transfer'|'suspend'|'unsuspend'|
+  // 'delete'), or null.
+  const [bulkAction, setBulkAction] = useState(null)
 
   const fetchDevices = useCallback(async () => {
     if (!teamId) {
@@ -546,6 +568,7 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
       setDevices((prev) => prev.filter((d) => d.deviceUserId !== deletingDevice.deviceUserId))
       toast.success('Device deleted')
       setDeletingDevice(null)
+      setDeleteConfirmInput('')
     } catch (err) {
       toast.error('Failed to delete device: ' + (err.response?.data?.error || err.message))
     } finally {
@@ -562,6 +585,91 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
       device,
       mode: device.accountStatus === 'suspended' ? 'unsuspend' : 'suspend'
     })
+  }
+
+  // --- Orgs & Teams multi-select: Team Devices tab bulk actions ---
+  const toggleDeviceSelected = (deviceUserId) => {
+    setSelectedDeviceIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(deviceUserId)) {
+        next.delete(deviceUserId)
+      } else {
+        next.add(deviceUserId)
+      }
+      return next
+    })
+  }
+
+  // Select-all targets only the current filtered view (`filteredDevices`
+  // -- this tab has no pagination, so "filtered" is the whole visible
+  // list), matching the Members tab's own paginatedData-scoped select-all.
+  const allVisibleDeviceIdsSelected =
+    filteredDevices.length > 0 && filteredDevices.every((device) => selectedDeviceIds.has(device.deviceUserId))
+
+  const toggleSelectAllVisibleDevices = () => {
+    setSelectedDeviceIds((prev) => {
+      const next = new Set(prev)
+      if (allVisibleDeviceIdsSelected) {
+        filteredDevices.forEach((device) => next.delete(device.deviceUserId))
+      } else {
+        filteredDevices.forEach((device) => next.add(device.deviceUserId))
+      }
+      return next
+    })
+  }
+
+  const clearDeviceSelection = () => setSelectedDeviceIds(new Set())
+
+  const selectedDevices = devices.filter((device) => selectedDeviceIds.has(device.deviceUserId))
+
+  // Eligibility pre-screen (option b, matching the Members tab's own
+  // rule exactly): blocks the action outright, naming the ineligible
+  // rows, rather than opening a dialog that would partially fail. No
+  // Global_Manager-only restriction here -- unlike deleting a HUMAN
+  // account, deleting a Team_Owned_Device is `device:manage`-gated (any
+  // admin of the device's team, human or not), so there is no
+  // authorization-based exclusion the client can usefully pre-screen for
+  // delete the way it can for the Members tab's user-delete action.
+  const checkBulkDeviceEligibility = (action) => {
+    if (selectedDevices.length === 0) {
+      return 'Select at least one device first.'
+    }
+
+    if (action === 'suspend') {
+      const ineligible = selectedDevices.filter(
+        (d) => d.accountStatus === 'orphaned' || d.accountStatus === 'suspended'
+      )
+      if (ineligible.length > 0) {
+        return `Cannot suspend: ${ineligible.map(deviceDisplayName).join(', ')} ${ineligible.length === 1 ? 'is' : 'are'} already suspended or has no Authentik identity (orphaned). Deselect them and try again.`
+      }
+    }
+
+    if (action === 'unsuspend') {
+      const ineligible = selectedDevices.filter(
+        (d) => d.accountStatus === 'orphaned' || d.accountStatus !== 'suspended'
+      )
+      if (ineligible.length > 0) {
+        return `Cannot unsuspend: ${ineligible.map(deviceDisplayName).join(', ')} ${ineligible.length === 1 ? 'is' : 'are'} not currently suspended. Deselect them and try again.`
+      }
+    }
+
+    return null
+  }
+
+  const handleBulkActionClick = (action) => {
+    const ineligibleMessage = checkBulkDeviceEligibility(action)
+    if (ineligibleMessage) {
+      toast.error(ineligibleMessage)
+      return
+    }
+    setBulkAction(action)
+  }
+
+  const closeBulkAction = () => setBulkAction(null)
+
+  const handleBulkActionCompleted = () => {
+    clearDeviceSelection()
+    fetchDevices()
   }
 
   return (
@@ -583,6 +691,39 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
           {filteredDevices.length} device{filteredDevices.length !== 1 ? 's' : ''}
         </div>
       </div>
+
+      {/* Orgs & Teams multi-select: the bulk-action toolbar, shown only
+          once at least one device is selected -- mirrors the Members
+          tab's own toolbar exactly, minus Resend (devices have no
+          welcome email) and minus a Global_Manager-only Delete gate
+          (device delete has no such restriction -- see
+          `checkBulkDeviceEligibility`'s own doc comment). */}
+      {selectedDevices.length > 0 && (
+        <div className="mb-4 flex flex-wrap items-center gap-2 rounded-md border border-primary-200 dark:border-primary-800 bg-primary-50 dark:bg-primary-900/20 p-3">
+          <span className="text-sm font-medium text-gray-700 dark:text-gray-300 mr-2">
+            {selectedDevices.length} selected
+          </span>
+          <button type="button" onClick={() => handleBulkActionClick('transfer')} className="btn-secondary px-3 py-1.5 text-sm">
+            Transfer
+          </button>
+          <button type="button" onClick={() => handleBulkActionClick('suspend')} className="btn-secondary px-3 py-1.5 text-sm">
+            Suspend
+          </button>
+          <button type="button" onClick={() => handleBulkActionClick('unsuspend')} className="btn-secondary px-3 py-1.5 text-sm">
+            Unsuspend
+          </button>
+          <button type="button" onClick={() => handleBulkActionClick('delete')} className="btn-danger px-3 py-1.5 text-sm">
+            Delete
+          </button>
+          <button
+            type="button"
+            onClick={clearDeviceSelection}
+            className="text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300 underline ml-auto"
+          >
+            Clear selection
+          </button>
+        </div>
+      )}
 
       {error && (
         <p role="alert" className="text-sm text-red-600 dark:text-red-400 mb-4">
@@ -619,6 +760,16 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
             {filteredDevices.map((device) => (
               <div key={device.deviceUserId} className="p-4 space-y-2 text-sm">
                 <div className="flex items-start gap-3 min-w-0">
+                  {/* Orgs & Teams multi-select: same checkbox as the
+                      desktop table's row, sharing the SAME
+                      selectedDeviceIds Set. */}
+                  <input
+                    type="checkbox"
+                    checked={selectedDeviceIds.has(device.deviceUserId)}
+                    onChange={() => toggleDeviceSelected(device.deviceUserId)}
+                    aria-label={`Select ${deviceDisplayName(device)}`}
+                    className="mt-1 rounded border-gray-300 dark:border-gray-600 flex-shrink-0"
+                  />
                   <DeviceTabletIcon className="h-5 w-5 mt-0.5 text-gray-400 dark:text-gray-500 flex-shrink-0" aria-hidden="true" />
                   <div className="min-w-0">
                     <p className="font-medium text-gray-900 dark:text-gray-100 break-all">
@@ -676,6 +827,17 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
             <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
               <thead className="bg-gray-50 dark:bg-gray-800">
                 <tr>
+                  {/* Orgs & Teams multi-select: header select-all,
+                      targeting the current filtered list. */}
+                  <th className="px-3 py-3 text-left">
+                    <input
+                      type="checkbox"
+                      checked={allVisibleDeviceIdsSelected}
+                      onChange={toggleSelectAllVisibleDevices}
+                      aria-label="Select all visible devices"
+                      className="rounded border-gray-300 dark:border-gray-600"
+                    />
+                  </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     Device
                   </th>
@@ -695,7 +857,7 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
                   editingDeviceId === device.deviceUserId ? (
                     <DeviceEditRow
                       key={device.deviceUserId}
-                      colSpan={4}
+                      colSpan={5}
                       form={editForm}
                       setForm={setEditForm}
                       saving={savingEdit}
@@ -705,6 +867,15 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
                     />
                   ) : (
                     <tr key={device.deviceUserId} className="hover:bg-gray-50 dark:hover:bg-gray-800">
+                      <td className="px-3 py-4 whitespace-nowrap">
+                        <input
+                          type="checkbox"
+                          checked={selectedDeviceIds.has(device.deviceUserId)}
+                          onChange={() => toggleDeviceSelected(device.deviceUserId)}
+                          aria-label={`Select ${deviceDisplayName(device)}`}
+                          className="rounded border-gray-300 dark:border-gray-600"
+                        />
+                      </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">
                         <div className="flex items-center gap-2">
                           <DeviceTabletIcon className="h-4 w-4 text-gray-400 dark:text-gray-500 flex-shrink-0" aria-hidden="true" />
@@ -782,17 +953,91 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
         />
       )}
 
-      {/* Bugfix (#7): delete confirmation, matching the Remove User
-          confirmation dialog's own visual weight (danger button, red
-          title) without the type-in-email step that dialog uses -- a
-          device has no email to type. */}
+      {/* Orgs & Teams multi-select: bulk-action dialogs, built on the
+          eligibility-screened `selectedDevices` set -- `handleBulkActionClick`
+          never opens one of these unless every selected device already
+          passed that action's requirements. */}
+      {bulkAction === 'suspend' && (
+        <BulkConfirmDialog
+          title="Suspend Device Accounts"
+          tone="danger"
+          literalWord="SUSPEND"
+          rows={selectedDevices.map((d) => ({ id: d.deviceUserId, label: deviceDisplayName(d) }))}
+          description={
+            <>
+              <p>Suspend {selectedDevices.length} selected device account{selectedDevices.length !== 1 ? 's' : ''}?</p>
+              <p className="text-amber-700 dark:text-amber-400">
+                This locks each device's Authentik identity and revokes every live TAK Server certificate it currently
+                holds. It can be undone later, but a revoked certificate cannot be restored -- re-enrollment issues a
+                new one.
+              </p>
+            </>
+          }
+          onClose={() => setBulkAction(null)}
+          onConfirm={async (ids) => (await usersAPI.bulkSuspend(ids)).data}
+          renderRowResult={(result) => (result.success ? 'Account suspended' : result.error)}
+          resultRowId={(result) => result.userId}
+          onCompleted={handleBulkActionCompleted}
+        />
+      )}
+
+      {bulkAction === 'unsuspend' && (
+        <BulkConfirmDialog
+          title="Unsuspend Device Accounts"
+          rows={selectedDevices.map((d) => ({ id: d.deviceUserId, label: deviceDisplayName(d) }))}
+          description={<p>Unsuspend {selectedDevices.length} selected device account{selectedDevices.length !== 1 ? 's' : ''}? No certificate is restored automatically -- any device that needs one again will need to re-enroll.</p>}
+          onClose={() => setBulkAction(null)}
+          onConfirm={async (ids) => (await usersAPI.bulkUnsuspend(ids)).data}
+          renderRowResult={(result) => (result.success ? 'Account unsuspended' : result.error)}
+          resultRowId={(result) => result.userId}
+          onCompleted={handleBulkActionCompleted}
+        />
+      )}
+
+      {bulkAction === 'delete' && (
+        <BulkConfirmDialog
+          title="Permanently Delete Devices"
+          tone="danger"
+          literalWord="DELETE"
+          rows={selectedDevices.map((d) => ({ id: d.deviceUserId, label: deviceDisplayName(d) }))}
+          description={
+            <p>
+              Permanently delete {selectedDevices.length} selected device{selectedDevices.length !== 1 ? 's' : ''}? Each
+              is removed from every team and channel, and its account is deleted from the identity provider. This action
+              cannot be undone.
+            </p>
+          }
+          onClose={() => setBulkAction(null)}
+          onConfirm={async (ids) => (await devicesAPI.bulkDelete(ids)).data}
+          renderRowResult={(result) => (result.success ? 'Permanently deleted' : result.error)}
+          resultRowId={(result) => result.deviceUserId}
+          onCompleted={handleBulkActionCompleted}
+        />
+      )}
+
+      {bulkAction === 'transfer' && (
+        <BulkTransferDialog
+          members={selectedDevices.map(toTransferMember)}
+          team={{ id: teamId }}
+          user={user}
+          onClose={() => setBulkAction(null)}
+          onCompleted={handleBulkActionCompleted}
+        />
+      )}
+
+      {/* Bugfix (type-to-confirm consistency): permanently deleting a
+          device now requires typing its own `username` to confirm,
+          matching "Permanently Delete User"/"Delete Channel"/"Delete
+          Sub-Team"'s established type-to-confirm pattern for permanent
+          deletion -- a plain Cancel/Confirm dialog understated that
+          this is the same severity class as those three. */}
       {deletingDevice && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center sm:p-4 z-50">
           <div
             role="dialog"
             aria-modal="true"
             aria-labelledby="delete-device-title"
-            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full"
+            className="bg-white dark:bg-gray-800 shadow-xl w-full h-full sm:rounded-lg sm:max-w-md sm:h-auto"
           >
             <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
               <h3 id="delete-device-title" className="text-lg font-medium text-red-600 dark:text-red-400">
@@ -800,8 +1045,8 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
               </h3>
               <button
                 type="button"
-                onClick={() => setDeletingDevice(null)}
-                className="text-gray-400 hover:text-gray-500 dark:hover:text-gray-300"
+                onClick={() => { setDeletingDevice(null); setDeleteConfirmInput('') }}
+                className="p-2 rounded-lg text-gray-400 hover:text-gray-500 hover:bg-gray-100 dark:hover:text-gray-300 dark:hover:bg-gray-700"
                 aria-label="Close"
               >
                 <XMarkIcon className="h-6 w-6" />
@@ -814,10 +1059,25 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
                 This removes it from every team and channel, and deletes its account from the identity provider.
                 This action cannot be undone.
               </p>
+              <div className="mb-4">
+                <label htmlFor="delete-device-confirm" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Type <span className="font-mono font-bold text-gray-900 dark:text-gray-100">{deletingDevice.username}</span> to confirm:
+                </label>
+                <input
+                  id="delete-device-confirm"
+                  type="text"
+                  className="input w-full"
+                  value={deleteConfirmInput}
+                  onChange={(e) => setDeleteConfirmInput(e.target.value)}
+                  placeholder={deletingDevice.username}
+                  autoComplete="off"
+                  disabled={deleting}
+                />
+              </div>
               <div className="flex justify-end space-x-3">
                 <button
                   type="button"
-                  onClick={() => setDeletingDevice(null)}
+                  onClick={() => { setDeletingDevice(null); setDeleteConfirmInput('') }}
                   className="btn-secondary"
                   disabled={deleting}
                 >
@@ -826,8 +1086,8 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
                 <button
                   type="button"
                   onClick={handleConfirmDelete}
-                  disabled={deleting}
-                  className="btn-danger disabled:opacity-50"
+                  disabled={deleting || deleteConfirmInput !== deletingDevice.username}
+                  className="btn-danger disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {deleting ? 'Deleting...' : 'Delete Device'}
                 </button>

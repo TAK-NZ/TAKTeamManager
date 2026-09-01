@@ -864,3 +864,101 @@ describe('DELETE /api/devices/:deviceUserId', () => {
     expect(pool.query).not.toHaveBeenCalled();
   });
 });
+
+// Team Devices tab multi-select: bulk delete. `DeviceEnrollmentService
+// .deleteDevice` already performs the REAL per-row authorization
+// internally (assertAuthorized) -- this route's job is just looping it
+// and reporting a per-row result, mirroring the single-item route's own
+// behaviour and error mapping exactly.
+describe('POST /api/devices/bulk-delete', () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    app = buildApp();
+    pool.query.mockResolvedValue({ rows: [] });
+  });
+
+  it('returns 400 without calling the service when deviceUserIds is missing/empty/invalid', async () => {
+    asGlobalManager();
+
+    const empty = await request(app).post('/api/devices/bulk-delete').send({ deviceUserIds: [] });
+    expect(empty.status).toBe(400);
+
+    const notArray = await request(app).post('/api/devices/bulk-delete').send({ deviceUserIds: 'nope' });
+    expect(notArray.status).toBe(400);
+
+    const badId = await request(app).post('/api/devices/bulk-delete').send({ deviceUserIds: [1, 'x'] });
+    expect(badId.status).toBe(400);
+
+    expect(DeviceEnrollmentService.deleteDevice).not.toHaveBeenCalled();
+  });
+
+  it('deletes every device for a Global_Manager, writing one audit_logs row per device, and returns a per-row success result', async () => {
+    asGlobalManager();
+    DeviceEnrollmentService.deleteDevice
+      .mockResolvedValueOnce({ deviceUserId: 10, teamId: 3 })
+      .mockResolvedValueOnce({ deviceUserId: 11, teamId: 4 });
+
+    const res = await request(app).post('/api/devices/bulk-delete').send({ deviceUserIds: [10, 11] });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      successCount: 2,
+      failureCount: 0,
+      results: [
+        { deviceUserId: 10, success: true },
+        { deviceUserId: 11, success: true }
+      ]
+    });
+    expect(DeviceEnrollmentService.deleteDevice).toHaveBeenCalledWith(10, mockUser);
+    expect(DeviceEnrollmentService.deleteDevice).toHaveBeenCalledWith(11, mockUser);
+    expect(pool.query).toHaveBeenCalledTimes(2);
+  });
+
+  it("relies on the service's own per-row assertAuthorized: a DeviceEnrollmentAuthorizationError becomes that row's own failure, never a whole-request 403", async () => {
+    asStandardUser(5);
+    DeviceEnrollmentService.deleteDevice.mockRejectedValue(
+      new DeviceEnrollmentService.DeviceEnrollmentAuthorizationError()
+    );
+
+    const res = await request(app).post('/api/devices/bulk-delete').send({ deviceUserIds: [10] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results[0]).toEqual({
+      deviceUserId: 10,
+      success: false,
+      error: expect.stringMatching(/authorization/i)
+    });
+  });
+
+  it("one row's NotATeamOwnedDeviceError does not affect another row's success (per-row isolation)", async () => {
+    asGlobalManager();
+    DeviceEnrollmentService.deleteDevice
+      .mockRejectedValueOnce(new DeviceEnrollmentService.NotATeamOwnedDeviceError())
+      .mockResolvedValueOnce({ deviceUserId: 11, teamId: 4 });
+
+    const res = await request(app).post('/api/devices/bulk-delete').send({ deviceUserIds: [10, 11] });
+
+    expect(res.body.successCount).toBe(1);
+    expect(res.body.failureCount).toBe(1);
+    expect(res.body.results[0]).toEqual(
+      expect.objectContaining({ deviceUserId: 10, success: false })
+    );
+    expect(res.body.results[1]).toEqual({ deviceUserId: 11, success: true });
+  });
+
+  it('maps an unrecognized error to a generic per-row message rather than failing the whole request', async () => {
+    asGlobalManager();
+    DeviceEnrollmentService.deleteDevice.mockRejectedValue(new Error('unexpected db failure'));
+
+    const res = await request(app).post('/api/devices/bulk-delete').send({ deviceUserIds: [10] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results[0]).toEqual({
+      deviceUserId: 10,
+      success: false,
+      error: 'Failed to delete team-owned device'
+    });
+  });
+});

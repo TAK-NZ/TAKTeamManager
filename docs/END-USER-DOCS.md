@@ -33,10 +33,11 @@ To log out, use the menu in the top navigation bar. This also ends your identity
 After logging in, your Dashboard is home base. It shows:
 
 - **TAK Profile** — your callsign, your TAK role, your team's colour/function, your organisation, and your team (with a lock icon if your team is private). If you don't currently belong to a team, this reads literally "None" rather than being blank.
-- **Pending Requests** — if you're an admin and there are requests waiting for review, a banner links you straight to the Requests page.
+- **Pending Requests** — if you're an admin and there are requests waiting for review, a banner links you straight to the Tasks page.
 - **My Devices** *(if device management is enabled for your deployment)* — every TAK device you've enrolled, with its name, type, when it was last seen, and its status. You can:
   - Click **Add Device** to enroll a new one (see "Enrolling a Device" below).
   - **Revoke** a device you no longer use, right from this card.
+  - If one of your devices' certificates is expiring soon or has already expired, a banner appears above the list linking you to **Renew now** — see "Certificate Renewal" below.
 - **My Channels** — a searchable, expandable folder tree of every TAK channel you have access to, each one marked Read, Write, or Read-Write.
 
 ## Downloading and Enrolling a TAK Client
@@ -50,7 +51,7 @@ The Downloads page (`/downloads`) links to the official TAK client for your devi
 - **Android** — ATAK, via TAK.gov (recommended) or the Google Play Store.
 - **iOS** — TAK Aware (recommended) or iTAK.
 - **Windows** — WinTAK.
-- **CloudTAK** — if your deployment offers it, this runs entirely in a web browser and needs no install at all.
+- **CloudTAK** — if your deployment offers it, a link appears below the download grid; this runs entirely in a web browser and needs no install at all, on any operating system.
 
 ### Step 2: Enroll
 
@@ -63,7 +64,17 @@ When you're ready, click **Generate Enrollment Data**. This creates a one-time e
 - **iTAK** — its own QR code and iTAK-specific steps.
 - **Manual / WinTAK** — if your client can't scan a QR code, this tab gives you everything to type in by hand: server address, port, username, and a password you can copy to your clipboard (it's never shown as plain text).
 
-A countdown shows how long you have before the code expires. Your enrolled device's certificate is valid for about a year; when it's getting close to expiring, you can come back here and generate a new enrollment.
+A countdown shows how long you have before the code expires. Your enrolled device's certificate is valid for about a year.
+
+### Certificate Renewal and Expiry Emails
+
+*(If your deployment has certificate-expiry notifications enabled.)*
+
+As your device's certificate approaches expiry, you'll get an email reminder — the first one about 30 days out, with further reminders as the date gets closer if you haven't renewed yet. The email tells you which device it's about and when its certificate expires. To renew, go to the Enrollment page and generate a new enrollment the same way you did the first time — this issues a new certificate and automatically retires the one it replaces (as long as you only have one live device certificate at the time; with more than one, retire the old one yourself via Revoke).
+
+If a device stopped being used a while ago and you don't need it anymore, don't bother renewing it — revoke its certificate instead, either from your Dashboard's "My Devices" card or from the Tasks page (see below).
+
+For a team-owned device (one that belongs to the team rather than to any one person), the same kind of reminder email goes to the team's admins instead of to any individual, escalating to admins further up the organisation's hierarchy the closer the certificate gets to expiring.
 
 ## Team Admin: Managing Your Team
 
@@ -90,7 +101,10 @@ Your team's **Members** tab lists everyone on the team. Each row has a set of ac
 - **Resend welcome email** — if someone missed or lost their original welcome email, this sends it again. You'll be asked to confirm before it sends.
 - **Transfer** — move this member to a different team.
 - **View Devices** *(if device management is enabled)* — see the TAK devices this member has enrolled, and revoke one on their behalf if needed.
+- **Suspend account** — locks the member out and revokes every certificate they hold. Use this for a temporary situation (someone leaving under a cloud, an access review in progress) rather than someone leaving for good. Because revoking a certificate can't be undone, you'll need to type the member's exact username to confirm. **Unsuspend account** reverses the lockout (a plain confirmation, no typing required) but does not un-revoke any certificate — the member has to re-enroll to get a working one again.
 - **Delete** — this is the one genuinely irreversible action here: it permanently removes their account everywhere, including from the identity provider. You'll need to type their email address to confirm before it happens. Use this only when someone is truly leaving for good, not as a way to remove them from just your team (use Transfer for that).
+
+You may also see a text label instead of the usual row content if an account is **Suspended** or the system could no longer find the account in the identity provider (**Account not found**, meaning it's been orphaned — see below). An orphaned account's Suspend/Unsuspend actions disappear entirely, since there's no identity left to lock or unlock; its Remove/Delete action still works.
 
 ### Managing team admins
 
@@ -100,7 +114,7 @@ The **Team Admins** tab shows everyone with admin rights on your team. The only 
 
 *(Only if device management is enabled for your deployment.)*
 
-The **Team Devices** tab is for devices that belong to the team itself rather than to any one person — a shared tablet or a vehicle-mounted radio, for example. From here you can enroll a new team device (the same QR-code flow described above, just bound to the team rather than to you) or revoke an existing one's certificate.
+The **Team Devices** tab is for devices that belong to the team itself rather than to any one person — a shared tablet or a vehicle-mounted radio, for example. From here you can enroll a new team device (the same QR-code flow described above, just bound to the team rather than to you), revoke an existing one's certificate, or suspend/unsuspend the device account the same way you would a member's.
 
 ### Managing channels
 
@@ -110,21 +124,26 @@ The **Channels** tab shows your team's TAK channels — its primary channel plus
 
 The **Sub-teams** tab lists any teams nested underneath yours. You can create a new sub-team from here (there's a maximum nesting depth, so the option disables itself once you've reached it), or delete an existing sub-team.
 
-### Reviewing access requests
+### Reviewing tasks and access requests
 
-If people have requested to join your team, the **Requests** page (`/requests`, visible to any team admin) shows them as cards:
+The **Tasks** page (`/tasks` — an old bookmark to `/requests` still gets you here) is visible to everyone, not just admins, and shows up to four sections depending on who you are:
 
-- **New account requests** show the person's email, requested team, submission date, and their stated reason for requesting access. You can adjust their name and callsign suffix before approving. Click **Approve** to let them in, or **Deny** (you'll be asked to give a written reason, which gets emailed to them).
-- **Transfer requests** show a member moving from one team to another, who requested it, and a note that approving it will remove their admin rights on their old team if they had any.
+- **My certificates needing renewal** — anyone with a device certificate that's expiring soon or already expired sees it here, with a link to renew it.
+- **Team devices needing renewal** *(team admins and above)* — the same, but for devices belonging to any team you administer, with a Renew action right on the row.
+- **Access requests** *(team admins and above)* — pending requests to review, as cards:
+  - **New account requests** show the person's email, requested team, submission date, and their stated reason for requesting access. You can adjust their name and callsign suffix before approving. Click **Approve** to let them in, or **Deny** (you'll be asked to give a written reason, which gets emailed to them). If the email matches an account whose identity-provider record was previously lost (see "orphaned account" above), you'll see a notice that approving will reclaim that old account — history and all — instead of creating a brand-new one; you'll still need to assign it a team and any admin rights fresh, since those aren't restored automatically.
+  - **Transfer requests** show a member moving from one team to another, who requested it, and a note that approving it will remove their admin rights on their old team if they had any.
+- **Organisation Interest requests** *(Global Manager only)* — people from an organisation with no team yet, expressing interest.
 
 ## Organisation-Wide Views (Global Manager only)
 
 A few areas are visible only to your organisation's Global Manager, not to a regular team admin:
 
 - **Users** (`/users`) — an organisation-wide version of the Members tab, letting a Global Manager act on any user regardless of which team they're in.
+- **Devices** (`/devices`) *(if device management is enabled)* — the device counterpart of Users: every team-owned device across the organisation in one list. A regular team admin can also reach this page, but can only act on devices belonging to a team they administer; a Global Manager can act on all of them.
 - **Global Channels** — organisation-wide channel management across every channel type.
 - **Audit Log** — a complete, unchangeable history of administrative actions taken across the whole system, with CSV export.
-- **Admin/Settings** — branding, colour and role definitions, TAK Server credentials, email template editing, and bulk import/export of configuration.
+- **Admin/Settings** — site content text, email template editing, bulk import of team hierarchies, excluded sign-up domains, and export/import of settings.
 
 If you're a team admin without global rights, you won't see these in your navigation menu at all.
 
@@ -134,7 +153,8 @@ If you're a team admin without global rights, you won't see these in your naviga
 - **Welcome/approval email** — sent once your access request is approved, with your account details.
 - **Denial email** — sent if your request is denied, including the admin's stated reason.
 - **Resend welcome email** — an admin can trigger this again if you missed the original.
+- **Certificate expiry reminder** *(if enabled for your deployment)* — sent as your own device's certificate approaches expiry, or to your team's admins for a team-owned device — see "Certificate Renewal and Expiry Emails" above.
 
 ## Using TAK Team Manager on Your Phone
 
-The whole app works on mobile. Tables that would otherwise require side-scrolling on a small screen (like the Members or Team Devices lists) instead show as a stack of cards, and buttons are sized for a real tap rather than a precise click. Everything you can do on desktop, you can do on mobile — the layout just adapts.
+The whole app works on mobile. Tables that would otherwise require side-scrolling on a small screen (like the Members, Users, or Devices lists) instead show as a stack of cards, and buttons are sized for a real tap rather than a precise click. Everything you can do on desktop, you can do on mobile — the layout just adapts.

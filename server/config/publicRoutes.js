@@ -7,7 +7,7 @@
  * expected to require a valid JWT_Token via `authenticateToken`.
  *
  * `path` values use the same mounted-route-pattern style Express exposes
- * (e.g. `/api/requests/verify/:token`), not interpolated values.
+ * (e.g. `/api/requests/team-access`), not interpolated values.
  *
  * This is the complete registry (task 55.1 - Public_Route_Registry
  * completion): every route handler across `server/routes/*.js` that does
@@ -28,12 +28,10 @@ const publicRoutes = [
   // --- server/routes/config.js ---
   { method: 'GET', path: '/api/config/public' },
 
-  // --- server/routes/requests.js ---
-  { method: 'POST', path: '/api/requests/team-access' },
-
   // --- server/routes/signup.js ---
   { method: 'POST', path: '/api/requests/initiate' },
   { method: 'GET', path: '/api/requests/available-teams' },
+  { method: 'POST', path: '/api/requests/team-access' },
   { method: 'POST', path: '/api/org-interest' },
 
   // --- server/routes/health.js (mounted at /health) ---

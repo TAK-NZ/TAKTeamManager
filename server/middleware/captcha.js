@@ -1,10 +1,10 @@
 /**
  * Google reCAPTCHA v3 verification middleware (Requirement 7.3/7.4:
- * bot-mitigation challenge on `POST /api/requests/team-access`).
+ * bot-mitigation challenge on `POST /api/requests/initiate`).
  *
  * `verifyCaptcha` is mounted directly in front of
- * `POST /api/requests/team-access`'s handler chain in
- * `server/routes/requests.js`. Unlike v2 (a checkbox/invisible widget
+ * `POST /api/requests/initiate`'s handler chain in
+ * `server/routes/signup.js`. Unlike v2 (a checkbox/invisible widget
  * that only reports pass/fail), reCAPTCHA v3 runs invisibly and returns a
  * risk `score` (0.0 = likely bot, 1.0 = likely human) alongside
  * `success`/`action` -- there is no user-facing challenge to fail, so
@@ -39,11 +39,10 @@
  *  - IF every check above passes, calls `next()`.
  *
  * Because this middleware runs before the route's express-validator chain
- * and before `emailWindowLimiter` (see the ordering comment in
- * `server/routes/requests.js`), a missing/invalid/low-score token is
- * rejected before any `access_requests` row is inserted or verification
- * email is sent, satisfying Requirement 7.4's "SHALL NOT create an
- * Access_Request row or send a verification email".
+ * (see the ordering comment in `server/routes/signup.js`), a missing/
+ * invalid/low-score token is rejected before any `access_requests` row is
+ * inserted or verification email is sent, satisfying Requirement 7.4's
+ * "SHALL NOT create an Access_Request row or send a verification email".
  */
 
 const axios = require('axios');

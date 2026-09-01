@@ -8,10 +8,9 @@
  *
  *  - the two auth-specific limiters called for by Requirements 7.1, 7.5,
  *    and 7.6 (`authLimiter`, `authCallbackFailureLimiter`); and
- *  - the two request-access-specific limiters called for by Requirements
- *    7.1 and 7.2 (`requestAccessLimiter`, `emailWindowLimiter`), mounted
- *    on `POST /api/requests/team-access` and `GET /api/requests/verify/:token`
- *    (see `server/routes/requests.js`).
+ *  - the request-access-specific limiter called for by Requirement 7.1
+ *    (`requestAccessLimiter`), mounted on `POST /api/requests/initiate`
+ *    (see `server/routes/signup.js`).
  *
  * `authLimiter` and `requestAccessLimiter` are both keyed by `req.ip` (via
  * `express-rate-limit`'s default `keyGenerator`):
@@ -57,8 +56,6 @@
 
 const rateLimit = require('express-rate-limit');
 const { MemoryStore } = rateLimit;
-const { validationResult } = require('express-validator');
-const pool = require('../config/database');
 
 // Requirement 7.1: no more than 20 requests per IP per 15-minute window on
 // the OAuth2 `/api/auth/*` routes.
@@ -174,12 +171,12 @@ function recordAuthCallbackFailure(req) {
 }
 
 // ---------------------------------------------------------------------------
-// Requirement 7.1/7.2: requestAccessLimiter (per-IP) and emailWindowLimiter
-// (per-email, via `email_rate_tracking`) for `POST /api/requests/team-access`.
+// Requirement 7.1: requestAccessLimiter (per-IP) for
+// `POST /api/requests/initiate`.
 // ---------------------------------------------------------------------------
 
 // Requirement 7.1: no more than 20 requests per IP per 15-minute window on
-// `POST /api/requests/team-access`.
+// `POST /api/requests/initiate`.
 // This is a *separate* `express-rate-limit` instance (own store) from
 // `authLimiter` above, even though both currently use the same 20/15min
 // thresholds, so that a burst against one route group never counts
@@ -192,11 +189,11 @@ const requestAccessLimiterStore = new MemoryStore();
 /**
  * Requirement 7.1: standard `express-rate-limit` instance capped at 20
  * requests per IP per 15-minute window, mounted on
- * `POST /api/requests/team-access`.
+ * `POST /api/requests/initiate`.
  * Because this middleware runs before the route's handler, an IP that
  * exceeds the limit receives HTTP 429 and the handler -- which would
  * otherwise create an `access_requests` row or send a verification email
- * -- never runs (Requirement 7.2).
+ * -- never runs.
  */
 const requestAccessLimiter = rateLimit({
   windowMs: REQUEST_ACCESS_LIMITER_WINDOW_MS,
@@ -206,106 +203,11 @@ const requestAccessLimiter = rateLimit({
   store: requestAccessLimiterStore
 });
 
-// Requirement 7.2: no more than 5 requests associated with a given email
-// address within a 60-minute window, tracked via the `email_rate_tracking`
-// table (see `database/migrations/*_create-email-rate-tracking.cjs`)
-// rather than an in-memory store, since `express-rate-limit`'s built-in
-// keying only has synchronous access to request properties (typically
-// `req.ip`) and cannot key off a value read from the request body without
-// a custom store/middleware like this one.
-const EMAIL_WINDOW_LIMITER_WINDOW_MS = 60 * 60 * 1000;
-const EMAIL_WINDOW_LIMITER_MAX = 5;
-
-/**
- * Requirement 7.2: per-email rate-limiting middleware for
- * `POST /api/requests/team-access`, where `req.body.email` is directly
- * submitted by the caller.
- *
- * This is intentionally mounted AFTER the route's `express-validator`
- * chain (which includes `body('email').isEmail().normalizeEmail()`) so
- * that:
- *   - an invalid `email` never reaches this DB-backed check at all (the
- *     chain's sanitizers still run and mutate `req.body.email` in place,
- *     but this middleware defers to the route handler's own
- *     `validationResult(req)` check for reporting the 400, rather than
- *     duplicating that logic here); and
- *   - the value read from `req.body.email` is already normalized
- *     (lower-cased, etc.) by `.normalizeEmail()`, consistent with how
- *     `requester_email` is later persisted by `RequestApprovalService`/
- *     `AccessRequest`, so the same address is always tracked under the
- *     same key regardless of the casing/formatting a caller submits.
- *
- * Uses a single window row per email: if an active (< 60 minutes old)
- * window row exists and its count is already at or over the limit, the
- * request is rejected with 429 *without* incrementing the count further
- * and without calling `next()` (so the route handler -- which creates the
- * `access_requests` row and sends the verification email -- never runs,
- * per Requirement 7.2). Otherwise the existing window's count is
- * incremented, or a fresh window row is inserted if none is active, and
- * the request proceeds.
- */
-async function emailWindowLimiter(req, res, next) {
-  // If the express-validator chain mounted ahead of this middleware
-  // already found `email` invalid (or missing), let the route handler's
-  // own `validationResult(req)` check report the 400 rather than this
-  // middleware attempting to rate-limit an invalid/absent value.
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return next();
-  }
-
-  const email = req.body.email;
-
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    const windowResult = await client.query(
-      `SELECT id, count FROM email_rate_tracking
-       WHERE email = $1 AND window_start > NOW() - INTERVAL '60 minutes'
-       ORDER BY window_start DESC
-       LIMIT 1
-       FOR UPDATE`,
-      [email]
-    );
-
-    if (windowResult.rows.length > 0) {
-      const { id, count } = windowResult.rows[0];
-
-      if (count >= EMAIL_WINDOW_LIMITER_MAX) {
-        await client.query('ROLLBACK');
-        return res.status(429).json({
-          error: 'Too many requests for this email address. Please try again later.'
-        });
-      }
-
-      await client.query(
-        'UPDATE email_rate_tracking SET count = count + 1 WHERE id = $1',
-        [id]
-      );
-    } else {
-      await client.query(
-        'INSERT INTO email_rate_tracking (email, window_start, count) VALUES ($1, NOW(), 1)',
-        [email]
-      );
-    }
-
-    await client.query('COMMIT');
-    return next();
-  } catch (error) {
-    await client.query('ROLLBACK');
-    return next(error);
-  } finally {
-    client.release();
-  }
-}
-
 module.exports = {
   authLimiter,
   authCallbackFailureLimiter,
   recordAuthCallbackFailure,
   requestAccessLimiter,
-  emailWindowLimiter,
   // Exposed for tests only, to reset in-memory counters between cases.
   authLimiterStore,
   authCallbackFailureStore,
@@ -315,7 +217,5 @@ module.exports = {
   AUTH_CALLBACK_FAILURE_WINDOW_MS,
   AUTH_CALLBACK_FAILURE_MAX,
   REQUEST_ACCESS_LIMITER_WINDOW_MS,
-  REQUEST_ACCESS_LIMITER_MAX,
-  EMAIL_WINDOW_LIMITER_WINDOW_MS,
-  EMAIL_WINDOW_LIMITER_MAX
+  REQUEST_ACCESS_LIMITER_MAX
 };

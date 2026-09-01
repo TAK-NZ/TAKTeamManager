@@ -6,119 +6,10 @@ const EventPublisher = require('./EventPublisher');
 const UserAttributesService = require('./userAttributes');
 const Team = require('../models/Team');
 const { getLogger } = require('../middleware/requestContext');
-const crypto = require('crypto');
 
 class RequestApprovalService {
   constructor() {
     this.emailService = new EmailService();
-  }
-
-  async createAccessRequest(requestData) {
-    const client = await pool.connect();
-    
-    try {
-      await client.query('BEGIN');
-      
-      // Generate verification token
-      const token = crypto.randomBytes(32).toString('hex');
-      const expiryHours = await this.getConfigValue('email_verification_hours', '24');
-      const expiresAt = new Date(Date.now() + parseInt(expiryHours) * 60 * 60 * 1000);
-      
-      // Calculate escalation time (24 hours from now, excluding weekends if configured)
-      const escalatesAt = await this.calculateEscalationTime();
-      
-      // Insert request
-      //
-      // Requirement 11.9: `callsign_suffix` stores whatever the requester
-      // submitted (or `null` if omitted) -- this is the same "accept an
-      // optional field" behavior regardless of the target Team's
-      // Organisation's `callsign_name_format`; only the REQUIRED-ness of
-      // supplying it is format-conditional, enforced by the caller
-      // (`POST /api/requests/team-access`), not here.
-      const result = await client.query(`
-        INSERT INTO access_requests (
-          request_type, requester_email, requester_first_name, requester_last_name,
-          existing_user_id, target_team_id, current_team_id, requested_role,
-          requested_first_name, requested_last_name, justification, callsign_suffix,
-          email_verification_token, email_verification_expires_at, escalates_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-        RETURNING id
-      `, [
-        requestData.request_type,
-        requestData.requester_email,
-        requestData.requester_first_name,
-        requestData.requester_last_name,
-        requestData.existing_user_id || null,
-        requestData.target_team_id || null,
-        requestData.current_team_id || null,
-        requestData.requested_role || null,
-        requestData.requested_first_name || null,
-        requestData.requested_last_name || null,
-        requestData.justification,
-        requestData.callsign_suffix || null,
-        token,
-        expiresAt,
-        escalatesAt
-      ]);
-      
-      const requestId = result.rows[0].id;
-      
-      // Send verification email
-      await this.emailService.sendVerificationEmail(requestData.requester_email, token, requestData.requester_first_name || '');
-      
-      await client.query('COMMIT');
-      return { requestId, token };
-      
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
-    }
-  }
-
-  async verifyEmail(token) {
-    const result = await pool.query(`
-      UPDATE access_requests 
-      SET email_verified = true 
-      WHERE email_verification_token = $1 
-        AND email_verification_expires_at > NOW() 
-        AND status = 'pending'
-      RETURNING id, requester_email, target_team_id
-    `, [token]);
-    
-    if (result.rows.length === 0) {
-      throw new Error('Invalid or expired verification token');
-    }
-    
-    const request = result.rows[0];
-    
-    // Assign to appropriate admin
-    await this.assignToAdmin(request.id, request.target_team_id);
-    
-    return request;
-  }
-
-  async assignToAdmin(requestId, teamId) {
-    if (!teamId) return;
-    
-    // Find team admins
-    const adminResult = await pool.query(`
-      SELECT u.id, u.email, u.first_name, u.last_name
-      FROM users u
-      JOIN team_memberships tm ON u.id = tm.user_id
-      WHERE tm.team_id = $1 AND tm.role IN ('admin', 'owner')
-      ORDER BY RANDOM()
-      LIMIT 1
-    `, [teamId]);
-    
-    if (adminResult.rows.length > 0) {
-      const admin = adminResult.rows[0];
-      await pool.query(
-        'UPDATE access_requests SET assigned_to_admin = $1 WHERE id = $2',
-        [admin.id, requestId]
-      );
-    }
   }
 
   /**
@@ -992,46 +883,6 @@ class RequestApprovalService {
         );
         break;
       }
-    }
-  }
-
-  async calculateEscalationTime() {
-    const escalationHours = await this.getConfigValue('escalation_hours', '24');
-    const excludeWeekends = await this.getConfigValue('weekend_escalation', 'false') === 'false';
-    
-    let escalationTime = new Date(Date.now() + parseInt(escalationHours) * 60 * 60 * 1000);
-    
-    if (excludeWeekends) {
-      // Skip weekends
-      while (escalationTime.getDay() === 0 || escalationTime.getDay() === 6) {
-        escalationTime.setDate(escalationTime.getDate() + 1);
-      }
-    }
-    
-    return escalationTime;
-  }
-
-  getRequestDescription(request) {
-    switch (request.request_type) {
-      case 'new_account':
-        return `join team "${request.team_name}"`;
-      case 'team_change':
-        return `change teams`;
-      case 'role_change':
-        return `change role to "${request.requested_role}"`;
-      case 'name_change':
-        return `change name`;
-      default:
-        return 'access TAK Team Manager';
-    }
-  }
-
-  async getConfigValue(key, defaultValue) {
-    try {
-      const result = await pool.query('SELECT config_value FROM system_config WHERE config_key = $1', [key]);
-      return result.rows[0]?.config_value || defaultValue;
-    } catch (error) {
-      return defaultValue;
     }
   }
 }
