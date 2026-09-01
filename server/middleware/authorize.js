@@ -1007,6 +1007,48 @@ const rowScopedResolvers = {
   },
 
   /**
+   * `device:read:org` — backs `GET /api/devices` (the org-wide
+   * Team_Owned_Device listing behind the `/devices` page). The exact
+   * listing-route counterpart of `user:read:team_admin` above, for the
+   * exact same reason: this route carries no `:teamId`/`:userId` route
+   * param, so there is no single row to scope a check against — the
+   * question is "does this caller administer SOMETHING", not "does this
+   * caller administer THIS team". Satisfied if the requesting user is a
+   * Global_Manager OR holds at least one DIRECT admin membership
+   * (`role = 'admin' AND inherited_from_team_id IS NULL`, the glossary's
+   * Team_Admin condition — an INHERITED admin row never confers it).
+   *
+   * The per-row narrowing of WHICH devices appear in the response is
+   * deliberately NOT addressed here, exactly as `user:read:team_admin`'s
+   * own comment explains: it is handled in the route handler via
+   * `DeviceEnrollmentService.listAllDevices`, which resolves the same
+   * `DirectoryScopeService` scope `GET /api/users` already uses. This
+   * resolver only closes the "any authenticated user at all" hole.
+   *
+   * Per this module's contract a throw propagates to
+   * `isSatisfiedWithRowScopedChecks`, which logs it and fails closed, so
+   * there is deliberately no local try/catch.
+   *
+   * @param {import('express').Request} req
+   * @returns {Promise<boolean>}
+   */
+  'device:read:org': async (req) => {
+    if (req.user && req.user.is_global_manager) {
+      return true;
+    }
+
+    const result = await pool.query(
+      `SELECT 1 FROM team_memberships
+        WHERE user_id = $1 AND role = 'admin' AND inherited_from_team_id IS NULL
+        LIMIT 1`,
+      // LOCAL users.id, never req.user.id (the Authentik id).
+      [req.user && req.user.userId]
+    );
+
+    return result.rows.length > 0;
+  },
+
+  /**
    * `admin:excluded_domains:manage` — Global_Manager-only.
    *
    * @param {import('express').Request} req

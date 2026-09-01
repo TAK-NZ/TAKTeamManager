@@ -54,6 +54,7 @@ jest.mock('../services/DeviceEnrollmentService', () => {
     generateEnrollmentQrCode: jest.fn(),
     previewEnrollmentQrCode: jest.fn(),
     listTeamDevices: jest.fn(),
+    listAllDevices: jest.fn(),
     updateDevice: jest.fn(),
     deleteDevice: jest.fn(),
     DeviceEnrollmentAuthorizationError,
@@ -205,6 +206,106 @@ describe('POST /api/devices', () => {
 
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/Tanker1/);
+  });
+});
+
+// Org-wide Team_Owned_Device listing backing the `/devices` page.
+describe('GET /api/devices', () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    app = buildApp();
+  });
+
+  it('returns the devices and pagination info for an authorized caller (Global_Manager)', async () => {
+    asGlobalManager();
+    DeviceEnrollmentService.listAllDevices.mockResolvedValue({
+      devices: [
+        {
+          deviceUserId: 10,
+          username: 'AUK-D7K3QMX',
+          deviceLabel: 'Engine 4 Tablet',
+          callsignSuffix: 'Tanker1',
+          takRole: 'Team Member',
+          callsign: 'AUKTanker1',
+          teamId: 3,
+          teamName: 'Auckland',
+          createdAt: '2024-01-01T00:00:00.000Z',
+          accountStatus: 'active',
+          liveCertificateCount: 1,
+          canManage: true
+        }
+      ],
+      pagination: { page: 1, pageSize: 50, total: 1 }
+    });
+
+    const res = await request(app).get('/api/devices');
+
+    expect(res.status).toBe(200);
+    expect(res.body.devices).toHaveLength(1);
+    expect(res.body.devices[0]).not.toHaveProperty('email');
+    expect(res.body.pagination).toEqual({ page: 1, pageSize: 50, total: 1 });
+    expect(DeviceEnrollmentService.listAllDevices).toHaveBeenCalledWith(
+      mockUser,
+      { page: 1, pageSize: 50, search: undefined }
+    );
+  });
+
+  it('passes page/pageSize/search query params through to the service', async () => {
+    asGlobalManager();
+    DeviceEnrollmentService.listAllDevices.mockResolvedValue({
+      devices: [],
+      pagination: { page: 2, pageSize: 10, total: 0 }
+    });
+
+    const res = await request(app).get('/api/devices').query({ page: 2, pageSize: 10, search: 'tanker' });
+
+    expect(res.status).toBe(200);
+    expect(DeviceEnrollmentService.listAllDevices).toHaveBeenCalledWith(
+      mockUser,
+      { page: 2, pageSize: 10, search: 'tanker' }
+    );
+  });
+
+  it('allows a Team_Admin (non-global-manager) to reach the handler', async () => {
+    asStandardUser(5);
+    // The real `authorize.js` middleware and `device:read:org` resolver
+    // run for this route (not mocked, per this file's header comment) --
+    // its resolver issues a real `pool.query` existence check. A
+    // non-empty row set is what makes it resolve `true` for a standard
+    // user, mirroring `GET /api/devices/team/:teamId`'s own test above.
+    pool.query.mockResolvedValue({ rows: [{ exists: 1 }] });
+    DeviceEnrollmentService.listAllDevices.mockResolvedValue({
+      devices: [],
+      pagination: { page: 1, pageSize: 50, total: 0 }
+    });
+
+    const res = await request(app).get('/api/devices');
+
+    expect(res.status).toBe(200);
+    expect(DeviceEnrollmentService.listAllDevices).toHaveBeenCalled();
+  });
+
+  it('denies a plain team member (no direct admin row) with 403', async () => {
+    asStandardUser(6);
+    // No direct admin row anywhere -- the `device:read:org` resolver's
+    // existence check resolves empty.
+    pool.query.mockResolvedValue({ rows: [] });
+
+    const res = await request(app).get('/api/devices');
+
+    expect(res.status).toBe(403);
+    expect(DeviceEnrollmentService.listAllDevices).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 for an out-of-range pageSize without calling the service', async () => {
+    asGlobalManager();
+
+    const res = await request(app).get('/api/devices').query({ pageSize: 1000 });
+
+    expect(res.status).toBe(400);
+    expect(DeviceEnrollmentService.listAllDevices).not.toHaveBeenCalled();
   });
 });
 

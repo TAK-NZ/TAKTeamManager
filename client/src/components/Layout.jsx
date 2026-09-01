@@ -4,6 +4,7 @@ import {
   HomeIcon, 
   UserGroupIcon, 
   UsersIcon, 
+  DeviceTabletIcon,
   ClipboardDocumentListIcon,
   SignalIcon,
   DocumentMagnifyingGlassIcon,
@@ -41,6 +42,15 @@ const getNavigation = (user) => {
   
   if (user?.isAdmin || user?.is_global_manager) {
     baseNavigation.push({ name: 'Users', href: '/users', icon: UsersIcon })
+    // Placed directly beneath Users, same role gate: the org-wide
+    // Team_Owned_Device listing (GET /api/devices, 'device:read:org') is
+    // authorized by the SAME "Global_Manager, or a Team_Admin of ANY
+    // team" rule 'user:read:team_admin' already uses for Users -- there
+    // is no separate feature flag gating this nav entry (unlike the
+    // View-Devices action on a /users row, which is gated behind
+    // DEVICE_MGMT_ENABLED via useDeviceManagementEnabled -- a different
+    // feature: TAK Server certificates, not Team_Owned_Device accounts).
+    baseNavigation.push({ name: 'Devices', href: '/devices', icon: DeviceTabletIcon })
   }
   
   if (user?.isAdmin || user?.isTeamAdmin) {

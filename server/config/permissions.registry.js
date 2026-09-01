@@ -441,6 +441,19 @@ const routes = {
   // only via `roleDefaults.global_manager`'s wildcard, which is expected
   // for this task's scope.
   'GET /api/devices/team/:teamId': ['device:read:team_admin'],
+  // Org-wide Team_Owned_Device listing backing the `/devices` page
+  // (mirrors `GET /api/users`' own 'user:read:team_admin' shape exactly).
+  // `device:read:org` is resolver-gated in server/middleware/authorize.js:
+  // Global_Manager, or a Team_Admin of ANY team (a listing route has no
+  // `:teamId`/`:userId` subject, so the resolver checks "administers
+  // something", not "administers this" -- see that resolver's own
+  // comment). Deliberately NOT in `roleDefaults.authenticated_user`: a
+  // statically-held identifier would satisfy `resolveAccess` outright and
+  // let every authenticated user enumerate every Team_Owned_Device.
+  // Per-row visibility narrowing (which devices actually appear) is a
+  // SEPARATE concern, handled inside `DeviceEnrollmentService
+  // .listAllDevices` via `DirectoryScopeService`, not by this identifier.
+  'GET /api/devices': ['device:read:org'],
 
   // --- /api/enrollment (server/routes/enrollment.js) ---
   // takserver-enrollment Criteria 3.4, 3.5 (task 8.4): self-service

@@ -9,6 +9,8 @@ const authentikService = require('./authentik');
 const ManagedIdentifierService = require('./ManagedIdentifierService');
 const UserAttributesService = require('./userAttributes');
 const CallsignService = require('./CallsignService');
+const DirectoryScopeService = require('./DirectoryScopeService');
+const { partitionCandidates } = require('../utils/directoryScope');
 const { MAX_TEAM_DEPTH } = require('../config/constants');
 const { IDENTIFIER_TYPE_MARKERS } = require('../utils/managedIdentifier');
 const { isValidCallsignPrefix } = require('../utils/callsignValidation');
@@ -638,6 +640,198 @@ class DeviceEnrollmentService {
     }));
 
     return { devices };
+  }
+
+  /**
+   * Org-wide Team_Owned_Device listing (`/devices` page, mirroring
+   * `GET /api/users`' own org-wide listing for human members). Unlike
+   * `listTeamDevices` above -- which is scoped to exactly one Team named
+   * by the caller and authorized via `Team.isAdmin(teamId, ...)` -- this
+   * method has no single team in scope: it returns every
+   * Team_Owned_Device the ACTING USER may see across their whole
+   * Organisation-scoped visibility, the same visibility
+   * `DirectoryScopeService`/`GET /api/users` already define for human
+   * members. There is no separate "device visibility" rule to invent: a
+   * Team_Owned_Device is a `users` row like any other, so the SAME
+   * Scoped_Organisations / Allowed_Domains resolution applies, with the
+   * Email_Domain leg of `isCandidateVisible` simply never matching (a
+   * device has no email -- Device_Email_Null_Invariant) rather than
+   * short-circuited around it.
+   *
+   * A Global_Manager gets every Team_Owned_Device, unfiltered
+   * (`DirectoryScopeService.UNSCOPED`), exactly mirroring `GET /api/users`.
+   * A non-Global_Manager gets only the rows `isCandidateVisible` admits by
+   * `origin_org_id` or Direct_Membership Organisation -- the pagination
+   * total, unlike `GET /api/users`' Authentik-sourced count, is computed
+   * from the SAME `candidates` CTE via a `COUNT(*) OVER()` window so it is
+   * exact rather than an over-count (this listing has no upstream-service
+   * pagination quirk to inherit).
+   *
+   * `can_manage` mirrors `GET /api/users`' own field exactly: Global_Manager
+   * manages everything; otherwise Set-membership of the device's own
+   * `team_id` against `Team.getManagedTeamIds(actingUser.userId)`, resolved
+   * ONCE for the whole page rather than per row.
+   *
+   * @param {{userId?: number, is_global_manager?: boolean}} actingUser
+   * @param {{page: number, pageSize: number, search?: string}} pageParams
+   * @returns {Promise<{devices: Array<{deviceUserId: number, username: string, deviceLabel: string|null, callsignSuffix: string|null, takRole: string, callsign: string|null, teamId: number|null, teamName: string|null, createdAt: string, accountStatus: 'active'|'suspended'|'orphaned', liveCertificateCount: number, canManage: boolean}>, pagination: {page: number, pageSize: number, total: number}}>}
+   */
+  static async listAllDevices(actingUser, { page, pageSize, search } = {}) {
+    const offset = (page - 1) * pageSize;
+    const searchTerm = typeof search === 'string' ? search.trim() : '';
+
+    const scope = await DirectoryScopeService.resolveScope(actingUser);
+    const isUnscoped = scope === DirectoryScopeService.UNSCOPED;
+
+    // Every device's Organisation is resolved via the SAME `team_root` CTE
+    // `DirectoryScopeService.TEAM_ROOT_CTE` shares with `GET /api/users`
+    // (Requirement-parity: "the root of the Ancestor_Chain has one
+    // definition on the server"), joined against the device's OWN direct
+    // team membership -- a Team_Owned_Device always carries exactly one
+    // (Requirement 14.1), so an INNER JOIN (never LEFT) is correct here and
+    // a device with no membership row simply cannot appear, matching
+    // `listTeamDevices`'s own `JOIN team_memberships` above.
+    //
+    // Scope params are supplied even for an unscoped (Global_Manager)
+    // caller: `COALESCE(..., false)` renders the disjunct false when
+    // `organisationIds` is empty, so passing `[]`/`[]` for an unscoped
+    // caller is harmless -- `in_scope` is simply never read on that branch.
+    const organisationIds = isUnscoped ? [] : scope.organisationIds;
+    const searchPattern = searchTerm ? `%${searchTerm}%` : null;
+
+    const params = [organisationIds, searchPattern];
+
+    const query = `
+      WITH RECURSIVE team_root AS (
+        ${DirectoryScopeService.TEAM_ROOT_CTE}
+      ),
+      candidates AS (
+        SELECT u.id AS device_user_id,
+               u.username AS username,
+               u.device_label AS device_label,
+               u.callsign_suffix AS callsign_suffix,
+               u.tak_role AS tak_role,
+               u.created_at AS created_at,
+               u.account_status AS account_status,
+               u.origin_org_id AS origin_org_id,
+               tm.team_id AS team_id,
+               CASE
+                 WHEN t.parent_team_id IS NOT NULL THEN
+                   COALESCE(root.root_callsign_prefix, root.root_name, '') || ' - ' || t.name
+                 ELSE t.name
+               END AS team_name,
+               root.root_id AS direct_membership_org_id,
+               COALESCE(certs.live_certificate_count, 0) AS live_certificate_count,
+               (COALESCE(u.origin_org_id = ANY($1::int[]), false)
+                OR COALESCE(root.root_id = ANY($1::int[]), false)) AS in_scope
+        FROM users u
+        JOIN team_memberships tm ON tm.user_id = u.id AND tm.inherited_from_team_id IS NULL
+        JOIN teams t ON tm.team_id = t.id
+        LEFT JOIN team_root root ON root.team_id = t.id AND root.parent_team_id IS NULL
+        LEFT JOIN (
+          SELECT user_id, COUNT(*)::int AS live_certificate_count
+          FROM tak_devices
+          WHERE user_id IS NOT NULL AND revoked = false
+          GROUP BY user_id
+        ) certs ON certs.user_id = u.id
+        WHERE u.is_team_device = true
+          AND ($2::text IS NULL OR u.username ILIKE $2 OR u.device_label ILIKE $2)
+      ),
+      counted AS (
+        SELECT c.*, COUNT(*) FILTER (WHERE $3::boolean OR c.in_scope) OVER () AS total_count
+        FROM candidates c
+      )
+      SELECT *
+      FROM counted
+      WHERE $3::boolean OR in_scope
+      ORDER BY created_at DESC NULLS LAST, username ASC
+      LIMIT $4 OFFSET $5
+    `;
+
+    params.push(isUnscoped, pageSize, offset);
+
+    const result = await pool.query(query, params);
+
+    // Belt-and-braces predicate pass (Requirement-parity with
+    // `GET /api/users`): the SAME `scope` object is the sole input to both
+    // the SQL parameters and this predicate, so the response can never be
+    // wider than what `isCandidateVisible` itself permits. Skipped entirely
+    // for a Global_Manager, matching `GET /api/users`' own UNSCOPED branch.
+    let rows = result.rows;
+    if (!isUnscoped) {
+      const toFacts = (row) => ({
+        email: null,
+        originOrgId: row.origin_org_id ?? null,
+        directMembershipOrgId: row.direct_membership_org_id ?? null,
+      });
+      rows = partitionCandidates(scope, result.rows, toFacts).visible;
+    }
+
+    const total = result.rows.length > 0 ? Number(result.rows[0].total_count) : 0;
+
+    // can_manage, resolved ONCE for the whole page -- mirrors
+    // `GET /api/users`' identical `Team.getManagedTeamIds` call exactly.
+    const managedTeamIds = actingUser && actingUser.is_global_manager
+      ? null
+      : await Team.getManagedTeamIds(actingUser && actingUser.userId);
+
+    // Ancestor_Chain resolution is per-TEAM (not per-device): several
+    // devices on the page may share a team, so each distinct `team_id` is
+    // resolved at most once, mirroring `listTeamDevices`'s single-chain
+    // reuse but extended across however many distinct teams appear on this
+    // page (an org-wide listing spans more than one team, unlike
+    // `listTeamDevices`).
+    const distinctTeamIds = [...new Set(rows.map((row) => row.team_id).filter((id) => id != null))];
+    const chainByTeamId = new Map();
+    await Promise.all(
+      distinctTeamIds.map(async (teamId) => {
+        const rawChain = await Team.getAncestorChain(teamId);
+        chainByTeamId.set(teamId, Array.isArray(rawChain) ? rawChain : []);
+      })
+    );
+
+    const devices = rows.map((row) => {
+      const ancestorChain = chainByTeamId.get(row.team_id) || [];
+      const organisation = ancestorChain[0];
+      const callsignLevelSelection =
+        organisation?.callsign_level_selection == null
+          ? Array.from({ length: MAX_TEAM_DEPTH }, (_, i) => i + 1)
+          : organisation.callsign_level_selection;
+      const teamSegmentPrefixes = ancestorChain
+        .filter(
+          (t) =>
+            t.depth >= 1 &&
+            callsignLevelSelection.includes(t.depth) &&
+            !!t.callsign_prefix
+        )
+        .map((t) => t.callsign_prefix);
+
+      return {
+        deviceUserId: row.device_user_id,
+        username: row.username,
+        deviceLabel: row.device_label,
+        callsignSuffix: row.callsign_suffix,
+        takRole: row.tak_role,
+        callsign: organisation
+          ? CallsignService.assembleCallsign({
+              organisationPrefix: organisation.callsign_prefix,
+              teamSegmentPrefixes,
+              nameSegment: row.callsign_suffix
+            })
+          : null,
+        teamId: row.team_id,
+        teamName: row.team_name,
+        createdAt: row.created_at,
+        accountStatus: row.account_status,
+        liveCertificateCount: row.live_certificate_count,
+        canManage: managedTeamIds === null ? true : managedTeamIds.has(row.team_id)
+      };
+    });
+
+    return {
+      devices,
+      pagination: { page, pageSize, total }
+    };
   }
 
   /**
@@ -1374,6 +1568,7 @@ class DeviceEnrollmentService {
 }
 
 module.exports = DeviceEnrollmentService;
+
 module.exports.DeviceEnrollmentAuthorizationError = DeviceEnrollmentAuthorizationError;
 module.exports.NotATeamOwnedDeviceError = NotATeamOwnedDeviceError;
 module.exports.DeviceSessionCannotSelfEnrollError = DeviceSessionCannotSelfEnrollError;
