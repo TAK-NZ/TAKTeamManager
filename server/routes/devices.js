@@ -4,6 +4,7 @@ const { authenticateToken } = require('../middleware/auth');
 const authorize = require('../middleware/authorize');
 const { getLogger } = require('../middleware/requestContext');
 const pool = require('../config/database');
+const { paginationParams } = require('../middleware/pagination');
 const DeviceEnrollmentService = require('../services/DeviceEnrollmentService');
 const { isValidCallsignSuffix } = require('../utils/callsignValidation');
 
@@ -253,6 +254,31 @@ router.post('/:deviceUserId/qr-code', authenticateToken, authorize, [
     res.json({ qrCode });
   } catch (error) {
     handleServiceError(res, error, 'Failed to generate team-owned device enrollment QR code');
+  }
+});
+
+// Org-wide Team_Owned_Device listing, backing the `/devices` page --
+// mirrors `GET /api/users` exactly: no `:teamId` in scope, visibility
+// resolved via `DirectoryScopeService` (the SAME Scoped_Organisations
+// rule `GET /api/users` already applies to human members, since a
+// Team_Owned_Device is a `users` row like any other), and `device:read:org`
+// below is the listing-route counterpart of `user:read:team_admin` --
+// "does this caller administer SOMETHING", not "does this caller
+// administer THIS team" (there is no `:teamId` route param here for a
+// per-row check to scope against). Per-row `canManage` in the response
+// answers the narrower "may THIS caller act on THIS row" question the
+// client needs to gate its action icons, exactly like `GET /api/users`'
+// own `can_manage` field.
+router.get('/', authenticateToken, authorize, paginationParams, async (req, res) => {
+  try {
+    const { page, pageSize } = req.pagination;
+    const { search } = req.query;
+
+    const result = await DeviceEnrollmentService.listAllDevices(req.user, { page, pageSize, search });
+
+    res.json(result);
+  } catch (error) {
+    handleServiceError(res, error, 'Failed to list devices');
   }
 });
 

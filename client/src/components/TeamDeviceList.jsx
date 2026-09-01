@@ -164,6 +164,36 @@ export function deviceDisplayName(device) {
 }
 
 /**
+ * `TransferMemberDialog` is generic over any `{id, first_name, last_name,
+ * email, role}`-shaped object -- mechanically, a device is just another
+ * `users.id` to it and to the server route it calls
+ * (`POST /api/users/:userId/transfer`, `TeamTransferService
+ * .executeTransfer`). This adapts a device row into that shape: `id` is
+ * the device's `deviceUserId` (the SAME local `users.id` the transfer
+ * route expects), `first_name` carries the Device_Display_Name so the
+ * dialog's "Move X out of..." copy reads sensibly, `last_name`/`email`
+ * are omitted (a device has neither), and `role` is always `'member'`
+ * (a Team_Owned_Device is never an admin).
+ *
+ * Hoisted to module scope (rather than defined inside `TeamDeviceList`)
+ * and exported so `Devices.jsx`'s org-wide listing -- which has no
+ * single team in scope the way this component does -- can reuse the
+ * SAME adapter rather than duplicating it.
+ *
+ * @param {{deviceUserId: number, username?: string, deviceLabel?: string|null}} device
+ * @returns {{id: number, first_name: string, last_name: string, email: undefined, role: 'member'}}
+ */
+export function toTransferMember(device) {
+  return {
+    id: device.deviceUserId,
+    first_name: deviceDisplayName(device),
+    last_name: '',
+    email: undefined,
+    role: 'member'
+  }
+}
+
+/**
  * Bug #8: the client-side search filter for this tab, matching the
  * `filterAndSort`-driven search the Members/Team Admins/Channels/Sub-teams
  * tabs already have (`TeamDetail.jsx`) -- case-insensitive substring
@@ -193,7 +223,7 @@ export function filterTeamDevices(devices, searchTerm) {
  * `AddTeamDeviceDialog.jsx`'s `isValidDeviceCallsignSuffix` convention
  * exactly -- an empty value is valid (the field is optional).
  */
-const CALLSIGN_SUFFIX_PATTERN = '[A-Za-z0-9.-]*'
+export const CALLSIGN_SUFFIX_PATTERN = '[A-Za-z0-9.-]*'
 const CALLSIGN_SUFFIX_REGEX = /^[A-Za-z0-9.-]*$/
 
 export function isValidTeamDeviceCallsignSuffix(value) {
@@ -228,7 +258,7 @@ export function extractDeviceEditServerError(error) {
  * device's normal row) -- so editing a device feels like editing a member,
  * not like a different feature.
  */
-function DeviceEditRow({ colSpan, form, setForm, saving, error, onSave, onCancel }) {
+export function DeviceEditRow({ colSpan, form, setForm, saving, error, onSave, onCancel }) {
   return (
     <tr className="bg-gray-50 dark:bg-gray-800">
       <td colSpan={colSpan} className="px-6 py-4">
@@ -297,43 +327,72 @@ function DeviceEditRow({ colSpan, form, setForm, saving, error, onSave, onCancel
  * `MemberActions.jsx`'s identical `variant` prop for the fuller
  * rationale -- both components were fixed together for consistency.
  */
-function DeviceActions({ device, onEdit, onTransfer, onEnroll, onDelete, onSuspend, accountStatus = 'active', variant = 'table' }) {
+export function DeviceActions({
+  device,
+  onEdit,
+  onTransfer,
+  onEnroll,
+  onDelete,
+  onSuspend,
+  accountStatus = 'active',
+  variant = 'table',
+  // Devices-page-parity: whether EVERY action in this group should be
+  // enabled for this row, mirroring `MemberActions.jsx`'s identical
+  // `hasTeam` prop exactly -- `TeamDeviceList` (a single team's own
+  // Devices tab) never passes it (defaults `true`): the whole component
+  // is already scoped to one team the caller administers by the time it
+  // renders. `Devices.jsx`'s org-wide listing passes the row's own
+  // `canManage` (from `GET /api/devices`, mirroring `GET /api/users`'
+  // `can_manage`), since that listing's visibility scope is wider than
+  // any single caller's management authority.
+  hasTeam = true,
+  disabledReason = "You don't administer this device's team"
+}) {
   const isCard = variant === 'card'
   const iconSizeClass = isCard ? 'h-5 w-5' : 'h-4 w-4'
   const boxClass = isCard ? 'p-2 rounded-lg' : ''
   const neutralClass = isCard
     ? 'bg-gray-100 hover:bg-gray-200 text-gray-600 dark:bg-gray-700 dark:hover:bg-gray-600 dark:text-gray-300'
     : 'text-gray-600 hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300'
+  const neutralDisabledClass = isCard
+    ? 'bg-gray-100 text-gray-400 dark:bg-gray-700 dark:text-gray-600 cursor-not-allowed'
+    : 'text-gray-400 dark:text-gray-600 cursor-not-allowed'
   const dangerClass = isCard
     ? 'bg-red-50 hover:bg-red-100 text-red-600 dark:bg-red-950/40 dark:hover:bg-red-900/60 dark:text-red-400'
     : 'text-red-600 hover:text-red-500 dark:text-red-400 dark:hover:text-red-300'
+  const dangerDisabledClass = isCard
+    ? 'bg-red-50/50 text-red-300 dark:bg-red-950/20 dark:text-red-800 cursor-not-allowed'
+    : 'text-gray-400 dark:text-gray-600 cursor-not-allowed'
 
   return (
     <div className="flex items-center justify-end space-x-3">
       <button
         type="button"
-        onClick={() => onEdit(device)}
-        className={`${boxClass} ${neutralClass}`}
-        title="Edit device"
-        aria-label={`Edit device ${deviceDisplayName(device)}`}
+        onClick={() => hasTeam && onEdit(device)}
+        disabled={!hasTeam}
+        className={`${boxClass} ${hasTeam ? neutralClass : neutralDisabledClass}`}
+        title={hasTeam ? 'Edit device' : disabledReason}
+        aria-label={hasTeam ? `Edit device ${deviceDisplayName(device)}` : disabledReason}
       >
         <PencilIcon className={iconSizeClass} aria-hidden="true" />
       </button>
       <button
         type="button"
-        onClick={() => onTransfer(device)}
-        className={`${boxClass} ${neutralClass}`}
-        title="Transfer device to another team"
-        aria-label={`Transfer device ${deviceDisplayName(device)} to another team`}
+        onClick={() => hasTeam && onTransfer(device)}
+        disabled={!hasTeam}
+        className={`${boxClass} ${hasTeam ? neutralClass : neutralDisabledClass}`}
+        title={hasTeam ? 'Transfer device to another team' : disabledReason}
+        aria-label={hasTeam ? `Transfer device ${deviceDisplayName(device)} to another team` : disabledReason}
       >
         <ArrowRightCircleIcon className={iconSizeClass} aria-hidden="true" />
       </button>
       <button
         type="button"
-        onClick={() => onEnroll?.(device)}
-        className={`${boxClass} ${neutralClass}`}
-        title="Enroll device"
-        aria-label={`Enroll device ${deviceDisplayName(device)}`}
+        onClick={() => hasTeam && onEnroll?.(device)}
+        disabled={!hasTeam}
+        className={`${boxClass} ${hasTeam ? neutralClass : neutralDisabledClass}`}
+        title={hasTeam ? 'Enroll device' : disabledReason}
+        aria-label={hasTeam ? `Enroll device ${deviceDisplayName(device)}` : disabledReason}
       >
         <QrCodeIcon className={iconSizeClass} aria-hidden="true" />
       </button>
@@ -352,10 +411,11 @@ function DeviceActions({ device, onEdit, onTransfer, onEnroll, onDelete, onSuspe
       {onSuspend && (
         <button
           type="button"
-          onClick={() => onSuspend(device)}
-          className={`${boxClass} ${accountStatus === 'suspended' ? neutralClass : dangerClass}`}
-          title={accountStatus === 'suspended' ? 'Unsuspend device account' : 'Suspend device account'}
-          aria-label={accountStatus === 'suspended' ? `Unsuspend device account ${deviceDisplayName(device)}` : `Suspend device account ${deviceDisplayName(device)}`}
+          onClick={() => hasTeam && onSuspend(device)}
+          disabled={!hasTeam}
+          className={`${boxClass} ${hasTeam ? (accountStatus === 'suspended' ? neutralClass : dangerClass) : (accountStatus === 'suspended' ? neutralDisabledClass : dangerDisabledClass)}`}
+          title={hasTeam ? (accountStatus === 'suspended' ? 'Unsuspend device account' : 'Suspend device account') : disabledReason}
+          aria-label={hasTeam ? (accountStatus === 'suspended' ? `Unsuspend device account ${deviceDisplayName(device)}` : `Suspend device account ${deviceDisplayName(device)}`) : disabledReason}
         >
           {accountStatus === 'suspended' ? (
             <LockOpenIcon className={iconSizeClass} aria-hidden="true" />
@@ -366,10 +426,11 @@ function DeviceActions({ device, onEdit, onTransfer, onEnroll, onDelete, onSuspe
       )}
       <button
         type="button"
-        onClick={() => onDelete(device)}
-        className={`${boxClass} ${dangerClass}`}
-        title="Delete device"
-        aria-label={`Delete device ${deviceDisplayName(device)}`}
+        onClick={() => hasTeam && onDelete(device)}
+        disabled={!hasTeam}
+        className={`${boxClass} ${hasTeam ? dangerClass : dangerDisabledClass}`}
+        title={hasTeam ? 'Delete device' : disabledReason}
+        aria-label={hasTeam ? `Delete device ${deviceDisplayName(device)}` : disabledReason}
       >
         <TrashIcon className={iconSizeClass} aria-hidden="true" />
       </button>
@@ -500,26 +561,6 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
       device,
       mode: device.accountStatus === 'suspended' ? 'unsuspend' : 'suspend'
     })
-  }
-
-  // TransferMemberDialog is generic over any `{id, first_name, last_name,
-  // email, role}`-shaped object -- mechanically, a device is just another
-  // `users.id` to it and to the server route it calls
-  // (`POST /api/users/:userId/transfer`, `TeamTransferService
-  // .executeTransfer`). This adapts a device row into that shape: `id` is
-  // the device's `deviceUserId` (the SAME local `users.id` the transfer
-  // route expects), `first_name` carries the Device_Display_Name so the
-  // dialog's "Move X out of..." copy reads sensibly, `last_name`/`email`
-  // are omitted (a device has neither), and `role` is always `'member'`
-  // (a Team_Owned_Device is never an admin).
-  function toTransferMember(device) {
-    return {
-      id: device.deviceUserId,
-      first_name: deviceDisplayName(device),
-      last_name: '',
-      email: undefined,
-      role: 'member'
-    }
   }
 
   return (

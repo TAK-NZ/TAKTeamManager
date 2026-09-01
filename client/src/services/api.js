@@ -501,6 +501,13 @@ export const enrollmentAPI = {
 };
 
 export const devicesAPI = {
+  // Org-wide Team_Owned_Device listing backing the `/devices` page,
+  // mirroring `usersAPI.getAll()`'s own shape: `{ devices, pagination }`.
+  // `params` is `{ page?, pageSize?, search? }`; `stripEmptyParams` drops
+  // an absent/empty value rather than sending it as a literal empty
+  // string, matching `auditLogsAPI.getAuditLogs`'s own convention.
+  getAll: (params = {}) => api.get('/devices', { params: stripEmptyParams(params) }),
+
   // Creates a brand-new Team_Owned_Device for `teamId` (Requirement 27
   // Criteria 2, 4). `label` and `callsignSuffix` are both optional --
   // `callsignSuffix` is checked server-side against the SAME per-team

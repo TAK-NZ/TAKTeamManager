@@ -10,6 +10,7 @@ import Dashboard from './pages/Dashboard'
 import Teams from './pages/Teams'
 import TeamDetail from './pages/TeamDetail'
 import Users from './pages/Users'
+import Devices from './pages/Devices'
 import Requests from './pages/Requests'
 import RequestAccess from './pages/RequestAccess'
 import GlobalChannels from './pages/GlobalChannels'
@@ -166,6 +167,7 @@ function App() {
           <Route path="/teams" element={<Teams user={user} />} />
           <Route path="/teams/:teamId" element={<TeamDetail user={user} refreshUser={refreshUser} />} />
           <Route path="/users" element={<Users user={user} />} />
+          <Route path="/devices" element={<Devices user={user} />} />
           <Route path="/requests" element={<Requests user={user} />} />
           <Route path="/global-channels" element={<GlobalChannels user={user} />} />
           <Route path="/admin" element={<Admin user={user} />} />

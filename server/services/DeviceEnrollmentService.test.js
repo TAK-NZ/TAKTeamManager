@@ -32,7 +32,8 @@ jest.mock('../config/database', () => ({
 jest.mock('../models/Team', () => ({
   isAdmin: jest.fn(),
   getAncestorChain: jest.fn(),
-  getFullMemberList: jest.fn()
+  getFullMemberList: jest.fn(),
+  getManagedTeamIds: jest.fn()
 }));
 jest.mock('./TeamMembershipService', () => ({
   addUserToTeam: jest.fn(),
@@ -52,6 +53,11 @@ jest.mock('../models/User', () => ({
 jest.mock('./userAttributes', () => ({
   generateCallsign: jest.fn()
 }));
+jest.mock('./DirectoryScopeService', () => ({
+  resolveScope: jest.fn(),
+  UNSCOPED: Object.freeze({ unscoped: true }),
+  TEAM_ROOT_CTE: 'SELECT id AS team_id, id AS root_id, name AS root_name, callsign_prefix AS root_callsign_prefix, parent_team_id FROM teams'
+}));
 
 const mockLoggerInstance = { info: jest.fn(), error: jest.fn() };
 jest.mock('../config/logger', () => ({
@@ -66,6 +72,7 @@ const EventPublisher = require('./EventPublisher');
 const authentikService = require('./authentik');
 const UserAttributesService = require('./userAttributes');
 const ManagedIdentifierService = require('./ManagedIdentifierService');
+const DirectoryScopeService = require('./DirectoryScopeService');
 const { isManagedIdentifier } = require('../utils/managedIdentifier');
 const DeviceEnrollmentService = require('./DeviceEnrollmentService');
 const {
@@ -1142,5 +1149,215 @@ describe('DeviceEnrollmentService.deleteDevice', () => {
       ([sql]) => typeof sql === 'string' && sql.includes('DELETE FROM users')
     );
     expect(deleteCalls.length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * Org-wide Team_Owned_Device listing backing the `/devices` page --
+ * mirrors `GET /api/users`' own scoping shape (DirectoryScopeService,
+ * Team.getManagedTeamIds) rather than `listTeamDevices`'s single-team
+ * `Team.isAdmin` gate.
+ */
+describe('DeviceEnrollmentService.listAllDevices', () => {
+  const ORG_ANCESTOR_CHAIN = [{ id: 5, parent_team_id: null, callsign_prefix: 'AUK', callsign_level_selection: null, depth: 0 }];
+
+  function mockCandidatesQuery(rows) {
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('FROM users u')) {
+        return Promise.resolve({ rows });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    Team.getAncestorChain.mockResolvedValue(ORG_ANCESTOR_CHAIN);
+    Team.getManagedTeamIds.mockResolvedValue(new Set([5]));
+  });
+
+  it('returns every device unfiltered for a Global_Manager (UNSCOPED), with can_manage true for every row', async () => {
+    DirectoryScopeService.resolveScope.mockResolvedValue(DirectoryScopeService.UNSCOPED);
+    mockCandidatesQuery([
+      {
+        device_user_id: 42,
+        username: 'AUK-D7K3QMX',
+        device_label: 'Engine 4 Tablet',
+        callsign_suffix: 'Tanker1',
+        tak_role: 'Team Member',
+        created_at: '2024-01-01T00:00:00.000Z',
+        account_status: 'active',
+        origin_org_id: null,
+        team_id: 5,
+        team_name: 'Auckland',
+        direct_membership_org_id: 5,
+        live_certificate_count: 2,
+        in_scope: true,
+        total_count: '1'
+      }
+    ]);
+
+    const result = await DeviceEnrollmentService.listAllDevices(
+      { userId: 1, is_global_manager: true },
+      { page: 1, pageSize: 50 }
+    );
+
+    expect(Team.getManagedTeamIds).not.toHaveBeenCalled();
+    expect(result.devices).toHaveLength(1);
+    expect(result.devices[0]).toEqual({
+      deviceUserId: 42,
+      username: 'AUK-D7K3QMX',
+      deviceLabel: 'Engine 4 Tablet',
+      callsignSuffix: 'Tanker1',
+      takRole: 'Team Member',
+      callsign: 'AUK-Tanker1',
+      teamId: 5,
+      teamName: 'Auckland',
+      createdAt: '2024-01-01T00:00:00.000Z',
+      accountStatus: 'active',
+      liveCertificateCount: 2,
+      canManage: true
+    });
+    expect(result.devices[0]).not.toHaveProperty('email');
+    expect(result.pagination).toEqual({ page: 1, pageSize: 50, total: 1 });
+  });
+
+  it('resolves canManage per row via Team.getManagedTeamIds for a non-Global_Manager, resolved once for the whole page', async () => {
+    DirectoryScopeService.resolveScope.mockResolvedValue({
+      organisations: [{ id: 5, name: 'Auckland' }],
+      organisationIds: [5],
+      allowedDomains: new Set(),
+      domainsConfigured: false
+    });
+    Team.getManagedTeamIds.mockResolvedValue(new Set([5]));
+    mockCandidatesQuery([
+      {
+        device_user_id: 42,
+        username: 'AUK-D7K3QMX',
+        device_label: 'Engine 4 Tablet',
+        callsign_suffix: null,
+        tak_role: 'Team Member',
+        created_at: '2024-01-01T00:00:00.000Z',
+        account_status: 'active',
+        origin_org_id: null,
+        team_id: 5,
+        team_name: 'Auckland',
+        direct_membership_org_id: 5,
+        live_certificate_count: 0,
+        in_scope: true,
+        total_count: '1'
+      },
+      {
+        device_user_id: 43,
+        username: 'AUK-D0000BB',
+        device_label: null,
+        callsign_suffix: null,
+        tak_role: 'Team Member',
+        created_at: '2024-01-02T00:00:00.000Z',
+        account_status: 'active',
+        origin_org_id: null,
+        team_id: 9,
+        team_name: 'Sub Team',
+        direct_membership_org_id: 5,
+        live_certificate_count: 0,
+        in_scope: true,
+        total_count: '1'
+      }
+    ]);
+    Team.getAncestorChain.mockImplementation((teamId) =>
+      Promise.resolve(teamId === 9 ? [ORG_ANCESTOR_CHAIN[0], { id: 9, parent_team_id: 5, callsign_prefix: 'STL', callsign_level_selection: null, depth: 1 }] : ORG_ANCESTOR_CHAIN)
+    );
+
+    const result = await DeviceEnrollmentService.listAllDevices(
+      { userId: 1, is_global_manager: false },
+      { page: 1, pageSize: 50 }
+    );
+
+    expect(Team.getManagedTeamIds).toHaveBeenCalledTimes(1);
+    expect(Team.getManagedTeamIds).toHaveBeenCalledWith(1);
+    expect(result.devices.find((d) => d.deviceUserId === 42).canManage).toBe(true);
+    // team_id 9 is not in the managed set -- visible (scope admits it via
+    // direct_membership_org_id) but not manageable by this caller.
+    expect(result.devices.find((d) => d.deviceUserId === 43).canManage).toBe(false);
+  });
+
+  it('excludes a row the DirectoryScope predicate rejects, via the belt-and-braces partitionCandidates pass', async () => {
+    DirectoryScopeService.resolveScope.mockResolvedValue({
+      organisations: [{ id: 5, name: 'Auckland' }],
+      organisationIds: [5],
+      allowedDomains: new Set(),
+      domainsConfigured: false
+    });
+    // The SQL predicate is trusted to have already excluded this row in
+    // production, but the belt-and-braces pass must ALSO exclude a row
+    // whose facts don't actually match the resolved scope -- e.g. one
+    // that slipped through with a mismatched org id.
+    mockCandidatesQuery([
+      {
+        device_user_id: 99,
+        username: 'WLG-D0000ZZ',
+        device_label: null,
+        callsign_suffix: null,
+        tak_role: 'Team Member',
+        created_at: '2024-01-01T00:00:00.000Z',
+        account_status: 'active',
+        origin_org_id: 77,
+        team_id: 12,
+        team_name: 'Wellington',
+        direct_membership_org_id: 77,
+        live_certificate_count: 0,
+        in_scope: false,
+        total_count: '0'
+      }
+    ]);
+
+    const result = await DeviceEnrollmentService.listAllDevices(
+      { userId: 1, is_global_manager: false },
+      { page: 1, pageSize: 50 }
+    );
+
+    expect(result.devices).toEqual([]);
+  });
+
+  it('passes organisationIds, the search pattern, page size and offset as SQL parameters', async () => {
+    DirectoryScopeService.resolveScope.mockResolvedValue(DirectoryScopeService.UNSCOPED);
+    mockCandidatesQuery([]);
+
+    await DeviceEnrollmentService.listAllDevices(
+      { userId: 1, is_global_manager: true },
+      { page: 2, pageSize: 10, search: 'tanker' }
+    );
+
+    const [, params] = pool.query.mock.calls.find(([sql]) => sql.includes('FROM users u'));
+    expect(params).toEqual([[], '%tanker%', true, 10, 10]);
+  });
+
+  it('returns zero total and an empty device array when the candidates CTE yields no rows', async () => {
+    DirectoryScopeService.resolveScope.mockResolvedValue(DirectoryScopeService.UNSCOPED);
+    mockCandidatesQuery([]);
+
+    const result = await DeviceEnrollmentService.listAllDevices(
+      { userId: 1, is_global_manager: true },
+      { page: 1, pageSize: 50 }
+    );
+
+    expect(result).toEqual({ devices: [], pagination: { page: 1, pageSize: 50, total: 0 } });
+    expect(Team.getAncestorChain).not.toHaveBeenCalled();
+  });
+
+  it('resolves each distinct team\'s Ancestor_Chain at most once across the whole page', async () => {
+    DirectoryScopeService.resolveScope.mockResolvedValue(DirectoryScopeService.UNSCOPED);
+    mockCandidatesQuery([
+      { device_user_id: 1, username: 'AUK-D0000AA', device_label: null, callsign_suffix: null, tak_role: 'Team Member', created_at: '2024-01-01T00:00:00.000Z', account_status: 'active', origin_org_id: null, team_id: 5, team_name: 'Auckland', direct_membership_org_id: 5, live_certificate_count: 0, in_scope: true, total_count: '2' },
+      { device_user_id: 2, username: 'AUK-D0000BB', device_label: null, callsign_suffix: null, tak_role: 'Team Member', created_at: '2024-01-02T00:00:00.000Z', account_status: 'active', origin_org_id: null, team_id: 5, team_name: 'Auckland', direct_membership_org_id: 5, live_certificate_count: 0, in_scope: true, total_count: '2' }
+    ]);
+
+    await DeviceEnrollmentService.listAllDevices(
+      { userId: 1, is_global_manager: true },
+      { page: 1, pageSize: 50 }
+    );
+
+    expect(Team.getAncestorChain).toHaveBeenCalledTimes(1);
+    expect(Team.getAncestorChain).toHaveBeenCalledWith(5);
   });
 });
