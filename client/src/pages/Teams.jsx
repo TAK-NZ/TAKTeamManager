@@ -68,7 +68,12 @@ function TeamStatusIcons({ team }) {
         <ArrowLeftOnRectangleIcon className="h-4 w-4 text-green-500 flex-shrink-0" title="Joinable team" />
       )}
       {team.has_signup_code && (
-        <QrCodeIcon className="h-4 w-4 text-purple-500 flex-shrink-0" title="Has sign-up code" />
+        // Bugfix: was a distinct purple accent (text-purple-500), unlike
+        // Private/Joinable above which use a semantic red/green. A
+        // sign-up code isn't a state that needs its own alert colour, so
+        // this now matches the team name link's own text colour
+        // (text-gray-900 dark:text-gray-100) instead of standing out.
+        <QrCodeIcon className="h-4 w-4 text-gray-900 dark:text-gray-100 flex-shrink-0" title="Has sign-up code" />
       )}
     </>
   )

@@ -544,7 +544,23 @@ const routes = {
   'GET /api/admin/excluded-domains': ['admin:excluded_domains:manage'],
   'PUT /api/admin/excluded-domains': ['admin:excluded_domains:manage'],
   'GET /api/admin/org-interest': ['admin:org_interest:read'],
-  'PATCH /api/admin/org-interest/:id': ['admin:org_interest:manage']
+  'PATCH /api/admin/org-interest/:id': ['admin:org_interest:manage'],
+
+  // --- /api/openapi (server/routes/openapi.js) ---
+  // Generated OpenAPI document (server/config/openapi.js), derived from
+  // this registry and publicRoutes.js. Gated to 'docs:openapi:read'
+  // rather than left reachable by any authenticated user: the document
+  // names every admin-only route's exact permission identifier, which is
+  // minor reconnaissance value for a caller who is not themselves an
+  // admin of anything. 'docs:openapi:read' has NO route param to key a
+  // resolver on -- this is a listing-shaped route, exactly like
+  // 'device:read:org'/'user:read:team_admin' above ("does this caller
+  // administer SOMETHING", not "administer THIS") -- and is deliberately
+  // NOT in `roleDefaults.authenticated_user`, for the same reason those
+  // two identifiers are not: a statically-held identifier would satisfy
+  // `resolveAccess` outright and bypass the row-scoped resolver entirely,
+  // letting every authenticated user read it.
+  'GET /api/openapi.json': ['docs:openapi:read']
 };
 
 // Role-based default permission sets.

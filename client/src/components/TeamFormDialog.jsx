@@ -175,7 +175,7 @@ const EMPTY_FORM_DATA = {
   parentTeamId: null,
   callsignLevelSelection: [],
   // Default for a brand-new Organisation is "First Initial + Dot + Last
-  // Name" (e.g. "J.Doe"), not "Full Name" -- an operator creating a new
+  // Name" (e.g. "J.Bloggs"), not "Full Name" -- an operator creating a new
   // Organisation gets the more space-efficient callsign format unless
   // they choose otherwise. An existing team being EDITED still shows its
   // own stored `callsign_name_format` value (see the edit-mode seeding
@@ -567,8 +567,8 @@ export default function TeamFormDialog({
                     editableReason="A Sub-team's Prefix may be corrected at any time -- it participates only in Callsign generation, never in a device/user identifier"
                   />
                   <InfoTooltip text={formData.parentTeamId
-                    ? 'The Sub-team segment of generated callsigns, e.g. FENZ-STL-John Smith. Optional; may be corrected later.'
-                    : "The Organisation segment of every callsign minted under it, e.g. FENZ-John Smith. Required, and permanent once this Organisation is created -- every device and user identifier is derived from it."} />
+                    ? 'The Sub-team segment of generated callsigns, e.g. FENZ-STL-Joe Bloggs. Optional; may be corrected later.'
+                    : "The Organisation segment of every callsign minted under it, e.g. FENZ-Joe Bloggs. Required, and permanent once this Organisation is created -- every device and user identifier is derived from it."} />
                 </label>
                 <input
                   type="text"
@@ -734,10 +734,10 @@ export default function TeamFormDialog({
                     className={`input w-full ${formData.parentTeamId ? 'bg-gray-100 dark:bg-gray-600 text-gray-500' : ''}`}
                     disabled={!!formData.parentTeamId}
                   >
-                    <option value="full_name">Full Name (John Doe)</option>
-                    <option value="first_initial_last">First Initial + Last Name (J Doe)</option>
-                    <option value="first_last_initial">First Name + Last Initial (John D)</option>
-                    <option value="first_initial_dot_last">First Initial + Dot + Last Name (J.Doe)</option>
+                    <option value="full_name">Full Name (Joe Bloggs)</option>
+                    <option value="first_initial_last">First Initial + Last Name (J Bloggs)</option>
+                    <option value="first_last_initial">First Name + Last Initial (Joe B)</option>
+                    <option value="first_initial_dot_last">First Initial + Dot + Last Name (J.Bloggs)</option>
                     <option value="user_defined">User Defined (Custom per-member suffix)</option>
                   </select>
                   {!formData.parentTeamId && formData.callsignNameFormat === 'user_defined' && (

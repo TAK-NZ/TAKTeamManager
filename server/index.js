@@ -174,6 +174,12 @@ app.set('trust proxy', getTrustProxyHops());
   app.use('/api/devices', require('./routes/devices'));
   app.use('/api/enrollment', require('./routes/enrollment'));
   app.use('/api/bulk-import', require('./routes/bulkImport'));
+  // Generated OpenAPI document (GET /api/openapi.json), gated to
+  // 'docs:openapi:read' -- see server/routes/openapi.js and this route's
+  // permissions.registry.js entry for why. Mounted at the bare '/api'
+  // root, alongside the version probe above, since the route itself
+  // already carries the full '/openapi.json' suffix.
+  app.use('/api', require('./routes/openapi'));
 
   // Device_Management (device-management Requirements 1.8, 1.9, task
   // 13.1): mounted ONLY while Device_Mgmt_Enabled is true, so while the

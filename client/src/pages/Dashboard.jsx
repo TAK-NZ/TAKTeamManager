@@ -1,7 +1,18 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Link } from 'react-router-dom'
-import { UsersIcon, ClipboardDocumentListIcon, ArrowUpRightIcon, ArrowDownLeftIcon, ArrowsRightLeftIcon, MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon, InformationCircleIcon, FolderIcon, FolderOpenIcon, ChevronRightIcon as ChevronRightSmall, ChevronDownIcon, ChevronUpIcon, SignalIcon, IdentificationIcon, DevicePhoneMobileIcon } from '@heroicons/react/24/outline'
-import { teamsAPI, requestsAPI, configAPI, usersAPI, channelsAPI, deviceManagementAPI, adminAPI } from '../services/api'
+import { UsersIcon, UserGroupIcon, RadioIcon, ClipboardDocumentListIcon, ArrowUpRightIcon, ArrowDownLeftIcon, ArrowsRightLeftIcon, MagnifyingGlassIcon, ChevronLeftIcon, ChevronRightIcon, InformationCircleIcon, FolderIcon, FolderOpenIcon, ChevronRightIcon as ChevronRightSmall, ChevronDownIcon, ChevronUpIcon, SignalIcon, IdentificationIcon, DevicePhoneMobileIcon } from '@heroicons/react/24/outline'
+// Bugfix (top-level folder icons): the five recognized top-level channel
+// folders get a symbol naming what they actually are, rather than the
+// generic FolderIcon/FolderOpenIcon every other folder still uses.
+// BCH/Response/Support/XtraTools mirror GlobalChannels.jsx's own section
+// icons EXACTLY (RadioIcon stays heroicons there too, per that page's own
+// "leave as is" -- see the comment on CHANNEL_TABS in GlobalChannels.jsx);
+// Teams mirrors Layout.jsx's "Orgs & Teams" nav icon. None of the five has
+// an open/closed pair the way FolderIcon/FolderOpenIcon do, so one icon is
+// used regardless of expanded state -- matching how GlobalChannels' own
+// section headers render these same icons (never swapped on toggle).
+import { IconFiretruck, IconBackhoe, IconTool } from '@tabler/icons-react'
+import { teamsAPI, requestsAPI, configAPI, usersAPI, channelsAPI, deviceManagementAPI, adminAPI, devicesAPI } from '../services/api'
 import { buildFolderTree } from '../utils/channelTree'
 import { getTakColorHex } from '../utils/takColors'
 import RevokeDeviceDialog from '../components/RevokeDeviceDialog'
@@ -29,6 +40,25 @@ import { EXPIRY_STATES, classifyExpiry, getExpiryWarningDays } from '../utils/ex
 // cadence is tightened to match it (Requirement 19.7).
 const REFRESH_INTERVAL_MS = 60000
 
+// Bugfix (top-level folder icons): the exact top-level folder names this
+// server can produce for a Team/BCH/Region channel's group name, once
+// `tak_` and any category/tier prefix are stripped -- 'Teams'
+// (`Team.createTeamChannel`), 'BCH'/'XtraTools'
+// (`BCH_CHANNEL_CATEGORY_PREFIX`, server/config/constants.js), and
+// 'Response'/'Support' (`REGION_CHANNEL_TIER_PREFIX`, same file). A folder
+// name not in this map (a plain team/region name with no recognized
+// prefix, e.g. a literal Region name before tiering existed, or any other
+// ad-hoc top-level group) keeps the existing generic FolderIcon/
+// FolderOpenIcon -- this only replaces the symbol for the five names the
+// server is actually known to produce at the top level.
+const TOP_LEVEL_FOLDER_ICONS = Object.freeze({
+  Teams: UserGroupIcon,
+  BCH: RadioIcon,
+  Response: IconFiretruck,
+  Support: IconBackhoe,
+  XtraTools: IconTool
+})
+
 function startVisibilityPausedRefresh(refresh) {
   let intervalId = setInterval(refresh, REFRESH_INTERVAL_MS)
 
@@ -55,7 +85,24 @@ function startVisibilityPausedRefresh(refresh) {
 }
 
 export default function Dashboard({ user }) {
-  const [stats, setStats] = useState({ requests: 0 })
+  // Bugfix (generic-pending-tasks-banner): this banner's count previously
+  // covered ONLY the access_requests/Org_Interest queue (`accessRequests`
+  // below). It now also folds in Team-Owned Device renewals awaiting an
+  // ADMIN's action (`teamDeviceRenewals`) -- the same count the /tasks
+  // page's own "Team devices needing renewal" section lists -- so an admin
+  // with nothing but expiring team devices still sees a non-zero banner.
+  //
+  // Deliberately NOT folded in: the viewer's OWN device renewals. Those
+  // already get a separate, more specific banner just below ("One or more
+  // of your devices has a certificate expiring soon or expired." with a
+  // direct /enrollment link) -- folding them in here too would put two
+  // banners about the same expiring cert on one page.
+  const [stats, setStats] = useState({ accessRequests: 0, teamDeviceRenewals: 0 })
+  // Requests.jsx's own gate for whether the viewer administers ANY team
+  // (Team_Admin, admin, or Global_Manager) -- reused here verbatim so the
+  // team-device-renewal fetch below only fires for a viewer who could act
+  // on the result.
+  const canManageTeams = Boolean(user?.isAdmin || user?.isTeamAdmin || user?.is_global_manager)
   const [userTeam, setUserTeam] = useState(null)
   const [userChannels, setUserChannels] = useState([])
   const [freshUser, setFreshUser] = useState(user)
@@ -321,7 +368,15 @@ export default function Dashboard({ user }) {
           </div>
         )
       } else {
-        // Render as regular folder
+        // Render as regular folder. Bugfix (top-level folder icons): a
+        // TOP-LEVEL folder (path === '', i.e. not nested under another
+        // folder) whose name is one of the five recognized names gets that
+        // name's dedicated symbol instead of the generic Folder/FolderOpen
+        // pair -- checked on `path`, not `folderPath`, because a NESTED
+        // folder could coincidentally share one of these names (e.g. some
+        // team's own sub-team literally named "Support") and must keep the
+        // ordinary folder glyph.
+        const TopLevelIcon = path === '' ? TOP_LEVEL_FOLDER_ICONS[folderName] : undefined
         items.push(
           <div key={folderPath}>
             <div 
@@ -329,7 +384,9 @@ export default function Dashboard({ user }) {
               onClick={() => toggleFolder(folderPath)}
             >
               <div className="flex items-center flex-1">
-                {isExpanded ? (
+                {TopLevelIcon ? (
+                  <TopLevelIcon className="h-5 w-5 text-gray-900 dark:text-gray-100 mr-2" />
+                ) : isExpanded ? (
                   <FolderOpenIcon className="h-5 w-5 text-gray-900 dark:text-gray-100 mr-2" />
                 ) : (
                   <FolderIcon className="h-5 w-5 text-gray-900 dark:text-gray-100 mr-2" />
@@ -489,39 +546,54 @@ export default function Dashboard({ user }) {
       
       setUserChannels(takChannels)
 
-      // Fetch pending request count for admins. Two independent request
-      // systems feed this one stat, mirroring Layout.jsx's nav badge
-      // exactly: the access_requests-backed requests (any admin) and,
-      // for a Global_Manager only, pending Org_Interest_Requests -- a
-      // separate table surfaced today only via the /requests page's own
-      // OrgInterestRequests panel. Fetched with Promise.allSettled, not
-      // Promise.all: a non-global admin has no admin:org_interest:read
+      // Fetch pending-task counts for admins. THREE independent sources feed
+      // this one banner: the access_requests-backed requests (any admin),
+      // pending Org_Interest_Requests (Global_Manager only, mirroring
+      // Layout.jsx's nav badge), and -- bugfix (generic-pending-tasks-banner)
+      // -- Team-Owned Device renewals across every team the viewer
+      // administers (canManageTeams only, mirroring /tasks' own
+      // fetchTeamDevicesNeedingRenewal). Fetched with Promise.allSettled,
+      // not Promise.all: a non-global admin has no admin:org_interest:read
       // permission and gets a 403 on that call, which must not blank out
-      // the access_requests count they DO have permission for.
+      // the counts they DO have permission for.
       try {
         const promises = [requestsAPI.getPending()]
         if (user?.is_global_manager) {
           promises.push(adminAPI.getOrgInterest({ status: 'pending' }))
+        } else {
+          promises.push(Promise.resolve(null))
+        }
+        if (canManageTeams) {
+          promises.push(devicesAPI.getAll({ expiringOnly: true, pageSize: 200 }))
+        } else {
+          promises.push(Promise.resolve(null))
         }
 
-        const [accessRequestsResult, orgInterestResult] = await Promise.allSettled(promises)
+        const [accessRequestsResult, orgInterestResult, teamDeviceRenewalsResult] = await Promise.allSettled(promises)
 
         const accessRequestsCount =
           accessRequestsResult.status === 'fulfilled'
             ? accessRequestsResult.value.data.requests?.length || 0
             : 0
         const orgInterestCount =
-          orgInterestResult?.status === 'fulfilled'
+          orgInterestResult.status === 'fulfilled' && orgInterestResult.value
             ? orgInterestResult.value.data.requests?.length || 0
             : 0
+        const teamDeviceRenewalsCount =
+          teamDeviceRenewalsResult.status === 'fulfilled' && teamDeviceRenewalsResult.value
+            ? teamDeviceRenewalsResult.value.data?.devices?.length || 0
+            : 0
 
-        setStats({ requests: accessRequestsCount + orgInterestCount })
+        setStats({
+          accessRequests: accessRequestsCount + orgInterestCount,
+          teamDeviceRenewals: teamDeviceRenewalsCount
+        })
       } catch (e) {
-        setStats({ requests: 0 })
+        setStats({ accessRequests: 0, teamDeviceRenewals: 0 })
       }
     } catch (error) {
       console.error('Failed to fetch channel data:', error)
-      setStats({ requests: 0 })
+      setStats({ accessRequests: 0, teamDeviceRenewals: 0 })
     } finally {
       setLoading(false)
     }
@@ -592,7 +664,7 @@ export default function Dashboard({ user }) {
           Welcome back, {user.first_name}
         </h1>
         <p className="text-gray-600 dark:text-gray-400">
-          View your TAK profile, channels and devices.
+          View your TAK profile, devices and channels.
         </p>
       </div>
 
@@ -708,8 +780,13 @@ export default function Dashboard({ user }) {
         </div>
       )}
 
-      {/* Pending Requests */}
-      {stats.requests > 0 && (
+      {/* Pending Tasks (bugfix: generic-pending-tasks-banner). The heading
+          and count cover access requests + Org_Interest_Requests +
+          Team-Owned Device renewals; the description line names only the
+          category/categories that are actually non-zero, since a fixed
+          A-or-B sentence would misdescribe the case where both are
+          present. */}
+      {(stats.accessRequests + stats.teamDeviceRenewals) > 0 && (
         <div className="card bg-yellow-50 dark:bg-yellow-900/20 border-yellow-200 dark:border-yellow-800">
           {/* Below `sm`: the icon + text stay on their own row and the
               button drops underneath, full-width -- the previous single
@@ -723,10 +800,15 @@ export default function Dashboard({ user }) {
               <ClipboardDocumentListIcon className="h-6 w-6 text-yellow-600 dark:text-yellow-400 flex-shrink-0" />
               <div className="ml-3">
                 <h3 className="text-sm font-medium text-yellow-800 dark:text-yellow-200">
-                  You have {stats.requests} pending request{stats.requests !== 1 ? 's' : ''}
+                  You have {stats.accessRequests + stats.teamDeviceRenewals} pending task
+                  {(stats.accessRequests + stats.teamDeviceRenewals) !== 1 ? 's' : ''}
                 </h3>
                 <p className="text-sm text-yellow-700 dark:text-yellow-300">
-                  Review team access requests from new users.
+                  {stats.accessRequests > 0 && stats.teamDeviceRenewals > 0
+                    ? 'Review team access requests and device certificate renewals.'
+                    : stats.teamDeviceRenewals > 0
+                      ? 'Review team device certificate renewals.'
+                      : 'Review team access requests from new users.'}
                 </p>
               </div>
             </div>
@@ -735,7 +817,7 @@ export default function Dashboard({ user }) {
                   at the renamed /tasks route rather than relying on the
                   /requests redirect for a link this codebase itself owns. */}
               <Link to="/tasks" className="btn-primary block text-center sm:inline-block">
-                Review Requests
+                Review Tasks
               </Link>
             </div>
           </div>

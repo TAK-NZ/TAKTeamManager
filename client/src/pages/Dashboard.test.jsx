@@ -15,7 +15,7 @@ import {
   revokeActionLabel
 } from '../components/DeviceListRow.jsx'
 import { labelForClientType } from '../components/DeviceTypeIcon.jsx'
-import { usersAPI, channelsAPI, requestsAPI, configAPI, deviceManagementAPI, adminAPI } from '../services/api'
+import { usersAPI, channelsAPI, requestsAPI, configAPI, deviceManagementAPI, adminAPI, devicesAPI } from '../services/api'
 import { formatDateTime } from '../utils/dateFormat'
 import { DEFAULT_EXPIRY_WARNING_DAYS, setExpiryWarningDays } from '../utils/expiryWarning'
 
@@ -50,13 +50,20 @@ vi.mock('../services/api', () => ({
   // of a missing export from a mocked ES module is a load-time failure, so it
   // is present.
   teamsAPI: {},
-  // Dashboard.jsx's pending-requests stat additionally calls
+  // Dashboard.jsx's pending-tasks stat additionally calls
   // adminAPI.getOrgInterest for a Global_Manager user (bugfix:
   // pending-requests-badge). USER below carries no is_global_manager flag
   // at all, so that branch never actually fires in this file's tests, but
   // the export must still exist -- a named import of a missing export from
   // a mocked ES module is a load-time failure.
   adminAPI: { getOrgInterest: vi.fn() },
+  // Bugfix (generic-pending-tasks-banner): the same stat now also calls
+  // devicesAPI.getAll({ expiringOnly: true, ... }) for a viewer who
+  // administers a team (canManageTeams). USER below carries no
+  // isAdmin/isTeamAdmin/is_global_manager flag, so that branch never
+  // actually fires in most of this file's tests either, but the export
+  // must still exist for the same load-time reason as adminAPI above.
+  devicesAPI: { getAll: vi.fn() },
   deviceManagementAPI: {
     probeEnabled: vi.fn(),
     revokeMyDevice: vi.fn(),
@@ -251,6 +258,14 @@ const FAR_FUTURE_DEVICE = {
  * (adminAPI.getOrgInterest({status: 'pending'})); for any other user, it
  * never calls adminAPI.getOrgInterest at all and reads only the
  * access_requests count.
+ *
+ * Bugfix (generic-pending-tasks-banner): the banner (now titled "pending
+ * task(s)") additionally folds in Team-Owned Device renewals
+ * (devicesAPI.getAll({expiringOnly: true, ...})) for a viewer who
+ * administers a team (isAdmin/isTeamAdmin/is_global_manager), mirroring
+ * /tasks' own "Team devices needing renewal" count. A viewer who manages no
+ * team never calls devicesAPI.getAll at all. The description line beneath
+ * the count names only the category/categories that are actually non-zero.
  */
 // Bugfix (mobile tap targets too small):
 // 1. An "expandable channel" row (a channel that is ALSO a folder --
@@ -369,7 +384,168 @@ describe('Dashboard folder tree tap targets (bugfix)', () => {
   })
 })
 
-describe('Dashboard "Pending Requests" stat (bugfix: pending-requests-badge)', () => {
+// Bugfix (top-level folder icons): the five recognized top-level channel
+// folder names (Teams, BCH, Response, Support, XtraTools) render a symbol
+// naming what they are, mirroring GlobalChannels.jsx's own section icons
+// (BCH/Response/Support/XtraTools) and Layout.jsx's "Orgs & Teams" nav icon
+// (Teams). Every OTHER folder -- nested, or top-level but unrecognized --
+// keeps the existing generic FolderIcon/FolderOpenIcon pair.
+describe('Dashboard top-level folder icons (bugfix: top-level folder icons)', () => {
+  let container
+  let root
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    vi.clearAllMocks()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    container = document.createElement('div')
+    document.body.appendChild(container)
+
+    // One channel per recognized top-level name, plus an unrecognized
+    // top-level name ("Ops") and a NESTED folder that coincidentally
+    // shares a recognized name ("Region - Support"), so the "only at the
+    // top level" rule is exercised, not merely "only these five names".
+    usersAPI.getMe.mockResolvedValue({
+      data: {
+        user: {
+          ...USER,
+          groups: [
+            'tak_teams_alpha',
+            'tak_bch_alpha',
+            'tak_response_alpha',
+            'tak_support_alpha',
+            'tak_xtratools_alpha',
+            'tak_ops_alpha',
+            'tak_region_support_alpha'
+          ]
+        },
+        teams: []
+      }
+    })
+    channelsAPI.getDescriptions.mockResolvedValue({
+      data: {
+        channels: [
+          { name: 'tak_teams_alpha', display_name: 'Teams - Alpha', description: 'd' },
+          { name: 'tak_bch_alpha', display_name: 'BCH - Alpha', description: 'd' },
+          { name: 'tak_response_alpha', display_name: 'Response - Alpha', description: 'd' },
+          { name: 'tak_support_alpha', display_name: 'Support - Alpha', description: 'd' },
+          { name: 'tak_xtratools_alpha', display_name: 'XtraTools - Alpha', description: 'd' },
+          { name: 'tak_ops_alpha', display_name: 'Ops - Alpha', description: 'd' },
+          { name: 'tak_region_support_alpha', display_name: 'Region - Support - Alpha', description: 'd' }
+        ]
+      }
+    })
+    requestsAPI.getPending.mockResolvedValue({ data: { requests: [] } })
+    configAPI.getColorMappings.mockResolvedValue({ data: { colorMappings: {}, roleDescriptions: {} } })
+    configAPI.getPublic.mockResolvedValue({ data: {} })
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false, devices: [] })
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    vi.restoreAllMocks()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  const mount = async () => {
+    root = createRoot(container)
+    await act(async () => {
+      root.render(
+        <MemoryRouter>
+          <Dashboard user={USER} />
+        </MemoryRouter>
+      )
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+  }
+
+  // A folder row's icon is the first svg inside the row's own
+  // `flex items-center flex-1` wrapper (the chevron is a sibling of that
+  // wrapper, not inside it -- see the row markup in Dashboard.jsx).
+  const folderIconFor = (folderName) => {
+    const span = Array.from(container.querySelectorAll('span')).find(
+      (el) => el.textContent === folderName && el.className.includes('font-medium')
+    )
+    if (!span) return null
+    return span.parentElement.querySelector('svg')
+  }
+
+  it('renders RadioIcon (heroicons) for the top-level BCH folder', async () => {
+    await mount()
+    const icon = folderIconFor('BCH')
+    expect(icon).toBeTruthy()
+    // heroicons components carry no stable class-token signature of their
+    // own; distinguished here from Tabler's `tabler-icon-*` token instead
+    // (absence of that token, on an icon this test already knows is not
+    // the generic Folder/FolderOpen shape via the icon-count assertion
+    // below).
+    expect(icon.getAttribute('class')).not.toContain('tabler-icon')
+  })
+
+  it('renders Tabler IconFiretruck for the top-level Response folder', async () => {
+    await mount()
+    const icon = folderIconFor('Response')
+    expect(icon).toBeTruthy()
+    expect(icon.getAttribute('class')).toContain('tabler-icon-firetruck')
+  })
+
+  it('renders Tabler IconBackhoe for the top-level Support folder', async () => {
+    await mount()
+    const icon = folderIconFor('Support')
+    expect(icon).toBeTruthy()
+    expect(icon.getAttribute('class')).toContain('tabler-icon-backhoe')
+  })
+
+  it('renders Tabler IconTool for the top-level XtraTools folder', async () => {
+    await mount()
+    const icon = folderIconFor('XtraTools')
+    expect(icon).toBeTruthy()
+    expect(icon.getAttribute('class')).toContain('tabler-icon-tool')
+  })
+
+  it('renders no chevron-shaped SVG class on the Teams folder\'s own icon (UserGroupIcon, not a generic folder)', async () => {
+    await mount()
+    const icon = folderIconFor('Teams')
+    expect(icon).toBeTruthy()
+    expect(icon.getAttribute('class')).not.toContain('tabler-icon')
+  })
+
+  it('keeps the generic FolderIcon for an unrecognized top-level folder name ("Ops")', async () => {
+    await mount()
+    const icon = folderIconFor('Ops')
+    expect(icon).toBeTruthy()
+    expect(icon.getAttribute('class')).not.toContain('tabler-icon')
+  })
+
+  it('keeps the generic FolderIcon for a NESTED folder that coincidentally shares a recognized name ("Support" nested under "Region")', async () => {
+    await mount()
+
+    // "Region" is the top-level folder here; expand it to reach the
+    // nested "Support" folder underneath.
+    const regionIcon = folderIconFor('Region')
+    expect(regionIcon).toBeTruthy()
+    const regionRow = regionIcon.closest('.cursor-pointer')
+    await act(async () => {
+      regionRow.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+
+    const nestedIcon = folderIconFor('Support')
+    expect(nestedIcon).toBeTruthy()
+    // The NESTED "Support" must NOT get IconBackhoe -- that symbol is
+    // reserved for the top-level Support folder only.
+    expect(nestedIcon.getAttribute('class')).not.toContain('tabler-icon')
+  })
+})
+
+describe('Dashboard "Pending Tasks" stat (bugfix: pending-requests-badge, generic-pending-tasks-banner)', () => {
   let container
   let root
 
@@ -385,6 +561,10 @@ describe('Dashboard "Pending Requests" stat (bugfix: pending-requests-badge)', (
     configAPI.getColorMappings.mockResolvedValue({ data: { colorMappings: {}, roleDescriptions: {} } })
     configAPI.getPublic.mockResolvedValue({ data: {} })
     deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false, devices: [] })
+    // Only reached by tests below that mount an admin/team-admin/
+    // Global_Manager user; harmless default for every other test in this
+    // suite, which never triggers the canManageTeams branch at all.
+    devicesAPI.getAll.mockResolvedValue({ data: { devices: [], pagination: { page: 1, pageSize: 200, total: 0 } } })
   })
 
   afterEach(async () => {
@@ -413,15 +593,22 @@ describe('Dashboard "Pending Requests" stat (bugfix: pending-requests-badge)', (
   // The dedicated "Pending Requests" stat tile was removed from the page
   // (TAK Profile / My Channels / My Devices dashboard restyle); the
   // computed count this suite validates now surfaces only in the
-  // "Quick Actions" banner's "You have N pending request(s)" heading,
+  // "Quick Actions" banner's "You have N pending task(s)" heading,
   // which is rendered only when the count is greater than 0.
-  const pendingRequestsStatText = () => {
+  const pendingTasksStatText = () => {
     const heading = Array.from(container.querySelectorAll('h3')).find((h3) =>
-      /pending request/.test(h3.textContent)
+      /pending task/.test(h3.textContent)
     )
     if (!heading) return null
-    const match = heading.textContent.match(/You have (\d+) pending request/)
+    const match = heading.textContent.match(/You have (\d+) pending task/)
     return match ? match[1] : null
+  }
+
+  const bannerDescriptionText = () => {
+    const heading = Array.from(container.querySelectorAll('h3')).find((h3) =>
+      /pending task/.test(h3.textContent)
+    )
+    return heading ? heading.nextElementSibling?.textContent ?? null : null
   }
 
   it('sums access_requests and pending Org_Interest_Requests counts for a Global_Manager', async () => {
@@ -431,7 +618,7 @@ describe('Dashboard "Pending Requests" stat (bugfix: pending-requests-badge)', (
     await mount({ ...USER, is_global_manager: true })
 
     expect(adminAPI.getOrgInterest).toHaveBeenCalledWith({ status: 'pending' })
-    expect(pendingRequestsStatText()).toBe('3')
+    expect(pendingTasksStatText()).toBe('3')
   })
 
   it('never calls adminAPI.getOrgInterest for a non-Global_Manager, reading only the access_requests count', async () => {
@@ -440,7 +627,7 @@ describe('Dashboard "Pending Requests" stat (bugfix: pending-requests-badge)', (
     await mount({ ...USER, is_global_manager: false })
 
     expect(adminAPI.getOrgInterest).not.toHaveBeenCalled()
-    expect(pendingRequestsStatText()).toBe('1')
+    expect(pendingTasksStatText()).toBe('1')
   })
 
   it('falls back to the access_requests count alone when the Org_Interest fetch fails', async () => {
@@ -449,19 +636,76 @@ describe('Dashboard "Pending Requests" stat (bugfix: pending-requests-badge)', (
 
     await mount({ ...USER, is_global_manager: true })
 
-    expect(pendingRequestsStatText()).toBe('2')
+    expect(pendingTasksStatText()).toBe('2')
   })
 
-  it('renders no "pending request" banner when both counts are zero', async () => {
+  it('renders no "pending task" banner when every count is zero', async () => {
     requestsAPI.getPending.mockResolvedValue({ data: { requests: [] } })
     adminAPI.getOrgInterest.mockResolvedValue({ data: { requests: [] } })
 
     await mount({ ...USER, is_global_manager: true })
 
     // The banner (the sole surface for this stat now) only renders when
-    // stats.requests > 0, so a zero count means no banner at all.
-    expect(pendingRequestsStatText()).toBeNull()
-    expect(container.textContent).not.toContain('pending request')
+    // the combined count is > 0, so all-zero means no banner at all.
+    expect(pendingTasksStatText()).toBeNull()
+    expect(container.textContent).not.toContain('pending task')
+  })
+
+  // --- generic-pending-tasks-banner: Team-Owned Device renewals ---
+
+  it('never calls devicesAPI.getAll for a viewer who administers no team', async () => {
+    requestsAPI.getPending.mockResolvedValue({ data: { requests: [] } })
+
+    await mount({ ...USER, isAdmin: false, isTeamAdmin: false, is_global_manager: false })
+
+    expect(devicesAPI.getAll).not.toHaveBeenCalled()
+    expect(pendingTasksStatText()).toBeNull()
+  })
+
+  it('folds Team-Owned Device renewals into the count for a Team_Admin', async () => {
+    requestsAPI.getPending.mockResolvedValue({ data: { requests: [] } })
+    devicesAPI.getAll.mockResolvedValue({
+      data: { devices: [{ deviceUserId: 1 }, { deviceUserId: 2 }], pagination: { page: 1, pageSize: 200, total: 2 } }
+    })
+
+    await mount({ ...USER, isTeamAdmin: true })
+
+    expect(devicesAPI.getAll).toHaveBeenCalledWith({ expiringOnly: true, pageSize: 200 })
+    expect(pendingTasksStatText()).toBe('2')
+  })
+
+  it('sums access requests AND team-device renewals for an admin with both', async () => {
+    requestsAPI.getPending.mockResolvedValue({ data: { requests: [{ id: 1 }] } })
+    devicesAPI.getAll.mockResolvedValue({
+      data: { devices: [{ deviceUserId: 1 }], pagination: { page: 1, pageSize: 200, total: 1 } }
+    })
+
+    await mount({ ...USER, isAdmin: true })
+
+    expect(pendingTasksStatText()).toBe('2')
+    expect(bannerDescriptionText()).toBe('Review team access requests and device certificate renewals.')
+  })
+
+  it('describes team-device renewals alone when that is the only non-zero category', async () => {
+    requestsAPI.getPending.mockResolvedValue({ data: { requests: [] } })
+    devicesAPI.getAll.mockResolvedValue({
+      data: { devices: [{ deviceUserId: 1 }], pagination: { page: 1, pageSize: 200, total: 1 } }
+    })
+
+    await mount({ ...USER, isAdmin: true })
+
+    expect(pendingTasksStatText()).toBe('1')
+    expect(bannerDescriptionText()).toBe('Review team device certificate renewals.')
+  })
+
+  it('describes access requests alone when that is the only non-zero category', async () => {
+    requestsAPI.getPending.mockResolvedValue({ data: { requests: [{ id: 1 }] } })
+    devicesAPI.getAll.mockResolvedValue({ data: { devices: [], pagination: { page: 1, pageSize: 200, total: 0 } } })
+
+    await mount({ ...USER, isAdmin: true })
+
+    expect(pendingTasksStatText()).toBe('1')
+    expect(bannerDescriptionText()).toBe('Review team access requests from new users.')
   })
 })
 

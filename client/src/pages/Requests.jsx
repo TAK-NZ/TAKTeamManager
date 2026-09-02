@@ -245,7 +245,7 @@ export default function Requests({ user }) {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Tasks</h1>
-        <p className="text-gray-600 dark:text-gray-400">Review and approve team access requests from new users.</p>
+        <p className="text-gray-600 dark:text-gray-400">Review and manage your assigned tasks.</p>
       </div>
 
       {/* cert-expiry-notifications Requirement 7.3(a): the current viewer's

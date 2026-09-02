@@ -982,6 +982,42 @@ const rowScopedResolvers = {
   },
 
   /**
+   * `docs:openapi:read` — backs `GET /api/openapi.json`
+   * (server/routes/openapi.js). Satisfied if the requesting user is a
+   * Global_Manager OR holds at least one DIRECT admin membership
+   * (`role = 'admin' AND inherited_from_team_id IS NULL`, the glossary's
+   * Team_Admin condition — an INHERITED admin row never confers it).
+   *
+   * Identical shape and query to `device:read:org` immediately above,
+   * and for the same reason: this route carries no `:teamId`/`:userId`
+   * route param, so there is no single row to scope a check against —
+   * the question is "does this caller administer SOMETHING", not "does
+   * this caller administer THIS team".
+   *
+   * Per this module's contract a throw propagates to
+   * `isSatisfiedWithRowScopedChecks`, which logs it and fails closed, so
+   * there is deliberately no local try/catch.
+   *
+   * @param {import('express').Request} req
+   * @returns {Promise<boolean>}
+   */
+  'docs:openapi:read': async (req) => {
+    if (req.user && req.user.is_global_manager) {
+      return true;
+    }
+
+    const result = await pool.query(
+      `SELECT 1 FROM team_memberships
+        WHERE user_id = $1 AND role = 'admin' AND inherited_from_team_id IS NULL
+        LIMIT 1`,
+      // LOCAL users.id, never req.user.id (the Authentik id).
+      [req.user && req.user.userId]
+    );
+
+    return result.rows.length > 0;
+  },
+
+  /**
    * `admin:excluded_domains:manage` — Global_Manager-only.
    *
    * @param {import('express').Request} req

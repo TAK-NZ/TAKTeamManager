@@ -42,16 +42,16 @@ import { isValidNewUserEmail, extractCallsignSuffixServerError } from '../utils/
 import { describeAccountStatusBadge } from '../utils/accountStatusBadge'
 
 // Requirement 5's two new `callsign_name_format` values need example
-// strings alongside the three existing ones, matching the "J Doe"/"John D"
+// strings alongside the three existing ones, matching the "J Bloggs"/"Joe B"
 // pattern already used for `first_initial_last`/`first_last_initial`.
-// `first_initial_dot_last` -> "J.Doe" (Requirement 8.6), `user_defined` ->
+// `first_initial_dot_last` -> "J.Bloggs" (Requirement 8.6), `user_defined` ->
 // "Custom" (Requirement 11.5, since that format computes no default at
 // all -- there is no single example name to show).
 const CALLSIGN_NAME_FORMAT_EXAMPLES = {
-  full_name: 'John Doe',
-  first_initial_last: 'J Doe',
-  first_last_initial: 'John D',
-  first_initial_dot_last: 'J.Doe',
+  full_name: 'Joe Bloggs',
+  first_initial_last: 'J Bloggs',
+  first_last_initial: 'Joe B',
+  first_initial_dot_last: 'J.Bloggs',
   user_defined: 'Custom'
 }
 
@@ -3063,7 +3063,7 @@ export default function TeamDetail({ user, refreshUser }) {
                     placeholder="STL, AKL, etc."
                   />
                   <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                    Used to build callsigns. Example: FENZ-STL-John Smith
+                    Used to build callsigns. Example: FENZ-STL-Joe Bloggs
                   </p>
                   {!isValidSubTeamCallsignPrefix(subTeamFormData.callsignPrefix) && (
                     <p role="alert" className="text-red-600 dark:text-red-400 text-sm mt-1">Prefix may only contain letters and digits (no "-")</p>

@@ -63,20 +63,20 @@ describe('formatCallsignLevels', () => {
 })
 
 describe('formatCallsignNameFormatExample', () => {
-  it('returns "John Doe" for full_name', () => {
-    expect(formatCallsignNameFormatExample('full_name')).toBe('John Doe')
+  it('returns "Joe Bloggs" for full_name', () => {
+    expect(formatCallsignNameFormatExample('full_name')).toBe('Joe Bloggs')
   })
 
-  it('returns "J Doe" for first_initial_last', () => {
-    expect(formatCallsignNameFormatExample('first_initial_last')).toBe('J Doe')
+  it('returns "J Bloggs" for first_initial_last', () => {
+    expect(formatCallsignNameFormatExample('first_initial_last')).toBe('J Bloggs')
   })
 
-  it('returns "John D" for first_last_initial', () => {
-    expect(formatCallsignNameFormatExample('first_last_initial')).toBe('John D')
+  it('returns "Joe B" for first_last_initial', () => {
+    expect(formatCallsignNameFormatExample('first_last_initial')).toBe('Joe B')
   })
 
-  it('returns "J.Doe" for the new first_initial_dot_last format (Req 8.6)', () => {
-    expect(formatCallsignNameFormatExample('first_initial_dot_last')).toBe('J.Doe')
+  it('returns "J.Bloggs" for the new first_initial_dot_last format (Req 8.6)', () => {
+    expect(formatCallsignNameFormatExample('first_initial_dot_last')).toBe('J.Bloggs')
   })
 
   it('returns "Custom" for the new user_defined format (Req 11.5)', () => {
@@ -84,8 +84,8 @@ describe('formatCallsignNameFormatExample', () => {
   })
 
   it('falls back to the full_name example for an unrecognized/missing value', () => {
-    expect(formatCallsignNameFormatExample(undefined)).toBe('John Doe')
-    expect(formatCallsignNameFormatExample('something_else')).toBe('John Doe')
+    expect(formatCallsignNameFormatExample(undefined)).toBe('Joe Bloggs')
+    expect(formatCallsignNameFormatExample('something_else')).toBe('Joe Bloggs')
   })
 })
 

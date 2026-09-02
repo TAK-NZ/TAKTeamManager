@@ -69,7 +69,7 @@ const path = require('path');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 const SERVER_ROOT = path.join(REPO_ROOT, 'server');
-const OPENAPI_SPEC_PATH = path.join(REPO_ROOT, 'tak-server-openapispec.json');
+const OPENAPI_SPEC_PATH = path.join(REPO_ROOT, 'docs', 'refs', 'tak-server-openapispec.json');
 
 // The endpoint Requirement 14.4 names explicitly.
 const UNDOCUMENTED_ENDPOINT = '/Marti/clients';

@@ -567,7 +567,7 @@ export default function GlobalChannels({ user }) {
       <div>
         <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Global Channels</h1>
         <p className="text-gray-600 dark:text-gray-400">
-          Manage BCH (broadcast/ETL), XtraTools (maps, overlays and other extras), Response (emergency services) and Support (all-agency) channels that users have access to.
+          Manage BCH (broadcast/ETL), Response (emergency services), Support (all-agency), and XtraTools (maps, overlays and other extras) channels that users have access to.
         </p>
       </div>
 

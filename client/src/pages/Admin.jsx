@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { UserGroupIcon, UsersIcon, CogIcon, PencilIcon, CheckIcon, XMarkIcon, ArrowUpTrayIcon, ArrowDownTrayIcon, DocumentTextIcon, EnvelopeIcon, NoSymbolIcon, ArrowsRightLeftIcon } from '@heroicons/react/24/outline'
+import { UserGroupIcon, UsersIcon, CogIcon, CheckIcon, ArrowUpTrayIcon, ArrowDownTrayIcon, DocumentTextIcon, EnvelopeIcon, NoSymbolIcon, ArrowsRightLeftIcon } from '@heroicons/react/24/outline'
 import { configAPI, usersAPI, teamsAPI, syncAPI, bulkImportAPI, communicationsAPI, settingsAPI } from '../services/api'
 import FormattedDate, { DATE_PRECISION, TOOLTIP_SIDES } from '../components/FormattedDate'
 import { getVariableHints } from '../utils/templateVariableHints'
@@ -11,9 +11,21 @@ export default function Admin({ user }) {
   const [stats, setStats] = useState({ totalUsers: 0, totalTeams: 0 })
   const [syncStatus, setSyncStatus] = useState(null)
   const [syncing, setSyncing] = useState(false)
+  // --- Site Content editor state (dropdown-selector pattern, matching the
+  // Email Templates tab below). `siteConfig` remains the single fetched list
+  // (Requirement source of truth); `selectedConfigKey` is the one item
+  // currently open for editing, replacing the old per-row `editingConfig`
+  // inline-edit approach. `configDraftValue` is the controlled-input draft;
+  // `configOriginalValue` is the last-loaded value, used for no-op detection
+  // on save exactly like `templateOriginal` does for Email Templates.
   const [siteConfig, setSiteConfig] = useState([])
-  const [editingConfig, setEditingConfig] = useState(null)
-  const [tempConfigValue, setTempConfigValue] = useState('')
+  const [selectedConfigKey, setSelectedConfigKey] = useState('')
+  const [configDraftValue, setConfigDraftValue] = useState('')
+  const [configOriginalValue, setConfigOriginalValue] = useState('')
+  const [configSaving, setConfigSaving] = useState(false)
+  const [configSaveError, setConfigSaveError] = useState(null)
+  const [configSaveSuccess, setConfigSaveSuccess] = useState(null)
+  const [configNoChanges, setConfigNoChanges] = useState(false)
 
   // --- Email Template Editor state (admin-settings-management, task 7.1) ---
   // The template list is the single source of truth for the set of editable
@@ -174,30 +186,66 @@ export default function Admin({ user }) {
   const [importing, setImporting] = useState(false)
   const settingsImportFileInputRef = useRef(null)
 
-  const handleEditConfig = (configKey) => {
+  // Load a single Site Content item's current value into the display fields
+  // when an admin selects it from the dropdown, mirroring
+  // `handleSelectTemplate` below. `siteConfig` was already fetched in full by
+  // `fetchSiteConfig`, so "loading" here is a local lookup rather than a
+  // network request.
+  const handleSelectConfig = (configKey) => {
+    setSelectedConfigKey(configKey)
+    // Switching (or clearing) items always clears any stale save feedback
+    // from the previously-selected item.
+    setConfigSaveError(null)
+    setConfigSaveSuccess(null)
+    setConfigNoChanges(false)
+    if (!configKey) {
+      // Cleared selection -- reset the draft, nothing to load.
+      setConfigDraftValue('')
+      setConfigOriginalValue('')
+      return
+    }
     const config = siteConfig.find(c => c.config_key === configKey)
-    setEditingConfig(configKey)
-    setTempConfigValue(config?.config_value || '')
+    const loadedValue = config?.config_value || ''
+    setConfigDraftValue(loadedValue)
+    setConfigOriginalValue(loadedValue)
   }
 
-  const handleSaveConfig = async (configKey) => {
+  const handleSaveConfig = async () => {
+    if (!selectedConfigKey) {
+      return
+    }
+    setConfigSaveSuccess(null)
+    setConfigNoChanges(false)
+
+    // No-op edit: skip the request entirely, same as the Email Template save
+    // path (buildTemplateUpdatePayload's empty-payload branch).
+    if (configDraftValue === configOriginalValue) {
+      setConfigSaveError(null)
+      setConfigNoChanges(true)
+      return
+    }
+
+    setConfigSaving(true)
+    setConfigSaveError(null)
     try {
-      await configAPI.update(configKey, { value: tempConfigValue })
-      setSiteConfig(prev => prev.map(c => 
-        c.config_key === configKey 
-          ? { ...c, config_value: tempConfigValue }
+      const response = await configAPI.update(selectedConfigKey, { value: configDraftValue })
+      const savedValue = response.data.config?.config_value ?? configDraftValue
+      setSiteConfig(prev => prev.map(c =>
+        c.config_key === selectedConfigKey
+          ? { ...c, config_value: savedValue }
           : c
       ))
-      setEditingConfig(null)
-      setTempConfigValue('')
+      setConfigDraftValue(savedValue)
+      setConfigOriginalValue(savedValue)
+      setConfigSaveSuccess('Content saved.')
     } catch (error) {
       console.error('Failed to update config:', error)
+      // Retain the operator's unsaved edits on failure, matching
+      // handleSaveTemplate's behavior below.
+      setConfigSaveError('Failed to save. Your changes were not saved and are still shown below.')
+    } finally {
+      setConfigSaving(false)
     }
-  }
-
-  const handleCancelConfigEdit = () => {
-    setEditingConfig(null)
-    setTempConfigValue('')
   }
 
   // Load a single template's current content into the display fields when a
@@ -514,7 +562,7 @@ export default function Admin({ user }) {
           Global Administration
         </h1>
         <p className="text-gray-600 dark:text-gray-400">
-          Manage the TAK Team Manager system and create top-level teams.
+          Manage the TAK Team Manager system.
         </p>
       </div>
 
@@ -648,103 +696,92 @@ export default function Admin({ user }) {
           {activeTab === 'site' && (
             <div>
               <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
-                Configure text content displayed on the request access page.
+                View and edit text content displayed on the request access page. Select an item to
+                load its current content.
               </p>
-              {/* Mobile fix: stacked cards below `sm:`, the existing table
-                  restored at `sm:` and up -- matching the dual-render
-                  card/table pairing TeamDetail.jsx/TeamDeviceList.jsx/
-                  Teams.jsx already use for tabular content, rather than a
-                  horizontally-scrolling table on a phone. */}
-              <div className="sm:hidden divide-y divide-gray-200 dark:divide-gray-700 border border-gray-200 dark:border-gray-700 rounded-lg">
-                {siteConfig.filter(config => config.config_key.startsWith('request_access')).map((config) => (
-                  <div key={config.config_key} className="p-4 space-y-2 text-sm">
-                    <p className="font-medium text-gray-900 dark:text-gray-100">
-                      {config.description || config.config_key}
-                    </p>
-                    {editingConfig === config.config_key ? (
-                      <>
-                        <textarea
-                          value={tempConfigValue}
-                          onChange={(e) => setTempConfigValue(e.target.value)}
-                          className="w-full px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
-                          rows={config.config_key === 'request_access_footer' ? 4 : 2}
-                        />
-                        <div className="flex justify-end space-x-1">
-                          <button onClick={() => handleSaveConfig(config.config_key)} className="p-2 rounded-lg bg-green-50 hover:bg-green-100 text-green-600 dark:bg-green-950/40 dark:hover:bg-green-900/60 dark:text-green-400">
-                            <CheckIcon className="h-5 w-5" />
-                          </button>
-                          <button onClick={handleCancelConfigEdit} className="p-2 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 dark:bg-red-950/40 dark:hover:bg-red-900/60 dark:text-red-400">
-                            <XMarkIcon className="h-5 w-5" />
-                          </button>
-                        </div>
-                      </>
-                    ) : (
-                      <>
-                        <p className="text-gray-700 dark:text-gray-300 break-words">{config.config_value}</p>
-                        <div className="flex justify-end">
-                          <button onClick={() => handleEditConfig(config.config_key)} className="p-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-600 dark:bg-gray-700 dark:hover:bg-gray-600 dark:text-gray-300">
-                            <PencilIcon className="h-5 w-5" />
-                          </button>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                ))}
-              </div>
-              <div className="hidden sm:block overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                <thead className="bg-gray-50 dark:bg-gray-700">
-                  <tr>
-                    <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
-                      Setting
-                    </th>
-                    <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
-                      Content
-                    </th>
-                    <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
-                      Actions
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                  {siteConfig.filter(config => config.config_key.startsWith('request_access')).map((config) => (
-                    <tr key={config.config_key}>
-                      <td className="px-3 py-2 text-sm font-medium text-gray-900 dark:text-gray-100">
+
+              <div className="mb-4">
+                <label
+                  htmlFor="site-content-select"
+                  className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"
+                >
+                  Content item
+                </label>
+                <select
+                  id="site-content-select"
+                  value={selectedConfigKey}
+                  onChange={(e) => handleSelectConfig(e.target.value)}
+                  className="w-full sm:w-96 px-2 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
+                >
+                  <option value="">Select an item...</option>
+                  {siteConfig
+                    .filter(config => config.config_key.startsWith('request_access'))
+                    .map((config) => (
+                      <option key={config.config_key} value={config.config_key}>
                         {config.description || config.config_key}
-                      </td>
-                      <td className="px-3 py-2 text-sm text-gray-900 dark:text-gray-100">
-                        {editingConfig === config.config_key ? (
-                          <textarea
-                            value={tempConfigValue}
-                            onChange={(e) => setTempConfigValue(e.target.value)}
-                            className="w-full px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
-                            rows={config.config_key === 'request_access_footer' ? 4 : 2}
-                          />
-                        ) : (
-                          <div className="max-w-md truncate">{config.config_value}</div>
-                        )}
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        {editingConfig === config.config_key ? (
-                          <div className="flex justify-end space-x-1">
-                            <button onClick={() => handleSaveConfig(config.config_key)} className="text-green-600 hover:text-green-900">
-                              <CheckIcon className="h-4 w-4" />
-                            </button>
-                            <button onClick={handleCancelConfigEdit} className="text-red-600 hover:text-red-900">
-                              <XMarkIcon className="h-4 w-4" />
-                            </button>
-                          </div>
-                        ) : (
-                          <button onClick={() => handleEditConfig(config.config_key)} className="text-primary-600 hover:text-primary-900">
-                            <PencilIcon className="h-4 w-4" />
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                      </option>
+                    ))}
+                </select>
               </div>
+
+              {selectedConfigKey && (
+                <div className="space-y-4">
+                  <div>
+                    <label
+                      htmlFor="site-content-value"
+                      className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"
+                    >
+                      Content
+                    </label>
+                    <textarea
+                      id="site-content-value"
+                      value={configDraftValue}
+                      onChange={(e) => {
+                        setConfigDraftValue(e.target.value)
+                        // Editing updates only draft state and issues no request;
+                        // clear any stale save feedback, matching the Email
+                        // Template editor's onChange handlers.
+                        setConfigSaveError(null)
+                        setConfigSaveSuccess(null)
+                        setConfigNoChanges(false)
+                      }}
+                      rows={selectedConfigKey === 'request_access_footer' ? 4 : 2}
+                      className="w-full px-2 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
+                    />
+                  </div>
+
+                  {configSaveError && (
+                    <div className="rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-900/30 p-3">
+                      <p className="text-sm text-red-700 dark:text-red-300">{configSaveError}</p>
+                    </div>
+                  )}
+
+                  {configNoChanges && (
+                    <div className="rounded border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-800 p-3">
+                      <p className="text-sm text-gray-700 dark:text-gray-300">
+                        No changes to save.
+                      </p>
+                    </div>
+                  )}
+
+                  {configSaveSuccess && (
+                    <div className="rounded border border-green-300 dark:border-green-700 bg-green-50 dark:bg-green-900/30 p-3">
+                      <p className="text-sm text-green-700 dark:text-green-300">{configSaveSuccess}</p>
+                    </div>
+                  )}
+
+                  <div>
+                    <button
+                      onClick={handleSaveConfig}
+                      disabled={configSaving}
+                      className="btn-primary flex items-center gap-2 disabled:opacity-50"
+                    >
+                      <CheckIcon className="h-4 w-4" />
+                      {configSaving ? 'Saving...' : 'Save Content'}
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

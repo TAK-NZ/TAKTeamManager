@@ -618,7 +618,7 @@ export default function EnrollmentView({
       <div>
         <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Enroll a TAK Client</h1>
         <p className="text-sm text-gray-500 dark:text-gray-400">
-          Review your enrollment data below, then generate a code to scan with ATAK, TAK Aware, iTAK, or enter manually.
+          Review your enrollment data below, then generate a code to scan with ATAK, TAK Aware, iTAK, WinTAK, or enter manually.
         </p>
       </div>
 
