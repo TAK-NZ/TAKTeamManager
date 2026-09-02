@@ -146,4 +146,61 @@ describe('BchChannelCredentialsDialog (mounted)', () => {
 
     expect(onClose).toHaveBeenCalledTimes(1)
   })
+
+  // Bugfix (explicit request: cycle password / delete service account).
+  describe('Cycle Password / Delete Service Account actions', () => {
+    it('renders neither action when their callback props are omitted', async () => {
+      await mount()
+
+      expect(container.textContent).not.toContain('Cycle Password')
+      expect(container.textContent).not.toContain('Delete Service Account')
+    })
+
+    it('renders Cycle Password when onRotateRequested is supplied, and calls it with the username', async () => {
+      const onRotateRequested = vi.fn()
+      await mount({ onRotateRequested })
+
+      const button = Array.from(container.querySelectorAll('button')).find((b) => /Cycle Password/.test(b.textContent))
+      expect(button).toBeDefined()
+
+      await act(async () => {
+        button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+
+      expect(onRotateRequested).toHaveBeenCalledWith('etl-data-packages')
+    })
+
+    it('renders Delete Service Account when onDeleteRequested is supplied, and calls it with the username', async () => {
+      const onDeleteRequested = vi.fn()
+      await mount({ onDeleteRequested })
+
+      const button = Array.from(container.querySelectorAll('button')).find((b) => /Delete Service Account/.test(b.textContent))
+      expect(button).toBeDefined()
+
+      await act(async () => {
+        button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+
+      expect(onDeleteRequested).toHaveBeenCalledWith('etl-data-packages')
+    })
+
+    it('never calls the API directly from either action -- only the callback prop', async () => {
+      const onRotateRequested = vi.fn()
+      const onDeleteRequested = vi.fn()
+      await mount({ onRotateRequested, onDeleteRequested })
+
+      const rotateButton = Array.from(container.querySelectorAll('button')).find((b) => /Cycle Password/.test(b.textContent))
+      const deleteButton = Array.from(container.querySelectorAll('button')).find((b) => /Delete Service Account/.test(b.textContent))
+
+      await act(async () => {
+        rotateButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        deleteButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+
+      // Neither action closes the dialog or shows a toast itself -- both
+      // are entirely the parent's responsibility once the callback fires.
+      expect(onClose).not.toHaveBeenCalled()
+      expect(toast.success).not.toHaveBeenCalled()
+    })
+  })
 })

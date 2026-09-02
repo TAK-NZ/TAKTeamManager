@@ -1,9 +1,33 @@
 import { useState, useEffect } from 'react';
-import { PlusIcon, KeyIcon, GlobeAltIcon, RadioIcon, SignalIcon, PencilIcon, TrashIcon, FolderIcon, FolderOpenIcon, ChevronRightIcon, ChevronDownIcon, ChevronUpIcon } from '@heroicons/react/24/outline';
+import { PlusIcon, KeyIcon, UserPlusIcon, GlobeAltIcon, RadioIcon, SignalIcon, PencilIcon, TrashIcon, FolderIcon, FolderOpenIcon, ChevronRightIcon, ChevronDownIcon, ChevronUpIcon } from '@heroicons/react/24/outline';
+// Response/Support/XtraTools use Tabler icons instead of a heroicons
+// stand-in: heroicons has no fire-truck/ambulance, digger, or wrench+tools
+// glyph, and Tabler (already vetted/added to package.json for this) has an
+// exact match for all three -- IconFiretruck, IconBackhoe, IconTool. BCH
+// keeps its original heroicons RadioIcon, per explicit request ("leave as
+// is"). Tabler components take the same `className` prop heroicons' do, so
+// they drop into the existing `h-6 w-6 text-*` classes unchanged.
+import { IconFiretruck, IconBackhoe, IconTool } from '@tabler/icons-react';
 import toast from 'react-hot-toast';
 import { globalChannelsAPI, configAPI } from '../services/api';
 import { buildFolderTree } from '../utils/channelTree';
 import BchChannelCredentialsDialog from '../components/BchChannelCredentialsDialog';
+import AddServiceAccountDialog from '../components/AddServiceAccountDialog';
+import ServiceAccountActionConfirmDialog from '../components/ServiceAccountActionConfirmDialog';
+import { useTabs, tabAria, TabPanel } from '../components/Tabs';
+
+// Bugfix (too much scrolling): the four channel types render as tabs
+// instead of four stacked cards, alphabetically ordered (BCH, Response,
+// Support, XtraTools) per explicit request. The tab bar itself stays
+// neutral (active/inactive coloring only), matching Admin.jsx's own
+// tab-bar convention -- icon-only below `sm:`, full label restored at
+// `sm:` and up, accessible name constant either way.
+const CHANNEL_TABS = [
+  { id: 'bch', label: 'BCH', icon: RadioIcon },
+  { id: 'response', label: 'Response', icon: IconFiretruck },
+  { id: 'support', label: 'Support', icon: IconBackhoe },
+  { id: 'utl', label: 'XtraTools', icon: IconTool }
+];
 
 export default function GlobalChannels({ user }) {
   const [bchChannels, setBchChannels] = useState([]);
@@ -41,10 +65,21 @@ export default function GlobalChannels({ user }) {
   // from a prior open, matching the enrollment page's own "never cache a
   // secret in state longer than needed" posture.
   const [credentialsDialog, setCredentialsDialog] = useState(null);
+  // Bugfix (explicit request: "Add Service Account" modal replacing the
+  // one-click Provision action): the channel to name a service account
+  // for, or null when the dialog is closed.
+  const [addServiceAccountChannel, setAddServiceAccountChannel] = useState(null);
+  // Bugfix (explicit request: cycle password / delete service account,
+  // both write-in confirmed): which action is pending confirmation, the
+  // channel it applies to, and the exact username the admin must type --
+  // read straight off the already-open credentials dialog, so this never
+  // needs its own separate fetch.
+  const [serviceAccountAction, setServiceAccountAction] = useState(null);
   const [formData, setFormData] = useState({
     name: '',
     description: ''
   });
+  const [activeChannelTab, setActiveChannelTab] = useTabs('bch');
 
   const isGlobalManager = user?.is_global_manager; // Global managers only
 
@@ -256,6 +291,13 @@ export default function GlobalChannels({ user }) {
   // the credentials endpoint's own 403/404 to distinguish "no service
   // account" from "not allowed"/"not found"), so that case short-circuits
   // with a clear message and never calls the credentials endpoint at all.
+  //
+  // Bugfix (a channel with no service account has no credentials to get):
+  // the Get Credentials button itself is now hidden entirely for such a
+  // channel (see the render block below) in favor of a Provision Service
+  // Account action -- this early-return stays as a defensive fallback for
+  // a stale row (e.g. a list snapshot from before another admin just
+  // provisioned one), not as the primary way this case is surfaced.
   const handleGetCredentials = async (channel) => {
     if (!channel.service_account_username) {
       toast.error('This channel has no service account configured.');
@@ -264,10 +306,37 @@ export default function GlobalChannels({ user }) {
 
     try {
       const response = await globalChannelsAPI.getBchCredentials(channel.id);
-      setCredentialsDialog({ channelName: channel.name, credentials: response.data.credentials });
+      setCredentialsDialog({ channelId: channel.id, channelName: channel.name, credentials: response.data.credentials });
     } catch (error) {
       toast.error(error.response?.data?.error || 'Failed to get credentials');
     }
+  };
+
+  // Bugfix (explicit request: "Add Service Account" modal, replacing the
+  // former one-click provision action): opens the naming dialog instead
+  // of provisioning with the channel-name-derived default directly.
+  // `AddServiceAccountDialog` itself calls
+  // `globalChannelsAPI.provisionServiceAccount(channelId, username)` on
+  // submit and its `onCompleted` refreshes the channel list (see the
+  // render block below), so the row picks up its new
+  // `service_account_username` and the action switches from Add Service
+  // Account back to Get Credentials without needing a manual page reload.
+  const handleOpenAddServiceAccount = (channel) => {
+    setAddServiceAccountChannel({ id: channel.id, name: channel.name });
+  };
+
+  // Bugfix (explicit request: cycle password / delete service account,
+  // both write-in confirmed): opens the shared confirm dialog. Called
+  // from `BchChannelCredentialsDialog`'s own callback props, so `mode`
+  // and `serviceAccountUsername` come from that already-open dialog's
+  // own data rather than a fresh fetch.
+  const handleServiceAccountAction = (mode, username) => {
+    setServiceAccountAction({
+      mode,
+      channelId: credentialsDialog.channelId,
+      channelName: credentialsDialog.channelName,
+      serviceAccountUsername: username
+    });
   };
 
   const handleSyncChannels = async () => {
@@ -431,7 +500,16 @@ export default function GlobalChannels({ user }) {
             // use -- grey for the two ordinary actions, red-tinted for
             // the destructive one.
             <div className="flex items-center gap-2 flex-shrink-0">
-              {(channelType === 'bch' || channelType === 'utl') && (
+              {/* Bugfix (a channel with no service account has no
+                  credentials to get): Get Credentials only renders once
+                  `service_account_username` is actually set -- showing it
+                  unconditionally led to "This channel has no service
+                  account configured" on every click for a channel
+                  discovered via Sync Existing Channels. The alternative,
+                  Add Service Account, renders in exactly the opposite
+                  case, so a BCH/UTL channel always shows precisely one
+                  of the two, never both and never neither. */}
+              {(channelType === 'bch' || channelType === 'utl') && channel.service_account_username && (
                 <button
                   onClick={() => handleGetCredentials(channel)}
                   className="p-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-blue-600 dark:bg-gray-700 dark:hover:bg-gray-600 dark:text-blue-400"
@@ -439,6 +517,16 @@ export default function GlobalChannels({ user }) {
                   aria-label={`Get credentials for ${channel.name}`}
                 >
                   <KeyIcon className="h-5 w-5" />
+                </button>
+              )}
+              {(channelType === 'bch' || channelType === 'utl') && !channel.service_account_username && (
+                <button
+                  onClick={() => handleOpenAddServiceAccount(channel)}
+                  className="p-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-blue-600 dark:bg-gray-700 dark:hover:bg-gray-600 dark:text-blue-400"
+                  title="Add service account"
+                  aria-label={`Add service account for ${channel.name}`}
+                >
+                  <UserPlusIcon className="h-5 w-5" />
                 </button>
               )}
               <button
@@ -476,67 +564,268 @@ export default function GlobalChannels({ user }) {
 
   return (
     <div className="space-y-6">
-      {/* Bugfix (mobile responsiveness parity with /dashboard, /downloads,
-          /enrollment, /teams, /users, /requests): below `sm:`, the header's
-          four Create buttons drop underneath the title/description and
-          stack full-width rather than sitting beside a two-line paragraph
-          in a `flex-wrap` row that squeezed them into whatever width was
-          left -- `flex-col` here mirrors Dashboard.jsx's "Review Requests"
-          banner fix. `sm:` and up is the original side-by-side layout. */}
-      <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Global Channels</h1>
-          <p className="text-gray-600 dark:text-gray-400">
-            Manage BCH (broadcast/ETL), XtraTools (maps, overlays and other extras), Response (emergency services) and Support (all-agency) channels that users have access to.
-          </p>
-        </div>
-        
-        {isGlobalManager && (
-          <div className="grid grid-cols-2 sm:flex sm:flex-wrap gap-2">
-            <button
-              onClick={() => {
-                setCreateType('bch');
-                setShowCreateModal(true);
-              }}
-              className="btn-primary flex items-center justify-center"
-            >
-              <PlusIcon className="h-4 w-4 mr-2 flex-shrink-0" />
-              Create BCH Channel
-            </button>
-            <button
-              onClick={() => {
-                setCreateType('utl');
-                setShowCreateModal(true);
-              }}
-              className="btn-secondary flex items-center justify-center"
-            >
-              <PlusIcon className="h-4 w-4 mr-2 flex-shrink-0" />
-              Create XtraTools Channel
-            </button>
-            <button
-              onClick={() => {
-                setCreateType('response');
-                setShowCreateModal(true);
-              }}
-              className="btn-secondary flex items-center justify-center"
-            >
-              <PlusIcon className="h-4 w-4 mr-2 flex-shrink-0" />
-              Create Response Channel
-            </button>
-            <button
-              onClick={() => {
-                setCreateType('support');
-                setShowCreateModal(true);
-              }}
-              className="btn-secondary flex items-center justify-center"
-            >
-              <PlusIcon className="h-4 w-4 mr-2 flex-shrink-0" />
-              Create Support Channel
-            </button>
-          </div>
-        )}
+      <div>
+        <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Global Channels</h1>
+        <p className="text-gray-600 dark:text-gray-400">
+          Manage BCH (broadcast/ETL), XtraTools (maps, overlays and other extras), Response (emergency services) and Support (all-agency) channels that users have access to.
+        </p>
       </div>
 
+      {/* Bugfix (too much scrolling): the four channel types are now tabs
+          in one card, alphabetically ordered (BCH, Response, Support,
+          XtraTools), instead of four separately-scrolled cards stacked
+          on the page. Every `TabPanel` below is `keepMounted` -- content
+          is hidden via CSS (`hidden`), never unmounted -- so all four
+          folder trees stay in the DOM simultaneously (client/src/pages/
+          channelTreeContrast.test.jsx's structural guard mounts this
+          page once and expects to find all four sections' Folder_Rows
+          at once) and so each tab's Expand/Collapse-All state survives
+          switching away and back. */}
+      <div className="card">
+        <div className="border-b border-gray-200 dark:border-gray-700">
+          <nav className="-mb-px flex space-x-3 sm:space-x-6" role="tablist">
+            {CHANNEL_TABS.map((tab) => {
+              const Icon = tab.icon;
+              return (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveChannelTab(tab.id)}
+                  aria-label={tab.label}
+                  title={tab.label}
+                  {...tabAria(activeChannelTab, tab.id)}
+                  className={`flex items-center py-4 px-1 border-b-2 font-medium text-sm flex-shrink-0 ${
+                    activeChannelTab === tab.id
+                      ? 'border-primary-500 text-primary-600 dark:text-primary-400'
+                      : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:border-gray-300'
+                  }`}
+                >
+                  <Icon className="h-5 w-5 sm:mr-2" aria-hidden="true" />
+                  <span className="hidden sm:inline">{tab.label}</span>
+                </button>
+              );
+            })}
+          </nav>
+        </div>
+
+        <div className="pt-4">
+          {/* BCH Channels */}
+          <TabPanel id="bch" activeTab={activeChannelTab} keepMounted>
+            {/* Bugfix: `flex-wrap gap-2` (was a non-wrapping row) so the
+                section title, the Expand/Collapse All buttons and the
+                section's own Create button can drop to their own line on
+                a narrow phone, matching Teams.jsx's own search-bar wrap
+                fix -- identical across all four sections below. */}
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+              <div className="flex items-center">
+                <RadioIcon className="h-6 w-6 text-blue-600 mr-2" />
+                <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
+                  BCH Channels (Broadcast/ETL)
+                </h2>
+              </div>
+              <div className="flex items-center gap-2">
+                {bchOnlyChannels.length > 0 && Object.keys(buildFolderTree(bchOnlyChannels, folderSeparator, 'name').folders).length > 0 && (
+                  <div className="flex items-center space-x-2">
+                    <button
+                      onClick={() => expandAllFolders(bchOnlyChannels)}
+                      className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
+                    >
+                      <ChevronDownIcon className="h-4 w-4 mr-1" />
+                      Expand All
+                    </button>
+                    <button
+                      onClick={collapseAllFolders}
+                      className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
+                    >
+                      <ChevronUpIcon className="h-4 w-4 mr-1" />
+                      Collapse All
+                    </button>
+                  </div>
+                )}
+                {isGlobalManager && (
+                  <button
+                    onClick={() => {
+                      setCreateType('bch');
+                      setShowCreateModal(true);
+                    }}
+                    className="btn-primary flex items-center justify-center"
+                  >
+                    <PlusIcon className="h-4 w-4 mr-2 flex-shrink-0" />
+                    Create BCH Channel
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {bchOnlyChannels.length === 0 ? (
+              <p className="text-gray-500 dark:text-gray-400">No BCH channels configured.</p>
+            ) : (
+              <div className="space-y-3">
+                {renderFolderTree(buildFolderTree(bchOnlyChannels, folderSeparator, 'name'), '', 'bch')}
+              </div>
+            )}
+          </TabPanel>
+
+          {/* Response Channels */}
+          <TabPanel id="response" activeTab={activeChannelTab} keepMounted>
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+              <div className="flex items-center">
+                <IconFiretruck className="h-6 w-6 text-red-600 mr-2" />
+                <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
+                  Response Channels (Emergency Services)
+                </h2>
+              </div>
+              <div className="flex items-center gap-2">
+                {responseChannels.length > 0 && Object.keys(buildFolderTree(responseChannels, folderSeparator, 'name').folders).length > 0 && (
+                  <div className="flex items-center space-x-2">
+                    <button
+                      onClick={() => expandAllFolders(responseChannels)}
+                      className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
+                    >
+                      <ChevronDownIcon className="h-4 w-4 mr-1" />
+                      Expand All
+                    </button>
+                    <button
+                      onClick={collapseAllFolders}
+                      className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
+                    >
+                      <ChevronUpIcon className="h-4 w-4 mr-1" />
+                      Collapse All
+                    </button>
+                  </div>
+                )}
+                {isGlobalManager && (
+                  <button
+                    onClick={() => {
+                      setCreateType('response');
+                      setShowCreateModal(true);
+                    }}
+                    className="btn-primary flex items-center justify-center"
+                  >
+                    <PlusIcon className="h-4 w-4 mr-2 flex-shrink-0" />
+                    Create Response Channel
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {responseChannels.length === 0 ? (
+              <p className="text-gray-500 dark:text-gray-400">No response channels configured.</p>
+            ) : (
+              <div className="space-y-3">
+                {renderFolderTree(buildFolderTree(responseChannels, folderSeparator, 'name'), '', 'response')}
+              </div>
+            )}
+          </TabPanel>
+
+          {/* Support Channels */}
+          <TabPanel id="support" activeTab={activeChannelTab} keepMounted>
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+              <div className="flex items-center">
+                <IconBackhoe className="h-6 w-6 text-green-600 mr-2" />
+                <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
+                  Support Channels (All Agencies)
+                </h2>
+              </div>
+              <div className="flex items-center gap-2">
+                {supportChannels.length > 0 && Object.keys(buildFolderTree(supportChannels, folderSeparator, 'name').folders).length > 0 && (
+                  <div className="flex items-center space-x-2">
+                    <button
+                      onClick={() => expandAllFolders(supportChannels)}
+                      className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
+                    >
+                      <ChevronDownIcon className="h-4 w-4 mr-1" />
+                      Expand All
+                    </button>
+                    <button
+                      onClick={collapseAllFolders}
+                      className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
+                    >
+                      <ChevronUpIcon className="h-4 w-4 mr-1" />
+                      Collapse All
+                    </button>
+                  </div>
+                )}
+                {isGlobalManager && (
+                  <button
+                    onClick={() => {
+                      setCreateType('support');
+                      setShowCreateModal(true);
+                    }}
+                    className="btn-primary flex items-center justify-center"
+                  >
+                    <PlusIcon className="h-4 w-4 mr-2 flex-shrink-0" />
+                    Create Support Channel
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {supportChannels.length === 0 ? (
+              <p className="text-gray-500 dark:text-gray-400">No support channels configured.</p>
+            ) : (
+              <div className="space-y-3">
+                {renderFolderTree(buildFolderTree(supportChannels, folderSeparator, 'name'), '', 'support')}
+              </div>
+            )}
+          </TabPanel>
+
+          {/* XtraTools Channels */}
+          <TabPanel id="utl" activeTab={activeChannelTab} keepMounted>
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+              <div className="flex items-center">
+                <IconTool className="h-6 w-6 text-purple-600 mr-2" />
+                <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
+                  XtraTools Channels
+                </h2>
+              </div>
+              <div className="flex items-center gap-2">
+                {utlChannels.length > 0 && Object.keys(buildFolderTree(utlChannels, folderSeparator, 'name').folders).length > 0 && (
+                  <div className="flex items-center space-x-2">
+                    <button
+                      onClick={() => expandAllFolders(utlChannels)}
+                      className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
+                    >
+                      <ChevronDownIcon className="h-4 w-4 mr-1" />
+                      Expand All
+                    </button>
+                    <button
+                      onClick={collapseAllFolders}
+                      className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
+                    >
+                      <ChevronUpIcon className="h-4 w-4 mr-1" />
+                      Collapse All
+                    </button>
+                  </div>
+                )}
+                {isGlobalManager && (
+                  <button
+                    onClick={() => {
+                      setCreateType('utl');
+                      setShowCreateModal(true);
+                    }}
+                    className="btn-primary flex items-center justify-center"
+                  >
+                    <PlusIcon className="h-4 w-4 mr-2 flex-shrink-0" />
+                    Create XtraTools Channel
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {utlChannels.length === 0 ? (
+              <p className="text-gray-500 dark:text-gray-400">No XtraTools channels configured.</p>
+            ) : (
+              <div className="space-y-3">
+                {renderFolderTree(buildFolderTree(utlChannels, folderSeparator, 'name'), '', 'utl')}
+              </div>
+            )}
+          </TabPanel>
+        </div>
+      </div>
+
+      {/* Global Channel Management -- moved below the tabs per explicit
+          request, so the page reads: what channels exist (tabs), then
+          bulk operations that act on/across all of them. */}
       {isGlobalManager && (
         <div className="card">
           <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
@@ -586,163 +875,6 @@ export default function GlobalChannels({ user }) {
           </div>
         </div>
       )}
-
-      {/* BCH Channels */}
-      <div className="card">
-        {/* Bugfix: `flex-wrap gap-2` (was a non-wrapping row) so the
-            section title and the Expand/Collapse All buttons can drop to
-            their own line on a narrow phone, matching Teams.jsx's own
-            search-bar wrap fix -- identical across all four sections
-            below. */}
-        <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
-          <div className="flex items-center">
-            <RadioIcon className="h-6 w-6 text-blue-600 mr-2" />
-            <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
-              BCH Channels (Broadcast/ETL)
-            </h2>
-          </div>
-          {bchOnlyChannels.length > 0 && Object.keys(buildFolderTree(bchOnlyChannels, folderSeparator, 'name').folders).length > 0 && (
-            <div className="flex items-center space-x-2">
-              <button
-                onClick={() => expandAllFolders(bchOnlyChannels)}
-                className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
-              >
-                <ChevronDownIcon className="h-4 w-4 mr-1" />
-                Expand All
-              </button>
-              <button
-                onClick={collapseAllFolders}
-                className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
-              >
-                <ChevronUpIcon className="h-4 w-4 mr-1" />
-                Collapse All
-              </button>
-            </div>
-          )}
-        </div>
-        
-        {bchOnlyChannels.length === 0 ? (
-          <p className="text-gray-500 dark:text-gray-400">No BCH channels configured.</p>
-        ) : (
-          <div className="space-y-3">
-            {renderFolderTree(buildFolderTree(bchOnlyChannels, folderSeparator, 'name'), '', 'bch')}
-          </div>
-        )}
-      </div>
-
-      {/* XtraTools Channels */}
-      <div className="card">
-        <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
-          <div className="flex items-center">
-            <RadioIcon className="h-6 w-6 text-purple-600 mr-2" />
-            <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
-              XtraTools Channels
-            </h2>
-          </div>
-          {utlChannels.length > 0 && Object.keys(buildFolderTree(utlChannels, folderSeparator, 'name').folders).length > 0 && (
-            <div className="flex items-center space-x-2">
-              <button
-                onClick={() => expandAllFolders(utlChannels)}
-                className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
-              >
-                <ChevronDownIcon className="h-4 w-4 mr-1" />
-                Expand All
-              </button>
-              <button
-                onClick={collapseAllFolders}
-                className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
-              >
-                <ChevronUpIcon className="h-4 w-4 mr-1" />
-                Collapse All
-              </button>
-            </div>
-          )}
-        </div>
-        
-        {utlChannels.length === 0 ? (
-          <p className="text-gray-500 dark:text-gray-400">No XtraTools channels configured.</p>
-        ) : (
-          <div className="space-y-3">
-            {renderFolderTree(buildFolderTree(utlChannels, folderSeparator, 'name'), '', 'utl')}
-          </div>
-        )}
-      </div>
-
-      {/* Response Channels */}
-      <div className="card">
-        <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
-          <div className="flex items-center">
-            <GlobeAltIcon className="h-6 w-6 text-red-600 mr-2" />
-            <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
-              Response Channels (Emergency Services)
-            </h2>
-          </div>
-          {responseChannels.length > 0 && Object.keys(buildFolderTree(responseChannels, folderSeparator, 'name').folders).length > 0 && (
-            <div className="flex items-center space-x-2">
-              <button
-                onClick={() => expandAllFolders(responseChannels)}
-                className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
-              >
-                <ChevronDownIcon className="h-4 w-4 mr-1" />
-                Expand All
-              </button>
-              <button
-                onClick={collapseAllFolders}
-                className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
-              >
-                <ChevronUpIcon className="h-4 w-4 mr-1" />
-                Collapse All
-              </button>
-            </div>
-          )}
-        </div>
-        
-        {responseChannels.length === 0 ? (
-          <p className="text-gray-500 dark:text-gray-400">No response channels configured.</p>
-        ) : (
-          <div className="space-y-3">
-            {renderFolderTree(buildFolderTree(responseChannels, folderSeparator, 'name'), '', 'response')}
-          </div>
-        )}
-      </div>
-
-      {/* Support Channels */}
-      <div className="card">
-        <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
-          <div className="flex items-center">
-            <GlobeAltIcon className="h-6 w-6 text-green-600 mr-2" />
-            <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
-              Support Channels (All Agencies)
-            </h2>
-          </div>
-          {supportChannels.length > 0 && Object.keys(buildFolderTree(supportChannels, folderSeparator, 'name').folders).length > 0 && (
-            <div className="flex items-center space-x-2">
-              <button
-                onClick={() => expandAllFolders(supportChannels)}
-                className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
-              >
-                <ChevronDownIcon className="h-4 w-4 mr-1" />
-                Expand All
-              </button>
-              <button
-                onClick={collapseAllFolders}
-                className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
-              >
-                <ChevronUpIcon className="h-4 w-4 mr-1" />
-                Collapse All
-              </button>
-            </div>
-          )}
-        </div>
-        
-        {supportChannels.length === 0 ? (
-          <p className="text-gray-500 dark:text-gray-400">No support channels configured.</p>
-        ) : (
-          <div className="space-y-3">
-            {renderFolderTree(buildFolderTree(supportChannels, folderSeparator, 'name'), '', 'support')}
-          </div>
-        )}
-      </div>
 
       {/* Create Modal */}
       {showCreateModal && (
@@ -981,12 +1113,47 @@ export default function GlobalChannels({ user }) {
         </div>
       )}
 
-      {/* Bugfix ("Get credentials" button): the lite credentials view. */}
+      {/* Bugfix ("Get credentials" button): the lite credentials view.
+          Cycle Password / Delete Service Account open the shared confirm
+          dialog below (rendered AFTER this one in the JSX so it stacks
+          visually on top, both being fixed inset-0 z-50 overlays). */}
       {credentialsDialog && (
         <BchChannelCredentialsDialog
           channelName={credentialsDialog.channelName}
           credentials={credentialsDialog.credentials}
           onClose={() => setCredentialsDialog(null)}
+          onRotateRequested={(username) => handleServiceAccountAction('rotate', username)}
+          onDeleteRequested={(username) => handleServiceAccountAction('delete', username)}
+        />
+      )}
+
+      {/* Bugfix (explicit request: "Add Service Account" modal). */}
+      {addServiceAccountChannel && (
+        <AddServiceAccountDialog
+          channelId={addServiceAccountChannel.id}
+          channelName={addServiceAccountChannel.name}
+          onClose={() => setAddServiceAccountChannel(null)}
+          onCompleted={fetchChannels}
+        />
+      )}
+
+      {/* Bugfix (explicit request: cycle password / delete service
+          account, both write-in confirmed). Closes the credentials
+          dialog too on success -- a rotation invalidates the password it
+          was showing, and a deletion removes the account it was showing
+          entirely, so leaving that dialog open afterwards would display
+          a stale/nonexistent credential. */}
+      {serviceAccountAction && (
+        <ServiceAccountActionConfirmDialog
+          mode={serviceAccountAction.mode}
+          channelId={serviceAccountAction.channelId}
+          channelName={serviceAccountAction.channelName}
+          serviceAccountUsername={serviceAccountAction.serviceAccountUsername}
+          onClose={() => setServiceAccountAction(null)}
+          onCompleted={() => {
+            setCredentialsDialog(null);
+            fetchChannels();
+          }}
         />
       )}
     </div>

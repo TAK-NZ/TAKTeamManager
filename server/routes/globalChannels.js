@@ -157,6 +157,175 @@ router.get('/bch/:channelId/credentials', authenticateToken, authorize, async (r
   }
 });
 
+// Bugfix (collision/takeover risk): the "Add Service Account" dialog's
+// live pre-submit check -- lets the client show a collision (another
+// channel's service account, or an unrelated Authentik user with this
+// exact username) BEFORE the admin ever clicks "Add Service Account",
+// rather than only finding out from a 409 on submit. Read-only, so this
+// is a GET despite taking a query parameter rather than a route param;
+// gated the same as every other channel-management action on this
+// router since it still reveals whether a given name collides with a
+// real Authentik identity.
+router.get('/bch/service-account-availability', authenticateToken, authorize, async (req, res) => {
+  try {
+    const { username, channelId } = req.query;
+    if (!username || typeof username !== 'string') {
+      return res.status(400).json({ error: 'A username query parameter is required' });
+    }
+
+    const result = await globalChannelService.checkServiceAccountUsernameAvailability(
+      username,
+      channelId ? parseInt(channelId, 10) : null
+    );
+
+    res.json(result);
+  } catch (error) {
+    getLogger().error({ err: error }, 'Failed to check service account username availability');
+    res.status(500).json({ error: 'Failed to check service account username availability' });
+  }
+});
+
+// Bugfix (a BCH/UTL channel imported via "Sync Existing Channels" has no
+// service account; and the "Add Service Account" dialog): provisions one
+// for a channel that doesn't already have one. Global managers only,
+// same gate as every other channel-management action on this router.
+//
+// `username` in the body is OPTIONAL: the "Get Credentials" surface's
+// automatic provision action (a channel discovered with no service
+// account at all) omits it entirely and gets the channel-name-derived
+// default, exactly as before this field existed; the "Add Service
+// Account" dialog supplies an admin-chosen name instead. Both paths are
+// enforced against the same `etl-` prefix rule by
+// GlobalChannelService.provisionServiceAccount itself (via
+// isValidServiceAccountUsername) -- this route's own validator below is
+// a fast, no-database-round-trip rejection for the obviously-wrong case
+// (wrong type, empty string), not a duplicate of that enforcement.
+router.post('/bch/:channelId/provision-service-account', authenticateToken, authorize, [
+  body('username').optional().trim().isLength({ min: 1, max: 100 })
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
+  try {
+    const { channelId } = req.params;
+    const { username } = req.body;
+
+    // req.user.userId is already the local users.id -- see comment on the
+    // BCH create route above.
+    const result = await globalChannelService.provisionServiceAccount(channelId, req.user.userId, username || null);
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'global_channel.provision_service_account', 'bch_channel', parseInt(channelId, 10), JSON.stringify({ serviceAccountUsername: result.serviceAccountUsername })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
+    res.status(201).json({
+      message: 'Service account provisioning queued',
+      serviceAccountUsername: result.serviceAccountUsername
+    });
+  } catch (error) {
+    getLogger().error({ err: error }, 'Failed to provision service account');
+    // Branches on the specific caller-fixable states
+    // GlobalChannelService.provisionServiceAccount throws, mirroring this
+    // router's own /region/:channelId 404 handling shape and this
+    // codebase's general convention of branching on the exact thrown
+    // message rather than collapsing every failure to one status.
+    if (error.message === 'BCH channel not found') {
+      return res.status(404).json({ error: error.message });
+    }
+    if (error.message === 'This channel already has a service account configured') {
+      return res.status(409).json({ error: error.message });
+    }
+    // The etl- prefix / character-class validation error is a caller
+    // mistake (a malformed custom name from the Add Service Account
+    // dialog), not a server failure.
+    if (error.message.startsWith('Service account username must start with')) {
+      return res.status(400).json({ error: error.message });
+    }
+    // Bugfix (collision/takeover risk): checkServiceAccountUsernameAvailability's
+    // two dynamic reason strings (see its own doc comment) are also
+    // caller-fixable conflicts, not server failures -- the admin picked a
+    // name that is already taken and needs to choose a different one.
+    if (error.message.includes('already the service account for another channel') || error.message.includes('already exists in Authentik')) {
+      return res.status(409).json({ error: error.message });
+    }
+    res.status(500).json({ error: 'Failed to provision service account' });
+  }
+});
+
+// Bugfix (BCH credentials modal: "cycle the password"): rotates an
+// EXISTING service account's password. Global managers only.
+router.post('/bch/:channelId/rotate-password', authenticateToken, authorize, async (req, res) => {
+  try {
+    const { channelId } = req.params;
+
+    const result = await globalChannelService.rotateServiceAccountPassword(channelId, req.user.userId);
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'global_channel.rotate_service_account_password', 'bch_channel', parseInt(channelId, 10), JSON.stringify({ serviceAccountUsername: result.serviceAccountUsername })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
+    res.status(201).json({
+      message: 'Service account password rotation queued',
+      serviceAccountUsername: result.serviceAccountUsername
+    });
+  } catch (error) {
+    getLogger().error({ err: error }, 'Failed to rotate service account password');
+    if (error.message === 'BCH channel not found') {
+      return res.status(404).json({ error: error.message });
+    }
+    if (error.message === 'This channel has no service account to rotate') {
+      return res.status(409).json({ error: error.message });
+    }
+    res.status(500).json({ error: 'Failed to rotate service account password' });
+  }
+});
+
+// Bugfix (BCH credentials modal: "delete the service account"): removes
+// a channel's service account entirely (the read/write groups and the
+// channel itself are untouched). Global managers only.
+router.delete('/bch/:channelId/service-account', authenticateToken, authorize, async (req, res) => {
+  try {
+    const { channelId } = req.params;
+
+    const result = await globalChannelService.deleteServiceAccount(channelId, req.user.userId);
+
+    try {
+      await pool.query(
+        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+        [req.user.userId, 'global_channel.delete_service_account', 'bch_channel', parseInt(channelId, 10), JSON.stringify({ serviceAccountUsername: result.serviceAccountUsername })]
+      );
+    } catch (auditErr) {
+      getLogger().error({ err: auditErr }, 'Failed to write audit log');
+    }
+
+    res.json({
+      message: 'Service account deletion queued',
+      serviceAccountUsername: result.serviceAccountUsername
+    });
+  } catch (error) {
+    getLogger().error({ err: error }, 'Failed to delete service account');
+    if (error.message === 'BCH channel not found') {
+      return res.status(404).json({ error: error.message });
+    }
+    if (error.message === 'This channel has no service account to delete') {
+      return res.status(409).json({ error: error.message });
+    }
+    res.status(500).json({ error: 'Failed to delete service account' });
+  }
+});
+
 // Assign all users to global channels (global managers only)
 router.post('/assign-all-users', authenticateToken, authorize, async (req, res) => {
   try {

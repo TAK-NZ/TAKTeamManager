@@ -267,6 +267,23 @@ const routes = {
   'POST /api/global-channels/region': ['global_channel:manage'],
   // Requirement 4.4 / 24.5: BCH credential-retrieval route, Global_Manager-only.
   'GET /api/global-channels/bch/:channelId/credentials': ['global_channel:credentials'],
+  // Bugfix (collision/takeover risk): the "Add Service Account" dialog's
+  // live pre-submit availability check. Same gate as every other
+  // channel-management action -- it still reveals whether a candidate
+  // name collides with a real Authentik identity.
+  'GET /api/global-channels/bch/service-account-availability': ['global_channel:manage'],
+  // Bugfix (a BCH/UTL channel imported via "Sync Existing Channels" has
+  // no service account): provisions one. Reuses 'global_channel:manage'
+  // -- the same permission every other channel-MANAGEMENT action here
+  // requires -- rather than 'global_channel:credentials', since this
+  // route creates/mutates a service account rather than reading an
+  // existing one's password.
+  'POST /api/global-channels/bch/:channelId/provision-service-account': ['global_channel:manage'],
+  // Bugfix (BCH credentials modal: cycle password / delete service
+  // account): same 'global_channel:manage' gate as every other
+  // channel-management action.
+  'POST /api/global-channels/bch/:channelId/rotate-password': ['global_channel:manage'],
+  'DELETE /api/global-channels/bch/:channelId/service-account': ['global_channel:manage'],
   'POST /api/global-channels/assign-all-users': ['global_channel:manage'],
   'PUT /api/global-channels/bch/:channelId': ['global_channel:manage'],
   'PUT /api/global-channels/region/:channelId': ['global_channel:manage'],

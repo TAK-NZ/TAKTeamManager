@@ -514,6 +514,15 @@ describe('Property 3: Payload validation failures never schedule a retry', () =>
     create_group: 'createGroup',
     bulk_add_user_to_team: 'bulkAddUserToTeam',
     create_bch_channel_groups: 'createBchChannelGroups',
+    // Bugfix (a BCH/UTL channel imported via "Sync Existing Channels" has
+    // no service account): enqueued by
+    // GlobalChannelService.provisionServiceAccount.
+    provision_bch_service_account: 'provisionBchServiceAccount',
+    // Bugfix (BCH credentials modal: cycle password / delete service
+    // account): enqueued by GlobalChannelService.rotateServiceAccountPassword
+    // / .deleteServiceAccount respectively.
+    rotate_bch_service_account_password: 'rotateBchServiceAccountPassword',
+    delete_bch_service_account: 'deleteBchServiceAccount',
     create_region_channel_group: 'createRegionChannelGroup',
     update_bch_channel_group: 'updateBchChannelGroup',
     update_region_channel_group: 'updateRegionChannelGroup',
@@ -1452,6 +1461,524 @@ describe('SyncWorker Authentik failure classification wiring', () => {
 
       const readCallBody = JSON.parse(global.fetch.mock.calls[0][1].body);
       expect(readCallBody.attributes.description).toBe('Data Packages');
+    });
+  });
+
+  /**
+   * Bugfix (a BCH/UTL channel imported via "Sync Existing Channels" has
+   * no service account): `provisionBchServiceAccount`. Enqueued by
+   * `GlobalChannelService.provisionServiceAccount`, which has already
+   * written the new username/password onto the channel's row before
+   * this handler runs.
+   */
+  describe('provisionBchServiceAccount', () => {
+    const baseOperation = {
+      id: 'op-provision-1',
+      operation_type: 'provision_bch_service_account',
+      retry_count: 0,
+      max_retries: 48,
+      correlation_id: 'corr-provision-1',
+      payload: {
+        bch_channel_id: 11,
+        service_account_username: 'etl-data-packages',
+        service_account_password: 'secret',
+        read_group_id: 'grp-read',
+        write_group_id: 'grp-write'
+      }
+    };
+
+    beforeEach(() => {
+      worker.pool.query = jest.fn().mockResolvedValue({ rows: [] });
+    });
+
+    it('creates the service account, sets its password, and adds it to BOTH the read AND write groups', async () => {
+      let call = 0;
+      global.fetch = jest.fn().mockImplementation((url, options) => {
+        call++;
+        if (call === 1) {
+          // POST /core/users/ (create)
+          expect(options.method).toBe('POST');
+          const body = JSON.parse(options.body);
+          expect(body.username).toBe('etl-data-packages');
+          expect(body.type).toBe('service_account');
+          // Bugfix (collision/takeover risk): every created service
+          // account is tagged with its owning channel id, so a later
+          // Create_Or_Reuse lookup can tell "mine" from "not mine".
+          expect(body.attributes.bch_channel_id).toBe(11);
+          return Promise.resolve({ ok: true, status: 201, json: () => Promise.resolve({ pk: 'svc-pk' }) });
+        }
+        if (call === 2) {
+          // POST /core/users/{pk}/set_password/
+          expect(url).toContain('/set_password/');
+          const body = JSON.parse(options.body);
+          expect(body.password).toBe('secret');
+          return Promise.resolve({ ok: true, status: 204, json: () => Promise.resolve({}) });
+        }
+        // The two add_user calls, one per group.
+        return Promise.resolve({ ok: true, status: 201, json: () => Promise.resolve({}) });
+      });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      expect(global.fetch).toHaveBeenCalledTimes(4);
+      const addUserUrls = [global.fetch.mock.calls[2][0], global.fetch.mock.calls[3][0]];
+      expect(addUserUrls.some((u) => u.includes('grp-read'))).toBe(true);
+      expect(addUserUrls.some((u) => u.includes('grp-write'))).toBe(true);
+      for (const call of [global.fetch.mock.calls[2], global.fetch.mock.calls[3]]) {
+        const body = JSON.parse(call[1].body);
+        expect(body.pk).toBe('svc-pk');
+      }
+    });
+
+    it('writes service_account_id onto the row, without touching read_group_id/write_group_id', async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 201,
+        json: () => Promise.resolve({ pk: 'svc-pk' })
+      });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      const updateCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('UPDATE bch_channels')
+      );
+      expect(updateCall).toBeDefined();
+      expect(updateCall[0]).not.toContain('read_group_id');
+      expect(updateCall[0]).not.toContain('write_group_id');
+      expect(updateCall[1]).toEqual(['svc-pk', 11]);
+    });
+
+    it('skips the write-group add when write_group_id is absent (omitted, per the real payload shape a null group id produces)', async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 201,
+        json: () => Promise.resolve({ pk: 'svc-pk' })
+      });
+
+      // write_group_id OMITTED entirely, not set to `null` -- mirroring
+      // GlobalChannelService.provisionServiceAccount's own payload
+      // shape, which never passes a null group id through as the
+      // literal `null` (operationSchemas.js's optional-field check would
+      // reject it: typeof null !== 'string').
+      const payloadWithoutWriteGroup = { ...baseOperation.payload };
+      delete payloadWithoutWriteGroup.write_group_id;
+
+      await worker.executeOperationSafely({ ...baseOperation, payload: payloadWithoutWriteGroup });
+
+      // create, set_password, ONE add_user call (read only) -- not two.
+      expect(global.fetch).toHaveBeenCalledTimes(3);
+      expect(global.fetch.mock.calls[2][0]).toContain('grp-read');
+    });
+
+    // Bugfix (collision/takeover risk): Create_Or_Reuse now only reuses a
+    // found account when it is TAGGED as belonging to this exact channel
+    // (attributes.bch_channel_id matches) -- proving this app's own prior
+    // attempt, not some unrelated account that merely shares the name.
+    it('reuses an existing service account by username (Create_Or_Reuse) when it is tagged as belonging to THIS channel', async () => {
+      let call = 0;
+      global.fetch = jest.fn().mockImplementation(() => {
+        call++;
+        if (call === 1) {
+          // Create POST conflicts.
+          return Promise.resolve({ ok: false, status: 400, statusText: 'Bad Request' });
+        }
+        if (call === 2) {
+          // Lookup by username finds the existing account, tagged with
+          // the SAME bch_channel_id this operation carries (11) --
+          // proving it is this app's own prior attempt at provisioning
+          // for this exact channel.
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({
+              results: [{
+                pk: 'existing-svc-pk',
+                username: 'etl-data-packages',
+                attributes: { bch_channel_id: 11 }
+              }]
+            })
+          });
+        }
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+      });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      const updateCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('UPDATE bch_channels')
+      );
+      expect(updateCall[1]).toEqual(['existing-svc-pk', 11]);
+    });
+
+    // Bugfix (collision/takeover risk): the core of the fix. A found
+    // account with NO bch_channel_id tag at all (never created by this
+    // app -- e.g. a human's own login, or a pre-existing unrelated
+    // Authentik user) must never be reused, reset, or added to this
+    // channel's groups.
+    it('permanently fails, and never resets/reuses the account, when the found account has NO bch_channel_id tag at all', async () => {
+      let call = 0;
+      global.fetch = jest.fn().mockImplementation(() => {
+        call++;
+        if (call === 1) {
+          return Promise.resolve({ ok: false, status: 400, statusText: 'Bad Request' });
+        }
+        if (call === 2) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({
+              results: [{ pk: 'unrelated-pk', username: 'etl-data-packages' }] // no attributes at all
+            })
+          });
+        }
+        throw new Error('Should not reach set_password or add_user for an unrelated account');
+      });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      // Only the create attempt and the lookup -- no set_password, no
+      // add_user, no database write.
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+      const updateCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('UPDATE bch_channels')
+      );
+      expect(updateCall).toBeUndefined();
+
+      const failCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('failure_category')
+      );
+      expect(failCall).toBeDefined();
+      expect(failCall[1][1]).toBe('permanent');
+    });
+
+    // Bugfix (collision/takeover risk): a found account tagged with a
+    // DIFFERENT channel's id (this app's own prior work, but for a
+    // different channel) is just as much a collision as an untagged
+    // account, and must be rejected the same way.
+    it('permanently fails when the found account is tagged with a DIFFERENT bch_channel_id', async () => {
+      let call = 0;
+      global.fetch = jest.fn().mockImplementation(() => {
+        call++;
+        if (call === 1) {
+          return Promise.resolve({ ok: false, status: 400, statusText: 'Bad Request' });
+        }
+        if (call === 2) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({
+              results: [{
+                pk: 'other-channel-pk',
+                username: 'etl-data-packages',
+                attributes: { bch_channel_id: 999 } // a different channel
+              }]
+            })
+          });
+        }
+        throw new Error('Should not reach set_password or add_user for a different channel\'s account');
+      });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+      const failCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('failure_category')
+      );
+      expect(failCall).toBeDefined();
+      expect(failCall[1][1]).toBe('permanent');
+    });
+
+    // Bugfix (collision/takeover risk): a string/number type mismatch on
+    // bch_channel_id (the attribute round-trips through Authentik's own
+    // JSON storage, and the payload value may already be a string from
+    // its own JSON round-trip through sync_operations) must not cause a
+    // false-negative rejection of a genuinely-matching account.
+    it('reuses the found account when bch_channel_id matches as a STRING against a numeric payload value, or vice versa', async () => {
+      let call = 0;
+      global.fetch = jest.fn().mockImplementation(() => {
+        call++;
+        if (call === 1) {
+          return Promise.resolve({ ok: false, status: 400, statusText: 'Bad Request' });
+        }
+        if (call === 2) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({
+              results: [{
+                pk: 'existing-svc-pk',
+                username: 'etl-data-packages',
+                attributes: { bch_channel_id: '11' } // string, payload carries 11 (number)
+              }]
+            })
+          });
+        }
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+      });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      const updateCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('UPDATE bch_channels')
+      );
+      expect(updateCall[1]).toEqual(['existing-svc-pk', 11]);
+    });
+
+    it('results in the retryable path when the create POST fails with a 5xx and no existing account is found by lookup', async () => {
+      global.fetch = jest.fn().mockImplementation((url) => {
+        if (typeof url === 'string' && url.includes('?username=')) {
+          return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ results: [] }) });
+        }
+        return Promise.resolve({ ok: false, status: 503, statusText: 'Service Unavailable' });
+      });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      const failCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('next_retry_at')
+      );
+      expect(failCall).toBeDefined();
+      expect(failCall[1][0]).toBe('pending');
+    });
+
+    it('results in the permanent-failure path when set_password fails with a 4xx', async () => {
+      let call = 0;
+      global.fetch = jest.fn().mockImplementation(() => {
+        call++;
+        if (call === 1) {
+          return Promise.resolve({ ok: true, status: 201, json: () => Promise.resolve({ pk: 'svc-pk' }) });
+        }
+        // set_password
+        return Promise.resolve({ ok: false, status: 400, statusText: 'Bad Request' });
+      });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      const failCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('failure_category')
+      );
+      expect(failCall).toBeDefined();
+      expect(failCall[1][1]).toBe('permanent');
+    });
+  });
+
+  /**
+   * Bugfix (BCH credentials modal: "cycle the password"):
+   * `rotateBchServiceAccountPassword`. Enqueued by
+   * `GlobalChannelService.rotateServiceAccountPassword`, which has
+   * already written the freshly generated encrypted password onto the
+   * channel's row before this handler runs.
+   */
+  describe('rotateBchServiceAccountPassword', () => {
+    const baseOperation = {
+      id: 'op-rotate-1',
+      operation_type: 'rotate_bch_service_account_password',
+      retry_count: 0,
+      max_retries: 48,
+      correlation_id: 'corr-rotate-1',
+      payload: {
+        bch_channel_id: 11,
+        service_account_username: 'etl-data-packages',
+        service_account_password: 'new-secret'
+      }
+    };
+
+    beforeEach(() => {
+      worker.pool.query = jest.fn().mockResolvedValue({ rows: [] });
+    });
+
+    it('looks up the existing service account by username and sets its new password', async () => {
+      let call = 0;
+      global.fetch = jest.fn().mockImplementation((url, options) => {
+        call++;
+        if (call === 1) {
+          expect(url).toContain('?username=etl-data-packages');
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({ results: [{ pk: 'svc-pk', username: 'etl-data-packages' }] })
+          });
+        }
+        expect(url).toContain('/set_password/');
+        const body = JSON.parse(options.body);
+        expect(body.password).toBe('new-secret');
+        return Promise.resolve({ ok: true, status: 204, json: () => Promise.resolve({}) });
+      });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('permanently fails when the service account is not found in Authentik (never retries against a target that will always 404)', async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ results: [] })
+      });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      const failCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('failure_category')
+      );
+      expect(failCall).toBeDefined();
+      expect(failCall[1][0]).toBe('failed');
+      expect(failCall[1][1]).toBe('permanent');
+    });
+
+    it('results in the retryable path when the username lookup itself fails with a 5xx', async () => {
+      global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 503, statusText: 'Service Unavailable' });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      const failCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('next_retry_at')
+      );
+      expect(failCall).toBeDefined();
+      expect(failCall[1][0]).toBe('pending');
+    });
+
+    it('results in the permanent-failure path when set_password itself fails with a 4xx', async () => {
+      let call = 0;
+      global.fetch = jest.fn().mockImplementation(() => {
+        call++;
+        if (call === 1) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({ results: [{ pk: 'svc-pk', username: 'etl-data-packages' }] })
+          });
+        }
+        return Promise.resolve({ ok: false, status: 400, statusText: 'Bad Request' });
+      });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      const failCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('failure_category')
+      );
+      expect(failCall).toBeDefined();
+      expect(failCall[1][1]).toBe('permanent');
+    });
+  });
+
+  /**
+   * Bugfix (BCH credentials modal: "delete the service account"):
+   * `deleteBchServiceAccount`. Enqueued by
+   * `GlobalChannelService.deleteServiceAccount`, which has already
+   * cleared the local service_account_id/username/password columns
+   * before this handler runs.
+   */
+  describe('deleteBchServiceAccount', () => {
+    const baseOperation = {
+      id: 'op-delete-svc-1',
+      operation_type: 'delete_bch_service_account',
+      retry_count: 0,
+      max_retries: 48,
+      correlation_id: 'corr-delete-svc-1',
+      payload: {
+        bch_channel_id: 11,
+        service_account_username: 'etl-data-packages',
+        service_account_id: 'svc-pk-known'
+      }
+    };
+
+    beforeEach(() => {
+      worker.pool.query = jest.fn().mockResolvedValue({ rows: [] });
+    });
+
+    it('deletes by the known service_account_id directly, without any username lookup', async () => {
+      global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 204 });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      expect(global.fetch.mock.calls[0][0]).toContain('svc-pk-known');
+      expect(global.fetch.mock.calls[0][1].method).toBe('DELETE');
+    });
+
+    it('falls back to a username lookup, then deletes by the resolved id, when service_account_id is absent', async () => {
+      const payloadWithoutId = { ...baseOperation.payload };
+      delete payloadWithoutId.service_account_id;
+
+      let call = 0;
+      global.fetch = jest.fn().mockImplementation((url) => {
+        call++;
+        if (call === 1) {
+          expect(url).toContain('?username=etl-data-packages');
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({ results: [{ pk: 'resolved-pk', username: 'etl-data-packages' }] })
+          });
+        }
+        expect(url).toContain('resolved-pk');
+        return Promise.resolve({ ok: true, status: 204 });
+      });
+
+      await worker.executeOperationSafely({ ...baseOperation, payload: payloadWithoutId });
+
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('is a no-op (no error, no retry) when the username lookup finds no matching account', async () => {
+      const payloadWithoutId = { ...baseOperation.payload };
+      delete payloadWithoutId.service_account_id;
+
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ results: [] })
+      });
+
+      await worker.executeOperationSafely({ ...baseOperation, payload: payloadWithoutId });
+
+      // No failure/retry UPDATE at all -- markOperationCompleted's own
+      // UPDATE is the only one issued, distinguishable from a failure by
+      // NOT containing failure_category or next_retry_at.
+      const failureOrRetryCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && (sql.includes('failure_category') || sql.includes('next_retry_at'))
+      );
+      expect(failureOrRetryCall).toBeUndefined();
+    });
+
+    it('is a no-op (no error, no retry) when the DELETE itself 404s (already deleted)', async () => {
+      global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 404, statusText: 'Not Found' });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      const failureOrRetryCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && (sql.includes('failure_category') || sql.includes('next_retry_at'))
+      );
+      expect(failureOrRetryCall).toBeUndefined();
+    });
+
+    it('results in the retryable path when the DELETE fails with a 5xx', async () => {
+      global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 503, statusText: 'Service Unavailable' });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      const failCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('next_retry_at')
+      );
+      expect(failCall).toBeDefined();
+      expect(failCall[1][0]).toBe('pending');
+    });
+
+    it('results in the retryable path when the username lookup itself fails with a 5xx', async () => {
+      const payloadWithoutId = { ...baseOperation.payload };
+      delete payloadWithoutId.service_account_id;
+
+      global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 503, statusText: 'Service Unavailable' });
+
+      await worker.executeOperationSafely({ ...baseOperation, payload: payloadWithoutId });
+
+      const failCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('next_retry_at')
+      );
+      expect(failCall).toBeDefined();
+      expect(failCall[1][0]).toBe('pending');
     });
   });
 

@@ -113,6 +113,65 @@ module.exports = {
     }
   },
 
+  // Bugfix (a BCH/UTL channel imported via "Sync Existing Channels" has
+  // no service account): enqueued by
+  // GlobalChannelService.provisionServiceAccount after it has already
+  // written the new service_account_username/service_account_password
+  // onto the channel's row. `read_group_id`/`write_group_id` are the
+  // channel's ALREADY-KNOWN group ids (present on every BCH/UTL row
+  // regardless of which path created it), passed through so the
+  // Sync_Worker handler `provisionBchServiceAccount` can add the new
+  // service account to both without its own extra database lookup --
+  // both are declared OPTIONAL rather than required because a channel
+  // discovered via Sync Existing Channels can, in principle, have a null
+  // `write_group_id` if its sibling write group was never found in
+  // Authentik (see syncExistingGlobalChannels's `writeGroup?.pk || null`
+  // fallback) -- provisioning must not itself fail payload validation
+  // over a pre-existing data gap it did not create.
+  provision_bch_service_account: {
+    requiredFields: {
+      bch_channel_id: 'number',
+      service_account_username: 'string',
+      service_account_password: 'string'
+    },
+    optionalFields: {
+      read_group_id: 'string',
+      write_group_id: 'string'
+    }
+  },
+
+  // Bugfix (BCH credentials modal: "cycle the password"): enqueued by
+  // GlobalChannelService.rotateServiceAccountPassword after it has
+  // already written the freshly generated encrypted password onto the
+  // channel's row. The username is unchanged by a rotation but still
+  // required here -- the Sync_Worker handler needs it to resolve the
+  // existing Authentik service account to set the new password on.
+  rotate_bch_service_account_password: {
+    requiredFields: {
+      bch_channel_id: 'number',
+      service_account_username: 'string',
+      service_account_password: 'string'
+    }
+  },
+
+  // Bugfix (BCH credentials modal: "delete the service account"):
+  // enqueued by GlobalChannelService.deleteServiceAccount after it has
+  // already cleared the local service_account_id/username/password
+  // columns. `service_account_id` (the Authentik user pk) is OPTIONAL --
+  // preferred when known (an exact id lookup needs no search), but a
+  // channel provisioned before that column was populated may only have
+  // carried a username; the Sync_Worker handler falls back to a
+  // username lookup when the id is absent.
+  delete_bch_service_account: {
+    requiredFields: {
+      bch_channel_id: 'number',
+      service_account_username: 'string'
+    },
+    optionalFields: {
+      service_account_id: 'string'
+    }
+  },
+
   // region-channel-tiers: `tier` ('response'/'support') is required --
   // GlobalChannelService.createRegionChannel always supplies it, having
   // already validated it against the same two-value set the migration's

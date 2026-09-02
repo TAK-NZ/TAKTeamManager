@@ -1,4 +1,4 @@
-import { XMarkIcon, ClipboardDocumentIcon } from '@heroicons/react/24/outline'
+import { XMarkIcon, ClipboardDocumentIcon, ArrowPathIcon, TrashIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 
 /**
@@ -14,21 +14,36 @@ import toast from 'react-hot-toast'
  * button copies the real value straight to the clipboard.
  *
  * Deliberately NO expiry countdown, unlike the enrollment tab's own
- * `EnrollmentCountdown`: a BCH service account's credentials are a static,
- * unrotated username/password pair with no expiry mechanism at all (there
- * is no `expires_at` column, no rotation job, nothing time-limited about
- * them) -- rendering a countdown here would be purely decorative at best
- * and misleading at worst, implying a rotation that doesn't happen. If a
- * real rotation feature is added later, a countdown can be added then,
- * backed by a real expiry value.
+ * `EnrollmentCountdown`: a BCH service account's credentials are a static
+ * username/password pair with no AUTOMATIC expiry mechanism (there is no
+ * `expires_at` column, no scheduled rotation job) -- rendering a countdown
+ * here would still be misleading, implying a rotation that happens on its
+ * own. Rotation is instead a deliberate, admin-triggered action (see the
+ * "Cycle Password" button below), not a timed one.
+ *
+ * Bugfix (explicit request): also surfaces "Cycle Password" and "Delete
+ * Service Account" -- both dispatched via callback props rather than
+ * calling the API directly here, so the PARENT owns opening
+ * `ServiceAccountActionConfirmDialog.jsx` (the shared type-to-confirm
+ * dialog for both actions) and can stack it above this one, then decide
+ * what happens to THIS dialog once that confirm dialog completes (a
+ * rotation invalidates the password currently shown here -- the parent
+ * closes this dialog so a stale value is never left on screen; a deletion
+ * removes the service account entirely, so the parent closes this dialog
+ * for the same reason).
  *
  * @param {object} props
  * @param {string} props.channelName the channel this credential belongs to,
  *   shown in the dialog title.
  * @param {{service_account_username: string, service_account_password: string}} props.credentials
  * @param {() => void} props.onClose
+ * @param {(username: string) => void} [props.onRotateRequested] invoked
+ *   when "Cycle Password" is clicked, with the service account's own
+ *   username (the confirm dialog's type-to-confirm target).
+ * @param {(username: string) => void} [props.onDeleteRequested] invoked
+ *   when "Delete Service Account" is clicked, with the same username.
  */
-export default function BchChannelCredentialsDialog({ channelName, credentials, onClose }) {
+export default function BchChannelCredentialsDialog({ channelName, credentials, onClose, onRotateRequested, onDeleteRequested }) {
   const handleCopy = async (value, label) => {
     try {
       await copyToClipboard(value)
@@ -116,7 +131,36 @@ export default function BchChannelCredentialsDialog({ channelName, credentials, 
             </dd>
           </div>
 
-          <div className="flex justify-end pt-2">
+          {/* Bugfix: both actions are behind the shared type-to-confirm
+              dialog (opened by the parent, per the callback props above),
+              never a direct call from here -- consistent with this app's
+              "no one-click destructive/credential-affecting action" rule.
+              `flex-wrap` so the two secondary actions can drop to their
+              own line on a narrow phone rather than crowding beside
+              Close. */}
+          <div className="flex flex-wrap justify-between items-center gap-2 pt-2 border-t border-gray-200 dark:border-gray-700">
+            <div className="flex flex-wrap gap-2">
+              {onRotateRequested && (
+                <button
+                  type="button"
+                  onClick={() => onRotateRequested(credentials.service_account_username)}
+                  className="btn-secondary flex items-center gap-1.5"
+                >
+                  <ArrowPathIcon className="h-4 w-4" aria-hidden="true" />
+                  Cycle Password
+                </button>
+              )}
+              {onDeleteRequested && (
+                <button
+                  type="button"
+                  onClick={() => onDeleteRequested(credentials.service_account_username)}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-lg font-medium text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/40 hover:bg-red-100 dark:hover:bg-red-900/60"
+                >
+                  <TrashIcon className="h-4 w-4" aria-hidden="true" />
+                  Delete Service Account
+                </button>
+              )}
+            </div>
             <button type="button" onClick={onClose} className="btn-secondary">
               Close
             </button>

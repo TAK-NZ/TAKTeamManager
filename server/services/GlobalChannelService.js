@@ -2,9 +2,19 @@ const pool = require('../config/database');
 const EventPublisher = require('./EventPublisher');
 const crypto = require('crypto');
 const CredentialEncryptionService = require('./CredentialEncryptionService');
+const authentikService = require('./authentik');
 const logger = require('../config/logger').createLogger('GlobalChannelService');
 const { REGION_CHANNEL_TIER_PREFIX, REGION_CHANNEL_TIER_DESCRIPTION_QUALIFIER, BCH_CHANNEL_CATEGORY_PREFIX } = require('../config/constants');
 const { buildRegionSeedWorkItems } = require('../config/regions');
+// Bugfix (service-account provisioning/naming): the single source of
+// truth for the `etl-` prefix and the default-name derivation, shared by
+// `createBchChannel` (a brand-new channel), `provisionServiceAccount`'s
+// default-name path (a channel discovered via Sync Existing Channels,
+// with no service account of its own yet), and `provisionServiceAccount`'s
+// admin-supplied-name path (the "Add Service Account" dialog) -- all
+// three can never disagree on the naming convention, since none of them
+// builds or validates a username with its own inline logic.
+const { buildDefaultServiceAccountUsername, isValidServiceAccountUsername } = require('../utils/serviceAccountUsername');
 
 // Frozen allow-list mapping a channelType to its backing table name.
 // Used to guard against SQL identifier interpolation from caller-controlled
@@ -39,7 +49,7 @@ class GlobalChannelService {
       await client.query('BEGIN');
       
       // Generate service account credentials
-      const serviceAccountUsername = `etl-${channelData.name.toLowerCase().replace(/\s+/g, '-')}`;
+      const serviceAccountUsername = buildDefaultServiceAccountUsername(channelData.name);
       const serviceAccountPassword = crypto.randomBytes(16).toString('hex');
 
       // Requirement 6.1: encrypt the password before it is persisted to the
@@ -358,16 +368,20 @@ class GlobalChannelService {
   }
 
   async getBchChannelCredentials(channelId, requestingUserId) {
-    // Only global managers can access service account credentials
-    const userResult = await pool.query(
-      'SELECT is_global_manager FROM users WHERE id = $1',
-      [requestingUserId]
-    );
-    
-    if (!userResult.rows[0]?.is_global_manager) {
-      throw new Error('Access denied: Global manager privileges required');
-    }
-    
+    // Bugfix: this used to re-check Global_Manager status itself via
+    // `SELECT is_global_manager FROM users WHERE id = $1` -- but
+    // `users.is_global_manager` is a dead column nothing in this codebase
+    // ever writes (the live flag is `user_cache.is_admin`, aliased onto
+    // `req.user.is_global_manager` by `server/middleware/auth.js` and
+    // already checked by the `authorize` middleware via this route's
+    // `global_channel:credentials` Permission_Registry entry -- see
+    // `globalChannels.js`). That made this re-check always false, 403ing
+    // every real Global_Manager unconditionally. `authorize` already
+    // gates this method's only caller, so the check is redundant, not
+    // just broken -- removed rather than repaired against the live
+    // column, per the server-conventions rule that authorization checks
+    // belong in `authorize.js`'s resolvers, not duplicated inline in a
+    // service.
     const result = await pool.query(`
       SELECT service_account_username, service_account_password
       FROM bch_channels 
@@ -410,6 +424,397 @@ class GlobalChannelService {
     }, 'BCH service account credentials accessed');
 
     return credentials;
+  }
+
+  /**
+   * Bugfix (collision/takeover risk): checks whether `username` is safe
+   * to provision as a NEW service account for `channelId`, i.e. whether
+   * creating it would collide with anything already using that exact
+   * name. Two independent sources are checked, since a collision can
+   * come from either:
+   *
+   *   1. Another `bch_channels` row already recorded as owning this
+   *      username (any OTHER channel's `service_account_username`
+   *      matching it, active or not -- an inactive/soft-deleted row's
+   *      name is not free to reuse if its Authentik account was never
+   *      actually cleaned up).
+   *   2. Authentik itself already having a user with this username --
+   *      REGARDLESS of what created it. This is deliberately not
+   *      narrowed to "another service account" or "type=service_account
+   *      only": a human's own login username is just as real a
+   *      collision as another channel's service account, and the
+   *      Sync_Worker's Create_Or_Reuse fallback (`provisionBchServiceAccount`)
+   *      would reuse either one identically if this check didn't exist.
+   *
+   * `excludeChannelId` lets a caller re-checking the SAME channel it is
+   * about to provision for skip source 1's self-match (relevant for a
+   * future "rename before provisioning" flow; today's only caller,
+   * `provisionServiceAccount`, always passes the channel it is
+   * provisioning FOR, which by construction has no
+   * `service_account_username` of its own yet -- so this exclusion is a
+   * defensive no-op today, not yet exercised, but keeps the method's
+   * contract correct for that future caller too).
+   *
+   * A Authentik lookup failure (network error, non-2xx) is NOT treated
+   * as "available" -- fails closed, propagating the error, rather than
+   * risking a takeover on an inconclusive check. This mirrors this
+   * codebase's general "directory scope never falls back to unscoped on
+   * error" posture (`DirectoryScopeService`): an inconclusive safety
+   * check is not a pass.
+   *
+   * @param {string} username - a full username, e.g. `'etl-data-packages'`.
+   * @param {number|string|null} [excludeChannelId] - a `bch_channels.id`
+   *   to exclude from source 1's comparison.
+   * @returns {Promise<{available: true} | {available: false, reason: string}>}
+   */
+  async checkServiceAccountUsernameAvailability(username, excludeChannelId = null) {
+    const localConflictResult = await pool.query(`
+      SELECT id, name
+      FROM bch_channels
+      WHERE service_account_username = $1 AND ($2::int IS NULL OR id <> $2)
+    `, [username, excludeChannelId]);
+
+    if (localConflictResult.rows.length > 0) {
+      return {
+        available: false,
+        reason: `"${username}" is already the service account for another channel ("${localConflictResult.rows[0].name}")`
+      };
+    }
+
+    const authentikUser = await authentikService.getUserByUsername(username);
+    if (authentikUser) {
+      return {
+        available: false,
+        reason: `"${username}" already exists in Authentik and cannot be reused for a new service account`
+      };
+    }
+
+    return { available: true };
+  }
+
+  /**
+   * Bugfix (a BCH/UTL channel imported via "Sync Existing Channels" has
+   * no service account): `syncExistingGlobalChannels` (server/workers/
+   * syncWorker.js) only ever discovers a channel's read/write GROUP pair
+   * from Authentik's group list -- it has no way to discover or create a
+   * service account, since Authentik's group-list API carries no
+   * password to capture even if a same-named service account happened to
+   * already exist. This method is the missing "provision one now" action
+   * for exactly that gap: a channel whose row already exists (created by
+   * either path) but has no `service_account_username` yet.
+   *
+   * Mirrors `createBchChannel`'s own credential-generation shape
+   * exactly -- same random password, same encrypt-before-persist
+   * ordering, same plaintext-in-payload handoff to the Sync_Worker
+   * (which needs the real password to set it in Authentik). Unlike
+   * `createBchChannel`, this UPDATEs an existing row rather than
+   * INSERTing a new one, and the enqueued operation must reuse the
+   * channel's ALREADY-KNOWN `read_group_id`/`write_group_id` (present on
+   * every BCH/UTL row, whichever path created it) so the Sync_Worker
+   * handler can add the new service account to both without a second
+   * database round trip of its own.
+   *
+   * The username is either the channel-name-derived default
+   * (`buildDefaultServiceAccountUsername`, matching `createBchChannel`'s
+   * own behaviour) or an admin-supplied custom name from the "Add
+   * Service Account" dialog -- both go through
+   * `isValidServiceAccountUsername`'s `etl-` prefix requirement, so
+   * every service account this app ever creates is guaranteed to start
+   * with that literal prefix regardless of which path named it.
+   *
+   * @param {number|string} channelId
+   * @param {number} requestingUserId - local `users.id`, attributed as
+   *   `sync_operations.created_by` and the audit log's actor (written by
+   *   the caller route, not here).
+   * @param {string|null} [customUsername] - an admin-supplied name from
+   *   the "Add Service Account" dialog, validated against
+   *   `isValidServiceAccountUsername` (must start with `etl-`) before
+   *   use. When omitted/null, falls back to the channel-name-derived
+   *   default, exactly as before this parameter existed.
+   * @returns {Promise<{serviceAccountUsername: string}>}
+   * @throws {Error} 'BCH channel not found' when no active row matches
+   *   `channelId`.
+   * @throws {Error} 'This channel already has a service account
+   *   configured' when `service_account_username` is already set --
+   *   provisioning never overwrites an existing service account; use the
+   *   channel's own edit path if a genuine replacement is ever needed.
+   * @throws {Error} "Service account username must start with \"etl-\"
+   *   and contain only lowercase letters, digits and hyphens after the
+   *   prefix" when `customUsername` is supplied but invalid.
+   */
+  async provisionServiceAccount(channelId, requestingUserId, customUsername = null) {
+    // Validated BEFORE ever connecting to the database, mirroring
+    // `createBchChannel`'s/`createRegionChannel`'s own
+    // validate-before-any-INSERT placement -- a bad custom name should
+    // never even open a transaction.
+    if (customUsername != null && !isValidServiceAccountUsername(customUsername)) {
+      throw new Error('Service account username must start with "etl-" and contain only lowercase letters, digits and hyphens after the prefix');
+    }
+
+    // A preliminary (non-locking) read: fails fast on the two conditions
+    // that don't need a transaction at all, and gives the DEFAULT-name
+    // path (no customUsername) the channel's own name to derive a
+    // candidate from -- needed before the availability check below, so
+    // that check can cover the auto-derived name too, not just an
+    // admin-typed one (two channels of different categories sharing a
+    // display name, e.g. a BCH and a UTL "Data Packages", derive the
+    // IDENTICAL default username, since category isn't part of the
+    // slug -- this is a real, not just hypothetical, collision source).
+    const precheckResult = await pool.query(`
+      SELECT name, service_account_username
+      FROM bch_channels
+      WHERE id = $1 AND is_active = true
+    `, [channelId]);
+
+    if (precheckResult.rows.length === 0) {
+      throw new Error('BCH channel not found');
+    }
+    if (precheckResult.rows[0].service_account_username) {
+      throw new Error('This channel already has a service account configured');
+    }
+
+    const candidateUsername = customUsername || buildDefaultServiceAccountUsername(precheckResult.rows[0].name);
+
+    // Bugfix (collision/takeover risk): the candidate username -- default
+    // OR custom -- must be checked for availability BEFORE anything is
+    // written or enqueued, and before a database transaction/row lock is
+    // ever opened (this check makes a real Authentik HTTP call, which
+    // should not run while holding a `FOR UPDATE` lock). Without this,
+    // `provisionBchServiceAccount`'s own Create_Or_Reuse fallback in the
+    // Sync_Worker would happily "reuse" (reset the password of, and add
+    // to this channel's read/write groups) ANY pre-existing Authentik
+    // account with a matching username -- another channel's service
+    // account, or an unrelated human/service account entirely -- and
+    // report success either way, with no indication a takeover just
+    // happened. See `checkServiceAccountUsernameAvailability`'s own doc
+    // comment for exactly what it checks.
+    const availability = await this.checkServiceAccountUsernameAvailability(candidateUsername, channelId);
+    if (!availability.available) {
+      throw new Error(availability.reason);
+    }
+
+    const client = await pool.connect();
+
+    try {
+      await client.query('BEGIN');
+
+      // Re-read WITH the row lock inside the transaction: the
+      // availability check above ran against a point-in-time snapshot,
+      // with no lock held, so a concurrent request could have changed
+      // either fact in between. Re-checking both conditions here closes
+      // that race rather than trusting the precheck's now-possibly-stale
+      // answer.
+      const existingResult = await client.query(`
+        SELECT name, service_account_username, read_group_id, write_group_id
+        FROM bch_channels
+        WHERE id = $1 AND is_active = true
+        FOR UPDATE
+      `, [channelId]);
+
+      if (existingResult.rows.length === 0) {
+        throw new Error('BCH channel not found');
+      }
+
+      const channel = existingResult.rows[0];
+
+      if (channel.service_account_username) {
+        throw new Error('This channel already has a service account configured');
+      }
+
+      const serviceAccountUsername = candidateUsername;
+      const serviceAccountPassword = crypto.randomBytes(16).toString('hex');
+      const encryptedServiceAccountPassword = CredentialEncryptionService.encrypt(serviceAccountPassword);
+
+      await client.query(`
+        UPDATE bch_channels
+        SET service_account_username = $1, service_account_password = $2
+        WHERE id = $3
+      `, [serviceAccountUsername, encryptedServiceAccountPassword, channelId]);
+
+      // The Sync_Worker handler needs both group ids to add the new
+      // service account to each -- read AND write access, per explicit
+      // product requirement -- without a second lookup of its own. A
+      // null group id is OMITTED from the payload entirely (never passed
+      // through as the literal `null`), mirroring `Team.delete`'s own
+      // `remove_team_channel_group` enqueue: `operationSchemas.js`'s
+      // optional-field type check only skips a field that is `undefined`,
+      // and `typeof null === 'object'` would otherwise fail it against
+      // this field's declared `'string'` type for a channel whose sibling
+      // write group was never found in Authentik.
+      const payload = {
+        bch_channel_id: Number(channelId),
+        service_account_username: serviceAccountUsername,
+        service_account_password: serviceAccountPassword
+      };
+      if (channel.read_group_id != null) {
+        payload.read_group_id = channel.read_group_id;
+      }
+      if (channel.write_group_id != null) {
+        payload.write_group_id = channel.write_group_id;
+      }
+      await EventPublisher.publishOperation('provision_bch_service_account', payload, requestingUserId, client);
+
+      await client.query('COMMIT');
+      return { serviceAccountUsername };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Rotates a BCH/UTL channel's existing service account password.
+   * Generates a fresh random password, encrypts and persists it in the
+   * SAME UPDATE as `provisionServiceAccount`'s own create path, and
+   * enqueues a Sync_Worker operation carrying the plaintext so Authentik
+   * can be updated to match -- mirroring `provisionServiceAccount`'s
+   * encrypt-then-enqueue-plaintext ordering exactly. The username and
+   * group ids are unchanged by a rotation; only the password moves.
+   *
+   * @param {number|string} channelId
+   * @param {number} requestingUserId - local `users.id`, attributed as
+   *   `sync_operations.created_by` and the audit log's actor (written by
+   *   the caller route, not here).
+   * @returns {Promise<{serviceAccountUsername: string}>}
+   * @throws {Error} 'BCH channel not found' when no active row matches
+   *   `channelId`.
+   * @throws {Error} 'This channel has no service account to rotate' when
+   *   `service_account_username` is not set -- there is nothing in
+   *   Authentik for a rotation to update; provision one first.
+   */
+  async rotateServiceAccountPassword(channelId, requestingUserId) {
+    const client = await pool.connect();
+
+    try {
+      await client.query('BEGIN');
+
+      const existingResult = await client.query(`
+        SELECT service_account_username
+        FROM bch_channels
+        WHERE id = $1 AND is_active = true
+        FOR UPDATE
+      `, [channelId]);
+
+      if (existingResult.rows.length === 0) {
+        throw new Error('BCH channel not found');
+      }
+
+      const { service_account_username: serviceAccountUsername } = existingResult.rows[0];
+
+      if (!serviceAccountUsername) {
+        throw new Error('This channel has no service account to rotate');
+      }
+
+      const newPassword = crypto.randomBytes(16).toString('hex');
+      const encryptedPassword = CredentialEncryptionService.encrypt(newPassword);
+
+      await client.query(`
+        UPDATE bch_channels
+        SET service_account_password = $1
+        WHERE id = $2
+      `, [encryptedPassword, channelId]);
+
+      await EventPublisher.publishOperation('rotate_bch_service_account_password', {
+        bch_channel_id: Number(channelId),
+        service_account_username: serviceAccountUsername,
+        service_account_password: newPassword
+      }, requestingUserId, client);
+
+      await client.query('COMMIT');
+      return { serviceAccountUsername };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Deletes a BCH/UTL channel's service account -- the Authentik user
+   * plus this app's own record of it -- WITHOUT touching the channel's
+   * read/write groups or the channel row itself. A channel with its
+   * service account removed reverts to exactly the "discovered, no
+   * service account" state `provisionServiceAccount`/the "Add Service
+   * Account" dialog already handle, so it can be re-provisioned or given
+   * a new custom-named account afterwards.
+   *
+   * Clears the local `service_account_id`/`service_account_username`/
+   * `service_account_password` columns IMMEDIATELY (inside this same
+   * transaction), rather than waiting for the Sync_Worker to confirm the
+   * Authentik-side delete -- mirroring this app's `account_status =
+   * 'orphaned'` convention elsewhere of updating the local, authoritative
+   * record synchronously and letting the asynchronous cleanup catch up.
+   * The enqueued operation carries the Authentik user id/username so the
+   * Sync_Worker can still delete the real Authentik account even though
+   * the local columns no longer reference it.
+   *
+   * @param {number|string} channelId
+   * @param {number} requestingUserId - local `users.id`, attributed as
+   *   `sync_operations.created_by` and the audit log's actor (written by
+   *   the caller route, not here).
+   * @returns {Promise<{serviceAccountUsername: string}>} the username
+   *   that was removed, so the caller route can log it before it's gone.
+   * @throws {Error} 'BCH channel not found' when no active row matches
+   *   `channelId`.
+   * @throws {Error} 'This channel has no service account to delete' when
+   *   `service_account_username` is not set already.
+   */
+  async deleteServiceAccount(channelId, requestingUserId) {
+    const client = await pool.connect();
+
+    try {
+      await client.query('BEGIN');
+
+      const existingResult = await client.query(`
+        SELECT service_account_id, service_account_username
+        FROM bch_channels
+        WHERE id = $1 AND is_active = true
+        FOR UPDATE
+      `, [channelId]);
+
+      if (existingResult.rows.length === 0) {
+        throw new Error('BCH channel not found');
+      }
+
+      const { service_account_id: serviceAccountId, service_account_username: serviceAccountUsername } = existingResult.rows[0];
+
+      if (!serviceAccountUsername) {
+        throw new Error('This channel has no service account to delete');
+      }
+
+      await client.query(`
+        UPDATE bch_channels
+        SET service_account_id = NULL, service_account_username = NULL, service_account_password = NULL
+        WHERE id = $1
+      `, [channelId]);
+
+      // `service_account_id` (the Authentik user pk) is preferred when
+      // present -- an exact id lookup needs no username-based search on
+      // the Sync_Worker side -- but a channel provisioned before
+      // `service_account_id` was ever populated (or one where the
+      // create/provision operation is still queued) may only have the
+      // username. Both are passed through when known; the Sync_Worker
+      // handler falls back to a username lookup when the id is absent.
+      const payload = {
+        bch_channel_id: Number(channelId),
+        service_account_username: serviceAccountUsername
+      };
+      if (serviceAccountId != null) {
+        payload.service_account_id = serviceAccountId;
+      }
+      await EventPublisher.publishOperation('delete_bch_service_account', payload, requestingUserId, client);
+
+      await client.query('COMMIT');
+      return { serviceAccountUsername };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async updateBchChannel(channelId, channelData, updatedBy) {

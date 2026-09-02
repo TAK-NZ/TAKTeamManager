@@ -350,6 +350,29 @@ export const globalChannelsAPI = {
   updateBchChannel: (channelId, data) => api.put(`/global-channels/bch/${channelId}`, data),
   updateRegionChannel: (channelId, data) => api.put(`/global-channels/region/${channelId}`, data),
   getBchCredentials: (channelId) => api.get(`/global-channels/bch/${channelId}/credentials`),
+  // Bugfix (collision/takeover risk): the "Add Service Account" dialog's
+  // live pre-submit check -- lets the client show a name collision
+  // BEFORE the admin clicks "Add Service Account". `channelId` is
+  // optional (omitted when checking availability for a brand-new
+  // channel that has no id yet).
+  checkServiceAccountAvailability: (username, channelId) => api.get('/global-channels/bch/service-account-availability', {
+    params: channelId ? { username, channelId } : { username }
+  }),
+  // Bugfix (a BCH/UTL channel imported via "Sync Existing Channels" has
+  // no service account; and the "Add Service Account" dialog):
+  // provisions one for a channel that doesn't already have one.
+  // `username` is optional -- omitted for the automatic
+  // "no service account at all" case (server derives the default from
+  // the channel name), supplied for the Add Service Account dialog's
+  // admin-chosen name.
+  provisionServiceAccount: (channelId, username) => api.post(`/global-channels/bch/${channelId}/provision-service-account`, username ? { username } : {}),
+  // Bugfix (BCH credentials modal: "cycle the password"): rotates an
+  // EXISTING service account's password.
+  rotateServiceAccountPassword: (channelId) => api.post(`/global-channels/bch/${channelId}/rotate-password`),
+  // Bugfix (BCH credentials modal: "delete the service account"):
+  // removes the service account entirely (the channel and its read/write
+  // groups are untouched).
+  deleteServiceAccount: (channelId) => api.delete(`/global-channels/bch/${channelId}/service-account`),
   assignAllUsers: () => api.post('/global-channels/assign-all-users'),
   deleteChannel: (channelType, channelId) => api.delete(`/global-channels/${channelType}/${channelId}`),
   syncExistingChannels: () => api.post('/global-channels/sync-existing'),

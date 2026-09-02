@@ -12,6 +12,7 @@
   "dependencies": {
     "@fortawesome/free-brands-svg-icons": "7.3.1",
     "@heroicons/react": "^2.0.18",
+    "@tabler/icons-react": "3.46.0",
     "axios": "^1.6.0",
     "dompurify": "^3.4.13",
     "fflate": "0.8.3",

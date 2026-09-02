@@ -9,6 +9,12 @@ jest.mock('./CredentialEncryptionService', () => ({
   encrypt: jest.fn(),
   decrypt: jest.fn()
 }));
+// Bugfix (collision/takeover risk): checkServiceAccountUsernameAvailability
+// calls authentikService.getUserByUsername -- mocked so tests control
+// whether Authentik reports the candidate username as already taken.
+jest.mock('./authentik', () => ({
+  getUserByUsername: jest.fn()
+}));
 
 const mockLoggerInstance = { info: jest.fn(), error: jest.fn() };
 jest.mock('../config/logger', () => ({
@@ -18,6 +24,7 @@ jest.mock('../config/logger', () => ({
 const pool = require('../config/database');
 const EventPublisher = require('./EventPublisher');
 const CredentialEncryptionService = require('./CredentialEncryptionService');
+const authentikService = require('./authentik');
 const GlobalChannelService = require('./GlobalChannelService');
 
 describe('GlobalChannelService.deleteGlobalChannel', () => {
@@ -553,16 +560,20 @@ describe('GlobalChannelService.getBchChannelCredentials', () => {
   });
 
   it('returns the decrypted plaintext password to the caller', async () => {
-    pool.query
-      .mockResolvedValueOnce({ rows: [{ is_global_manager: true }] }) // requester check
-      .mockResolvedValueOnce({
-        rows: [
-          {
-            service_account_username: 'etl-test',
-            service_account_password: 'iv:authTag:ciphertext'
-          }
-        ]
-      }); // credential fetch
+    // Bugfix: no longer mocks a first "requester check" pool.query call --
+    // this method used to re-check `users.is_global_manager` itself (a
+    // dead column, always false), which the fix removed. Authorization
+    // for this route is the `authorize` middleware's job, already tested
+    // separately; this service method's only remaining pool.query call is
+    // the credential fetch itself.
+    pool.query.mockResolvedValueOnce({
+      rows: [
+        {
+          service_account_username: 'etl-test',
+          service_account_password: 'iv:authTag:ciphertext'
+        }
+      ]
+    }); // credential fetch
     CredentialEncryptionService.decrypt.mockReturnValue('plaintext-password');
 
     const credentials = await service.getBchChannelCredentials(1, 99);
@@ -572,16 +583,14 @@ describe('GlobalChannelService.getBchChannelCredentials', () => {
   });
 
   it('logs the successful access as an auditable event with actorId/channelId/timestamp', async () => {
-    pool.query
-      .mockResolvedValueOnce({ rows: [{ is_global_manager: true }] })
-      .mockResolvedValueOnce({
-        rows: [
-          {
-            service_account_username: 'etl-test',
-            service_account_password: 'iv:authTag:ciphertext'
-          }
-        ]
-      });
+    pool.query.mockResolvedValueOnce({
+      rows: [
+        {
+          service_account_username: 'etl-test',
+          service_account_password: 'iv:authTag:ciphertext'
+        }
+      ]
+    });
     CredentialEncryptionService.decrypt.mockReturnValue('plaintext-password');
 
     await service.getBchChannelCredentials(1, 99);
@@ -602,16 +611,14 @@ describe('GlobalChannelService.getBchChannelCredentials', () => {
   });
 
   it('throws a generic error and logs the failure without leaking plaintext/ciphertext on decrypt failure', async () => {
-    pool.query
-      .mockResolvedValueOnce({ rows: [{ is_global_manager: true }] })
-      .mockResolvedValueOnce({
-        rows: [
-          {
-            service_account_username: 'etl-test',
-            service_account_password: 'corrupted-ciphertext'
-          }
-        ]
-      });
+    pool.query.mockResolvedValueOnce({
+      rows: [
+        {
+          service_account_username: 'etl-test',
+          service_account_password: 'corrupted-ciphertext'
+        }
+      ]
+    });
     CredentialEncryptionService.decrypt.mockImplementation(() => {
       throw new Error('Decryption failed');
     });
@@ -634,5 +641,358 @@ describe('GlobalChannelService.getBchChannelCredentials', () => {
 
     // No successful-access audit log should be emitted on failure.
     expect(mockLoggerInstance.info).not.toHaveBeenCalled();
+  });
+});
+
+// Bugfix (collision/takeover risk): checkServiceAccountUsernameAvailability.
+describe('GlobalChannelService.checkServiceAccountUsernameAvailability', () => {
+  let service;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    service = new GlobalChannelService();
+  });
+
+  it('reports available when neither the local table nor Authentik has a matching username', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+    authentikService.getUserByUsername.mockResolvedValue(null);
+
+    const result = await service.checkServiceAccountUsernameAvailability('etl-new-channel');
+
+    expect(result).toEqual({ available: true });
+  });
+
+  it('reports unavailable, naming the conflicting channel, when another bch_channels row already owns the username', async () => {
+    pool.query.mockResolvedValue({ rows: [{ id: 5, name: 'Data Packages' }] });
+    authentikService.getUserByUsername.mockResolvedValue(null);
+
+    const result = await service.checkServiceAccountUsernameAvailability('etl-data-packages');
+
+    expect(result.available).toBe(false);
+    expect(result.reason).toContain('Data Packages');
+  });
+
+  it('excludes excludeChannelId from the local-conflict query, via the SQL parameter', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+    authentikService.getUserByUsername.mockResolvedValue(null);
+
+    await service.checkServiceAccountUsernameAvailability('etl-data-packages', 7);
+
+    expect(pool.query).toHaveBeenCalledWith(
+      expect.stringContaining('id <> $2'),
+      ['etl-data-packages', 7]
+    );
+  });
+
+  it('reports unavailable when Authentik already has a user with this username, even with no local conflict', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+    authentikService.getUserByUsername.mockResolvedValue({ pk: 42, username: 'etl-someone-elses' });
+
+    const result = await service.checkServiceAccountUsernameAvailability('etl-someone-elses');
+
+    expect(result.available).toBe(false);
+    expect(result.reason).toContain('etl-someone-elses');
+  });
+
+  it('checks the local table BEFORE calling Authentik, and short-circuits without calling it on a local conflict', async () => {
+    pool.query.mockResolvedValue({ rows: [{ id: 5, name: 'Data Packages' }] });
+
+    await service.checkServiceAccountUsernameAvailability('etl-data-packages');
+
+    expect(authentikService.getUserByUsername).not.toHaveBeenCalled();
+  });
+
+  it('propagates (fails closed) when the Authentik lookup itself throws, rather than reporting available', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+    authentikService.getUserByUsername.mockRejectedValue(new Error('Authentik unreachable'));
+
+    await expect(service.checkServiceAccountUsernameAvailability('etl-data-packages')).rejects.toThrow(
+      'Authentik unreachable'
+    );
+  });
+});
+
+// Bugfix (a BCH/UTL channel imported via "Sync Existing Channels" has no
+// service account): GlobalChannelService.provisionServiceAccount.
+describe('GlobalChannelService.provisionServiceAccount', () => {
+  let service;
+  let mockClient;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockClient = {
+      query: jest.fn().mockResolvedValue({ rows: [] }),
+      release: jest.fn()
+    };
+    pool.connect.mockResolvedValue(mockClient);
+    EventPublisher.publishOperation.mockResolvedValue('op-id');
+    CredentialEncryptionService.encrypt.mockImplementation(
+      (plaintext) => `encrypted(${plaintext})`
+    );
+    // Available by default in every test below unless a test overrides
+    // this -- most of this describe block is about provisioning
+    // mechanics, not the availability check itself (which has its own
+    // dedicated describe block above).
+    authentikService.getUserByUsername.mockResolvedValue(null);
+    service = new GlobalChannelService();
+  });
+
+  /**
+   * Configures `pool.query` (the precheck SELECT, run before any
+   * transaction is opened, and the availability check's own local-conflict
+   * SELECT) AND `mockClient.query` (the transaction's re-SELECT, UPDATE,
+   * BEGIN/COMMIT/ROLLBACK) to agree on the same channel row -- both must
+   * return it identically, since `provisionServiceAccount` reads it
+   * twice (once outside the transaction, once inside with a lock) by
+   * design (see the method's own doc comment on closing that race).
+   */
+  function mockChannelRow(overrides = {}) {
+    const row = {
+      name: 'Data Packages',
+      service_account_username: null,
+      read_group_id: 'grp-read',
+      write_group_id: 'grp-write',
+      ...overrides
+    };
+    const selectMatcher = (sql) =>
+      typeof sql === 'string' && sql.includes('SELECT name, service_account_username');
+
+    pool.query.mockImplementation((sql) => {
+      if (selectMatcher(sql)) {
+        return Promise.resolve({ rows: [row] });
+      }
+      // The availability check's local-conflict query -- no conflicting
+      // row by default.
+      return Promise.resolve({ rows: [] });
+    });
+    mockClient.query.mockImplementation((sql) => {
+      if (selectMatcher(sql)) {
+        return Promise.resolve({ rows: [row] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+  }
+
+  it("builds the username as 'etl-<slugified-name>', matching createBchChannel's own convention exactly", async () => {
+    mockChannelRow({ name: 'Data Packages' });
+
+    const result = await service.provisionServiceAccount(1, 99);
+
+    expect(result.serviceAccountUsername).toBe('etl-data-packages');
+  });
+
+  it('always prefixes the generated username with "etl-", per explicit product requirement', async () => {
+    mockChannelRow({ name: 'Some Weird Channel Name' });
+
+    const result = await service.provisionServiceAccount(1, 99);
+
+    expect(result.serviceAccountUsername.startsWith('etl-')).toBe(true);
+  });
+
+  it('checks availability of the auto-derived default username, not just a custom one', async () => {
+    mockChannelRow({ name: 'Data Packages' });
+
+    await service.provisionServiceAccount(1, 99);
+
+    expect(authentikService.getUserByUsername).toHaveBeenCalledWith('etl-data-packages');
+  });
+
+  it('encrypts the password before persisting it, and enqueues the plaintext for the Sync_Worker', async () => {
+    mockChannelRow();
+
+    await service.provisionServiceAccount(1, 99);
+
+    expect(CredentialEncryptionService.encrypt).toHaveBeenCalledTimes(1);
+    const plaintextPassword = CredentialEncryptionService.encrypt.mock.calls[0][0];
+
+    const updateCall = mockClient.query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('UPDATE bch_channels')
+    );
+    expect(updateCall[1]).toContain(`encrypted(${plaintextPassword})`);
+    expect(updateCall[1]).not.toContain(plaintextPassword);
+
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'provision_bch_service_account',
+      expect.objectContaining({ service_account_password: plaintextPassword }),
+      99,
+      mockClient
+    );
+  });
+
+  it("passes the channel's already-known read_group_id/write_group_id through in the enqueued payload", async () => {
+    mockChannelRow({ read_group_id: 'grp-read-123', write_group_id: 'grp-write-456' });
+
+    await service.provisionServiceAccount(1, 99);
+
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'provision_bch_service_account',
+      expect.objectContaining({
+        bch_channel_id: 1,
+        read_group_id: 'grp-read-123',
+        write_group_id: 'grp-write-456'
+      }),
+      99,
+      mockClient
+    );
+  });
+
+  it('rejects with "BCH channel not found" and never opens a transaction when no active row matches', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+
+    await expect(service.provisionServiceAccount(999, 99)).rejects.toThrow('BCH channel not found');
+
+    expect(pool.connect).not.toHaveBeenCalled();
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+  });
+
+  it('rejects with a specific message and never opens a transaction when the channel already has a service account', async () => {
+    pool.query.mockResolvedValueOnce({
+      rows: [{ name: 'Data Packages', service_account_username: 'etl-already-configured' }]
+    });
+
+    await expect(service.provisionServiceAccount(1, 99)).rejects.toThrow(
+      'This channel already has a service account configured'
+    );
+
+    expect(pool.connect).not.toHaveBeenCalled();
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+  });
+
+  it('commits the transaction on success', async () => {
+    mockChannelRow();
+
+    await service.provisionServiceAccount(1, 99);
+
+    expect(mockClient.query).toHaveBeenCalledWith('COMMIT');
+    expect(mockClient.release).toHaveBeenCalled();
+  });
+
+  it('rolls back and releases the client when the transaction-scoped re-check finds the row missing (closing the precheck-to-lock race)', async () => {
+    // Precheck (pool.query) finds the row, and its own availability
+    // check's local-conflict query finds nothing; the transaction's own
+    // re-SELECT (mockClient.query) finds the row GONE -- simulating a
+    // concurrent delete between the two reads.
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('SELECT name, service_account_username')) {
+        return Promise.resolve({ rows: [{ name: 'Data Packages', service_account_username: null }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    mockClient.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('SELECT name, service_account_username')) {
+        return Promise.resolve({ rows: [] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await expect(service.provisionServiceAccount(1, 99)).rejects.toThrow('BCH channel not found');
+
+    expect(mockClient.query).toHaveBeenCalledWith('ROLLBACK');
+    expect(mockClient.release).toHaveBeenCalled();
+  });
+
+  // Bugfix (collision/takeover risk): a username collision is caught
+  // BEFORE any transaction is opened, for both the auto-derived default
+  // and an admin-supplied custom name.
+  describe('collision handling', () => {
+    it('rejects with the availability check\'s reason when the auto-derived default collides locally, before opening a transaction', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT name, service_account_username')) {
+          return Promise.resolve({ rows: [{ name: 'Data Packages', service_account_username: null }] });
+        }
+        // The availability check's local-conflict query finds a match.
+        return Promise.resolve({ rows: [{ id: 5, name: 'Another Channel' }] });
+      });
+
+      await expect(service.provisionServiceAccount(1, 99)).rejects.toThrow(
+        'already the service account for another channel'
+      );
+
+      expect(pool.connect).not.toHaveBeenCalled();
+      expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+    });
+
+    it('rejects when the auto-derived default already exists in Authentik, before opening a transaction', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT name, service_account_username')) {
+          return Promise.resolve({ rows: [{ name: 'Data Packages', service_account_username: null }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+      authentikService.getUserByUsername.mockResolvedValue({ pk: 1, username: 'etl-data-packages' });
+
+      await expect(service.provisionServiceAccount(1, 99)).rejects.toThrow(
+        'already exists in Authentik'
+      );
+
+      expect(pool.connect).not.toHaveBeenCalled();
+    });
+
+    it('rejects when a custom username collides, before opening a transaction', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT name, service_account_username')) {
+          return Promise.resolve({ rows: [{ name: 'Data Packages', service_account_username: null }] });
+        }
+        return Promise.resolve({ rows: [{ id: 5, name: 'Another Channel' }] });
+      });
+
+      await expect(service.provisionServiceAccount(1, 99, 'etl-taken-name')).rejects.toThrow(
+        'already the service account for another channel'
+      );
+
+      expect(pool.connect).not.toHaveBeenCalled();
+    });
+  });
+
+  // Bugfix (Add Service Account modal): an admin-supplied custom name,
+  // rather than the channel-name-derived default.
+  describe('with a custom username (the "Add Service Account" dialog)', () => {
+    it('uses the supplied custom username instead of deriving one from the channel name', async () => {
+      mockChannelRow({ name: 'Data Packages' });
+
+      const result = await service.provisionServiceAccount(1, 99, 'etl-custom-name');
+
+      expect(result.serviceAccountUsername).toBe('etl-custom-name');
+      expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+        'provision_bch_service_account',
+        expect.objectContaining({ service_account_username: 'etl-custom-name' }),
+        99,
+        mockClient
+      );
+    });
+
+    it('rejects a custom username with no etl- prefix, before ever connecting to the database', async () => {
+      await expect(service.provisionServiceAccount(1, 99, 'not-etl-prefixed')).rejects.toThrow(
+        'Service account username must start with "etl-"'
+      );
+
+      expect(pool.query).not.toHaveBeenCalled();
+      expect(pool.connect).not.toHaveBeenCalled();
+      expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+    });
+
+    it('rejects a custom username with invalid characters after the prefix', async () => {
+      await expect(service.provisionServiceAccount(1, 99, 'etl-Has Spaces')).rejects.toThrow(
+        'Service account username must start with "etl-"'
+      );
+
+      expect(pool.connect).not.toHaveBeenCalled();
+    });
+
+    it('rejects a custom username that is only the bare prefix', async () => {
+      await expect(service.provisionServiceAccount(1, 99, 'etl-')).rejects.toThrow(
+        'Service account username must start with "etl-"'
+      );
+
+      expect(pool.connect).not.toHaveBeenCalled();
+    });
+
+    it('falls back to the channel-name-derived default when customUsername is null', async () => {
+      mockChannelRow({ name: 'Data Packages' });
+
+      const result = await service.provisionServiceAccount(1, 99, null);
+
+      expect(result.serviceAccountUsername).toBe('etl-data-packages');
+    });
   });
 });

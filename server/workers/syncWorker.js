@@ -933,6 +933,18 @@ class SyncWorker {
       case 'create_bch_channel_groups':
         await this.createBchChannelGroups(payload);
         break;
+
+      case 'provision_bch_service_account':
+        await this.provisionBchServiceAccount(payload);
+        break;
+
+      case 'rotate_bch_service_account_password':
+        await this.rotateBchServiceAccountPassword(payload);
+        break;
+
+      case 'delete_bch_service_account':
+        await this.deleteBchServiceAccount(payload);
+        break;
         
       case 'create_region_channel_group':
         await this.createRegionChannelGroup(payload);
@@ -1407,7 +1419,15 @@ class SyncWorker {
     const readGroup = await readGroupResponse.json();
     const writeGroup = await writeGroupResponse.json();
     
-    // Create service account
+    // Create service account. Bugfix (collision/takeover risk):
+    // `attributes.bch_channel_id` mirrors the tag `provisionBchServiceAccount`
+    // stamps on its own creates, so a subsequent provision-vs-reuse check
+    // for the same username (there is no reuse fallback on THIS path --
+    // any non-2xx here is a hard failure -- but a future Sync_Worker
+    // retry of the create-groups operation, or the provision handler
+    // being pointed at a stale/duplicate username, could still consult
+    // this attribute) can identify an account this app created for this
+    // exact channel.
     const userResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/`, {
       method: 'POST',
       headers: {
@@ -1419,7 +1439,7 @@ class SyncWorker {
         name: `ETL Service Account - ${channel_name}`,
         is_active: true,
         type: 'service_account',
-        attributes: { service_type: 'etl', channel_name }
+        attributes: { service_type: 'etl', channel_name, bch_channel_id }
       })
     });
     
@@ -1456,6 +1476,318 @@ class SyncWorker {
       SET service_account_id = $1, read_group_id = $2, write_group_id = $3
       WHERE id = $4
     `, [serviceAccount.pk, readGroup.pk, writeGroup.pk, bch_channel_id]);
+  }
+
+  /**
+   * Bugfix (a BCH/UTL channel imported via "Sync Existing Channels" has
+   * no service account): enqueued by
+   * GlobalChannelService.provisionServiceAccount, which has already
+   * written the new service_account_username/service_account_password
+   * onto the channel's row before this runs, AND already confirmed the
+   * username was available (`checkServiceAccountUsernameAvailability`,
+   * checked against both the local `bch_channels` table and Authentik
+   * itself) before enqueueing at all. Creates the Authentik service
+   * account, tagging it with `attributes.bch_channel_id` so a later
+   * retry of THIS operation can recognise its own prior (possibly
+   * partial) attempt, sets its password, and adds it to BOTH the read
+   * AND write groups: per explicit product requirement, a provisioned
+   * service account always gets read/write access, exactly like a
+   * freshly created channel's own service account already gets via
+   * `createBchChannelGroups`'s write-group add (that add is sufficient
+   * for a NEW group pair because Authentik's write group is itself
+   * provisioned with read access baked into its own group rules at
+   * creation time in this deployment; a DISCOVERED channel's pre-existing
+   * groups make no such guarantee, so this handler adds the account to
+   * each group explicitly rather than assuming write implies read).
+   *
+   * Bugfix (collision/takeover risk): a name conflict on the create POST
+   * is Create_Or_Reuse ONLY when the found account's own
+   * `attributes.bch_channel_id` matches THIS operation's `bch_channel_id`
+   * -- i.e. only when it is unambiguously this app's own prior attempt at
+   * provisioning for the SAME channel (a retry, or a leftover from a
+   * partial run). ANY other match -- a different channel's service
+   * account, or an account this app never created at all, e.g. a human's
+   * own Authentik login -- is a PERMANENT failure, never silently reused,
+   * reset, or added to this channel's groups. The service-side
+   * availability check should already have prevented this operation from
+   * ever being enqueued with a colliding name in the first place; this
+   * check exists for the residual race between that check and this
+   * operation actually running (another provision request, or an
+   * out-of-band Authentik change, in between), and is the last line of
+   * defense against a takeover, not the primary one.
+   *
+   * `read_group_id`/`write_group_id` are read from the payload (already
+   * known to `provisionServiceAccount` at enqueue time) rather than
+   * looked up again here -- either can legitimately be null (a
+   * discovered channel whose sibling write group was never found in
+   * Authentik; see `syncExistingGlobalChannels`), in which case that one
+   * add is simply skipped rather than treated as a failure.
+   */
+  async provisionBchServiceAccount(payload) {
+    const { bch_channel_id, service_account_username, service_account_password, read_group_id, write_group_id } = payload;
+
+    // Create_Or_Reuse: try to create first; a name conflict (or any
+    // non-2xx) falls back to an exact-username lookup, mirroring
+    // `ensureCloudTakGroup`'s own create-then-lookup-by-name shape --
+    // but unlike that pattern, the lookup result here is only ELIGIBLE
+    // for reuse when it was tagged as belonging to this exact channel
+    // (see the method's own doc comment above on why).
+    let serviceAccount;
+    const createResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username: service_account_username,
+        name: `ETL Service Account - ${service_account_username}`,
+        is_active: true,
+        type: 'service_account',
+        attributes: { service_type: 'etl', bch_channel_id }
+      })
+    });
+
+    if (createResponse.ok) {
+      serviceAccount = await createResponse.json();
+    } else {
+      const lookupResponse = await fetch(
+        `${process.env.AUTHENTIK_URL}/api/v3/core/users/?username=${encodeURIComponent(service_account_username)}`,
+        { headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` } }
+      );
+      const lookupData = lookupResponse.ok ? await lookupResponse.json() : null;
+      const foundAccount = lookupData?.results?.find((user) => user.username === service_account_username);
+
+      if (!foundAccount) {
+        const classification = classifyFailure(createResponse.status);
+        throw new AuthentikApiError(
+          `Failed to create or find service account "${service_account_username}": ${createResponse.status} ${createResponse.statusText}`,
+          classification
+        );
+      }
+
+      // Bugfix (collision/takeover risk): the found account is only
+      // reused when it was TAGGED as belonging to this exact channel --
+      // any other match (a different channel's service account, or an
+      // account this app never created, e.g. a human's own login) is a
+      // permanent failure. Comparing with `String(...)` on both sides:
+      // the attribute round-trips through Authentik's own JSON storage,
+      // and `bch_channel_id` here may already be a string (from the
+      // payload's own JSON round-trip through `sync_operations`) or a
+      // number, so a strict `===` could false-negative on a type
+      // mismatch that isn't an actual value mismatch.
+      const belongsToThisChannel =
+        foundAccount.attributes &&
+        String(foundAccount.attributes.bch_channel_id) === String(bch_channel_id);
+
+      if (!belongsToThisChannel) {
+        throw new AuthentikApiError(
+          `Service account "${service_account_username}" already exists in Authentik and does not belong to bch_channel_id=${bch_channel_id}; refusing to take it over`,
+          'permanent'
+        );
+      }
+
+      serviceAccount = foundAccount;
+      logger.info(
+        { bch_channel_id, service_account_username, serviceAccountId: serviceAccount.pk },
+        'Reused existing service account instead of creating a duplicate'
+      );
+    }
+
+    // Set (or reset, on the reuse path) its password -- always the
+    // freshly generated one `provisionServiceAccount` just wrote to the
+    // database, so the credential this app can display always matches
+    // what Authentik actually accepts.
+    const passwordResponse = await fetch(
+      `${process.env.AUTHENTIK_URL}/api/v3/core/users/${serviceAccount.pk}/set_password/`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ password: service_account_password })
+      }
+    );
+
+    if (!passwordResponse.ok) {
+      const classification = classifyFailure(passwordResponse.status);
+      throw new AuthentikApiError(
+        `Failed to set password for service account "${service_account_username}": ${passwordResponse.status} ${passwordResponse.statusText}`,
+        classification
+      );
+    }
+
+    // Add to both groups -- read AND write, per explicit product
+    // requirement. Either id can legitimately be absent (a discovered
+    // channel whose sibling group was never found), so each add is
+    // attempted independently rather than as one all-or-nothing step.
+    for (const groupId of [read_group_id, write_group_id]) {
+      if (!groupId) continue;
+
+      const addResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${groupId}/add_user/`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ pk: serviceAccount.pk })
+      });
+
+      if (!addResponse.ok) {
+        const classification = classifyFailure(addResponse.status);
+        throw new AuthentikApiError(
+          `Failed to add service account "${service_account_username}" to group ${groupId}: ${addResponse.status} ${addResponse.statusText}`,
+          classification
+        );
+      }
+    }
+
+    // Update database with the service account id -- read/write group
+    // ids are already correct on the row (unchanged by this operation).
+    await this.pool.query(`
+      UPDATE bch_channels
+      SET service_account_id = $1
+      WHERE id = $2
+    `, [serviceAccount.pk, bch_channel_id]);
+
+    logger.info(
+      { bch_channel_id, service_account_username, serviceAccountId: serviceAccount.pk },
+      'Provisioned service account for BCH/UTL channel'
+    );
+  }
+
+  /**
+   * Bugfix (BCH credentials modal: "cycle the password"): enqueued by
+   * GlobalChannelService.rotateServiceAccountPassword, which has already
+   * written the freshly generated encrypted password onto the channel's
+   * row. Resolves the EXISTING service account by username (no
+   * Create_Or_Reuse needed here -- rotation only ever runs on a channel
+   * that already has one) and calls the same `set_password` endpoint
+   * `provisionBchServiceAccount`/`createBchChannelGroups` already use.
+   *
+   * A 404 lookup (the Authentik account was deleted out-of-band, outside
+   * this app -- e.g. by an Authentik admin directly) is treated as
+   * permanent: there is nothing to set a password ON, and retrying an
+   * unchanged payload would only 404 again forever. This mirrors the
+   * general "an unrecoverable state on THIS attempt's data is permanent,
+   * not retryable" classification convention used elsewhere in this file
+   * (see e.g. the invalid-category branches above).
+   */
+  async rotateBchServiceAccountPassword(payload) {
+    const { bch_channel_id, service_account_username, service_account_password } = payload;
+
+    const lookupResponse = await fetch(
+      `${process.env.AUTHENTIK_URL}/api/v3/core/users/?username=${encodeURIComponent(service_account_username)}`,
+      { headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` } }
+    );
+    if (!lookupResponse.ok) {
+      const classification = classifyFailure(lookupResponse.status);
+      throw new AuthentikApiError(
+        `Failed to look up service account "${service_account_username}": ${lookupResponse.status} ${lookupResponse.statusText}`,
+        classification
+      );
+    }
+    const lookupData = await lookupResponse.json();
+    const serviceAccount = lookupData?.results?.find((user) => user.username === service_account_username);
+
+    if (!serviceAccount) {
+      throw new AuthentikApiError(
+        `Service account "${service_account_username}" not found in Authentik; cannot rotate its password`,
+        'permanent'
+      );
+    }
+
+    const passwordResponse = await fetch(
+      `${process.env.AUTHENTIK_URL}/api/v3/core/users/${serviceAccount.pk}/set_password/`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ password: service_account_password })
+      }
+    );
+
+    if (!passwordResponse.ok) {
+      const classification = classifyFailure(passwordResponse.status);
+      throw new AuthentikApiError(
+        `Failed to rotate password for service account "${service_account_username}": ${passwordResponse.status} ${passwordResponse.statusText}`,
+        classification
+      );
+    }
+
+    logger.info(
+      { bch_channel_id, service_account_username, serviceAccountId: serviceAccount.pk },
+      'Rotated service account password for BCH/UTL channel'
+    );
+  }
+
+  /**
+   * Bugfix (BCH credentials modal: "delete the service account"):
+   * enqueued by GlobalChannelService.deleteServiceAccount, which has
+   * already cleared the local service_account_id/username/password
+   * columns before this runs. Deletes the Authentik user, preferring an
+   * exact id lookup (`service_account_id`, when known) over a
+   * username-based one, since an id needs no search at all.
+   *
+   * A 404 on the DELETE itself (or on the username lookup, when no id
+   * was supplied) is treated as an ALREADY-SATISFIED no-op, not a
+   * failure -- mirrors `deleteGlobalChannelGroup`'s/
+   * `removeTeamChannelGroup`'s own established "absent target is a
+   * satisfied delete" convention (per this app's worker-handler
+   * idempotency rule): a retry of this operation, or a prior partial
+   * attempt that already reached Authentik, must not fail forever
+   * against a target that is already gone.
+   */
+  async deleteBchServiceAccount(payload) {
+    const { bch_channel_id, service_account_username, service_account_id } = payload;
+
+    let serviceAccountId = service_account_id;
+
+    if (!serviceAccountId) {
+      const lookupResponse = await fetch(
+        `${process.env.AUTHENTIK_URL}/api/v3/core/users/?username=${encodeURIComponent(service_account_username)}`,
+        { headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` } }
+      );
+      if (!lookupResponse.ok) {
+        const classification = classifyFailure(lookupResponse.status);
+        throw new AuthentikApiError(
+          `Failed to look up service account "${service_account_username}": ${lookupResponse.status} ${lookupResponse.statusText}`,
+          classification
+        );
+      }
+      const lookupData = await lookupResponse.json();
+      const serviceAccount = lookupData?.results?.find((user) => user.username === service_account_username);
+
+      if (!serviceAccount) {
+        logger.info(
+          { bch_channel_id, service_account_username },
+          'Service account already absent from Authentik; delete is a no-op'
+        );
+        return;
+      }
+      serviceAccountId = serviceAccount.pk;
+    }
+
+    const deleteResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${serviceAccountId}/`, {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
+    });
+
+    if (!deleteResponse.ok && deleteResponse.status !== 404) {
+      const classification = classifyFailure(deleteResponse.status);
+      throw new AuthentikApiError(
+        `Failed to delete service account "${service_account_username}": ${deleteResponse.status} ${deleteResponse.statusText}`,
+        classification
+      );
+    }
+
+    logger.info(
+      { bch_channel_id, service_account_username, serviceAccountId },
+      'Deleted service account for BCH/UTL channel'
+    );
   }
 
   // Region channels are a SINGLE Authentik group per channel (see the
