@@ -84,7 +84,7 @@ async function initializeDatabase() {
 
 Please verify your email to complete your account request.
 
-<a href="{{verification_link}}" class="btn-primary" style="text-decoration: none; color: #FFF; background-color: #348eda; border: solid #348eda; border-width: 10px 20px; font-weight: bold; display: inline-block; border-radius: 4px;">Verify my email</a>
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"><tr><td align="center"><a href="{{verification_link}}" class="btn-primary" style="text-decoration: none; color: #FFF; background-color: #348eda; border: solid #348eda; border-width: 10px 20px; font-weight: bold; display: inline-block; border-radius: 4px;">Verify my email</a></td></tr></table>
 
 <span style="font-size: 12px; color: #999;">If the button above doesn't work, copy and paste this link into your browser:</span>
 {{verification_link}}

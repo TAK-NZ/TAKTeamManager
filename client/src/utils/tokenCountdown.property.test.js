@@ -190,7 +190,20 @@ describe('Property 10: the Token_Countdown formatter is total and boundary-exact
 
         renderedCount += 1
       }),
-      { numRuns: 200 }
+      {
+        numRuns: 200,
+        // Bugfix (flaky CI failure): `scenarioArb` only draws from
+        // `boundaryValueArb` 40% of the time, and that arbitrary is a
+        // uniform pick among 15 discrete constants -- so any ONE named
+        // boundary (e.g. `NINETY_NINE_MINUTES_MS + 1`) lands with
+        // probability ~2.67% per run. Over 200 runs that is only a ~0.5%
+        // chance of never being drawn at all, which is exactly rare enough
+        // to pass locally dozens of times and then fail once in CI, as it
+        // did. `examples` runs these exact scenarios FIRST,
+        // deterministically, before any random sampling, so the
+        // anti-vacuity assertions below can never again depend on chance.
+        examples: [[0], [LIFETIME_MS - 1], [NINETY_NINE_MINUTES_MS + 1]]
+      }
     )
 
     expect(expiredCount).toBeGreaterThan(0)

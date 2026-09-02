@@ -95,6 +95,7 @@ const publicRoutes = require('./publicRoutes');
 function buildTestApp() {
   const app = express();
 
+  app.use('/api', require('../routes/version'));
   app.use('/api/auth', require('../routes/auth'));
   app.use('/api/teams', require('../routes/teams'));
   app.use('/api/users', require('../routes/users'));

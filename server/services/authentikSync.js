@@ -5,7 +5,6 @@ const { createLogger } = require('../config/logger');
 const { normaliseAuthentikEmail } = require('../utils/authentikEmail');
 const { isIgnoredAuthentikUsername } = require('../config/authentikSyncIgnore');
 const EventPublisher = require('./EventPublisher');
-const { SYSTEM_USER_ID } = require('../config/constants');
 
 const logger = createLogger('authentikSync');
 
@@ -253,7 +252,16 @@ class AuthentikSyncService {
         const revokePayload = row.is_team_device
           ? { client_uid: row.username }
           : { tak_usernames: [row.username] };
-        await EventPublisher.publishOperation('revoke_tak_certificates', revokePayload, SYSTEM_USER_ID);
+        // Bugfix: `sync_operations.created_by` carries a real FK to
+        // `users(id)` (confirmed against the schema -- there is no seeded
+        // sentinel row for SYSTEM_USER_ID), so passing the -1 sentinel
+        // here unconditionally threw inside this row's own try/catch,
+        // silently skipping every remaining step below (the row was NEVER
+        // actually marked orphaned) on every sync run, forever. NULL is a
+        // valid, already-nullable value for this column and is what
+        // `UserProvisioningService`'s own system-attributed write already
+        // uses for the identical situation.
+        await EventPublisher.publishOperation('revoke_tak_certificates', revokePayload, null);
 
         // Step 2 (Requirement 3 Criterion 2): clear the cached TAK
         // identity for a human row only -- a Team_Owned_Device carries
@@ -284,14 +292,18 @@ class AuthentikSyncService {
         }
 
         // Step 4 (Requirement 3 Criterion 4): the audit row, attributed
-        // to the system (not an admin) via the shared SYSTEM_USER_ID
-        // sentinel -- distinct from an admin-initiated suspend's own
-        // 'user.suspend' audit action.
+        // to the system (not an admin) via a NULL user_id -- distinct
+        // from an admin-initiated suspend's own 'user.suspend' audit
+        // action. Bugfix: NOT the former SYSTEM_USER_ID (-1) sentinel,
+        // which violated audit_logs.user_id's real FK to users(id) and
+        // silently aborted this whole step (and every step after it) on
+        // every run -- see the doc comment on the revoke-enqueue call
+        // above.
         await db.query(
           `INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details)
            VALUES ($1, $2, $3, $4, $5)`,
           [
-            SYSTEM_USER_ID,
+            null,
             'user.orphaned',
             'user',
             row.id,
@@ -544,7 +556,7 @@ class AuthentikSyncService {
             // Response mirrors `AccountLifecycleService.suspendAccount`'s
             // own local-write + Revoke_Operation shape, and
             // `reconcileOrphanedAccounts`'s own audit-attribution
-            // convention (`SYSTEM_USER_ID`, not an admin) for a
+            // convention (NULL user_id, not an admin) for a
             // system-detected transition. `local.is_active`/
             // `local.account_status` are updated IN PLACE afterward so the
             // push-to-Authentik comparison immediately below sees the NEW,
@@ -570,13 +582,18 @@ class AuthentikSyncService {
                 const revokePayload = isTeamDevice
                   ? { client_uid: user.username }
                   : { tak_usernames: [user.username] };
-                await EventPublisher.publishOperation('revoke_tak_certificates', revokePayload, SYSTEM_USER_ID);
+                // Bugfix: see the identical fix + comment on
+                // reconcileOrphanedAccounts's own revoke-enqueue above --
+                // SYSTEM_USER_ID (-1) violates the real FK on
+                // sync_operations.created_by and silently aborted this
+                // whole branch via its enclosing try/catch on every run.
+                await EventPublisher.publishOperation('revoke_tak_certificates', revokePayload, null);
 
                 await db.query(
                   `INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details)
                    VALUES ($1, $2, $3, $4, $5)`,
                   [
-                    SYSTEM_USER_ID,
+                    null,
                     'user.suspended_externally',
                     'user',
                     localUserId,
@@ -652,7 +669,7 @@ class AuthentikSyncService {
                   `INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details)
                    VALUES ($1, $2, $3, $4, $5)`,
                   [
-                    SYSTEM_USER_ID,
+                    null,
                     'user.unsuspended_externally',
                     'user',
                     localUserId,

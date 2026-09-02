@@ -14,7 +14,7 @@ import FormattedDate, {
   DATE_PRECISION,
   TOOLTIP_SIDES
 } from '../components/FormattedDate.jsx';
-import { requestsAPI, deviceManagementAPI, devicesAPI, configAPI } from '../services/api';
+import { requestsAPI, deviceManagementAPI, devicesAPI, configAPI, versionAPI } from '../services/api';
 import { formatDate } from '../utils/dateFormat';
 import toast from 'react-hot-toast';
 
@@ -57,11 +57,13 @@ vi.mock('../services/api', () => ({
     generateQrCode: vi.fn(),
     previewQrCode: vi.fn()
   },
-  // Layout.jsx imports authAPI, OrgInterestRequests.jsx imports adminAPI.
-  // Neither is exercised here, but a named import of a missing export from
-  // a mocked ES module is a load-time failure, so both are present.
+  // Layout.jsx imports authAPI and versionAPI, OrgInterestRequests.jsx
+  // imports adminAPI. None is exercised here, but a named import of a
+  // missing export from a mocked ES module is a load-time failure, so
+  // all are present.
   authAPI: { logout: vi.fn() },
   adminAPI: {},
+  versionAPI: { get: vi.fn().mockResolvedValue({ data: { version: '2026.9.0' } }) },
   // The Renew action's modal mounts the real EnrollmentView.jsx, which
   // reads configAPI.getPublic() on mount (unrelated to this feature) --
   // present here so that render path doesn't throw.
@@ -253,6 +255,10 @@ describe('Requests page team_change card (mounted)', () => {
     // nothing, matching its original assumptions.
     deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
     devicesAPI.getAll.mockResolvedValue({ data: { devices: [], pagination: { page: 1, pageSize: 200, total: 0 } } })
+    // vi.clearAllMocks() above also clears the module-level default this
+    // mock was given at definition time -- re-set it here, since Layout.jsx
+    // (mounted by the badge tests) calls it on mount.
+    versionAPI.get.mockResolvedValue({ data: { version: '2026.9.0' } })
   })
 
   afterEach(async () => {
@@ -773,6 +779,8 @@ describe('Requests page renewal sections (cert-expiry-notifications 7.3, 7.4, 7.
     // Renew action's modal mounts the real EnrollmentView.jsx, which
     // reads configAPI.getPublic() on mount.
     configAPI.getPublic.mockResolvedValue({ data: {} })
+    // Layout.jsx's own version-display mount effect calls this too.
+    versionAPI.get.mockResolvedValue({ data: { version: '2026.9.0' } })
   })
 
   afterEach(async () => {

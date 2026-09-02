@@ -149,6 +149,13 @@ app.set('trust proxy', getTrustProxyHops());
   app.use(require('./middleware/publicRouteBootstrap'));
 
   // Routes
+  //
+  // GET /api (bare root, mounted first among the /api routers so it
+  // never has to fall through every other one): a minimal, unauthenticated
+  // version probe, mirroring the shape CloudTAK's own GET /api/ returns.
+  // Reserved for machine-readable JSON only -- see server/routes/version.js's
+  // own doc comment for why a future Swagger UI belongs at a separate path.
+  app.use('/api', require('./routes/version'));
   app.use('/api/auth', require('./routes/auth'));
   app.use('/api/teams', require('./routes/teams'));
   app.use('/api/users', require('./routes/users'));

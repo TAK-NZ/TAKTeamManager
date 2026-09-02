@@ -929,3 +929,88 @@ describe('GET /api/users pagination (Requirement 11.4)', () => {
     expect(authentikService.getUsers).toHaveBeenCalledWith({ page: 1, pageSize: 50 });
   });
 });
+
+/**
+ * Bugfix: `GET /api/users/count` -- a dedicated, exact, unpaginated count
+ * backing the Admin page's "Total Users" stat, replacing the previous read
+ * of `GET /api/users`' own `pagination.total` (Authentik's raw
+ * `type=internal` count, which over-counted by several classes this
+ * route excludes: `is_team_device = false` excludes Team_Owned_Devices,
+ * `account_status <> 'orphaned'` excludes a row the Reconciliation_Sweep
+ * has already determined no longer has a matching Authentik identity, and
+ * the same `isIgnoredAuthentikUsername` predicate `GET /` already applies
+ * to its own list excludes a local row for a since-ignored-prefix username
+ * that predates the prefix being configured -- so this stat agrees with
+ * what `/users` itself lists).
+ *
+ * This route never calls Authentik at all -- confirmed below -- so it is
+ * immune to the over-count `GET /`'s own doc comment documents and
+ * deliberately tolerates for ITS OWN purposes.
+ */
+describe('GET /api/users/count (bugfix: exact Total Users stat)', () => {
+  let app;
+  const originalEnv = process.env.AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    app = buildApp();
+  });
+
+  afterEach(() => {
+    if (originalEnv === undefined) {
+      delete process.env.AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES;
+    } else {
+      process.env.AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES = originalEnv;
+    }
+  });
+
+  it("queries local usernames WHERE is_team_device = false AND account_status <> 'orphaned', then filters ignored-prefix usernames in JS, returning { count }", async () => {
+    process.env.AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES = 'akadmin,ckadmin';
+    pool.query.mockResolvedValue({
+      rows: [{ username: 'alice' }, { username: 'bob' }, { username: 'akadmin' }]
+    });
+
+    const res = await request(app).get('/api/users/count');
+
+    expect(res.status).toBe(200);
+    // akadmin matches the configured ignore-prefix list and is excluded,
+    // leaving 2 -- exercising the SAME retroactive-cleanup gap a local row
+    // predating the prefix being configured leaves behind (this is the
+    // bugfix: a plain SQL COUNT(*) cannot apply this predicate at all).
+    expect(res.body).toEqual({ count: 2 });
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    const [sql] = pool.query.mock.calls[0];
+    expect(sql).toContain('FROM users');
+    expect(sql).toContain('is_team_device = false');
+    expect(sql).toContain("account_status <> 'orphaned'");
+  });
+
+  it('counts every row when no ignored-prefix variable is configured', async () => {
+    delete process.env.AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES;
+    pool.query.mockResolvedValue({
+      rows: [{ username: 'alice' }, { username: 'bob' }, { username: 'akadmin' }]
+    });
+
+    const res = await request(app).get('/api/users/count');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ count: 3 });
+  });
+
+  it('never calls Authentik -- local-only, so it is immune to GET /\'s own documented over-count', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+
+    await request(app).get('/api/users/count');
+
+    expect(authentikService.getUsers).not.toHaveBeenCalled();
+  });
+
+  it('returns 500 without leaking the underlying error when the query fails', async () => {
+    pool.query.mockRejectedValue(new Error('connection reset'));
+
+    const res = await request(app).get('/api/users/count');
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: 'Failed to get user count' });
+  });
+});

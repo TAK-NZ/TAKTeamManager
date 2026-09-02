@@ -25,6 +25,9 @@
  */
 
 const publicRoutes = [
+  // --- server/routes/version.js ---
+  { method: 'GET', path: '/api' },
+
   // --- server/routes/config.js ---
   { method: 'GET', path: '/api/config/public' },
 

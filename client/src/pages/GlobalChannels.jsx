@@ -3,6 +3,7 @@ import { PlusIcon, KeyIcon, GlobeAltIcon, RadioIcon, SignalIcon, PencilIcon, Tra
 import toast from 'react-hot-toast';
 import { globalChannelsAPI, configAPI } from '../services/api';
 import { buildFolderTree } from '../utils/channelTree';
+import BchChannelCredentialsDialog from '../components/BchChannelCredentialsDialog';
 
 export default function GlobalChannels({ user }) {
   const [bchChannels, setBchChannels] = useState([]);
@@ -34,6 +35,12 @@ export default function GlobalChannels({ user }) {
   const [regionSeedComplete, setRegionSeedComplete] = useState(null);
   const [expandedFolders, setExpandedFolders] = useState(new Set());
   const [folderSeparator, setFolderSeparator] = useState(' - ');
+  // Bugfix ("Get credentials" button): the fetched credentials + the
+  // channel name they belong to (for the dialog's title), or null when
+  // the dialog is closed. Fetched fresh on every click rather than reused
+  // from a prior open, matching the enrollment page's own "never cache a
+  // secret in state longer than needed" posture.
+  const [credentialsDialog, setCredentialsDialog] = useState(null);
   const [formData, setFormData] = useState({
     name: '',
     description: ''
@@ -241,16 +248,25 @@ export default function GlobalChannels({ user }) {
     }
   };
 
-  const handleGetCredentials = async (channelId) => {
+  // Bugfix: previously copied straight to the clipboard with only a toast
+  // for feedback, and did nothing visibly different for a channel with no
+  // service account configured at all (most BCH/XtraTools channels have
+  // none) -- reading as "the button doesn't work". `channel.service_account_username`
+  // is already present on the row from the list fetch (no need to guess at
+  // the credentials endpoint's own 403/404 to distinguish "no service
+  // account" from "not allowed"/"not found"), so that case short-circuits
+  // with a clear message and never calls the credentials endpoint at all.
+  const handleGetCredentials = async (channel) => {
+    if (!channel.service_account_username) {
+      toast.error('This channel has no service account configured.');
+      return;
+    }
+
     try {
-      const response = await globalChannelsAPI.getBchCredentials(channelId);
-      const { credentials } = response.data;
-      
-      // Show credentials in a modal or copy to clipboard
-      navigator.clipboard.writeText(`Username: ${credentials.service_account_username}\nPassword: ${credentials.service_account_password}`);
-      toast.success('Credentials copied to clipboard');
+      const response = await globalChannelsAPI.getBchCredentials(channel.id);
+      setCredentialsDialog({ channelName: channel.name, credentials: response.data.credentials });
     } catch (error) {
-      toast.error('Failed to get credentials');
+      toast.error(error.response?.data?.error || 'Failed to get credentials');
     }
   };
 
@@ -417,7 +433,7 @@ export default function GlobalChannels({ user }) {
             <div className="flex items-center gap-2 flex-shrink-0">
               {(channelType === 'bch' || channelType === 'utl') && (
                 <button
-                  onClick={() => handleGetCredentials(channel.id)}
+                  onClick={() => handleGetCredentials(channel)}
                   className="p-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-blue-600 dark:bg-gray-700 dark:hover:bg-gray-600 dark:text-blue-400"
                   title="Get credentials"
                   aria-label={`Get credentials for ${channel.name}`}
@@ -963,6 +979,15 @@ export default function GlobalChannels({ user }) {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Bugfix ("Get credentials" button): the lite credentials view. */}
+      {credentialsDialog && (
+        <BchChannelCredentialsDialog
+          channelName={credentialsDialog.channelName}
+          credentials={credentialsDialog.credentials}
+          onClose={() => setCredentialsDialog(null)}
+        />
       )}
     </div>
   );

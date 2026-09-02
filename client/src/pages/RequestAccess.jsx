@@ -53,8 +53,8 @@ export default function RequestAccess() {
   const [codeError, setCodeError] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [config, setConfig] = useState({
-    request_access_title: 'Request Team Access',
-    request_access_subtitle: 'Fill out this form to request access to a TAK team',
+    request_access_title: 'Request TAK.NZ Access',
+    request_access_subtitle: 'Fill out this form to request access to a TAK.NZ team',
     request_access_footer: ''
   })
 
@@ -202,7 +202,7 @@ export default function RequestAccess() {
             <div className="text-center mb-6">
               <img
                 className="mx-auto h-32 w-auto mb-4"
-                src="/assets/tak-nz-brand-tall.svg"
+                src="/assets/tak-nz-logo.svg"
                 alt="TAK.NZ"
               />
               <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100">{config.request_access_title}</h2>
@@ -318,7 +318,7 @@ export default function RequestAccess() {
             <div className="text-center mb-6">
               <img
                 className="mx-auto h-32 w-auto mb-4"
-                src="/assets/tak-nz-brand-tall.svg"
+                src="/assets/tak-nz-logo.svg"
                 alt="TAK.NZ"
               />
               <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Complete Your Sign-up</h2>
@@ -393,6 +393,13 @@ export default function RequestAccess() {
                     <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                       Select the team or organisation you would like to request access to.
                     </p>
+                    <button
+                      type="button"
+                      onClick={() => setStep(STEPS.NO_TEAMS)}
+                      className="text-sm text-primary-600 hover:text-primary-500 underline mt-1"
+                    >
+                      Can't find your team? Request a new team here.
+                    </button>
                   </>
                 )}
               </div>
@@ -448,9 +455,18 @@ export default function RequestAccess() {
         return (
           <div className="card">
             <div className="text-center mb-6">
-              <h2 className="text-xl font-bold text-gray-900 dark:text-gray-100">No Teams Available</h2>
+              <img
+                className="mx-auto h-32 w-auto mb-4"
+                src="/assets/tak-nz-logo.svg"
+                alt="TAK.NZ"
+              />
+              <h2 className="text-xl font-bold text-gray-900 dark:text-gray-100">
+                {teams.length > 0 ? "Can't Find Your Team?" : 'No Teams Available'}
+              </h2>
               <p className="text-gray-600 dark:text-gray-400 mt-2">
-                There are no teams available for your email domain. If you represent an organisation, let us know below.
+                {teams.length > 0
+                  ? "If your team or organisation isn't listed, let us know below and we'll be in touch."
+                  : 'There are no teams available for your email domain. If you represent an organisation, let us know below.'}
               </p>
             </div>
 
@@ -466,6 +482,7 @@ export default function RequestAccess() {
                     value={firstName}
                     onChange={(e) => setFirstName(e.target.value)}
                     required
+                    placeholder="Joe"
                   />
                 </div>
                 <div>
@@ -478,6 +495,7 @@ export default function RequestAccess() {
                     value={lastName}
                     onChange={(e) => setLastName(e.target.value)}
                     required
+                    placeholder="Bloggs"
                   />
                 </div>
               </div>
@@ -516,6 +534,18 @@ export default function RequestAccess() {
                 {isSubmitting ? 'Submitting...' : 'Submit Interest'}
               </button>
             </form>
+
+            {teams.length > 0 && (
+              <div className="text-center mt-4">
+                <button
+                  type="button"
+                  onClick={() => setStep(STEPS.TEAM_SELECTION)}
+                  className="text-sm text-primary-600 hover:text-primary-500 underline"
+                >
+                  Back to team selection
+                </button>
+              </div>
+            )}
           </div>
         )
 

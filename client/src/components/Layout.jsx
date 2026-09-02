@@ -17,7 +17,7 @@ import {
   ArrowDownTrayIcon,
   UserCircleIcon
 } from '@heroicons/react/24/outline'
-import { authAPI, requestsAPI, adminAPI } from '../services/api'
+import { authAPI, requestsAPI, adminAPI, versionAPI } from '../services/api'
 import { useTheme } from '../contexts/ThemeContext'
 
 const getNavigation = (user) => {
@@ -39,7 +39,19 @@ const getNavigation = (user) => {
     { name: 'Enrollment', href: '/enrollment', icon: QrCodeIcon },
     { name: 'Orgs & Teams', href: '/teams', icon: UserGroupIcon },
   ]
-  
+
+  // cert-expiry-notifications Requirement 7.2: renamed from "Requests" to
+  // "Tasks" (the page now also lists certificate renewals due for the
+  // viewer, not just access requests an admin acts on) and moved OUT of
+  // the admin-only gate below -- every authenticated user needs to reach
+  // /tasks to see their own renewal section, regardless of admin status.
+  // The pending-request BADGE COUNT below keeps its own separate
+  // isAdmin/isTeamAdmin gate (Requirement 7.7) -- lifting the nav item's
+  // gate does not widen who that count is fetched for. Placed directly
+  // after Orgs & Teams (and therefore before the admin-only Users/Devices
+  // entries below), rather than after them, since it is unconditional.
+  baseNavigation.push({ name: 'Tasks', href: '/tasks', icon: ClipboardDocumentListIcon })
+
   if (user?.isAdmin || user?.is_global_manager) {
     baseNavigation.push({ name: 'Users', href: '/users', icon: UsersIcon })
     // Placed directly beneath Users, same role gate: the org-wide
@@ -52,16 +64,6 @@ const getNavigation = (user) => {
     // feature: TAK Server certificates, not Team_Owned_Device accounts).
     baseNavigation.push({ name: 'Devices', href: '/devices', icon: DeviceTabletIcon })
   }
-  
-  // cert-expiry-notifications Requirement 7.2: renamed from "Requests" to
-  // "Tasks" (the page now also lists certificate renewals due for the
-  // viewer, not just access requests an admin acts on) and moved OUT of
-  // the admin-only gate above -- every authenticated user needs to reach
-  // /tasks to see their own renewal section, regardless of admin status.
-  // The pending-request BADGE COUNT below keeps its own separate
-  // isAdmin/isTeamAdmin gate (Requirement 7.7) -- lifting the nav item's
-  // gate does not widen who that count is fetched for.
-  baseNavigation.push({ name: 'Tasks', href: '/tasks', icon: ClipboardDocumentListIcon })
 
   if (user?.is_global_manager) {
     baseNavigation.push({ name: 'Global Channels', href: '/global-channels', icon: SignalIcon })
@@ -116,6 +118,20 @@ export default function Layout({ children, user }) {
   const { theme, toggleTheme } = useTheme()
 
   const [pendingRequestCount, setPendingRequestCount] = useState(0)
+  // The running app version, shown at the bottom of the nav (both the
+  // desktop sidebar and the mobile drawer). `null` while unresolved --
+  // rendered as nothing rather than a placeholder, so an unreachable
+  // GET /api never shows a misleading "v?" or blank version string.
+  const [appVersion, setAppVersion] = useState(null)
+
+  useEffect(() => {
+    versionAPI.get()
+      .then((response) => setAppVersion(response.data?.version || null))
+      .catch(() => {
+        // Silent fail: the version display is informational only, never
+        // worth surfacing an error toast over.
+      })
+  }, [])
 
   useEffect(() => {
     // cert-expiry-notifications Requirement 7.7: this gate now also
@@ -256,6 +272,11 @@ export default function Layout({ children, user }) {
               </Link>
             ))}
           </nav>
+          {appVersion && (
+            <div className="px-4 py-3 border-t border-gray-200 dark:border-gray-700 text-xs text-center text-gray-400 dark:text-gray-500">
+              Version {appVersion}
+            </div>
+          )}
         </div>
       </div>
 
@@ -293,6 +314,11 @@ export default function Layout({ children, user }) {
               </Link>
             ))}
           </nav>
+          {appVersion && (
+            <div className="px-4 py-3 border-t border-gray-200 dark:border-gray-700 text-xs text-center text-gray-400 dark:text-gray-500">
+              Version {appVersion}
+            </div>
+          )}
         </div>
       </div>
 

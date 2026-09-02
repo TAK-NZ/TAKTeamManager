@@ -4,7 +4,7 @@ import { createRoot } from 'react-dom/client'
 import { MemoryRouter } from 'react-router-dom'
 
 import App from './App.jsx'
-import { authAPI, configAPI, requestsAPI } from './services/api'
+import { authAPI, configAPI, requestsAPI, versionAPI } from './services/api'
 import {
   getDisplayTimezone,
   setDisplayTimezone,
@@ -70,6 +70,8 @@ vi.mock('./services/api', () => ({
   teamsAPI: {},
   // Layout.jsx reads the pending-request count for its nav badge on mount.
   requestsAPI: { getPending: vi.fn() },
+  // Layout.jsx also fetches the running version for its nav footer on mount.
+  versionAPI: { get: vi.fn().mockResolvedValue({ data: { version: '2026.9.0' } }) },
   usersAPI: {},
   channelsAPI: {},
   syncAPI: {},
@@ -122,6 +124,9 @@ describe('App startup installs the presentation config (Requirements 18.7, 18.11
     // No session: the mount lands on the Login route. See the header note.
     authAPI.getProfile.mockRejectedValue(new Error('no session'))
     requestsAPI.getPending.mockResolvedValue({ data: { requests: [] } })
+    // A couple of tests below override authAPI.getProfile to resolve
+    // (mounting Layout.jsx instead of Login), which calls this too.
+    versionAPI.get.mockResolvedValue({ data: { version: '2026.9.0' } })
   })
 
   afterEach(async () => {
@@ -254,6 +259,108 @@ describe('App startup installs the presentation config (Requirements 18.7, 18.11
   })
 })
 
+// force_sso_login (server/config/forceSso.js): an unauthenticated visitor
+// with no Authentik-origin referrer is sent straight into the OAuth2
+// redirect when the public config carries `force_sso_login: true`, rather
+// than landing on the Login page and waiting for a manual "Sign in" click.
+describe('App startup honours force_sso_login from the public config', () => {
+  let container
+  let root
+  let matchMediaStubbed = false
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    vi.clearAllMocks()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    if (typeof window.matchMedia !== 'function') {
+      window.matchMedia = () => ({
+        matches: false,
+        addEventListener() {},
+        removeEventListener() {},
+        addListener() {},
+        removeListener() {}
+      })
+      matchMediaStubbed = true
+    }
+    authAPI.getProfile.mockRejectedValue(new Error('no session'))
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    if (matchMediaStubbed) {
+      delete window.matchMedia
+      matchMediaStubbed = false
+    }
+    localStorage.removeItem('theme')
+    vi.restoreAllMocks()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  const mountApp = async () => {
+    root = createRoot(container)
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={['/']}>
+          <App />
+        </MemoryRouter>
+      )
+    })
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+  }
+
+  it('calls authAPI.login() automatically when force_sso_login is true and there is no Authentik referrer', async () => {
+    configAPI.getPublic.mockResolvedValue({ data: { force_sso_login: true } })
+
+    await mountApp()
+
+    expect(authAPI.login).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not call authAPI.login() when force_sso_login is false, leaving the manual Login page in place', async () => {
+    configAPI.getPublic.mockResolvedValue({ data: { force_sso_login: false } })
+
+    await mountApp()
+
+    expect(authAPI.login).not.toHaveBeenCalled()
+    expect(container.textContent).toContain('Sign in')
+  })
+
+  it('does not call authAPI.login() when force_sso_login is absent from the response', async () => {
+    configAPI.getPublic.mockResolvedValue({ data: {} })
+
+    await mountApp()
+
+    expect(authAPI.login).not.toHaveBeenCalled()
+  })
+
+  it('defers to the more specific Authentik-referrer auto-login check, without calling login() twice', async () => {
+    Object.defineProperty(document, 'referrer', {
+      value: 'https://auth.example.test/some/path',
+      configurable: true
+    })
+    configAPI.getPublic.mockResolvedValue({
+      data: { authentik_origin: 'https://auth.example.test', force_sso_login: true }
+    })
+
+    await mountApp()
+
+    expect(authAPI.login).toHaveBeenCalledTimes(1)
+
+    Object.defineProperty(document, 'referrer', { value: '', configurable: true })
+  })
+})
+
 // cert-expiry-notifications Requirement 7.1: /requests stays reachable via a
 // redirect to /tasks, rather than becoming a broken link, for any existing
 // bookmark. Mounted the same way as the "renders a signed-in session"
@@ -285,6 +392,10 @@ describe('cert-expiry-notifications: /requests redirects to /tasks (Requirement 
     })
     configAPI.getPublic.mockResolvedValue({ data: {} })
     requestsAPI.getPending.mockResolvedValue({ data: { requests: [] } })
+    // vi.clearAllMocks() above also clears the module-level default this
+    // mock was given at definition time -- re-set it here, since Layout.jsx
+    // (mounted for this signed-in session) calls it on mount.
+    versionAPI.get.mockResolvedValue({ data: { version: '2026.9.0' } })
   })
 
   afterEach(async () => {

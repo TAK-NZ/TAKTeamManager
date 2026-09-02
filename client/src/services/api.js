@@ -221,6 +221,9 @@ export const bulkImportAPI = {
 
 export const usersAPI = {
   getAll: () => api.get('/users'),
+  // Bugfix (Admin page's inaccurate "Total Users" stat): an exact,
+  // unpaginated count excluding ignored-prefix accounts and Team_Owned_Devices.
+  getCount: () => api.get('/users/count'),
   getMe: () => api.get('/users/me'),
   create: (data) => api.post('/users', data),
   search: (query) => api.get(`/users/search?q=${query}`),
@@ -326,6 +329,12 @@ export const configAPI = {
   getAll: () => api.get('/config/all'),
   getColorMappings: () => api.get('/config/color-mappings'),
   update: (key, data) => api.put(`/config/${key}`, data),
+};
+
+// GET /api (bare root, server/routes/version.js): the running version,
+// shown at the bottom of the left-hand nav (Layout.jsx).
+export const versionAPI = {
+  get: () => api.get('/'),
 };
 
 export const syncAPI = {

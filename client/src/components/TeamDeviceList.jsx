@@ -699,20 +699,24 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
           (device delete has no such restriction -- see
           `checkBulkDeviceEligibility`'s own doc comment). */}
       {selectedDevices.length > 0 && (
-        <div className="mb-4 flex flex-wrap items-center gap-2 rounded-md border border-primary-200 dark:border-primary-800 bg-primary-50 dark:bg-primary-900/20 p-3">
+        <div className="mb-4 flex flex-wrap items-center gap-2 rounded-md border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20 p-3">
           <span className="text-sm font-medium text-gray-700 dark:text-gray-300 mr-2">
             {selectedDevices.length} selected
           </span>
-          <button type="button" onClick={() => handleBulkActionClick('transfer')} className="btn-secondary px-3 py-1.5 text-sm">
+          <button type="button" onClick={() => handleBulkActionClick('transfer')} className="btn-secondary flex items-center px-3 py-1.5 text-sm">
+            <ArrowRightCircleIcon className="h-4 w-4 mr-1.5 flex-shrink-0" aria-hidden="true" />
             Transfer
           </button>
-          <button type="button" onClick={() => handleBulkActionClick('suspend')} className="btn-secondary px-3 py-1.5 text-sm">
+          <button type="button" onClick={() => handleBulkActionClick('suspend')} className="btn-secondary flex items-center px-3 py-1.5 text-sm">
+            <LockClosedIcon className="h-4 w-4 mr-1.5 flex-shrink-0" aria-hidden="true" />
             Suspend
           </button>
-          <button type="button" onClick={() => handleBulkActionClick('unsuspend')} className="btn-secondary px-3 py-1.5 text-sm">
+          <button type="button" onClick={() => handleBulkActionClick('unsuspend')} className="btn-secondary flex items-center px-3 py-1.5 text-sm">
+            <LockOpenIcon className="h-4 w-4 mr-1.5 flex-shrink-0" aria-hidden="true" />
             Unsuspend
           </button>
-          <button type="button" onClick={() => handleBulkActionClick('delete')} className="btn-danger px-3 py-1.5 text-sm">
+          <button type="button" onClick={() => handleBulkActionClick('delete')} className="btn-danger flex items-center px-3 py-1.5 text-sm">
+            <TrashIcon className="h-4 w-4 mr-1.5 flex-shrink-0" aria-hidden="true" />
             Delete
           </button>
           <button

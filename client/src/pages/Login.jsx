@@ -10,7 +10,7 @@ export default function Login() {
         <div>
           <img
             className="mx-auto h-40 w-auto"
-            src="https://raw.githubusercontent.com/TAK-NZ/auth-infra/refs/heads/main/authentik/branding/icons/tak-nz-brand-tall.svg"
+            src="/assets/tak-nz-logo.svg"
             alt="TAK.NZ"
           />
           <h2 className="mt-6 text-center text-3xl font-bold text-gray-900 dark:text-gray-100">

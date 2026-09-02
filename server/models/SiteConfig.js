@@ -4,6 +4,7 @@ const { SANITIZE_HTML_OPTIONS } = require('../config/htmlSafeSubset');
 const { MAX_TEAM_DEPTH } = require('../config/constants');
 const { isRecaptchaDisabledForTesting } = require('../middleware/captcha');
 const { resolveCloudTakUrl } = require('../utils/cloudtakUrl');
+const { isForceSsoLoginEnabled } = require('../config/forceSso');
 
 /**
  * Default Expiry_Warning_Days: how far ahead of a certificate's `expires_at`
@@ -206,6 +207,14 @@ class SiteConfig {
     // (ENROLLMENT_PORT, token/cert lifetimes), which are deliberately code
     // constants, never env vars. This variable is unrelated to that feature.
     config.enrollment_manual_description = process.env.WINTAK_MANUAL_DESCRIPTION || 'TAK.NZ';
+
+    // Force_Sso_Login (server/config/forceSso.js): whether the Login page
+    // should immediately start the OAuth2 redirect itself rather than
+    // waiting for the user to click "Sign in". Presentation only -- see
+    // that module's own doc comment for why this, unlike
+    // DEVICE_MGMT_ENABLED/DEVICE_MGMT_REVOKE_ENABLED, is safe to expose
+    // here.
+    config.force_sso_login = isForceSsoLoginEnabled();
 
     return config;
   }

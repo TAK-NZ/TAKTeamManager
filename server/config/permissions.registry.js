@@ -105,6 +105,11 @@ const routes = {
   // `authorize.js` would never consult the resolver at all and the gate
   // would be bypassed.
   'GET /api/users': ['user:read:team_admin'],
+  // Bugfix (Admin page's inaccurate "Total Users" stat): an exact,
+  // unpaginated count backing that stat card alone. Same gate as the
+  // listing route above -- it is the same "enumerate the whole user
+  // directory" concern, just as a single number instead of a page of rows.
+  'GET /api/users/count': ['user:read:team_admin'],
   'GET /api/users/me': ['user:read:own'],
   'POST /api/users': ['user:create:team_admin'],
   'POST /api/users/:userId/resend-welcome': ['user:resend_welcome:team_admin'],

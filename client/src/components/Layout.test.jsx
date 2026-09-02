@@ -5,7 +5,7 @@ import { MemoryRouter } from 'react-router-dom'
 
 import Layout from './Layout.jsx'
 import { ThemeProvider } from '../contexts/ThemeContext.jsx'
-import { requestsAPI, adminAPI } from '../services/api'
+import { requestsAPI, adminAPI, versionAPI } from '../services/api'
 
 // Bugfix (pending-requests-badge): the nav "Tasks" badge (renamed from
 // "Requests" by cert-expiry-notifications Requirement 7.2 -- see the
@@ -26,7 +26,12 @@ import { requestsAPI, adminAPI } from '../services/api'
 vi.mock('../services/api', () => ({
   authAPI: { logout: vi.fn() },
   requestsAPI: { getPending: vi.fn() },
-  adminAPI: { getOrgInterest: vi.fn() }
+  adminAPI: { getOrgInterest: vi.fn() },
+  // The version-display mount effect (Layout.jsx) always calls this; a
+  // bare `vi.fn()` with no resolved value returns `undefined`, and
+  // `undefined.then` throws, so every test in this file needs a
+  // resolvable default even though most don't care about the version.
+  versionAPI: { get: vi.fn().mockResolvedValue({ data: { version: '2026.9.0' } }) }
 }))
 
 // Vitest compiles this JSX with esbuild's classic transform, and Layout.jsx
@@ -340,5 +345,92 @@ describe('Layout "Tasks" nav item visibility and badge-fetch gating (cert-expiry
 
     expect(tasksNavLink()).not.toBeUndefined()
     expect(requestsAPI.getPending).toHaveBeenCalledTimes(1)
+  })
+})
+
+// Version display at the bottom of the left-hand nav, sourced from
+// GET /api (server/routes/version.js).
+describe('Layout version display', () => {
+  let container
+  let root
+  let matchMediaStubbed = false
+
+  const PLAIN_USER = { userId: 99, isAdmin: false, isTeamAdmin: false, is_global_manager: false }
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    vi.clearAllMocks()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    if (typeof window.matchMedia !== 'function') {
+      window.matchMedia = () => ({
+        matches: false,
+        addEventListener() {},
+        removeEventListener() {},
+        addListener() {},
+        removeListener() {}
+      })
+      matchMediaStubbed = true
+    }
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    if (matchMediaStubbed) {
+      delete window.matchMedia
+      matchMediaStubbed = false
+    }
+    localStorage.removeItem('theme')
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  const mount = async (user) => {
+    root = createRoot(container)
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={['/dashboard']}>
+          <ThemeProvider>
+            <Layout user={user}>
+              <div />
+            </Layout>
+          </ThemeProvider>
+        </MemoryRouter>
+      )
+    })
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+  }
+
+  it('shows the version returned by GET /api, centered, in both the desktop and mobile sidebar copies', async () => {
+    versionAPI.get.mockResolvedValue({ data: { version: '2026.9.0' } })
+
+    await mount(PLAIN_USER)
+
+    const versionNodes = Array.from(container.querySelectorAll('div')).filter(
+      (div) => div.textContent.trim() === 'Version 2026.9.0'
+    )
+    // One copy in the mobile drawer, one in the desktop sidebar.
+    expect(versionNodes).toHaveLength(2)
+    versionNodes.forEach((node) => {
+      expect(node.className.split(/\s+/)).toContain('text-center')
+    })
+  })
+
+  it('renders no version text at all when the version fetch fails', async () => {
+    versionAPI.get.mockRejectedValue(new Error('network error'))
+
+    await mount(PLAIN_USER)
+
+    expect(container.textContent).not.toContain('Version 2026.9.0')
+    expect(container.textContent).not.toMatch(/Version \d/)
   })
 })

@@ -374,7 +374,7 @@ describe('AuthentikSyncService.reconcileOrphanedAccounts (account-lifecycle-mana
     expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
       'revoke_tak_certificates',
       { tak_usernames: ['ada'] },
-      -1
+      null
     );
 
     expect(db.query).toHaveBeenCalledWith(
@@ -393,7 +393,7 @@ describe('AuthentikSyncService.reconcileOrphanedAccounts (account-lifecycle-mana
 
     expect(db.query).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO audit_logs'),
-      [-1, 'user.orphaned', 'user', 42, JSON.stringify({ reason: 'authentik_account_missing' })]
+      [null, 'user.orphaned', 'user', 42, JSON.stringify({ reason: 'authentik_account_missing' })]
     );
   });
 
@@ -412,7 +412,7 @@ describe('AuthentikSyncService.reconcileOrphanedAccounts (account-lifecycle-mana
     expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
       'revoke_tak_certificates',
       { client_uid: 'AUK-D7K3QMX' },
-      -1
+      null
     );
 
     // No callsign/color clear for a device row (Requirement 3 Criterion 2).
@@ -428,7 +428,7 @@ describe('AuthentikSyncService.reconcileOrphanedAccounts (account-lifecycle-mana
     );
     expect(db.query).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO audit_logs'),
-      [-1, 'user.orphaned', 'user', 7, JSON.stringify({ reason: 'authentik_account_missing' })]
+      [null, 'user.orphaned', 'user', 7, JSON.stringify({ reason: 'authentik_account_missing' })]
     );
   });
 
@@ -1434,9 +1434,10 @@ describe('AuthentikSyncService.syncSingleUser is_team_device threading into user
  * `user.is_active === false` for a locally `'active'` row, reflects it
  * as `account_status = 'suspended'`/`is_active = false` locally,
  * enqueues a `revoke_tak_certificates` Sync_Operation, and writes a
- * `user.suspended_externally` audit row attributed to `SYSTEM_USER_ID`
- * -- mirroring `AccountLifecycleService.suspendAccount`'s own shape for
- * an admin-initiated suspend.
+ * `user.suspended_externally` audit row attributed to a NULL user_id
+ * (system-attributed, not a real admin) -- mirroring
+ * `AccountLifecycleService.suspendAccount`'s own shape for an
+ * admin-initiated suspend.
  */
 describe('AuthentikSyncService.syncSingleUser External_Lock Detection (bugfix)', () => {
   beforeEach(() => {
@@ -1487,11 +1488,11 @@ describe('AuthentikSyncService.syncSingleUser External_Lock Detection (bugfix)',
     expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
       'revoke_tak_certificates',
       { tak_usernames: ['alice'] },
-      -1 // SYSTEM_USER_ID
+      null
     );
     expect(db.query).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO audit_logs'),
-      [-1, 'user.suspended_externally', 'user', 42, JSON.stringify({ reason: 'authentik_is_active_false' })]
+      [null, 'user.suspended_externally', 'user', 42, JSON.stringify({ reason: 'authentik_is_active_false' })]
     );
   });
 
@@ -1514,7 +1515,7 @@ describe('AuthentikSyncService.syncSingleUser External_Lock Detection (bugfix)',
     expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
       'revoke_tak_certificates',
       { client_uid: 'AUK-D7K3QMX' },
-      -1
+      null
     );
   });
 
@@ -1680,10 +1681,10 @@ describe('AuthentikSyncService.syncSingleUser External_Lock Detection (bugfix)',
  * in Authentik (`is_active: true`, bypassing
  * `AccountLifecycleService.unsuspendAccount` entirely) is now recognised
  * and reflected -- `account_status` flips back to `'active'` locally, an
- * audit row (`user.unsuspended_externally`, attributed to
- * `SYSTEM_USER_ID`) is written, and NO certificate action is taken
- * (mirroring `unsuspendAccount`'s own behaviour: unsuspending never
- * restores a revoked certificate).
+ * audit row (`user.unsuspended_externally`, attributed to a NULL
+ * user_id) is written, and NO certificate action is taken (mirroring
+ * `unsuspendAccount`'s own behaviour: unsuspending never restores a
+ * revoked certificate).
  */
 describe('AuthentikSyncService.syncSingleUser External_Unlock Detection (bugfix)', () => {
   beforeEach(() => {
@@ -1733,7 +1734,7 @@ describe('AuthentikSyncService.syncSingleUser External_Unlock Detection (bugfix)
     );
     expect(db.query).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO audit_logs'),
-      [-1, 'user.unsuspended_externally', 'user', 42, JSON.stringify({ reason: 'authentik_is_active_true' })]
+      [null, 'user.unsuspended_externally', 'user', 42, JSON.stringify({ reason: 'authentik_is_active_true' })]
     );
     // Unsuspending never restores a certificate -- no Revoke_Operation,
     // and no other Sync_Operation of any kind, is enqueued here.

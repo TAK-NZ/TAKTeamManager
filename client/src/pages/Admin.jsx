@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { UserGroupIcon, UsersIcon, CogIcon, PencilIcon, CheckIcon, XMarkIcon, ArrowUpTrayIcon, ArrowDownTrayIcon } from '@heroicons/react/24/outline'
+import { UserGroupIcon, UsersIcon, CogIcon, PencilIcon, CheckIcon, XMarkIcon, ArrowUpTrayIcon, ArrowDownTrayIcon, DocumentTextIcon, EnvelopeIcon, NoSymbolIcon, ArrowsRightLeftIcon } from '@heroicons/react/24/outline'
 import { configAPI, usersAPI, teamsAPI, syncAPI, bulkImportAPI, communicationsAPI, settingsAPI } from '../services/api'
 import FormattedDate, { DATE_PRECISION, TOOLTIP_SIDES } from '../components/FormattedDate'
 import { getVariableHints } from '../utils/templateVariableHints'
@@ -74,17 +74,24 @@ export default function Admin({ user }) {
     // functions.
     const fetchStats = async () => {
       try {
-        const [usersResponse, teamsResponse] = await Promise.all([
-          usersAPI.getAll(),
+        const [usersCountResponse, teamsResponse] = await Promise.all([
+          // Bugfix: "Total Users" previously read GET /api/users' own
+          // pagination.total, which is Authentik's raw type=internal count
+          // -- it included AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES matches
+          // (e.g. etl- accounts) and still-internal-typed Team_Owned_Devices,
+          // both of which that endpoint's own list filters out but its total
+          // deliberately does not (see its doc comment). GET /api/users/count
+          // is a dedicated, exact, unpaginated count excluding both.
+          usersAPI.getCount(),
           teamsAPI.getMyTeams()
         ])
-        
-        // Both endpoints are paginated (default pageSize 50 -- see
+
+        // teams.getMyTeams is paginated (default pageSize 50 -- see
         // server/middleware/pagination.js) -- use pagination.total, not
         // the returned array's .length, so this stat doesn't silently
-        // undercount once there are more than one page of users/teams.
+        // undercount once there are more than one page of teams.
         setStats({
-          totalUsers: usersResponse.data.pagination?.total ?? usersResponse.data.users?.length ?? 0,
+          totalUsers: usersCountResponse.data.count ?? 0,
           totalTeams: teamsResponse.data.pagination?.total ?? teamsResponse.data.teams?.length ?? 0
         })
       } catch (error) {
@@ -537,8 +544,14 @@ export default function Admin({ user }) {
           </div>
         </div>
 
+        {/* Mobile fix: below `sm:`, the icon/label/status block and the Sync
+            Now button stack instead of squeezing onto one row (a
+            `text-xs px-3 py-1` button was also below this app's ~36px tap
+            target floor -- bumped to `text-sm px-3 py-1.5`, matching the
+            floor other small secondary buttons on this page already use,
+            e.g. "Send test email"'s sizing). */}
         <div className="card">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
             <div className="flex items-center">
               <div className="flex-shrink-0">
                 <CogIcon className="h-8 w-8 text-blue-600" />
@@ -584,7 +597,7 @@ export default function Admin({ user }) {
             <button
               onClick={triggerManualSync}
               disabled={syncing || syncStatus?.status === 'running'}
-              className="btn-secondary text-xs px-3 py-1 disabled:opacity-50"
+              className="btn-secondary text-sm px-3 py-1.5 disabled:opacity-50 flex-shrink-0"
             >
               {syncing ? 'Syncing...' : 'Sync Now'}
             </button>
@@ -592,60 +605,42 @@ export default function Admin({ user }) {
         </div>
       </div>
 
-      {/* Configuration Tabs */}
+      {/* Configuration Tabs. Mobile fix: below `sm:`, each tab collapses to
+          its icon alone (no visible label) so all five fit one row without
+          horizontal scrolling, matching TeamDetail.jsx's own tab-bar
+          convention (icon + `hidden sm:inline` label, full text restored at
+          `sm:` and up). The accessible name (aria-label/title) always
+          carries the full label regardless of which text is visible. */}
       <div className="card">
         <div className="border-b border-gray-200 dark:border-gray-700">
-          <nav className="-mb-px flex space-x-8">
-            <button
-              onClick={() => setActiveTab('site')}
-              className={`py-2 px-1 border-b-2 font-medium text-sm ${
-                activeTab === 'site'
-                  ? 'border-primary-500 text-primary-600 dark:text-primary-400'
-                  : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:border-gray-300'
-              }`}
-            >
-              Site Content
-            </button>
-            <button
-              onClick={() => setActiveTab('emailTemplates')}
-              className={`py-2 px-1 border-b-2 font-medium text-sm ${
-                activeTab === 'emailTemplates'
-                  ? 'border-primary-500 text-primary-600 dark:text-primary-400'
-                  : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:border-gray-300'
-              }`}
-            >
-              Email Templates
-            </button>
-            <button
-              onClick={() => setActiveTab('bulkImport')}
-              className={`py-2 px-1 border-b-2 font-medium text-sm ${
-                activeTab === 'bulkImport'
-                  ? 'border-primary-500 text-primary-600 dark:text-primary-400'
-                  : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:border-gray-300'
-              }`}
-            >
-              Bulk Import
-            </button>
-            <button
-              onClick={() => setActiveTab('excludedDomains')}
-              className={`py-2 px-1 border-b-2 font-medium text-sm ${
-                activeTab === 'excludedDomains'
-                  ? 'border-primary-500 text-primary-600 dark:text-primary-400'
-                  : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:border-gray-300'
-              }`}
-            >
-              Excluded Domains
-            </button>
-            <button
-              onClick={() => setActiveTab('settingsBackup')}
-              className={`py-2 px-1 border-b-2 font-medium text-sm ${
-                activeTab === 'settingsBackup'
-                  ? 'border-primary-500 text-primary-600 dark:text-primary-400'
-                  : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:border-gray-300'
-              }`}
-            >
-              Export / Import
-            </button>
+          <nav className="-mb-px flex space-x-3 sm:space-x-8" role="tablist">
+            {[
+              { id: 'site', label: 'Site Content', icon: DocumentTextIcon },
+              { id: 'emailTemplates', label: 'Email Templates', icon: EnvelopeIcon },
+              { id: 'bulkImport', label: 'Bulk Import', icon: ArrowUpTrayIcon },
+              { id: 'excludedDomains', label: 'Excluded Domains', icon: NoSymbolIcon },
+              { id: 'settingsBackup', label: 'Export / Import', icon: ArrowsRightLeftIcon }
+            ].map((tab) => {
+              const Icon = tab.icon
+              return (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id)}
+                  aria-label={tab.label}
+                  title={tab.label}
+                  role="tab"
+                  aria-selected={activeTab === tab.id}
+                  className={`flex items-center py-2 px-1 border-b-2 font-medium text-sm flex-shrink-0 ${
+                    activeTab === tab.id
+                      ? 'border-primary-500 text-primary-600 dark:text-primary-400'
+                      : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:border-gray-300'
+                  }`}
+                >
+                  <Icon className="h-5 w-5 sm:h-4 sm:w-4 sm:mr-2" aria-hidden="true" />
+                  <span className="hidden sm:inline">{tab.label}</span>
+                </button>
+              )
+            })}
           </nav>
         </div>
 
@@ -655,6 +650,48 @@ export default function Admin({ user }) {
               <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
                 Configure text content displayed on the request access page.
               </p>
+              {/* Mobile fix: stacked cards below `sm:`, the existing table
+                  restored at `sm:` and up -- matching the dual-render
+                  card/table pairing TeamDetail.jsx/TeamDeviceList.jsx/
+                  Teams.jsx already use for tabular content, rather than a
+                  horizontally-scrolling table on a phone. */}
+              <div className="sm:hidden divide-y divide-gray-200 dark:divide-gray-700 border border-gray-200 dark:border-gray-700 rounded-lg">
+                {siteConfig.filter(config => config.config_key.startsWith('request_access')).map((config) => (
+                  <div key={config.config_key} className="p-4 space-y-2 text-sm">
+                    <p className="font-medium text-gray-900 dark:text-gray-100">
+                      {config.description || config.config_key}
+                    </p>
+                    {editingConfig === config.config_key ? (
+                      <>
+                        <textarea
+                          value={tempConfigValue}
+                          onChange={(e) => setTempConfigValue(e.target.value)}
+                          className="w-full px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
+                          rows={config.config_key === 'request_access_footer' ? 4 : 2}
+                        />
+                        <div className="flex justify-end space-x-1">
+                          <button onClick={() => handleSaveConfig(config.config_key)} className="p-2 rounded-lg bg-green-50 hover:bg-green-100 text-green-600 dark:bg-green-950/40 dark:hover:bg-green-900/60 dark:text-green-400">
+                            <CheckIcon className="h-5 w-5" />
+                          </button>
+                          <button onClick={handleCancelConfigEdit} className="p-2 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 dark:bg-red-950/40 dark:hover:bg-red-900/60 dark:text-red-400">
+                            <XMarkIcon className="h-5 w-5" />
+                          </button>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <p className="text-gray-700 dark:text-gray-300 break-words">{config.config_value}</p>
+                        <div className="flex justify-end">
+                          <button onClick={() => handleEditConfig(config.config_key)} className="p-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-600 dark:bg-gray-700 dark:hover:bg-gray-600 dark:text-gray-300">
+                            <PencilIcon className="h-5 w-5" />
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <div className="hidden sm:block overflow-x-auto">
               <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                 <thead className="bg-gray-50 dark:bg-gray-700">
                   <tr>
@@ -707,6 +744,7 @@ export default function Admin({ user }) {
                   ))}
                 </tbody>
               </table>
+              </div>
             </div>
           )}
 
@@ -1023,6 +1061,26 @@ export default function Admin({ user }) {
                   <p className="text-sm text-gray-700 dark:text-gray-300 mb-2">
                     {bulkImportResult.successCount} succeeded, {bulkImportResult.failureCount} failed.
                   </p>
+                  <div className="sm:hidden divide-y divide-gray-200 dark:divide-gray-700 border border-gray-200 dark:border-gray-700 rounded-lg">
+                    {bulkImportResult.results.map((rowResult) => (
+                      <div key={rowResult.row} className="p-4 space-y-1 text-sm">
+                        <div className="flex items-center justify-between">
+                          <span className="font-medium text-gray-900 dark:text-gray-100">Row {rowResult.row}</span>
+                          {rowResult.success ? (
+                            <span className="text-green-600 dark:text-green-400 font-medium">Success</span>
+                          ) : (
+                            <span className="text-red-600 dark:text-red-400 font-medium">Failed</span>
+                          )}
+                        </div>
+                        <p className="text-gray-700 dark:text-gray-300 break-words">
+                          {rowResult.success
+                            ? `Team created (ID: ${rowResult.teamId})`
+                            : rowResult.error}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="hidden sm:block overflow-x-auto">
                   <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                     <thead className="bg-gray-50 dark:bg-gray-700">
                       <tr>
@@ -1059,6 +1117,7 @@ export default function Admin({ user }) {
                       ))}
                     </tbody>
                   </table>
+                  </div>
                 </div>
               )}
             </div>

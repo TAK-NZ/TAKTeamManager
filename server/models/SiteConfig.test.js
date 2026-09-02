@@ -475,4 +475,32 @@ describe('SiteConfig.getPublicConfig', () => {
     expect(config.device_expiry_warning_days).toBe(30);
     expect(getRevokeMaxCerts({ DEVICE_MGMT_REVOKE_MAX_CERTS: '-5' })).toBe(1);
   });
+
+  // force_sso_login (server/config/forceSso.js): unlike DEVICE_MGMT_ENABLED/
+  // DEVICE_MGMT_REVOKE_ENABLED, this IS a Presentation_Config value -- it
+  // arms no capability, it only decides whether the Login page starts the
+  // OAuth2 redirect itself instead of waiting for a click.
+  test('exposes force_sso_login: true when FORCE_SSO_LOGIN=true', async () => {
+    process.env.FORCE_SSO_LOGIN = 'true';
+
+    const config = await SiteConfig.getPublicConfig();
+
+    expect(config.force_sso_login).toBe(true);
+  });
+
+  test.each([
+    ['unset', undefined],
+    ['empty', ''],
+    ['any other value', 'TRUE']
+  ])('exposes force_sso_login: false when FORCE_SSO_LOGIN is %s', async (_label, value) => {
+    if (value === undefined) {
+      delete process.env.FORCE_SSO_LOGIN;
+    } else {
+      process.env.FORCE_SSO_LOGIN = value;
+    }
+
+    const config = await SiteConfig.getPublicConfig();
+
+    expect(config.force_sso_login).toBe(false);
+  });
 });

@@ -36,6 +36,8 @@ vi.mock('../services/api', () => ({
   // are present regardless.
   authAPI: { logout: vi.fn() },
   requestsAPI: { getPending: vi.fn().mockResolvedValue({ data: { requests: [] } }) },
+  // Layout.jsx's own version-display mount effect calls this too.
+  versionAPI: { get: vi.fn().mockResolvedValue({ data: { version: '2026.9.0' } }) },
   // Downloads.jsx's mount effect calls this directly. Defaulted to
   // "feature off" (`cloudtak_url: null`) so every test that does not care
   // about the CloudTAK_Row does not need its own mock setup, and so the

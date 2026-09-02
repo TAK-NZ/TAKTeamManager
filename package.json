@@ -1,6 +1,6 @@
 {
   "name": "tak-team-manager",
-  "version": "1.0.0",
+  "version": "2026.9.0",
   "description": "Manage TAK teams, users, and channels via Authentik",
   "main": "server/index.js",
   "scripts": {

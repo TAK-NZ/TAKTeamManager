@@ -114,6 +114,53 @@ const router = express.Router();
 // filtered, which is the requirement's primary concern (Requirement
 // 27.9's "excludes every Team_Owned_Device from any user-facing ...
 // count").
+
+// Bugfix: the Admin page's "Total Users" stat previously read `GET /api/users`'
+// own `pagination.total`, which is Authentik's raw `type=internal` count --
+// this is EXACTLY the over-count `GET /` itself documents above and
+// deliberately tolerates for its own paginated-list purposes (an ignored-
+// prefix account like `etl-earthquakes` is materialized in Authentik but
+// never gets a local `users` row at all -- see `authentikSync.js`'s
+// `syncSingleUser`/`isIgnoredAuthentikUsername` skip -- and a still-`internal`
+// -typed Team_Owned_Device row is filtered from the LIST but not from that
+// total). A dedicated, unpaginated route gives the Admin stat an EXACT count
+// instead: a single local `COUNT(*)` naturally excludes both, since neither
+// an ignored-prefix account nor (after this WHERE) a Team_Owned_Device row is
+// counted. Local-only (never calls Authentik), so this is cheap enough to run
+// on every Admin page load without the page-independent-COUNT cost `GET /`'s
+// own doc comment raises as its reason NOT to do this for the list route.
+//
+// Also excludes `account_status = 'orphaned'` -- a row the Reconciliation_Sweep
+// (`authentikSync.js`) has determined no longer has a matching Authentik
+// identity (deleted, or otherwise gone). An orphaned row stays in `users`
+// (never deleted -- this app never deletes a federated identity's local
+// record), but `/users` itself was never a real user going forward, and this
+// stat should agree with what `/users` actually lists.
+//
+// Also excludes any row whose username matches
+// AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES (e.g. `akadmin`/`ckadmin`),
+// applying the SAME `isIgnoredAuthentikUsername` predicate `GET /` already
+// applies to the list it renders. This is a SEPARATE reason a row can be
+// present locally and still not a real user: unlike the two SQL exclusions
+// above, a local row for one of these usernames can predate the prefix
+// being added to the ignore list -- the ignore list only ever prevents a
+// FUTURE materialization/sync, it never retroactively cleans up a row
+// created before it was configured. Applied in JS (matching `GET /`'s own
+// in-memory filtering) rather than a SQL predicate, since the prefix list
+// is env-configured and there is no portable "starts with any of these"
+// SQL operator worth building for a table this size.
+router.get('/count', authenticateToken, authorize, async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT username FROM users WHERE is_team_device = false AND account_status <> 'orphaned'"
+    );
+    const count = result.rows.filter((row) => !isIgnoredAuthentikUsername(row.username)).length;
+    res.json({ count });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get user count' });
+  }
+});
+
 router.get('/', authenticateToken, authorize, paginationParams, async (req, res) => {
   try {
     const { page, pageSize } = req.pagination;

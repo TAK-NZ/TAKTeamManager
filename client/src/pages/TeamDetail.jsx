@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import React from 'react'
 import { useParams, useSearchParams, Link } from 'react-router-dom'
-import { PlusIcon, UsersIcon, UserPlusIcon, ShieldCheckIcon, BuildingOfficeIcon, FolderPlusIcon, SignalIcon, XMarkIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, TrashIcon, PencilIcon, CheckIcon, ArrowLeftOnRectangleIcon, ArrowPathIcon, DevicePhoneMobileIcon, ArrowUpTrayIcon } from '@heroicons/react/24/outline'
+import { PlusIcon, UsersIcon, UserPlusIcon, ShieldCheckIcon, BuildingOfficeIcon, FolderPlusIcon, SignalIcon, XMarkIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, TrashIcon, PencilIcon, CheckIcon, ArrowLeftOnRectangleIcon, ArrowPathIcon, DevicePhoneMobileIcon, ArrowUpTrayIcon, EnvelopeIcon, ArrowRightCircleIcon, LockClosedIcon, LockOpenIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import { teamsAPI, channelsAPI, usersAPI, configAPI, devicesAPI } from '../services/api'
 import api from '../services/api'
@@ -1958,36 +1958,40 @@ export default function TeamDetail({ user, refreshUser }) {
                   icons without losing legibility, so this toolbar wraps
                   onto multiple lines on a narrow phone instead. */}
               {canManageTeam && selectedMembersUnique.length > 0 && (
-                <div className="mb-4 flex flex-wrap items-center gap-2 rounded-md border border-primary-200 dark:border-primary-800 bg-primary-50 dark:bg-primary-900/20 p-3">
+                <div className="mb-4 flex flex-wrap items-center gap-2 rounded-md border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20 p-3">
                   <span className="text-sm font-medium text-gray-700 dark:text-gray-300 mr-2">
                     {selectedMembersUnique.length} selected
                   </span>
                   <button
                     type="button"
                     onClick={() => handleBulkActionClick('resend')}
-                    className="btn-secondary px-3 py-1.5 text-sm"
+                    className="btn-secondary flex items-center px-3 py-1.5 text-sm"
                   >
+                    <EnvelopeIcon className="h-4 w-4 mr-1.5 flex-shrink-0" aria-hidden="true" />
                     Resend Welcome Email
                   </button>
                   <button
                     type="button"
                     onClick={() => handleBulkActionClick('transfer')}
-                    className="btn-secondary px-3 py-1.5 text-sm"
+                    className="btn-secondary flex items-center px-3 py-1.5 text-sm"
                   >
+                    <ArrowRightCircleIcon className="h-4 w-4 mr-1.5 flex-shrink-0" aria-hidden="true" />
                     Transfer
                   </button>
                   <button
                     type="button"
                     onClick={() => handleBulkActionClick('suspend')}
-                    className="btn-secondary px-3 py-1.5 text-sm"
+                    className="btn-secondary flex items-center px-3 py-1.5 text-sm"
                   >
+                    <LockClosedIcon className="h-4 w-4 mr-1.5 flex-shrink-0" aria-hidden="true" />
                     Suspend
                   </button>
                   <button
                     type="button"
                     onClick={() => handleBulkActionClick('unsuspend')}
-                    className="btn-secondary px-3 py-1.5 text-sm"
+                    className="btn-secondary flex items-center px-3 py-1.5 text-sm"
                   >
+                    <LockOpenIcon className="h-4 w-4 mr-1.5 flex-shrink-0" aria-hidden="true" />
                     Unsuspend
                   </button>
                   {/* Delete user is Global_Manager-only server-side with
@@ -1999,8 +2003,9 @@ export default function TeamDetail({ user, refreshUser }) {
                     <button
                       type="button"
                       onClick={() => handleBulkActionClick('delete')}
-                      className="btn-danger px-3 py-1.5 text-sm"
+                      className="btn-danger flex items-center px-3 py-1.5 text-sm"
                     >
+                      <TrashIcon className="h-4 w-4 mr-1.5 flex-shrink-0" aria-hidden="true" />
                       Delete
                     </button>
                   )}

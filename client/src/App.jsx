@@ -135,6 +135,18 @@ function App() {
               authAPI.login()
               return
             }
+            // FORCE_SSO_LOGIN (server/config/forceSso.js): skip the manual
+            // "Sign in" click entirely and start the OAuth2 redirect right
+            // away. Checked only once the Authentik-referrer branch above
+            // has already had its chance -- both ultimately call the same
+            // `authAPI.login()`, so the order between them makes no
+            // behavioural difference, but keeping the more specific
+            // referrer-based reason first matches its existing precedence
+            // over the blanket flag.
+            if (response.data?.force_sso_login) {
+              authAPI.login()
+              return
+            }
             setLoading(false)
           })
           .catch(() => setLoading(false))
