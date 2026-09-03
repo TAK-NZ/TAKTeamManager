@@ -1,6 +1,7 @@
 const pool = require('../config/database');
 const EventPublisher = require('./EventPublisher');
 const logger = require('../config/logger').createLogger('AccountLifecycleService');
+const { fetchWithTimeout } = require('../utils/fetchWithTimeout');
 
 /**
  * account-lifecycle-management Requirement 1 Criterion 5: thrown by
@@ -212,7 +213,7 @@ class AccountLifecycleService {
     // and never undoes the committed suspension above.
     if (authentikUserId) {
       try {
-        const response = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
+        const response = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
           method: 'PATCH',
           headers: {
             Authorization: `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
@@ -312,7 +313,7 @@ class AccountLifecycleService {
 
     if (authentikUserId) {
       try {
-        const response = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
+        const response = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
           method: 'PATCH',
           headers: {
             Authorization: `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,

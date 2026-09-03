@@ -31,6 +31,7 @@ router.get('/status', authenticateToken, authorize, async (req, res) => {
       bulkOperations: bulkStats.rows
     });
   } catch (error) {
+    getLogger().error({ err: error }, 'Failed to fetch operation status');
     res.status(500).json({ error: 'Failed to fetch operation status' });
   }
 });
@@ -54,6 +55,7 @@ router.get('/recent', authenticateToken, authorize, async (req, res) => {
     
     res.json({ operations: operations.rows });
   } catch (error) {
+    getLogger().error({ err: error }, 'Failed to fetch recent operations');
     res.status(500).json({ error: 'Failed to fetch recent operations' });
   }
 });
@@ -83,6 +85,7 @@ router.post('/retry-failed', authenticateToken, authorize, async (req, res) => {
       message: `${result.rowCount} operations queued for retry` 
     });
   } catch (error) {
+    getLogger().error({ err: error }, 'Failed to retry operations');
     res.status(500).json({ error: 'Failed to retry operations' });
   }
 });

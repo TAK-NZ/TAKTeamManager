@@ -56,7 +56,7 @@ function safeExtractEntityFields(payload) {
   if (typeof payload === 'string') {
     try {
       parsed = JSON.parse(payload);
-    } catch (parseError) {
+    } catch {
       // Raw JSON string that isn't valid JSON (or isn't JSON at all):
       // treat as ungroupable rather than throwing.
       return { target_user_id: undefined, target_group_id: undefined };

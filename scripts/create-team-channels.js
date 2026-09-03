@@ -3,28 +3,28 @@ const Team = require('../server/models/Team');
 
 async function createChannelsForAllTeams() {
   try {
-    console.log('Creating channels for all existing teams...');
-    
+    process.stdout.write('Creating channels for all existing teams...\n');
+
     // Get all teams
     const result = await pool.query('SELECT id, name FROM teams ORDER BY id');
     const teams = result.rows;
-    
-    console.log(`Found ${teams.length} teams`);
-    
+
+    process.stdout.write(`Found ${teams.length} teams\n`);
+
     for (const team of teams) {
-      console.log(`Creating channel for team: ${team.name}`);
+      process.stdout.write(`Creating channel for team: ${team.name}\n`);
       const channel = await Team.createTeamChannel(team.id);
       if (channel) {
-        console.log(`✓ Created channel: ${channel.display_name}`);
+        process.stdout.write(`✓ Created channel: ${channel.display_name}\n`);
       } else {
-        console.log(`✗ Failed to create channel for: ${team.name}`);
+        process.stdout.write(`✗ Failed to create channel for: ${team.name}\n`);
       }
     }
-    
-    console.log('Finished creating team channels');
+
+    process.stdout.write('Finished creating team channels\n');
     process.exit(0);
   } catch (error) {
-    console.error('Error creating team channels:', error);
+    process.stderr.write(`Error creating team channels: ${error && error.stack ? error.stack : error}\n`);
     process.exit(1);
   }
 }

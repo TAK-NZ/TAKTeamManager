@@ -116,7 +116,7 @@ router.get('/:teamId/pdf', authenticateToken, authorize, [
         const ancestorChain = await Team.getAncestorChain(req.params.teamId);
         const org = ancestorChain[0];
         teamDisplayName = `${org.callsign_prefix || org.name} - ${team.name}`;
-      } catch (e) {
+      } catch {
         // Fall back to plain name
       }
     }

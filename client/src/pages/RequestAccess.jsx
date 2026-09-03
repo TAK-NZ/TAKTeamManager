@@ -148,13 +148,23 @@ export default function RequestAccess() {
 
     setIsSubmitting(true)
     try {
+      let recaptchaToken
+      if (!config.recaptcha_disabled) {
+        if (!config.recaptcha_site_key) {
+          toast.error('CAPTCHA is not configured. Please contact an administrator.')
+          setIsSubmitting(false)
+          return
+        }
+        recaptchaToken = await getRecaptchaToken(config.recaptcha_site_key, RECAPTCHA_ACTION)
+      }
+
       await signupAPI.submitTeamAccess({
         token: tokenParam,
         firstName,
         lastName,
         teamId: parseInt(selectedTeamId, 10),
         reason,
-      })
+      }, recaptchaToken)
       setStep(STEPS.SUBMIT_SUCCESS)
     } catch (error) {
       const serverMessage = error.response?.data?.error

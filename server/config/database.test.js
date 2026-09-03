@@ -25,6 +25,59 @@ describe('server/config/database', () => {
   afterEach(() => {
     process.env = ORIGINAL_ENV;
     jest.dontMock('pg');
+    jest.dontMock('fs');
+  });
+
+  /**
+   * Security-hardening: this pool USED to set
+   * `ssl: { rejectUnauthorized: false }` unconditionally in production
+   * -- encrypted but never actually verified. It now defaults to
+   * `rejectUnauthorized: true`, optionally loading a CA bundle from
+   * `DB_CA_PATH`.
+   */
+  describe('TLS certificate validation (security-hardening)', () => {
+    it('sets ssl: false outside production, regardless of DB_CA_PATH', () => {
+      process.env.NODE_ENV = 'test';
+      process.env.DB_CA_PATH = '/certs/rds-ca.pem';
+
+      require('./database');
+
+      expect(PoolMock.mock.calls[0][0]).toMatchObject({ ssl: false });
+    });
+
+    it('never sets rejectUnauthorized: false, in any environment', () => {
+      process.env.NODE_ENV = 'production';
+
+      require('./database');
+
+      const sslOption = PoolMock.mock.calls[0][0].ssl;
+      expect(sslOption).not.toEqual(expect.objectContaining({ rejectUnauthorized: false }));
+    });
+
+    it('sets ssl: { rejectUnauthorized: true } in production when DB_CA_PATH is unset', () => {
+      process.env.NODE_ENV = 'production';
+      delete process.env.DB_CA_PATH;
+
+      require('./database');
+
+      expect(PoolMock.mock.calls[0][0]).toMatchObject({ ssl: { rejectUnauthorized: true } });
+    });
+
+    it('loads and includes the CA bundle when DB_CA_PATH is set in production', () => {
+      process.env.NODE_ENV = 'production';
+      process.env.DB_CA_PATH = '/certs/rds-ca.pem';
+
+      const mockCaContents = Buffer.from('-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----');
+      const readFileSyncMock = jest.fn(() => mockCaContents);
+      jest.doMock('fs', () => ({ readFileSync: readFileSyncMock }));
+
+      require('./database');
+
+      expect(readFileSyncMock).toHaveBeenCalledWith('/certs/rds-ca.pem');
+      expect(PoolMock.mock.calls[0][0]).toMatchObject({
+        ssl: { rejectUnauthorized: true, ca: mockCaContents }
+      });
+    });
   });
 
   it('constructs the Pool with the DB_POOL_MAX env value', () => {

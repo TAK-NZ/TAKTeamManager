@@ -46,6 +46,7 @@ jest.mock('../models/Team', () => ({
 }));
 jest.mock('../services/EventPublisher', () => ({
   publishOperation: jest.fn(),
+  publishOperationsBatch: jest.fn(),
   publishBulkOperation: jest.fn()
 }));
 
@@ -784,6 +785,54 @@ describe('SyncWorker.processNextOperation batch fetch', () => {
     const rollbackCall = mockClient.query.mock.calls.find((call) => call[0] === 'ROLLBACK');
     expect(rollbackCall).toBeDefined();
     expect(worker.executeOperationSafely).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Performance-hardening: the poll loop (SyncWorker.start) uses this
+   * return value to decide whether a full batch likely means more work
+   * is waiting, skipping its fixed inter-cycle sleep when so.
+   */
+  it('resolves with 0 when no pending operations are found', async () => {
+    mockClient.query.mockImplementation((sql) => {
+      if (sql.includes('SELECT * FROM sync_operations')) {
+        return Promise.resolve({ rows: [] });
+      }
+      return Promise.resolve();
+    });
+
+    await expect(worker.processNextOperation()).resolves.toBe(0);
+  });
+
+  it('resolves with the exact number of rows fetched (a partial batch)', async () => {
+    const fetchedRows = [
+      { id: 'op-1', operation_type: 'add_user_to_group', payload: {} },
+      { id: 'op-2', operation_type: 'add_user_to_group', payload: {} }
+    ];
+    mockClient.query.mockImplementation((sql) => {
+      if (sql.includes('SELECT * FROM sync_operations')) {
+        return Promise.resolve({ rows: fetchedRows });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await expect(worker.processNextOperation()).resolves.toBe(2);
+  });
+
+  it('resolves with a count equal to this.batchSize when the fetch returns a full batch', async () => {
+    worker.batchSize = 3;
+    const fetchedRows = [
+      { id: 'op-1', operation_type: 'add_user_to_group', payload: {} },
+      { id: 'op-2', operation_type: 'add_user_to_group', payload: {} },
+      { id: 'op-3', operation_type: 'add_user_to_group', payload: {} }
+    ];
+    mockClient.query.mockImplementation((sql) => {
+      if (sql.includes('SELECT * FROM sync_operations')) {
+        return Promise.resolve({ rows: fetchedRows });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await expect(worker.processNextOperation()).resolves.toBe(worker.batchSize);
   });
 
   /**
@@ -2707,14 +2756,15 @@ describe('SyncWorker.resyncOrgChannelTierAccess', () => {
       2,
       null
     );
-    expect(EventPublisher.publishOperation).toHaveBeenCalledTimes(2);
-    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+    // Performance-hardening: one batched multi-row enqueue, not one
+    // publishOperation call per user.
+    expect(EventPublisher.publishOperationsBatch).toHaveBeenCalledTimes(1);
+    expect(EventPublisher.publishOperationsBatch).toHaveBeenCalledWith(
       'assign_user_to_global_channels',
-      { target_user_id: 10, bulk_operation_id: 'bulk-op-1' }
-    );
-    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
-      'assign_user_to_global_channels',
-      { target_user_id: 11, bulk_operation_id: 'bulk-op-1' }
+      [
+        { target_user_id: 10, bulk_operation_id: 'bulk-op-1' },
+        { target_user_id: 11, bulk_operation_id: 'bulk-op-1' }
+      ]
     );
   });
 
@@ -2725,7 +2775,7 @@ describe('SyncWorker.resyncOrgChannelTierAccess', () => {
     await worker.resyncOrgChannelTierAccess({ organisation_id: 999, tier: 'support' });
 
     expect(EventPublisher.publishBulkOperation).not.toHaveBeenCalled();
-    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+    expect(EventPublisher.publishOperationsBatch).not.toHaveBeenCalled();
   });
 
   it('does nothing (no bulk op, no enqueue) when the Organisation tree has teams but no Direct_Membership users', async () => {
@@ -2735,7 +2785,7 @@ describe('SyncWorker.resyncOrgChannelTierAccess', () => {
     await worker.resyncOrgChannelTierAccess({ organisation_id: 1, tier: 'support' });
 
     expect(EventPublisher.publishBulkOperation).not.toHaveBeenCalled();
-    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+    expect(EventPublisher.publishOperationsBatch).not.toHaveBeenCalled();
   });
 
   it('deduplicates via DISTINCT user_id in the query, never enqueuing the same user twice for one Organisation reconcile', async () => {
@@ -2747,7 +2797,9 @@ describe('SyncWorker.resyncOrgChannelTierAccess', () => {
 
     const [sql] = worker.pool.query.mock.calls[0];
     expect(sql).toContain('DISTINCT user_id');
-    expect(EventPublisher.publishOperation).toHaveBeenCalledTimes(1);
+    expect(EventPublisher.publishOperationsBatch).toHaveBeenCalledTimes(1);
+    const [, payloads] = EventPublisher.publishOperationsBatch.mock.calls[0];
+    expect(payloads).toHaveLength(1);
   });
 });
 
@@ -3001,6 +3053,101 @@ describe('SyncWorker heartbeat upsert', () => {
     await worker.start();
 
     expect(worker.updateHeartbeat).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Performance-hardening: a FULL batch (processNextOperation resolving
+   * with exactly `this.batchSize`) is a strong signal the queue likely
+   * still has more pending work, so the poll loop skips its fixed
+   * `pollInterval` sleep entirely and loops straight back into another
+   * fetch. A partial/empty/unknown-shaped batch still sleeps, to avoid a
+   * tight busy-loop against a drained queue.
+   */
+  describe('poll loop skips the fixed sleep only when the last batch was confirmed full', () => {
+    it('skips sleep(pollInterval) when processNextOperation resolves with exactly this.batchSize', async () => {
+      worker.batchSize = 50;
+      worker.processNextOperation = jest.fn().mockImplementation(async () => {
+        worker.isRunning = false; // stop after one cycle
+        return 50;
+      });
+      worker.updateHeartbeat = jest.fn().mockResolvedValue();
+      worker.startHealthServer = jest.fn();
+      worker.retentionCleanupJob = { start: jest.fn(), stop: jest.fn() };
+      worker.sleep = jest.fn().mockResolvedValue();
+
+      await worker.start();
+
+      expect(worker.sleep).not.toHaveBeenCalled();
+    });
+
+    it('sleeps normally when processNextOperation resolves with a partial batch (queue drained)', async () => {
+      worker.batchSize = 50;
+      worker.processNextOperation = jest.fn().mockResolvedValue(3);
+      worker.updateHeartbeat = jest.fn().mockResolvedValue();
+      worker.startHealthServer = jest.fn();
+      worker.retentionCleanupJob = { start: jest.fn(), stop: jest.fn() };
+      worker.sleep = jest.fn().mockImplementation(() => {
+        worker.isRunning = false;
+        return Promise.resolve();
+      });
+
+      await worker.start();
+
+      expect(worker.sleep).toHaveBeenCalledWith(worker.pollInterval);
+    });
+
+    it('sleeps normally when processNextOperation resolves with 0 (empty queue)', async () => {
+      worker.batchSize = 50;
+      worker.processNextOperation = jest.fn().mockResolvedValue(0);
+      worker.updateHeartbeat = jest.fn().mockResolvedValue();
+      worker.startHealthServer = jest.fn();
+      worker.retentionCleanupJob = { start: jest.fn(), stop: jest.fn() };
+      worker.sleep = jest.fn().mockImplementation(() => {
+        worker.isRunning = false;
+        return Promise.resolve();
+      });
+
+      await worker.start();
+
+      expect(worker.sleep).toHaveBeenCalledWith(worker.pollInterval);
+    });
+
+    it('sleeps normally (falls through safely) when processNextOperation resolves undefined, as a stubbed mock commonly does', async () => {
+      worker.batchSize = 50;
+      worker.processNextOperation = jest.fn().mockResolvedValue(undefined);
+      worker.updateHeartbeat = jest.fn().mockResolvedValue();
+      worker.startHealthServer = jest.fn();
+      worker.retentionCleanupJob = { start: jest.fn(), stop: jest.fn() };
+      worker.sleep = jest.fn().mockImplementation(() => {
+        worker.isRunning = false;
+        return Promise.resolve();
+      });
+
+      await worker.start();
+
+      expect(worker.sleep).toHaveBeenCalledWith(worker.pollInterval);
+    });
+
+    it('runs multiple back-to-back full-batch cycles with zero sleeps in between, then sleeps once the queue empties', async () => {
+      worker.batchSize = 50;
+      let call = 0;
+      worker.processNextOperation = jest.fn().mockImplementation(async () => {
+        call += 1;
+        return call <= 3 ? 50 : 0; // 3 full cycles, then an empty one
+      });
+      worker.updateHeartbeat = jest.fn().mockResolvedValue();
+      worker.startHealthServer = jest.fn();
+      worker.retentionCleanupJob = { start: jest.fn(), stop: jest.fn() };
+      worker.sleep = jest.fn().mockImplementation(() => {
+        worker.isRunning = false; // stop on the first actual sleep
+        return Promise.resolve();
+      });
+
+      await worker.start();
+
+      expect(worker.processNextOperation).toHaveBeenCalledTimes(4);
+      expect(worker.sleep).toHaveBeenCalledTimes(1);
+    });
   });
 });
 
@@ -5328,5 +5475,187 @@ describe('SyncWorker.revokeTakCertificates revocation rails (12.11-12.16)', () =
       expect(worker.takServerService.revokeCertificates).toHaveBeenCalledWith([1, 2]);
       expect(auditRecord().payloadShape).toBe('tak_usernames');
     });
+  });
+});
+
+/**
+ * Resiliency-hardening: `stop()` now waits (bounded by
+ * `SHUTDOWN_DRAIN_TIMEOUT_MS`) for a currently in-flight
+ * `processNextOperation()` cycle to finish before proceeding to close
+ * the pool, rather than tearing down concurrently with an operation
+ * still mid-flight. Mirrors `server/utils/gracefulShutdown.js`'s
+ * force-proceed-on-timeout shape.
+ */
+describe('SyncWorker shutdown drain wait (resiliency-hardening)', () => {
+  let worker;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.useFakeTimers();
+    worker = new SyncWorker();
+    worker.pool.query = jest.fn().mockResolvedValue({ rows: [] });
+    worker.pool.end = jest.fn().mockResolvedValue();
+    worker.stopHealthServer = jest.fn().mockResolvedValue();
+    worker.retentionCleanupJob = { start: jest.fn(), stop: jest.fn() };
+    worker.certExpiryNotificationJob = { start: jest.fn(), stop: jest.fn() };
+    worker.adminCredentialRefreshJob = { start: jest.fn(), stop: jest.fn() };
+    worker.subscriptionPoller = { start: jest.fn(), stop: jest.fn() };
+    worker.deviceSync = { start: jest.fn(), stop: jest.fn() };
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('waitForActiveOperationToDrain resolves immediately when no operation is in flight', async () => {
+    worker.activeOperationPromise = null;
+
+    await expect(worker.waitForActiveOperationToDrain()).resolves.toBeUndefined();
+  });
+
+  it('waitForActiveOperationToDrain waits for the in-flight operation to settle before returning, on the fast path', async () => {
+    let resolveOperation;
+    worker.activeOperationPromise = new Promise((resolve) => {
+      resolveOperation = resolve;
+    });
+
+    const drainPromise = worker.waitForActiveOperationToDrain();
+    resolveOperation();
+
+    await expect(drainPromise).resolves.toBeUndefined();
+  });
+
+  it('waitForActiveOperationToDrain force-proceeds once SHUTDOWN_DRAIN_TIMEOUT_MS elapses without the operation settling', async () => {
+    // An operation promise that never settles on its own.
+    worker.activeOperationPromise = new Promise(() => {});
+
+    const drainPromise = worker.waitForActiveOperationToDrain();
+    await jest.advanceTimersByTimeAsync(30000 + 1);
+
+    await expect(drainPromise).resolves.toBeUndefined();
+  });
+
+  it('stop() calls waitForActiveOperationToDrain before closing the pool', async () => {
+    const callOrder = [];
+    worker.waitForActiveOperationToDrain = jest.fn().mockImplementation(async () => {
+      callOrder.push('drain');
+    });
+    worker.pool.end = jest.fn().mockImplementation(async () => {
+      callOrder.push('pool.end');
+    });
+
+    await worker.stop();
+
+    expect(callOrder).toEqual(['drain', 'pool.end']);
+  });
+
+  it('the poll loop tracks activeOperationPromise for the duration of processNextOperation only, clearing it afterward', async () => {
+    let capturedDuringCycle;
+    worker.processNextOperation = jest.fn().mockImplementation(async () => {
+      // A real `await` here (unlike a synchronous-bodied mock) is what
+      // lets control return to `start()`'s caller long enough for
+      // `this.activeOperationPromise = cyclePromise` to have already run
+      // by the time this line reads it -- without it, this mock's body
+      // would run to completion (there being no await before the read)
+      // BEFORE that assignment even happens, since `processNextOperation()`
+      // is called and assigned in that order.
+      await Promise.resolve();
+      capturedDuringCycle = worker.activeOperationPromise;
+    });
+    worker.updateHeartbeat = jest.fn().mockResolvedValue();
+    worker.startHealthServer = jest.fn();
+    worker.sleep = jest.fn().mockImplementation(() => {
+      worker.isRunning = false;
+      return Promise.resolve();
+    });
+
+    await worker.start();
+
+    expect(capturedDuringCycle).not.toBeNull();
+    expect(worker.activeOperationPromise).toBeNull();
+  });
+
+  it('clears activeOperationPromise even when processNextOperation throws', async () => {
+    worker.processNextOperation = jest.fn().mockRejectedValue(new Error('boom'));
+    worker.updateHeartbeat = jest.fn();
+    worker.startHealthServer = jest.fn();
+    worker.sleep = jest.fn().mockImplementation(() => {
+      worker.isRunning = false;
+      return Promise.resolve();
+    });
+
+    await worker.start();
+
+    expect(worker.activeOperationPromise).toBeNull();
+  });
+});
+
+/**
+ * Resiliency-hardening: previously this file registered no
+ * `unhandledRejection`/`uncaughtException` handlers at all -- an
+ * unhandled rejection or uncaught exception anywhere outside `start()`'s
+ * own top-level `.catch()` fell through to Node's default (ungraceful,
+ * ON `uncaughtException`: immediate process exit with no controlled
+ * shutdown) behavior. These handlers are registered inside the
+ * `require.main === module` block, so they cannot be exercised by
+ * `require()`-ing this module directly in a test the way the exported
+ * `SyncWorker` class itself can be -- this describe block instead proves
+ * the underlying, extracted behavior each handler delegates to
+ * (`worker.stop()` + a controlled exit) is correct, mirroring how
+ * `server/utils/gracefulShutdown.test.js` tests the extracted shutdown
+ * sequence rather than the top-level `process.on(...)` registration
+ * itself.
+ */
+describe('SyncWorker uncaughtException controlled-shutdown behavior (resiliency-hardening)', () => {
+  let worker;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    worker = new SyncWorker();
+    worker.pool.query = jest.fn().mockResolvedValue({ rows: [] });
+  });
+
+  it('an uncaughtException handler modeled on this file\'s registration calls worker.stop() before exiting non-zero', async () => {
+    worker.stop = jest.fn().mockResolvedValue();
+    const exitSpy = jest.fn();
+    const loggerErrorSpy = jest.fn();
+
+    // Reproduces the exact handler body registered in this file's
+    // `require.main === module` block, to prove its control flow
+    // (stop() awaited, any rejection from stop() itself caught and
+    // logged, then a non-zero exit via .finally()) without needing to
+    // simulate a real process-level uncaughtException event.
+    const handler = () => {
+      worker.stop().catch((stopErr) => {
+        loggerErrorSpy(stopErr);
+      }).finally(() => exitSpy(1));
+    };
+
+    handler(new Error('simulated uncaught exception'));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(worker.stop).toHaveBeenCalledTimes(1);
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(loggerErrorSpy).not.toHaveBeenCalled();
+  });
+
+  it('the controlled-shutdown handler still exits non-zero, with no unhandled rejection, even when worker.stop() itself rejects', async () => {
+    worker.stop = jest.fn().mockRejectedValue(new Error('stop failed'));
+    const exitSpy = jest.fn();
+    const loggerErrorSpy = jest.fn();
+
+    const handler = () => {
+      worker.stop().catch((stopErr) => {
+        loggerErrorSpy(stopErr);
+      }).finally(() => exitSpy(1));
+    };
+
+    handler(new Error('simulated uncaught exception'));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(loggerErrorSpy).toHaveBeenCalledWith(expect.objectContaining({ message: 'stop failed' }));
   });
 });

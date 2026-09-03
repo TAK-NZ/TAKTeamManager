@@ -1,6 +1,7 @@
 const pool = require('../config/database');
 const logger = require('../config/logger').createLogger('Channel');
 const EventPublisher = require('../services/EventPublisher');
+const { fetchWithTimeout } = require('../utils/fetchWithTimeout');
 
 /**
  * Requirement 16.6 (task 35.6): thrown by `Channel.createCustomChannel`
@@ -436,7 +437,7 @@ class Channel {
 
       const groupPromises = [
         // Read/Write group (main group)
-        fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
+        fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
@@ -450,7 +451,7 @@ class Channel {
           })
         }),
         // Read-only group
-        fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
+        fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
@@ -464,7 +465,7 @@ class Channel {
           })
         }),
         // Write-only group
-        fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
+        fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,

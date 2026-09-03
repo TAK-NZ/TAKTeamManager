@@ -36,7 +36,7 @@ const cookieParser = require('cookie-parser');
 const request = require('supertest');
 const pool = require('../config/database');
 const authentikSync = require('../services/authentikSync');
-const { authenticateToken, requireTeamAdmin } = require('./auth');
+const { authenticateToken } = require('./auth');
 
 const JWT_SECRET = 'a'.repeat(32);
 const TEST_IP = '203.0.113.7';
@@ -217,7 +217,6 @@ describe('requireTeamAdmin (Requirement 13.7 logging)', () => {
       }));
       jest.doMock('../config/database', () => ({ query: jest.fn() }));
 
-      // eslint-disable-next-line global-require
       freshRequireTeamAdmin = require('./auth').requireTeamAdmin;
     });
 

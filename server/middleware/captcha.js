@@ -1,10 +1,15 @@
 /**
  * Google reCAPTCHA v3 verification middleware (Requirement 7.3/7.4:
- * bot-mitigation challenge on `POST /api/requests/initiate`).
+ * bot-mitigation challenge on `POST /api/requests/initiate` and
+ * `POST /api/requests/team-access`).
  *
- * `verifyCaptcha` is mounted directly in front of
- * `POST /api/requests/initiate`'s handler chain in
- * `server/routes/signup.js`. Unlike v2 (a checkbox/invisible widget
+ * `verifyCaptcha` is mounted directly in front of both
+ * `POST /api/requests/initiate`'s and `POST /api/requests/team-access`'s
+ * handler chains in `server/routes/signup.js` -- the latter is the route
+ * `RECAPTCHA_EXPECTED_ACTION` ('team_access_request') was always named
+ * for; a prior version of this file was mounted only on `/initiate`,
+ * leaving `/team-access` reachable with neither a CAPTCHA check nor a
+ * rate limiter. Unlike v2 (a checkbox/invisible widget
  * that only reports pass/fail), reCAPTCHA v3 runs invisibly and returns a
  * risk `score` (0.0 = likely bot, 1.0 = likely human) alongside
  * `success`/`action` -- there is no user-facing challenge to fail, so
@@ -53,7 +58,7 @@ const RECAPTCHA_VERIFY_TIMEOUT_MS = 10000;
 
 /**
  * Testing-only bypass for the reCAPTCHA v3 check on
- * `POST /api/requests/team-access`.
+ * `POST /api/requests/initiate` and `POST /api/requests/team-access`.
  *
  * Honored ONLY when `RECAPTCHA_DISABLED=true` AND `NODE_ENV` is anything
  * other than `production` -- this second condition is unconditional and

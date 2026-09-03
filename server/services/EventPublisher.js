@@ -1,6 +1,15 @@
 const pool = require('../config/database');
 const { getCorrelationId } = require('../middleware/requestContext');
 
+// Performance-hardening: the maximum number of sync_operations rows
+// `publishOperationsBatch` inserts in a single multi-row INSERT statement.
+// Each row binds 6 parameters (see `publishOperation`'s own column list),
+// and Postgres's protocol caps a single statement at 65535 bound
+// parameters -- 1000 rows * 6 params = 6000, comfortably under that limit
+// with room to spare, while still cutting a 50,000-row enqueue from 50,000
+// individual round trips down to 50.
+const BATCH_INSERT_CHUNK_SIZE = 1000;
+
 class EventPublisher {
   /**
    * Enqueues a `sync_operations` row.
@@ -51,6 +60,83 @@ class EventPublisher {
     ]);
     
     return result.rows[0].id;
+  }
+
+  /**
+   * Performance-hardening: enqueues many `sync_operations` rows of the
+   * SAME `operationType` in one or more multi-row INSERT statements,
+   * instead of one INSERT per row. Introduced because
+   * `GlobalChannelService.assignAllUsersToGlobalChannels`,
+   * `TeamMembershipService.bulkAddUsersToTeam`, and
+   * `SyncWorker.resyncOrgChannelTierAccess` each previously enqueued one
+   * operation per user in a sequential `for` loop -- at the documented
+   * 50,000-user scale, that is 50,000 individual round trips to Postgres
+   * before the Sync_Worker even starts draining the queue.
+   *
+   * `payloads` is an array of the SAME shape `publishOperation`'s own
+   * `payload` argument takes -- each entry's own `target_user_id`/
+   * `target_group_id` (if present) are extracted the same way, and the
+   * whole entry is stored verbatim as that row's `payload` jsonb column.
+   * `operationType` and `createdBy` are shared across every row in the
+   * batch, matching every existing call site's own usage (a single bulk
+   * action always enqueues one operation type under one actor/system
+   * attribution).
+   *
+   * Chunked into groups of `BATCH_INSERT_CHUNK_SIZE` rows per statement
+   * (rather than one unbounded statement for the whole array) so an
+   * arbitrarily large `payloads` array can never build a single INSERT
+   * that exceeds Postgres's bound-parameter limit. Chunks are inserted
+   * sequentially, not concurrently, to avoid opening many simultaneous
+   * connections against a possibly-shared `client`/pool for one logical
+   * bulk action.
+   *
+   * Same `client`-or-pool and correlation-id behavior as `publishOperation`
+   * (Requirements 17.5, 13.4) -- see that method's own doc comment.
+   *
+   * @param {string} operationType
+   * @param {object[]} payloads - one entry per row to enqueue; may be empty.
+   * @param {number|null} [createdBy]
+   * @param {import('pg').PoolClient|null} [client]
+   * @returns {Promise<number[]>} the enqueued rows' ids, in the same
+   *   order as `payloads`.
+   */
+  static async publishOperationsBatch(operationType, payloads, createdBy = null, client = null) {
+    if (payloads.length === 0) {
+      return [];
+    }
+
+    const executor = client || pool;
+    const correlationId = getCorrelationId() || null;
+    const ids = [];
+
+    for (let chunkStart = 0; chunkStart < payloads.length; chunkStart += BATCH_INSERT_CHUNK_SIZE) {
+      const chunk = payloads.slice(chunkStart, chunkStart + BATCH_INSERT_CHUNK_SIZE);
+
+      const values = [];
+      const placeholderRows = chunk.map((payload, index) => {
+        const base = index * 6;
+        values.push(
+          operationType,
+          payload.target_user_id || null,
+          payload.target_group_id || null,
+          JSON.stringify(payload),
+          createdBy,
+          correlationId
+        );
+        return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`;
+      });
+
+      const query = `
+        INSERT INTO sync_operations (operation_type, target_user_id, target_group_id, payload, created_by, correlation_id)
+        VALUES ${placeholderRows.join(', ')}
+        RETURNING id
+      `;
+
+      const result = await executor.query(query, values);
+      ids.push(...result.rows.map((row) => row.id));
+    }
+
+    return ids;
   }
 
   static async publishBulkOperation(operationName, totalItems, createdBy) {

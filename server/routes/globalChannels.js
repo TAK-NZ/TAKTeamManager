@@ -20,6 +20,7 @@ router.get('/bch', authenticateToken, authorize, async (req, res) => {
     const channels = await globalChannelService.getBchChannels();
     res.json({ channels });
   } catch (error) {
+    getLogger().error({ err: error }, 'Failed to fetch BCH channels');
     res.status(500).json({ error: 'Failed to fetch BCH channels' });
   }
 });
@@ -30,6 +31,7 @@ router.get('/region', authenticateToken, authorize, async (req, res) => {
     const channels = await globalChannelService.getRegionChannels();
     res.json({ channels });
   } catch (error) {
+    getLogger().error({ err: error }, 'Failed to fetch region channels');
     res.status(500).json({ error: 'Failed to fetch region channels' });
   }
 });

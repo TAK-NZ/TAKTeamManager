@@ -213,15 +213,32 @@ class AuthentikSyncService {
    * "one user's failure must not abort or delay the others" discipline.
    *
    * @param {string[]} fetchedAuthentikIds - every `authentik_id` (as a
-   *   string) this run's fetch returned. An empty array here is only
-   *   ever reachable when `syncUsers` legitimately fetched zero users
-   *   (Authentik returned no accounts at all) -- a partial/failed fetch
-   *   never reaches this call site per `syncUsers`'s own success-path
-   *   gating, so this method applies no additional guard of its own
-   *   against an empty set (Requirement 2 Criterion 3 is enforced by the
-   *   CALLER, not here).
+   *   string) this run's fetch returned.
    */
   async reconcileOrphanedAccounts(fetchedAuthentikIds) {
+    // Resiliency-hardening: the candidate query below is
+    // `authentik_user_id::text <> ALL($1::text[])`, and Postgres's `<>
+    // ALL(...)` over an EMPTY array is vacuously true for every non-null
+    // `authentik_user_id` -- so an empty (or malformed/non-array)
+    // `fetchedAuthentikIds` would make EVERY active/suspended account in
+    // the system a sweep candidate, and this method would orphan all of
+    // them in one run. A live Authentik instance always has at least one
+    // user (this app's own service-account token among them), so an
+    // empty fetched-id list reaching here is itself evidence of an
+    // upstream anomaly -- e.g. Authentik answering 200 with a truncated
+    // or empty `results` page -- rather than a legitimate "Authentik
+    // currently holds zero user accounts" state. This guard refuses to
+    // run the sweep in that case rather than trusting it, logging so the
+    // anomaly is visible without silently mass-orphaning every account.
+    if (!Array.isArray(fetchedAuthentikIds) || fetchedAuthentikIds.length === 0) {
+      logger.error(
+        { fetchedAuthentikIds },
+        'Reconciliation_Sweep: refusing to run against an empty or malformed fetched-id list; ' +
+        'this would incorrectly orphan every account'
+      );
+      return;
+    }
+
     let candidates;
     try {
       const result = await db.query(

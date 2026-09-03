@@ -30,7 +30,6 @@ jest.mock('nodemailer', () => ({
 }));
 
 const pool = require('../config/database');
-const nodemailer = require('nodemailer');
 const EmailService = require('./EmailService');
 
 const ORIGINAL_ENV = { ...process.env };
@@ -81,7 +80,6 @@ describe('EmailService', () => {
       process.env.EMAIL_PORT = '465';
       mockCreateTransport.mockClear();
 
-      // eslint-disable-next-line no-new
       new EmailService();
 
       const options = mockCreateTransport.mock.calls[0][0];
@@ -96,7 +94,6 @@ describe('EmailService', () => {
       process.env.EMAIL_USE_SSL = 'false';
       mockCreateTransport.mockClear();
 
-      // eslint-disable-next-line no-new
       new EmailService();
 
       const options = mockCreateTransport.mock.calls[0][0];
@@ -110,7 +107,6 @@ describe('EmailService', () => {
       delete process.env.EMAIL_TIMEOUT;
       mockCreateTransport.mockClear();
 
-      // eslint-disable-next-line no-new
       new EmailService();
 
       const options = mockCreateTransport.mock.calls[0][0];

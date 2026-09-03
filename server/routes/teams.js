@@ -15,10 +15,22 @@ const EventPublisher = require('../services/EventPublisher');
 const router = express.Router();
 
 // Get joinable teams (public endpoint)
-router.get('/joinable', async (req, res) => {
+//
+// Performance-hardening: previously unbounded -- an unauthenticated
+// endpoint returning every public, joinable team with no LIMIT at all is
+// a soft scaling/DoS surface as the joinable-team count grows. Applies
+// the same shared `paginationParams` middleware every other list endpoint
+// uses (default pageSize 50, max 200), and reports `total`/`page`/
+// `pageSize` alongside the page of results so a client can page through
+// the full set.
+router.get('/joinable', paginationParams, async (req, res) => {
   try {
-    const teams = await Team.getJoinableTeams();
-    res.json({ teams });
+    const { page, pageSize, offset } = req.pagination;
+    const [teams, total] = await Promise.all([
+      Team.getJoinableTeams(pageSize, offset),
+      Team.getJoinableTeamsCount()
+    ]);
+    res.json({ teams, pagination: { page, pageSize, total } });
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to fetch joinable teams');
     res.status(500).json({ error: 'Failed to fetch joinable teams' });
@@ -689,6 +701,15 @@ router.post('/:teamId/members', authenticateToken, authorize, requireTeamAdmin, 
 
     res.status(201).json({ membership });
   } catch (error) {
+    // Data-corruption bugfix: a caller attempting to promote a user whose
+    // only relationship to this team is an inherited membership row gets
+    // a 400 naming the real reason, not a generic 500 -- this is a
+    // client-correctable rejection (the caller should transfer the
+    // user's Direct_Membership first), not a server error.
+    if (error instanceof Team.InheritedMembershipPromotionError) {
+      return res.status(400).json({ error: error.message });
+    }
+    getLogger().error({ err: error }, 'Failed to add member');
     res.status(500).json({ error: 'Failed to add member' });
   }
 });
@@ -873,6 +894,7 @@ router.get('/:teamId/hierarchy', authenticateToken, authorize, async (req, res) 
     const hierarchy = await Team.getTeamHierarchy(req.params.teamId);
     res.json({ hierarchy });
   } catch (error) {
+    getLogger().error({ err: error }, 'Failed to fetch team hierarchy');
     res.status(500).json({ error: 'Failed to fetch hierarchy' });
   }
 });

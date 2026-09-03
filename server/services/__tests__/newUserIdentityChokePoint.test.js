@@ -266,7 +266,18 @@ function lineAt(text, index) {
 // ---------------------------------------------------------------------------
 
 const AUTHENTIK_SERVICE_CREATE_USER_PATTERN = /\bauthentikService\.createUser\s*\(/g;
-const FETCH_CALL_PATTERN = /\bfetch\s*\(/g;
+// Resiliency-hardening: every raw `fetch(...)` call site in
+// server/services and server/routes was migrated to
+// `fetchWithTimeout(...)` (server/utils/fetchWithTimeout.js), a thin
+// wrapper that attaches a bounded AbortSignal so a hung Authentik
+// connection can never hang indefinitely. This is a call-site RENAME,
+// not a semantic change in what creates a user -- `fetchWithTimeout`
+// forwards its arguments to the native `fetch` unchanged (plus a
+// `signal`) -- so this pattern matches BOTH spellings. `\bfetch\b`
+// followed by an optional `WithTimeout` (rather than two separate
+// alternatives) keeps the single `\b...\(` word-boundary anchor shared
+// by both forms.
+const FETCH_CALL_PATTERN = /\bfetch(?:WithTimeout)?\s*\(/g;
 const USERS_COLLECTION_URL_PATTERN = /\/api\/v3\/core\/users\//;
 const POST_METHOD_PATTERN = /method\s*:\s*['"]POST['"]/;
 

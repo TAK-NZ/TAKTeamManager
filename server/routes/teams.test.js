@@ -42,6 +42,8 @@ jest.mock('../models/Team', () => {
   return {
     getAllTeams: jest.fn(),
     getTeamCount: jest.fn(),
+    getJoinableTeams: jest.fn(),
+    getJoinableTeamsCount: jest.fn(),
     getUserTeams: jest.fn(),
     getSubTeamsForCallsignLevel: jest.fn(),
     getSubTeams: jest.fn(),
@@ -232,6 +234,83 @@ describe('GET /api/teams/my-teams pagination (Requirement 11.4)', () => {
       expect(res.status).toBe(400);
       expect(Team.getUserTeams).not.toHaveBeenCalled();
     });
+  });
+});
+
+/**
+ * Performance-hardening: `GET /api/teams/joinable` (public, no auth) was
+ * previously fully unbounded -- no pagination applied at all. It now uses
+ * the same shared `paginationParams` middleware as `GET /my-teams`'s
+ * admin branch above, mirroring that same request/response contract.
+ */
+describe('GET /api/teams/joinable pagination (performance-hardening)', () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    app = buildApp();
+  });
+
+  it('returns 400 for an out-of-range pageSize before calling Team.getJoinableTeams', async () => {
+    const res = await request(app).get('/api/teams/joinable').query({ pageSize: 500 });
+
+    expect(res.status).toBe(400);
+    expect(Team.getJoinableTeams).not.toHaveBeenCalled();
+    expect(Team.getJoinableTeamsCount).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 for a non-numeric page before calling Team.getJoinableTeams', async () => {
+    const res = await request(app).get('/api/teams/joinable').query({ page: 'abc' });
+
+    expect(res.status).toBe(400);
+    expect(Team.getJoinableTeams).not.toHaveBeenCalled();
+  });
+
+  it('passes the resolved pageSize/offset through to Team.getJoinableTeams and echoes pagination metadata', async () => {
+    Team.getJoinableTeams.mockResolvedValue([{ id: 1, name: 'Team A', display_name: 'Team A' }]);
+    Team.getJoinableTeamsCount.mockResolvedValue(42);
+
+    const res = await request(app).get('/api/teams/joinable').query({ page: 2, pageSize: 5 });
+
+    expect(res.status).toBe(200);
+    // page=2, pageSize=5 -> offset = (2-1)*5 = 5
+    expect(Team.getJoinableTeams).toHaveBeenCalledWith(5, 5);
+    expect(res.body.pagination).toEqual({ page: 2, pageSize: 5, total: 42 });
+    expect(res.body.teams).toEqual([{ id: 1, name: 'Team A', display_name: 'Team A' }]);
+  });
+
+  it('defaults to page 1 / pageSize 50 when no query params are supplied', async () => {
+    Team.getJoinableTeams.mockResolvedValue([]);
+    Team.getJoinableTeamsCount.mockResolvedValue(0);
+
+    const res = await request(app).get('/api/teams/joinable');
+
+    expect(res.status).toBe(200);
+    expect(Team.getJoinableTeams).toHaveBeenCalledWith(50, 0);
+    expect(res.body.pagination).toEqual({ page: 1, pageSize: 50, total: 0 });
+  });
+
+  it('is reachable without authentication (no authenticateToken/authorize gate)', async () => {
+    Team.getJoinableTeams.mockResolvedValue([]);
+    Team.getJoinableTeamsCount.mockResolvedValue(0);
+
+    // buildApp() mounts the real router with no auth middleware bypass
+    // needed -- this route runs unauthenticated in production too (see
+    // publicRoutes.js), so simply not sending any credential is the
+    // correct test shape here.
+    const res = await request(app).get('/api/teams/joinable');
+
+    expect(res.status).toBe(200);
+  });
+
+  it('returns 500 without leaking the underlying error when Team.getJoinableTeams rejects', async () => {
+    Team.getJoinableTeams.mockRejectedValue(new Error('db unavailable'));
+    Team.getJoinableTeamsCount.mockResolvedValue(0);
+
+    const res = await request(app).get('/api/teams/joinable');
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Failed to fetch joinable teams');
   });
 });
 

@@ -18,9 +18,10 @@
  * (`suspend`, `unsuspend`, `orphan`) by calling the REAL production
  * entry points for each -- `AccountLifecycleService.suspendAccount`/
  * `unsuspendAccount` for the first two, and
- * `AuthentikSyncService.reconcileOrphanedAccounts` (with an empty
- * fetched-id set, so the row is always a candidate unless already
- * orphaned) for the third -- rather than reimplementing the state
+ * `AuthentikSyncService.reconcileOrphanedAccounts` (with a fetched-id set
+ * containing only a placeholder id, so the row's own id is never a
+ * member of it and stays a candidate unless already orphaned) for the
+ * third -- rather than reimplementing the state
  * machine. The mocked `pool`/`db` query function recognises each SQL
  * statement these two real modules issue and applies it to the model
  * row, closely mirroring how the sibling model-based property tests
@@ -100,7 +101,7 @@ function makeQueryImpl(row) {
     // candidate while not already orphaned, matching the real WHERE
     // clause's `account_status <> 'orphaned'` -- the authentik_user_id
     // filter is always satisfied here since every call in this test
-    // passes an empty fetched-id set.
+    // passes a fetched-id set that never contains 'eid-1'.
     if (typeof sql === 'string' && sql.includes('FROM users') && sql.includes("account_status <> 'orphaned'")) {
       if (row.account_status === 'orphaned') {
         return Promise.resolve({ rows: [] });
@@ -176,7 +177,13 @@ describe('Property 1: account_status/is_active consistency across every reachabl
           } else if (action === 'unsuspend') {
             await AccountLifecycleService.unsuspendAccount(1, ACTING_USER);
           } else {
-            await authentikSync.reconcileOrphanedAccounts([]);
+            // Resiliency-hardening: reconcileOrphanedAccounts now refuses
+            // to run at all against an EMPTY fetched-id list (a separate,
+            // dedicated guard). A non-matching placeholder id keeps this
+            // model's row a genuine candidate (its real
+            // `authentik_user_id`, 'eid-1', is never in this list) while
+            // exercising the sweep's normal code path.
+            await authentikSync.reconcileOrphanedAccounts(['unrelated-fetched-id']);
           }
         } catch {
           // An invalid transition for the current state (e.g. unsuspend
@@ -210,7 +217,7 @@ describe('Property 1: account_status/is_active consistency across every reachabl
             } else if (action === 'unsuspend') {
               await AccountLifecycleService.unsuspendAccount(1, ACTING_USER);
             } else {
-              await authentikSync.reconcileOrphanedAccounts([]);
+              await authentikSync.reconcileOrphanedAccounts(['unrelated-fetched-id']);
             }
           } catch {
             // Expected.

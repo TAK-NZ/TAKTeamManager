@@ -2,6 +2,8 @@ const fs = require('fs');
 const https = require('https');
 const axios = require('axios');
 const logger = require('../config/logger').createLogger('TakServerService');
+const { DEFAULT_FETCH_TIMEOUT_MS } = require('../utils/fetchWithTimeout');
+const { CircuitBreaker } = require('../utils/circuitBreaker');
 
 /**
  * TAK Server certificate lifecycle integration (Requirement 26,
@@ -83,7 +85,34 @@ class TakServerService {
 
     this.client = axios.create({
       baseURL: this.baseURL,
+      // Resiliency-hardening: no default timeout was set here, so a
+      // hung/unreachable TAK Server would leave a Marti certadmin call
+      // waiting indefinitely. `refreshAgent()` below only rebuilds
+      // `httpsAgent` in place, so this timeout survives every credential
+      // rotation. Same 10000ms value used everywhere else for consistency.
+      timeout: DEFAULT_FETCH_TIMEOUT_MS,
       httpsAgent: new https.Agent(this.agentOptions)
+    });
+
+    // Resiliency-hardening: every `this.client.*` call below is routed
+    // through `this.circuitBreaker.execute(...)` at its call site, so a
+    // run of failed Marti calls (unreachable/timed-out TAK Server) trips
+    // the breaker and subsequent calls fail fast instead of each waiting
+    // out the full axios `timeout` above. See
+    // `server/utils/circuitBreaker.js`'s own doc comment for the state
+    // machine. The client's methods are deliberately left unwrapped/
+    // untouched (rather than monkey-patched via `wrapAxiosClientMethods`):
+    // this repo's tests replace `service.client` outright with a plain
+    // object (see e.g. `DeviceSync.test.js`'s `createViewBackedTakServerService`)
+    // AFTER construction, which a constructor-time wrap would not see.
+    this.circuitBreaker = new CircuitBreaker({
+      name: 'tak-server',
+      onStateChange: ({ from, to }) => {
+        logger[to === 'open' ? 'error' : 'warn'](
+          { from, to },
+          `TAK Server circuit breaker transitioned ${from} -> ${to}`
+        );
+      }
     });
   }
 
@@ -193,7 +222,7 @@ class TakServerService {
    * @returns {Promise<Array<object>>} the raw `TakCert` list.
    */
   async listCertificates() {
-    const response = await this.client.get('/Marti/api/certadmin/cert');
+    const response = await this.circuitBreaker.execute(() => this.client.get('/Marti/api/certadmin/cert'));
     return response.data.data;
   }
 
@@ -225,7 +254,7 @@ class TakServerService {
    * @returns {Promise<Array<object>>} the active `TakCert` list.
    */
   async listActiveCertificates() {
-    const response = await this.client.get('/Marti/api/certadmin/cert/active');
+    const response = await this.circuitBreaker.execute(() => this.client.get('/Marti/api/certadmin/cert/active'));
     return unwrapArray(response);
   }
 
@@ -260,7 +289,7 @@ class TakServerService {
    * @returns {Promise<Array<object>>} the revoked `TakCert` list.
    */
   async listRevokedCertificates() {
-    const response = await this.client.get('/Marti/api/certadmin/cert/revoked');
+    const response = await this.circuitBreaker.execute(() => this.client.get('/Marti/api/certadmin/cert/revoked'));
     return unwrapArray(response);
   }
 
@@ -402,8 +431,8 @@ class TakServerService {
     const query = sanitizeClientEndpointParams(params);
 
     const response = query
-      ? await this.client.get('/Marti/api/clientEndPoints', { params: query })
-      : await this.client.get('/Marti/api/clientEndPoints');
+      ? await this.circuitBreaker.execute(() => this.client.get('/Marti/api/clientEndPoints', { params: query }))
+      : await this.circuitBreaker.execute(() => this.client.get('/Marti/api/clientEndPoints'));
 
     return unwrapArray(response);
   }
@@ -458,7 +487,7 @@ class TakServerService {
    * @returns {Promise<Array<object>>} the `SubscriptionInfo` list.
    */
   async getAllSubscriptions() {
-    const response = await this.client.get('/Marti/api/subscriptions/all');
+    const response = await this.circuitBreaker.execute(() => this.client.get('/Marti/api/subscriptions/all'));
 
     return unwrapArray(response);
   }
@@ -541,7 +570,7 @@ class TakServerService {
    */
   async revokeCertificates(certIds) {
     const idsParam = certIds.join(',');
-    await this.client.delete(`/Marti/api/certadmin/cert/revoke/${idsParam}`);
+    await this.circuitBreaker.execute(() => this.client.delete(`/Marti/api/certadmin/cert/revoke/${idsParam}`));
 
     const revokedCertificates = await this.listRevokedCertificates();
     const revokedIds = new Set(revokedCertificates.map((cert) => cert.id));

@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const pool = require('../config/database');
 const EmailService = require('./EmailService');
 const SignupCodeService = require('./SignupCodeService');
+const logger = require('../config/logger').createLogger('SignupFlowService');
 
 const emailService = new EmailService();
 
@@ -164,6 +165,7 @@ class SignupFlowService {
           await emailService.sendEmail(email, 'signup_pending_review', {});
         } catch (err) {
           // Template may not exist yet — log and continue gracefully
+          logger.warn({ err }, 'Failed to send signup_pending_review email');
         }
         break;
       }
@@ -176,6 +178,7 @@ class SignupFlowService {
           });
         } catch (err) {
           // Template may not exist yet — log and continue gracefully
+          logger.warn({ err }, 'Failed to send signup_already_active email');
         }
         break;
       }
@@ -293,6 +296,43 @@ class SignupFlowService {
       result.codeTeamId = codeTeamIdForClient;
     }
     return result;
+  }
+
+  /**
+   * Resolves the requester email address associated with a still-valid,
+   * not-yet-consumed verification token, without consuming it or
+   * otherwise mutating any row.
+   *
+   * Used by `emailKeyedRequestAccessLimiter`
+   * (`server/middleware/rateLimiters.js`) so `POST /requests/team-access`
+   * -- whose request body carries the verification token rather than the
+   * email address directly -- can still be rate-limited per email
+   * (Requirement 7.2), consistent with `POST /requests/initiate`'s
+   * email-in-body case.
+   *
+   * Returns `null` (never throws) for an invalid/expired/already-consumed
+   * token, so a rate-limiting middleware calling this can fail open on
+   * "no email to key against" and let the route handler's own token
+   * validation produce the actual error response.
+   *
+   * @param {string} token
+   * @returns {Promise<string|null>}
+   */
+  async resolveEmailByToken(token) {
+    if (typeof token !== 'string' || token.trim().length === 0) {
+      return null;
+    }
+
+    const tokenResult = await pool.query(
+      `SELECT requester_email FROM access_requests
+       WHERE email_verification_token = $1
+         AND email_verification_expires_at > NOW()
+         AND email_verified = false
+       LIMIT 1`,
+      [token]
+    );
+
+    return tokenResult.rows[0]?.requester_email ?? null;
   }
 
   /**

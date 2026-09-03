@@ -1,5 +1,7 @@
 const axios = require('axios');
 const logger = require('../config/logger').createLogger('AuthentikService');
+const { DEFAULT_FETCH_TIMEOUT_MS } = require('../utils/fetchWithTimeout');
+const { CircuitBreaker } = require('../utils/circuitBreaker');
 
 class AuthentikService {
   constructor() {
@@ -11,9 +13,41 @@ class AuthentikService {
     this.apiToken = process.env.AUTHENTIK_API_TOKEN;
     this.client = axios.create({
       baseURL: `${this.baseURL}/api/v3`,
+      // Resiliency-hardening: axios has no default timeout of its own
+      // (unlike native `fetch`, which now gets one via
+      // `server/utils/fetchWithTimeout.js`) -- without this, a hung
+      // Authentik connection would leave a caller waiting indefinitely.
+      // Same 10000ms value used everywhere else for consistency.
+      timeout: DEFAULT_FETCH_TIMEOUT_MS,
       headers: {
         'Authorization': `Bearer ${this.apiToken}`,
         'Content-Type': 'application/json'
+      }
+    });
+
+    // Resiliency-hardening: a single breaker for every call this service
+    // makes against Authentik, whether via `this.client` (least-privilege
+    // token) or `this.enrollmentClient` (isolated superuser token) below --
+    // both talk to the SAME Authentik server, so a run of failures on
+    // either client is evidence Authentik itself is unreachable, and both
+    // should fail fast together rather than tracking two independent,
+    // artificially separate failure counts. See
+    // `server/utils/circuitBreaker.js`'s own doc comment for the state
+    // machine. Every `this.client.*`/`this.enrollmentClient.*` call below
+    // is routed through `this.circuitBreaker.execute(...)` at its call
+    // site rather than the client object's methods being mutated in
+    // place -- this repo's existing tests configure a mock client's
+    // `post`/`get`/`delete` resolved values AFTER construction (on the
+    // same object `axios.create` returned), so replacing those methods
+    // here would silently detach the mock's `mockResolvedValue` etc. from
+    // whatever the service actually calls.
+    this.circuitBreaker = new CircuitBreaker({
+      name: 'authentik',
+      onStateChange: ({ from, to }) => {
+        logger[to === 'open' ? 'error' : 'warn'](
+          { from, to },
+          `Authentik circuit breaker transitioned ${from} -> ${to}`
+        );
       }
     });
 
@@ -40,6 +74,7 @@ class AuthentikService {
     this.enrollmentClient = this.enrollmentAdminToken
       ? axios.create({
           baseURL: `${this.baseURL}/api/v3`,
+          timeout: DEFAULT_FETCH_TIMEOUT_MS,
           headers: {
             'Authorization': `Bearer ${this.enrollmentAdminToken}`,
             'Content-Type': 'application/json'
@@ -73,21 +108,25 @@ class AuthentikService {
   // `type: 'internal'` in Authentik until/unless a separate backfill
   // migrates it.
   async createUser(userData) {
-    const response = await this.client.post('/core/users/', {
-      username: userData.username,
-      name: userData.name,
-      email: userData.email,
-      is_active: true,
-      type: userData.type || 'internal'
-    });
+    const response = await this.circuitBreaker.execute(() =>
+      this.client.post('/core/users/', {
+        username: userData.username,
+        name: userData.name,
+        email: userData.email,
+        is_active: true,
+        type: userData.type || 'internal'
+      })
+    );
     return response.data;
   }
 
   // Set user password
   async setUserPassword(userId, password) {
-    await this.client.post(`/core/users/${userId}/set_password/`, {
-      password: password
-    });
+    await this.circuitBreaker.execute(() =>
+      this.client.post(`/core/users/${userId}/set_password/`, {
+        password: password
+      })
+    );
   }
 
   // Requirement 27 Criteria 5-7 (task 49.3): creates a short-lived
@@ -153,22 +192,26 @@ class AuthentikService {
 
     const expires = new Date(Date.now() + expiresInMinutes * 60 * 1000).toISOString();
 
-    const createResponse = await this.enrollmentClient.post('/core/tokens/', {
-      identifier,
-      intent: 'app_password',
-      user: userId,
-      expiring: true,
-      expires
-    });
+    const createResponse = await this.circuitBreaker.execute(() =>
+      this.enrollmentClient.post('/core/tokens/', {
+        identifier,
+        intent: 'app_password',
+        user: userId,
+        expiring: true,
+        expires
+      })
+    );
 
     let keyResponse;
     try {
-      keyResponse = await this.enrollmentClient.get(
-        `/core/tokens/${encodeURIComponent(identifier)}/view_key/`
+      keyResponse = await this.circuitBreaker.execute(() =>
+        this.enrollmentClient.get(`/core/tokens/${encodeURIComponent(identifier)}/view_key/`)
       );
     } catch (keyFetchError) {
       try {
-        await this.enrollmentClient.delete(`/core/tokens/${encodeURIComponent(identifier)}/`);
+        await this.circuitBreaker.execute(() =>
+          this.enrollmentClient.delete(`/core/tokens/${encodeURIComponent(identifier)}/`)
+        );
       } catch (deleteError) {
         logger.error(
           { err: deleteError, identifier },
@@ -216,14 +259,14 @@ class AuthentikService {
   // caller can report a `total` independent of the current page.
   async getUsers({ page, pageSize } = {}) {
     if (page === undefined && pageSize === undefined) {
-      const response = await this.client.get('/core/users/?type=internal');
+      const response = await this.circuitBreaker.execute(() => this.client.get('/core/users/?type=internal'));
       return response.data.results;
     }
 
     const resolvedPage = page || 1;
     const resolvedPageSize = pageSize || 50;
-    const response = await this.client.get(
-      `/core/users/?type=internal&page=${resolvedPage}&page_size=${resolvedPageSize}`
+    const response = await this.circuitBreaker.execute(() =>
+      this.client.get(`/core/users/?type=internal&page=${resolvedPage}&page_size=${resolvedPageSize}`)
     );
     return {
       results: response.data.results,
@@ -233,39 +276,45 @@ class AuthentikService {
 
   // Get user by username
   async getUserByUsername(username) {
-    const response = await this.client.get(`/core/users/?username=${username}`);
+    const response = await this.circuitBreaker.execute(() => this.client.get(`/core/users/?username=${username}`));
     return response.data.results[0] || null;
   }
 
   // Create LDAP group for channel
   async createGroup(groupData) {
-    const response = await this.client.post('/core/groups/', {
-      name: groupData.name,
-      attributes: {
-        description: groupData.description
-      }
-    });
+    const response = await this.circuitBreaker.execute(() =>
+      this.client.post('/core/groups/', {
+        name: groupData.name,
+        attributes: {
+          description: groupData.description
+        }
+      })
+    );
     return response.data;
   }
 
   // Add user to group
   async addUserToGroup(groupId, userId) {
-    await this.client.post(`/core/groups/${groupId}/add_user/`, {
-      pk: userId
-    });
+    await this.circuitBreaker.execute(() =>
+      this.client.post(`/core/groups/${groupId}/add_user/`, {
+        pk: userId
+      })
+    );
   }
 
   // Remove user from group
   async removeUserFromGroup(groupId, userId) {
-    await this.client.post(`/core/groups/${groupId}/remove_user/`, {
-      pk: userId
-    });
+    await this.circuitBreaker.execute(() =>
+      this.client.post(`/core/groups/${groupId}/remove_user/`, {
+        pk: userId
+      })
+    );
   }
 
   // Get group by name
   async getGroupByName(name) {
     const encodedName = encodeURIComponent(name);
-    const response = await this.client.get(`/core/groups/?name=${encodedName}`);
+    const response = await this.circuitBreaker.execute(() => this.client.get(`/core/groups/?name=${encodedName}`));
     return response.data.results[0] || null;
   }
 }

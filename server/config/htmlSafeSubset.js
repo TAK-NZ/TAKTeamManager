@@ -8,6 +8,24 @@
 // DOMPurify) configured with an equivalent tag/attribute allow-list.
 //
 // Requirements: 5.4, 5.5, 5.6
+//
+// Dependency note (2026-09): `npm audit` flags `sanitize-html@1.9.0-2.17.6`
+// for GHSA-g8qq-57p8-ggw5 (moderate) -- a stored-XSS bypass via SVG
+// `<animate>`/`<set>` elements whose `values` attribute carries SMIL
+// URI-list semantics that the library's flat per-attribute scheme check
+// does not parse, letting a `javascript:` URL smuggle past
+// `allowedSchemesAppliedToAttributes`. This app's ALLOWED_TAGS below never
+// includes `svg`, `animate`, or `set`, and `disallowedTagsMode: 'discard'`
+// strips any tag outside the allow-list entirely, so the vulnerable code
+// path is unreachable through `SANITIZE_HTML_OPTIONS` regardless of the
+// installed sanitize-html version. The fixed release (2.17.7) is
+// deliberately NOT installed: it bumps its `htmlparser2` dependency to a
+// pure-ESM-only release (12.x, no CommonJS entry point), which breaks
+// every `require('sanitize-html')` call in this CommonJS codebase under
+// Jest. If ALLOWED_TAGS is ever extended to include `svg` or any SVG
+// animation element, re-evaluate this decision immediately -- the
+// unreachability argument above depends entirely on the current
+// allow-list.
 
 // Tags permitted in sanitized output. Deliberately excludes <script>,
 // <iframe>, <object>, <embed>, and any other tag capable of executing script

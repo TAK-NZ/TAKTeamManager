@@ -47,6 +47,9 @@
     "qrcode": "^1.5.4",
     "sanitize-html": "2.17.5"
   },
+  "overrides": {
+    "qs": "6.16.0"
+  },
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "@fast-check/jest": "2.2.0",

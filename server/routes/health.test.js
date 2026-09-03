@@ -162,6 +162,44 @@ describe('GET /health/ready (Requirements 14.3, 14.4)', () => {
     expect(res.body.reason.toLowerCase()).toContain('authentik');
   });
 
+  /**
+   * Resiliency-hardening: `Promise.allSettled` itself never rejects, but
+   * the code AFTER it (building `reasons`, calling `res.status().json()`)
+   * was previously unguarded -- a bug there became an unhandled rejection
+   * inside this `async` handler, which Express does not automatically
+   * catch/convert into a response. Simulated here by monkey-patching
+   * `res.json` (via middleware mounted before the router) to throw once,
+   * so the failure happens strictly after `Promise.allSettled` resolves,
+   * inside the handler's own post-processing code -- exactly the
+   * previously-unguarded region.
+   */
+  it('returns 503 {status: "not_ready"} rather than hanging when an unexpected error occurs after both checks settle', async () => {
+    pool.query.mockResolvedValue({ rows: [{ '?column?': 1 }] });
+    axios.get.mockResolvedValue({ data: { results: [] } });
+
+    const appWithBug = express();
+    appWithBug.use((req, res, next) => {
+      const originalJson = res.json.bind(res);
+      let callCount = 0;
+      res.json = (body) => {
+        callCount += 1;
+        if (callCount === 1) {
+          throw new Error('simulated bug in response serialization');
+        }
+        return originalJson(body);
+      };
+      next();
+    });
+    appWithBug.use('/health', healthRouter);
+
+    const res = await request(appWithBug).get('/health/ready');
+
+    expect(res.status).toBe(503);
+    expect(res.body.status).toBe('not_ready');
+    expect(typeof res.body.reason).toBe('string');
+    expect(res.body.reason).not.toContain('simulated bug');
+  });
+
   it('runs the DB and Authentik checks concurrently rather than sequentially', async () => {
     pool.query.mockImplementation(
       () => new Promise((resolve) => setTimeout(() => resolve({ rows: [{ '?column?': 1 }] }), 200))

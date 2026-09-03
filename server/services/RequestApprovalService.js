@@ -6,6 +6,7 @@ const EventPublisher = require('./EventPublisher');
 const UserAttributesService = require('./userAttributes');
 const Team = require('../models/Team');
 const { getLogger } = require('../middleware/requestContext');
+const { fetchWithTimeout } = require('../utils/fetchWithTimeout');
 
 class RequestApprovalService {
   constructor() {
@@ -235,7 +236,9 @@ class RequestApprovalService {
               });
               teamPath = segments.join(' - ');
             }
-          } catch (pathErr) {}
+          } catch {
+            // Fall back to team_name
+          }
 
           await this.emailService.sendApprovalEmail(
             request.requester_email,
@@ -316,7 +319,7 @@ class RequestApprovalService {
               });
               teamPath = segments.join(' - ');
             }
-          } catch (pathErr) {
+          } catch {
             // Fall back to team_name
           }
 
@@ -365,7 +368,7 @@ class RequestApprovalService {
         const failedStep = 'local_transaction';
         let compensationOutcome;
         try {
-          const deleteResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${newAccountAuthentikUser.pk}/`, {
+          const deleteResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${newAccountAuthentikUser.pk}/`, {
             method: 'DELETE',
             headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
           });
@@ -373,6 +376,13 @@ class RequestApprovalService {
           if (deleteResponse.ok || deleteResponse.status === 404) {
             compensationOutcome = 'deleted_synchronously';
           } else {
+            // Not a re-throw of the outer `catch (error)`'s transaction
+            // failure -- this is a new, unrelated error describing the
+            // Authentik delete's own HTTP response. Attaching the outer
+            // `error` as this error's `cause` would misrepresent the
+            // transaction failure as the reason the delete call itself
+            // returned a non-2xx/404 status.
+            // eslint-disable-next-line preserve-caught-error
             throw new Error(`Authentik delete responded with status ${deleteResponse.status}`);
           }
         } catch (deleteError) {
@@ -534,7 +544,7 @@ class RequestApprovalService {
     const lastName = request.requested_last_name || request.requester_last_name;
     const username = resolvedUsername;
 
-    const existingUserResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/?email=${encodeURIComponent(email)}`, {
+    const existingUserResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/users/?email=${encodeURIComponent(email)}`, {
       headers: { Authorization: `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
     });
     const existingUsers = await existingUserResponse.json();
@@ -543,7 +553,7 @@ class RequestApprovalService {
       throw new Error('User with this email already exists');
     }
 
-    const createUserResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/`, {
+    const createUserResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/users/`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
@@ -604,7 +614,7 @@ class RequestApprovalService {
     const authentikUserId = userResult.rows[0].authentik_user_id;
 
     // Update the user's name in Authentik.
-    const patchNameResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
+    const patchNameResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
       method: 'PATCH',
       headers: {
         'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
@@ -665,7 +675,7 @@ class RequestApprovalService {
           });
           denialTeamPath = segments.join(' - ');
         }
-      } catch (pathErr) {
+      } catch {
         // Fall back to just team_name
       }
 

@@ -308,33 +308,30 @@ class GlobalChannelService {
   }
 
   async assignAllUsersToGlobalChannels() {
-    try {
-      // Get all active users
-      const usersResult = await pool.query('SELECT id FROM users WHERE is_active = true');
-      const userIds = usersResult.rows.map(row => row.id);
-      
-      if (userIds.length === 0) return { usersProcessed: 0 };
-      
-      // Queue bulk operation for global channel assignment
-      const bulkOpId = await EventPublisher.publishBulkOperation(
-        `Assign ${userIds.length} users to global channels`,
-        userIds.length,
-        null // System operation
-      );
-      
-      // Queue individual operations for each user
-      for (const userId of userIds) {
-        await EventPublisher.publishOperation('assign_user_to_global_channels', {
-          target_user_id: userId,
-          bulk_operation_id: bulkOpId
-        });
-      }
-      
-      return { usersProcessed: userIds.length, bulkOperationId: bulkOpId };
-      
-    } catch (error) {
-      throw error;
-    }
+    // Get all active users
+    const usersResult = await pool.query('SELECT id FROM users WHERE is_active = true');
+    const userIds = usersResult.rows.map(row => row.id);
+
+    if (userIds.length === 0) return { usersProcessed: 0 };
+
+    // Queue bulk operation for global channel assignment
+    const bulkOpId = await EventPublisher.publishBulkOperation(
+      `Assign ${userIds.length} users to global channels`,
+      userIds.length,
+      null // System operation
+    );
+
+    // Performance-hardening: one multi-row INSERT (chunked internally by
+    // EventPublisher.publishOperationsBatch) instead of one INSERT per
+    // user -- at the documented 50,000-user scale, the former issued
+    // 50,000 sequential round trips before the Sync_Worker even started
+    // draining the queue.
+    await EventPublisher.publishOperationsBatch(
+      'assign_user_to_global_channels',
+      userIds.map((userId) => ({ target_user_id: userId, bulk_operation_id: bulkOpId }))
+    );
+
+    return { usersProcessed: userIds.length, bulkOperationId: bulkOpId };
   }
 
   async getBchChannels() {
@@ -400,11 +397,11 @@ class GlobalChannelService {
       credentials.service_account_password = CredentialEncryptionService.decrypt(
         credentials.service_account_password
       );
-    } catch (err) {
+    } catch {
       // Requirement 6.3: on decrypt failure, do not leak the ciphertext or
-      // the underlying crypto error. Log the failure (without plaintext or
-      // ciphertext) and throw a generic error reusing the decrypt service's
-      // own generic message.
+      // the underlying crypto error (not even as `cause`). Log the
+      // failure (without plaintext or ciphertext) and throw a generic
+      // error reusing the decrypt service's own generic message.
       logger.error({
         channelId,
         actorId: requestingUserId,
@@ -927,19 +924,45 @@ class GlobalChannelService {
     }
   }
 
+  /**
+   * Enqueues a `sync_existing_global_channels` Sync_Operation, handled by
+   * `SyncWorker.syncExistingGlobalChannels` (`server/workers/syncWorker.js`).
+   * That handler fetches every Authentik group, recognises BCH/UTL and
+   * Region channel groups by their naming convention, and for each one
+   * either INSERTs a new local row (a group Authentik has that this app
+   * does not yet know about) or UPDATEs an existing row's
+   * description/group id(s) to match Authentik.
+   *
+   * Deliberately one-directional, by design, not an oversight: this sync
+   * NEVER deletes or deactivates a local `bch_channels`/`region_channels`
+   * row whose corresponding Authentik group is absent from the fetched
+   * list. A channel row missing from that list could mean either "this
+   * channel's group was genuinely removed in Authentik" or "the fetch
+   * only returned a partial/incomplete group list" (a paging bug, an
+   * Authentik outage mid-request, or a permissions change on the token
+   * this app uses) -- and those two cases are indistinguishable from
+   * this side. Auto-deleting on the strength of an absence would risk
+   * silently destroying a channel (and, transitively, every BCH service
+   * account credential and Region group-membership rule attached to it)
+   * because of a transient or partial fetch, which is a far worse
+   * failure mode than leaving a stale row for an admin to notice and
+   * remove explicitly via `deleteGlobalChannel`/`deactivateGlobalChannel`
+   * above. This mirrors the same asymmetry `DeviceSync`/`SubscriptionPoller`
+   * document for their own upstream-absence handling (server-conventions
+   * steering: "an upstream outage that reads as empty must not wipe a
+   * table").
+   *
+   * @param {number} syncedBy
+   * @returns {Promise<{success: true}>}
+   */
   async syncExistingChannels(syncedBy) {
-    try {
-      // Queue operation to sync existing channels from Authentik
-      await EventPublisher.publishOperation('sync_existing_global_channels', {
-        synced_by: syncedBy
-      }, syncedBy);
-      
-      // Return success - actual sync happens asynchronously
-      return { success: true };
-      
-    } catch (error) {
-      throw error;
-    }
+    // Queue operation to sync existing channels from Authentik
+    await EventPublisher.publishOperation('sync_existing_global_channels', {
+      synced_by: syncedBy
+    }, syncedBy);
+
+    // Return success - actual sync happens asynchronously
+    return { success: true };
   }
 
   async deactivateGlobalChannel(channelId, channelType, deactivatedBy) {

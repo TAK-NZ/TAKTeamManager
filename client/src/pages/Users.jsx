@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { PlusIcon, MagnifyingGlassIcon, XMarkIcon, ChevronUpIcon, ChevronDownIcon, ArrowUpTrayIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import { usersAPI, teamsAPI, configAPI } from '../services/api'
@@ -159,11 +159,18 @@ export default function Users({ user }) {
     }
   }, [])
 
-  const filteredUsers = users.filter(user =>
-    user.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    user.email?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    user.username?.toLowerCase().includes(searchQuery.toLowerCase())
-  )
+  // Performance-hardening: memoized against [users, searchQuery] so an
+  // unrelated re-render (e.g. opening an edit row, a dialog, or updating
+  // takRoleValues) does not re-filter the entire fetched user list from
+  // scratch. Bounded by the server's own pagination page size in
+  // practice, but recomputing on every render was still pure waste.
+  const filteredUsers = useMemo(() => (
+    users.filter(user =>
+      user.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      user.email?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      user.username?.toLowerCase().includes(searchQuery.toLowerCase())
+    )
+  ), [users, searchQuery])
 
   // `name` sorts case-insensitively as a string, matching
   // TeamDetail.jsx's own `filterAndSort`. `last_login` sorts as a
@@ -173,26 +180,32 @@ export default function Users({ user }) {
   // would leave a "Never" row's position undefined relative to its
   // neighbours -- this way "Never" rows sort first ascending, last
   // descending, consistent with them being the oldest activity.
-  const sortedUsers = sortField
-    ? [...filteredUsers].sort((a, b) => {
-        let aValue
-        let bValue
-        if (sortField === 'last_login') {
-          const aTime = Date.parse(a.last_login)
-          const bTime = Date.parse(b.last_login)
-          aValue = Number.isNaN(aTime) ? -Infinity : aTime
-          bValue = Number.isNaN(bTime) ? -Infinity : bTime
-        } else {
-          aValue = (a[sortField] || '').toLowerCase()
-          bValue = (b[sortField] || '').toLowerCase()
-        }
+  //
+  // Performance-hardening: memoized against
+  // [filteredUsers, sortField, sortDirection] for the same reason as
+  // filteredUsers above.
+  const sortedUsers = useMemo(() => (
+    sortField
+      ? [...filteredUsers].sort((a, b) => {
+          let aValue
+          let bValue
+          if (sortField === 'last_login') {
+            const aTime = Date.parse(a.last_login)
+            const bTime = Date.parse(b.last_login)
+            aValue = Number.isNaN(aTime) ? -Infinity : aTime
+            bValue = Number.isNaN(bTime) ? -Infinity : bTime
+          } else {
+            aValue = (a[sortField] || '').toLowerCase()
+            bValue = (b[sortField] || '').toLowerCase()
+          }
 
-        if (sortDirection === 'asc') {
-          return aValue < bValue ? -1 : aValue > bValue ? 1 : 0
-        }
-        return aValue > bValue ? -1 : aValue < bValue ? 1 : 0
-      })
-    : filteredUsers
+          if (sortDirection === 'asc') {
+            return aValue < bValue ? -1 : aValue > bValue ? 1 : 0
+          }
+          return aValue > bValue ? -1 : aValue < bValue ? 1 : 0
+        })
+      : filteredUsers
+  ), [filteredUsers, sortField, sortDirection])
 
   const handleSort = (field) => {
     setSortDirection(sortField === field && sortDirection === 'asc' ? 'desc' : 'asc')

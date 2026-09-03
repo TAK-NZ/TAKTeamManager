@@ -5,19 +5,23 @@
  * Sync_Worker fail fast with a clear, actionable error instead of an
  * obscure runtime failure deep inside a request handler or sync operation.
  *
- * Scope of this module today: presence/non-empty (after `.trim()`) checks
- * for the Requirement 15.1 variable list (Criteria 15.1, 15.2); URL
- * well-formedness checks for AUTHENTIK_URL/APP_URL/FRONTEND_URL (Criteria
- * 15.3, 15.4); JWT_SECRET length / JWT_EXPIRES_IN duration checks (Criteria
- * 3.5, 3.6); the TAK Server mutual TLS credential gate described in
+ * Scope of this module today: a security-hardening check that `NODE_ENV`,
+ * if set, is an exact match for a recognized value (see
+ * `collectNodeEnvConfigIssues` below); presence/non-empty (after
+ * `.trim()`) checks for the Requirement 15.1 variable list (Criteria
+ * 15.1, 15.2); URL well-formedness checks for
+ * AUTHENTIK_URL/APP_URL/FRONTEND_URL (Criteria 15.3, 15.4); JWT_SECRET
+ * length / JWT_EXPIRES_IN duration checks (Criteria 3.5, 3.6); the TAK
+ * Server mutual TLS credential gate described in
  * Requirement 26.1-26.2 (see `collectTakServerConfigIssues` below), which
  * only applies WHERE `TAK_SERVER_URL` is configured; the Requirement 25.1/
  * 25.4 data-retention threshold checks for `SYNC_OPERATIONS_RETENTION_DAYS`
  * and `AUDIT_LOGS_RETENTION_DAYS` (see `collectRetentionConfigIssues`
  * below); when `NODE_ENV=production`, the secrets-manager gate
  * described in Requirement 6.4 (see `validateProductionSecrets` below);
- * the Requirement 15.5 production database-TLS-certificate-validation
- * warning (see `checkDatabaseTlsCertificateValidationWarning` below); and
+ * the Requirement 15.5 production database-TLS-certificate-verification
+ * diagnostic warning for an unset `DB_CA_PATH` (see
+ * `warnIfDatabaseTlsCertificateValidationDisabled` below); and
  * the Requirement 1 Criterion 5 startup assertion that a route module is
  * mounted at `/api/auth` (see `assertAuthRouteMounted` below).
  */
@@ -44,6 +48,24 @@ const REQUIRED_VARS = [
   'FRONTEND_URL',
   'APP_URL'
 ];
+
+// Security-hardening: the exact, case-sensitive set of `NODE_ENV` values
+// this codebase's own `NODE_ENV === 'production'` / `!== 'production'`
+// checks are written against (the session cookie's `secure` flag in
+// `server/routes/auth.js`, the reCAPTCHA test-only bypass gate in
+// `server/middleware/captcha.js`, the database TLS certificate
+// verification default in `server/config/database.js`, and the
+// production secrets-provider gate in this file). Every one of those
+// checks is a single string-equality comparison with no independent
+// safety net -- a typo'd or unset `NODE_ENV` in an actual production
+// deployment would silently degrade several of them at once (a
+// non-Secure session cookie, an inert reCAPTCHA bypass gate that stays
+// inert only by not matching 'production' either way, TLS verification
+// still defaulting on either way today but relying on a matching
+// string). Validating `NODE_ENV` itself against this known set turns
+// that class of misconfiguration into a loud startup failure instead of
+// several silent ones.
+const VALID_NODE_ENV_VALUES = ['production', 'development', 'test'];
 
 // Requirement 15.3/15.4: the environment variables that must be well-formed
 // absolute URLs.
@@ -132,7 +154,7 @@ function isWellFormedUrl(value) {
   let parsed;
   try {
     parsed = new URL(value);
-  } catch (err) {
+  } catch {
     return false;
   }
 
@@ -198,6 +220,43 @@ function isValidJwtExpiry(value) {
     return false;
   }
   return ms >= MIN_JWT_EXPIRY_MS && ms <= MAX_JWT_EXPIRY_MS;
+}
+
+/**
+ * Security-hardening: WHERE `NODE_ENV` is set (non-empty after
+ * trimming), requires it to be an EXACT, case-sensitive match for one of
+ * `VALID_NODE_ENV_VALUES` ('production', 'development', 'test'). `NODE_ENV`
+ * being entirely unset is treated the same as every non-'production'
+ * value already is throughout this codebase (permitted, non-production
+ * behavior) -- this check exists to catch a MISTYPED or miscased value
+ * (`'prod'`, `'Production'`, `'PRODUCTION '`) that would otherwise
+ * silently fall through every `NODE_ENV === 'production'` string-equality
+ * check as "not production," in an environment an operator actually
+ * intended to be production.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {string[]} human-readable issue descriptions; empty when
+ *   `NODE_ENV` is unset or an exact match for a recognized value.
+ */
+function collectNodeEnvConfigIssues(env) {
+  const nodeEnv = env.NODE_ENV;
+  const isSet = typeof nodeEnv === 'string' && nodeEnv.trim().length > 0;
+
+  if (!isSet) {
+    return [];
+  }
+
+  if (!VALID_NODE_ENV_VALUES.includes(nodeEnv)) {
+    return [
+      `NODE_ENV is set to "${nodeEnv}", which is not one of the recognized values ` +
+        `(${VALID_NODE_ENV_VALUES.join(', ')}). A misspelled or miscased value here would ` +
+        'silently fail every NODE_ENV === "production" check elsewhere in this codebase ' +
+        '(e.g. the session cookie\'s Secure flag, the reCAPTCHA test-bypass gate, database ' +
+        'TLS certificate verification), even in a deployment intended to be production.'
+    ];
+  }
+
+  return [];
 }
 
 /**
@@ -400,47 +459,62 @@ function collectRetentionConfigIssues(env) {
 }
 
 /**
- * Requirement 15.5: WHERE the App is started with `NODE_ENV=production`,
- * `server/config/database.js`'s connection pool unconditionally sets
- * `ssl: { rejectUnauthorized: false }` -- i.e. TLS certificate validation
- * is disabled -- purely as a function of `NODE_ENV === 'production'`
- * (there is no separate opt-in environment variable gating that setting).
- * This predicate mirrors that exact condition so the warning logged by
- * `validateConfig` below stays accurate to `database.js`'s actual
- * behavior.
+ * Requirement 15.5 (security-hardening follow-up): `server/config/
+ * database.js`'s connection pool no longer disables TLS certificate
+ * validation in production -- it now sets `rejectUnauthorized: true` by
+ * default whenever `NODE_ENV === 'production'`, optionally loading a CA
+ * bundle from `DB_CA_PATH` for a private/self-signed certificate chain
+ * (e.g. AWS RDS's `rds-ca-*.pem`), falling back to Node's system trust
+ * store otherwise (sufficient for RDS's current, publicly-trusted CA
+ * hierarchy).
+ *
+ * This predicate/warning pair is kept (rather than deleted) as a
+ * DIAGNOSTIC: it flags the one remaining case where a production
+ * deployment could still end up with an effectively-unverified
+ * connection -- `DB_CA_PATH` configured but pointing at a path that
+ * doesn't actually exist/isn't readable, which would make
+ * `database.js`'s own `fs.readFileSync` throw at module load and crash
+ * the process outright (a loud failure, not a silent downgrade) rather
+ * than something this predicate could detect from `env` alone. Kept
+ * narrowly scoped to what IS still checkable here: whether `DB_CA_PATH`
+ * is configured at all in production, since an unset value relies
+ * entirely on the system trust store recognizing the DB server's CA.
  *
  * `server/workers/syncWorker.js`'s own dedicated database pool
- * configuration does not set `ssl: { rejectUnauthorized: false }` (or any
- * `ssl` option at all) today, so there is no equivalent Sync_Worker-side
- * condition to check here. This single, `NODE_ENV`-driven predicate is
- * still evaluated at Sync_Worker startup (via `validateConfig`, called
- * from both `server/index.js` and `server/workers/syncWorker.js`'s
- * `require.main === module` block), satisfying Requirement 15.5's "at
- * startup" for both processes.
+ * configuration does not set any `ssl` option today, so there is no
+ * equivalent Sync_Worker-side condition to check here. This single,
+ * `NODE_ENV`-driven predicate is still evaluated at Sync_Worker startup
+ * (via `validateConfig`, called from both `server/index.js` and
+ * `server/workers/syncWorker.js`'s `require.main === module` block),
+ * satisfying Requirement 15.5's "at startup" for both processes.
  *
  * @param {NodeJS.ProcessEnv} env
  * @returns {boolean}
  */
 function isDatabaseTlsCertificateValidationDisabled(env) {
-  return env.NODE_ENV === 'production';
+  return env.NODE_ENV === 'production' &&
+    (typeof env.DB_CA_PATH !== 'string' || env.DB_CA_PATH.trim().length === 0);
 }
 
 /**
  * Requirement 15.5: WHEN `isDatabaseTlsCertificateValidationDisabled(env)`
  * is true, logs a WARNING (never a hard failure -- this is informational,
  * unlike every other check in this module, and MUST NOT cause
- * `validateConfig` to `process.exit(1)`) identifying that TLS certificate
- * validation is disabled for the database pool.
+ * `validateConfig` to `process.exit(1)`) identifying that the database
+ * pool is relying on the system trust store rather than an explicitly
+ * configured CA bundle for certificate verification.
  *
  * @param {NodeJS.ProcessEnv} env
  */
 function warnIfDatabaseTlsCertificateValidationDisabled(env) {
   if (isDatabaseTlsCertificateValidationDisabled(env)) {
     logger.warn(
-      'TLS certificate validation is disabled for the database connection pool ' +
-        "(NODE_ENV=production causes server/config/database.js to set ssl: { rejectUnauthorized: false }). " +
-        'The database connection is encrypted but the server certificate is not verified, ' +
-        'making the connection vulnerable to a man-in-the-middle attack.'
+      'DB_CA_PATH is not configured for the database connection pool in production ' +
+        '(server/config/database.js). TLS certificate verification is still ENABLED ' +
+        '(rejectUnauthorized: true) and will rely on Node\'s system trust store, which is ' +
+        'sufficient for a managed database with a publicly trusted certificate chain (e.g. ' +
+        'current AWS RDS CAs) but not for a private/self-signed one -- configure DB_CA_PATH ' +
+        'if the database server presents a certificate that is not chained to a public root.'
     );
   }
 }
@@ -533,6 +607,10 @@ function assertAuthRouteMounted(app) {
  */
 function collectConfigIssues(env) {
   const issues = [];
+
+  // Security-hardening: NODE_ENV, if set, must be an exact match for a
+  // recognized value. Checked first/independently of everything below.
+  issues.push(...collectNodeEnvConfigIssues(env));
 
   // Criteria 15.1/15.2: presence/non-empty checks.
   const missing = findMissingOrEmpty(REQUIRED_VARS, env);
@@ -637,6 +715,10 @@ async function validateProductionSecrets(env = process.env) {
  * 3 Criteria 3.5-3.6, Requirement 6.4).
  *
  * WHEN the App or Sync_Worker starts, verifies:
+ *  - WHERE `NODE_ENV` is set, it exactly matches one of
+ *    `VALID_NODE_ENV_VALUES` (security-hardening: catches a typo'd/
+ *    miscased value that would otherwise silently fail every
+ *    `NODE_ENV === 'production'` check elsewhere in this codebase)
  *  - every environment variable in `REQUIRED_VARS` is present and a
  *    non-empty string after trimming whitespace (Criterion 15.1)
  *  - `AUTHENTIK_URL`, `APP_URL`, and `FRONTEND_URL` are well-formed
@@ -656,9 +738,10 @@ async function validateProductionSecrets(env = process.env) {
  *  - WHERE `NODE_ENV=production`, `AUTHENTIK_API_TOKEN`, `JWT_SECRET`,
  *    `DB_PASSWORD`, and the AWS credential variables resolve through the
  *    configured secrets provider (Criterion 6.4)
- *  - WHERE `NODE_ENV=production`, logs an informational WARNING (never a
- *    hard failure) identifying that TLS certificate validation is
- *    disabled for the database pool (Criterion 15.5)
+ *  - WHERE `NODE_ENV=production` and `DB_CA_PATH` is unset, logs an
+ *    informational WARNING (never a hard failure) noting that database
+ *    TLS certificate verification is relying on the system trust store
+ *    rather than an explicitly configured CA bundle (Criterion 15.5)
  *
  * IF any check fails, logs every specific invalid/missing variable name
  * and reason, and exits with a non-zero status code (Criteria 15.2, 3.5,
@@ -702,6 +785,7 @@ module.exports = {
   validateConfig,
   validateProductionSecrets,
   collectConfigIssues,
+  collectNodeEnvConfigIssues,
   collectTakServerConfigIssues,
   collectRetentionConfigIssues,
   findMissingOrEmpty,
@@ -716,6 +800,7 @@ module.exports = {
   REQUIRED_VARS,
   URL_VARS,
   PRODUCTION_SECRET_VARS,
+  VALID_NODE_ENV_VALUES,
   TAK_SERVER_P12_CREDENTIAL_VARS,
   TAK_SERVER_CERT_KEY_CREDENTIAL_VARS,
   MIN_JWT_SECRET_LENGTH,

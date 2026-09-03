@@ -85,14 +85,13 @@ const systemConfigKeys = [
 ];
 
 const siteConfigKeys = [
-  // Existing baseline request-access page content
-  // (`1786596755665_baseline-schema.cjs`'s seed rows).
+  // Existing baseline request-access page content (the baseline
+  // migration's own seed rows, database/migrations/).
   'request_access_title',
   'request_access_subtitle',
   'request_access_footer',
 
-  // Branding fields (task 54.2 seed migration
-  // `1786800000000_seed-branding-site-config.cjs`).
+  // Branding fields (also seeded by the baseline migration).
   'organization_display_name',
   'organization_logo_path'
 ];

@@ -81,11 +81,31 @@ describe('RetentionCleanupJob.deleteExpiredRows', () => {
   it('returns the number of rows deleted from each table', async () => {
     pool.query
       .mockResolvedValueOnce({ rowCount: 12 })
-      .mockResolvedValueOnce({ rowCount: 34 });
+      .mockResolvedValueOnce({ rowCount: 34 })
+      .mockResolvedValueOnce({ rowCount: 7 });
 
     const result = await job.deleteExpiredRows();
 
-    expect(result).toEqual({ syncOperationsDeleted: 12, auditLogsDeleted: 34 });
+    expect(result).toEqual({ syncOperationsDeleted: 12, auditLogsDeleted: 34, tokenRevocationsDeleted: 7 });
+  });
+
+  /**
+   * Security-hardening addition: `token_revocations` (the JWT logout
+   * revocation list, `server/routes/auth.js`) had no cleanup at all
+   * before this change, despite the INSERT's own comment describing a
+   * purge pattern that never existed. Deletion here is keyed purely on
+   * `expires_at < NOW()` -- no configurable days-based threshold, unlike
+   * the other two tables -- since a revocation row is useless the moment
+   * its underlying token would have expired naturally.
+   */
+  it('deletes token_revocations rows whose expires_at has already passed', async () => {
+    await job.deleteExpiredRows();
+
+    const tokenRevocationsCall = pool.query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('DELETE FROM token_revocations')
+    );
+    expect(tokenRevocationsCall).toBeDefined();
+    expect(tokenRevocationsCall[0]).toContain('expires_at < NOW()');
   });
 
   /**
@@ -175,12 +195,13 @@ describe('RetentionCleanupJob.runCleanup', () => {
   it('logs a completion summary when deleteExpiredRows() succeeds', async () => {
     pool.query
       .mockResolvedValueOnce({ rowCount: 5 })
-      .mockResolvedValueOnce({ rowCount: 2 });
+      .mockResolvedValueOnce({ rowCount: 2 })
+      .mockResolvedValueOnce({ rowCount: 1 });
 
     await job.runCleanup();
 
     expect(mockLoggerInstance.info).toHaveBeenCalledWith(
-      { syncOperationsDeleted: 5, auditLogsDeleted: 2 },
+      { syncOperationsDeleted: 5, auditLogsDeleted: 2, tokenRevocationsDeleted: 1 },
       expect.stringContaining('Retention cleanup run completed')
     );
   });
@@ -192,8 +213,9 @@ describe('RetentionCleanupJob.runCleanup', () => {
     await job.runCleanup();
 
     // 1 failed call (sync_operations DELETE only, since it rejected) +
-    // 2 successful calls (sync_operations + audit_logs DELETEs) = 3 total.
-    expect(pool.query).toHaveBeenCalledTimes(3);
+    // 3 successful calls (sync_operations + audit_logs + token_revocations
+    // DELETEs) = 4 total.
+    expect(pool.query).toHaveBeenCalledTimes(4);
   });
 });
 
@@ -251,6 +273,11 @@ describe('RetentionCleanupJob start()/stop() lifecycle', () => {
 
   it('stop() clears the interval so no further cleanup passes run', async () => {
     job.start();
+    // Three sequential `await pool.query(...)` calls inside
+    // deleteExpiredRows() means three microtask ticks are needed before
+    // the immediate start()-triggered pass has fully completed.
+    await Promise.resolve();
+    await Promise.resolve();
     await Promise.resolve();
     pool.query.mockClear();
 

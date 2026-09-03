@@ -29,6 +29,22 @@ const logger = require('../config/logger').createLogger('RetentionCleanupJob');
  * standalone -- Config_Validator's startup check simply guarantees these
  * values are always well-formed by the time this job ever runs.
  *
+ * Security-hardening addition: also deletes expired `token_revocations`
+ * rows (`WHERE expires_at < NOW()`). This table is written once per
+ * logout with a valid `jti` (`server/routes/auth.js`) and read once per
+ * authenticated request (`server/middleware/auth.js`'s revocation
+ * check), but nothing purged it before this change -- despite
+ * `auth.js`'s own comment on the INSERT already describing "the
+ * retention job's `WHERE expires_at < NOW()` purge pattern" as if it
+ * existed. Deletion is keyed on `expires_at` alone (not a configurable
+ * days-based threshold like the other two tables): a revocation row is
+ * useless the moment its token would have expired naturally regardless
+ * of when that happens to fall, so there is no equivalent "how many days
+ * to keep it" question to make configurable here. The existing
+ * `token_revocations_expires_at_index` (baseline migration) makes this
+ * DELETE's WHERE clause an index range scan rather than a full table
+ * scan.
+ *
  * Lifecycle mirrors `ExpiryScheduler`'s `start()`/`stop()` shape (a plain
  * `setInterval`/`clearInterval` wrapper, idempotent against a double
  * `start()`/`stop()`), and, like `ExpiryScheduler`, `start()` runs one
@@ -113,8 +129,9 @@ class RetentionCleanupJob {
   }
 
   /**
-   * Executes the two DELETE statements from design.md's Section 20,
-   * against `sync_operations` and `audit_logs` respectively.
+   * Executes the DELETE statements from design.md's Section 20, against
+   * `sync_operations` and `audit_logs`, plus a third against
+   * `token_revocations` (see the class-level comment above).
    *
    * `sync_operations`: deletes rows that are both in a terminal state
    * (`completed`, or `failed` with a `failure_category` of `permanent`
@@ -130,14 +147,18 @@ class RetentionCleanupJob {
    * `AUDIT_LOGS_RETENTION_DAYS`, with no status-based condition (that
    * table has no analogous in-flight state to protect).
    *
-   * Retention day thresholds are read directly from
-   * `SYNC_OPERATIONS_RETENTION_DAYS` (default 90) and
+   * `token_revocations`: deletes every row whose `expires_at` has
+   * already passed. Unlike the other two tables, this has no
+   * configurable days-based threshold -- see the class-level comment.
+   *
+   * Retention day thresholds for the first two tables are read directly
+   * from `SYNC_OPERATIONS_RETENTION_DAYS` (default 90) and
    * `AUDIT_LOGS_RETENTION_DAYS` (default 365) on every run (rather than
    * cached at construction time), so a changed environment variable
    * takes effect on the very next scheduled pass without requiring a
    * process restart.
    *
-   * @returns {Promise<{syncOperationsDeleted: number, auditLogsDeleted: number}>}
+   * @returns {Promise<{syncOperationsDeleted: number, auditLogsDeleted: number, tokenRevocationsDeleted: number}>}
    */
   async deleteExpiredRows() {
     const syncOperationsRetentionDays =
@@ -158,9 +179,14 @@ class RetentionCleanupJob {
       [auditLogsRetentionDays]
     );
 
+    const tokenRevocationsResult = await this.pool.query(
+      `DELETE FROM token_revocations WHERE expires_at < NOW()`
+    );
+
     return {
       syncOperationsDeleted: syncOperationsResult.rowCount,
-      auditLogsDeleted: auditLogsResult.rowCount
+      auditLogsDeleted: auditLogsResult.rowCount,
+      tokenRevocationsDeleted: tokenRevocationsResult.rowCount
     };
   }
 }

@@ -1,6 +1,6 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
-const { authenticateToken, requireTeamAdmin } = require('../middleware/auth');
+const { authenticateToken } = require('../middleware/auth');
 const authorize = require('../middleware/authorize');
 const { paginationParams } = require('../middleware/pagination');
 const User = require('../models/User');
@@ -24,6 +24,7 @@ const {
 } = require('../services/TeamTransferService');
 const EventPublisher = require('../services/EventPublisher');
 const EmailService = require('../services/EmailService');
+const { fetchWithTimeout } = require('../utils/fetchWithTimeout');
 // AccountLifecycleService exports the class itself as the default export
 // (module.exports = AccountLifecycleService), with its error classes
 // attached as properties on it -- the same shape VendorChannelService and
@@ -157,6 +158,7 @@ router.get('/count', authenticateToken, authorize, async (req, res) => {
     const count = result.rows.filter((row) => !isIgnoredAuthentikUsername(row.username)).length;
     res.json({ count });
   } catch (error) {
+    getLogger().error({ err: error }, 'Failed to get user count');
     res.status(500).json({ error: 'Failed to get user count' });
   }
 });
@@ -778,6 +780,7 @@ router.get('/search', authenticateToken, authorize, async (req, res) => {
 
     res.json({ users });
   } catch (error) {
+    getLogger().error({ err: error }, 'User search failed');
     res.status(500).json({ error: 'Search failed' });
   }
 });
@@ -1176,7 +1179,7 @@ router.post('/create-and-add', authenticateToken, authorize, [
 
   // --- Phase 1: Authentik user creation (no open DB transaction). ---
   try {
-    const existingUserResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/?email=${encodeURIComponent(email)}`, {
+    const existingUserResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/users/?email=${encodeURIComponent(email)}`, {
       headers: { Authorization: `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
     });
     const existingUsers = await existingUserResponse.json();
@@ -1185,7 +1188,7 @@ router.post('/create-and-add', authenticateToken, authorize, [
       return res.status(400).json({ error: 'User with this email already exists' });
     }
 
-    const createUserResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/`, {
+    const createUserResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/users/`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
@@ -1283,7 +1286,7 @@ router.post('/create-and-add', authenticateToken, authorize, [
     const failedStep = 'local_transaction';
     let compensationOutcome;
     try {
-      const deleteResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${newUser.pk}/`, {
+      const deleteResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${newUser.pk}/`, {
         method: 'DELETE',
         headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
       });
@@ -1291,6 +1294,11 @@ router.post('/create-and-add', authenticateToken, authorize, [
       if (deleteResponse.ok || deleteResponse.status === 404) {
         compensationOutcome = 'deleted_synchronously';
       } else {
+        // Not a re-throw of the outer catch's local-provisioning failure
+        // -- this is a new, unrelated error describing the Authentik
+        // delete's own HTTP response, so the outer `error` is not
+        // attached as this error's `cause`.
+        // eslint-disable-next-line preserve-caught-error
         throw new Error(`Authentik delete responded with status ${deleteResponse.status}`);
       }
     } catch (deleteError) {
@@ -1362,7 +1370,7 @@ router.post('/create-and-add', authenticateToken, authorize, [
           ? `${root.callsign_prefix || root.name} - ${leafTeam.name}`
           : (leafTeam.callsign_prefix || leafTeam.name);
       }
-    } catch (e) {
+    } catch {
       // fallback
       const teamResult = await pool.query('SELECT name FROM teams WHERE id = $1', [teamId]);
       if (teamResult.rows.length > 0) teamPath = teamResult.rows[0].name;
@@ -1715,7 +1723,7 @@ router.delete('/remove-from-team/:userId', authenticateToken, authorize, [
     // outcome is recorded rather than silently assumed.
     let authentikAccountDeleted = true;
     try {
-      const deleteResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
+      const deleteResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
         method: 'DELETE',
         headers: {
           'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`
@@ -2275,7 +2283,7 @@ async function sendWelcomeEmailToUser(userId, teamId, actingUserId) {
           ? `${root.callsign_prefix || root.name} - ${team.name}`
           : (team.callsign_prefix || team.name);
       }
-    } catch (e) {
+    } catch {
       const teamResult = await pool.query('SELECT name FROM teams WHERE id = $1', [teamId]);
       if (teamResult.rows.length > 0) teamPath = teamResult.rows[0].name;
     }
@@ -2789,7 +2797,7 @@ router.post('/bulk-remove-from-team', authenticateToken, authorize, [
 
       let authentikAccountDeleted = true;
       try {
-        const deleteResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
+        const deleteResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
           method: 'DELETE',
           headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
         });

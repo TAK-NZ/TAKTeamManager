@@ -426,7 +426,11 @@ export const auditLogsAPI = {
 export const signupAPI = {
   initiate: (email, code, recaptchaToken) => api.post('/requests/initiate', { email, code, 'g-recaptcha-response': recaptchaToken }),
   getAvailableTeams: (token) => api.get(`/requests/available-teams?token=${token}`),
-  submitTeamAccess: (data) => api.post('/requests/team-access', data),
+  // recaptchaToken: server/middleware/captcha.js's verifyCaptcha is now
+  // mounted on this route (it always was the route
+  // RECAPTCHA_EXPECTED_ACTION='team_access_request' was named for), so a
+  // token generated for that same action must be submitted here too.
+  submitTeamAccess: (data, recaptchaToken) => api.post('/requests/team-access', { ...data, 'g-recaptcha-response': recaptchaToken }),
   submitOrgInterest: (data) => api.post('/org-interest', data),
 };
 

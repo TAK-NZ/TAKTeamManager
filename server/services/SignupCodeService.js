@@ -143,7 +143,7 @@ class SignupCodeService {
         if (err.code === '23505' && err.constraint && err.constraint.includes('code')) {
           // Retry with a new code on next iteration
           if (attempt === MAX_RETRY_ATTEMPTS - 1) {
-            throw new Error('Failed to generate a unique code after maximum retries');
+            throw new Error('Failed to generate a unique code after maximum retries', { cause: err });
           }
           continue;
         }

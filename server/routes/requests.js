@@ -240,6 +240,7 @@ router.get('/pending', authenticateToken, authorize, async (req, res) => {
 
     res.json({ requests });
   } catch (error) {
+    getLogger().error({ err: error }, 'Failed to fetch pending requests');
     res.status(500).json({ error: 'Failed to fetch requests' });
   }
 });

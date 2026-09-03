@@ -16,7 +16,6 @@ const http = require('http');
 // truncated log line detected) without the full list.
 const crypto = require('crypto');
 const pLimit = require('p-limit');
-const authentikService = require('../services/authentik');
 const TeamMembershipService = require('../services/TeamMembershipService');
 // region-channel-tiers: resolves a user's Organisation (Ancestor_Chain
 // index 0) to read response_channel_access/support_channel_access, in
@@ -60,6 +59,10 @@ const { classifyFailure } = require('./failureClassification');
 // `createLogger` import pattern already established in
 // `GlobalChannelService.js`/`authentikSync.js`.
 const logger = require('../config/logger').createLogger('syncWorker');
+// Resiliency-hardening: every raw `fetch()` call in this file goes
+// through `fetchWithTimeout`, which attaches a bounded `AbortSignal` so a
+// hung Authentik connection can never stall a queued operation forever.
+const { fetchWithTimeout } = require('../utils/fetchWithTimeout');
 // Requirement 25 (task 47.1): the Retention_Cleanup_Job, running on its
 // own scheduled interval (default 24h) inside the Sync_Worker process,
 // started/stopped alongside the poll loop, health server, and expiry
@@ -296,6 +299,13 @@ function revokePayloadShape(payload) {
 // endpoint returns 503) once it is 90 seconds old or older.
 const HEARTBEAT_STALE_THRESHOLD_MS = 90000;
 
+// Resiliency-hardening: how long `stop()` waits for a currently in-flight
+// `processNextOperation()` cycle to finish on its own before proceeding
+// to close the pool anyway. Mirrors `server/utils/gracefulShutdown.js`'s
+// 30-second HTTP-request drain window -- see
+// `SyncWorker.waitForActiveOperationToDrain`'s own doc comment.
+const SHUTDOWN_DRAIN_TIMEOUT_MS = 30000;
+
 /**
  * Requirement 14.6/task 34.4: queries the single `sync_worker_heartbeat`
  * row's `last_heartbeat_at` and determines liveness by comparing it
@@ -347,6 +357,13 @@ async function checkSyncWorkerHeartbeatHealth(pool) {
 class SyncWorker {
   constructor() {
     this.isRunning = false;
+    // Resiliency-hardening: tracks the currently in-flight
+    // `processNextOperation()` call, if any, so `stop()` can wait for it
+    // (bounded by `SHUTDOWN_DRAIN_TIMEOUT_MS` below) before closing the
+    // pool out from under it, rather than tearing down concurrently with
+    // an operation that is still mid-flight. `null` whenever no cycle is
+    // currently running (including between cycles, while sleeping).
+    this.activeOperationPromise = null;
     this.pollInterval = 5000; // 5 seconds
     this.maxRetries = 3;
     this.retryDelay = 1000; // 1 second
@@ -506,8 +523,16 @@ class SyncWorker {
     }
 
     while (this.isRunning) {
+      // Resiliency-hardening: `this.activeOperationPromise` is set for
+      // the duration of `processNextOperation()` alone (not the
+      // subsequent heartbeat/sleep), so `stop()`'s drain wait targets
+      // exactly the DB-writing/Authentik-calling work a shutdown
+      // shouldn't interrupt mid-flight, not the idle time between
+      // cycles.
+      const cyclePromise = this.processNextOperation();
+      this.activeOperationPromise = cyclePromise;
       try {
-        await this.processNextOperation();
+        const processedCount = await cyclePromise;
         // Requirement 14.6: update the heartbeat at the END of every poll
         // cycle -- after `processNextOperation()` completes, whether it
         // found work or not -- so the heartbeat reflects "the worker is
@@ -516,7 +541,31 @@ class SyncWorker {
         // allowed to crash the poll loop, mirroring the existing
         // catch-and-continue pattern already used elsewhere in this loop.
         await this.updateHeartbeat();
-        await this.sleep(this.pollInterval);
+
+        // Performance-hardening: a FULL batch (processedCount ===
+        // this.batchSize) means the queue very likely still has more
+        // pending work waiting behind this one -- skip the fixed
+        // inter-cycle sleep entirely and loop straight back into another
+        // fetch, rather than idling for `this.pollInterval` (default
+        // 5s) for no reason. At the documented 50,000-user bulk-enqueue
+        // scale, an unconditional sleep on every cycle was the actual
+        // bottleneck against the stated 30-60 minute target -- far more
+        // than either this.batchSize or this.concurrency's own tuning.
+        // A partial or empty batch (processedCount !== this.batchSize)
+        // means the queue was drained for now, so the normal sleep still
+        // applies to avoid a tight busy-loop against an empty queue.
+        // `!==` rather than `<` is deliberate defensive coding: `processNextOperation`
+        // is `LIMIT`-bounded and can never resolve to a count greater than
+        // `this.batchSize`, but a mocked/stubbed `processNextOperation`
+        // (as several existing tests use, resolving to `undefined`) must
+        // still reliably fall through to `sleep()` -- `undefined <
+        // this.batchSize` is `false` in JS, which would silently skip the
+        // sleep and spin the loop forever, while `undefined !==
+        // this.batchSize` is `true`, correctly treating an unknown count
+        // the same as "not a confirmed full batch".
+        if (processedCount !== this.batchSize) {
+          await this.sleep(this.pollInterval);
+        }
       } catch (error) {
         logger.error({ err: error }, 'Worker loop error');
         
@@ -527,13 +576,65 @@ class SyncWorker {
         } else {
           await this.sleep(this.pollInterval);
         }
+      } finally {
+        this.activeOperationPromise = null;
       }
+    }
+  }
+
+  /**
+   * Resiliency-hardening: waits for the currently in-flight
+   * `processNextOperation()` cycle (if any) to settle, bounded by
+   * `SHUTDOWN_DRAIN_TIMEOUT_MS`. Unlike `server/utils/gracefulShutdown.js`'s
+   * HTTP-request drain (which has an actual server to stop accepting
+   * connections on), there is no equivalent "stop accepting new work"
+   * primitive here -- `this.isRunning = false` (set by the caller before
+   * this method runs) only prevents the loop from starting ANOTHER
+   * cycle; it does not interrupt one already in progress. This method's
+   * sole job is to give that one in-progress cycle a bounded window to
+   * finish on its own before `stop()` proceeds to close the pool.
+   *
+   * Mirrors `gracefulShutdown.js`'s `Promise.race`-against-a-timer shape
+   * (same reasoning: force-proceed on timeout rather than hang forever),
+   * but is intentionally simpler -- no server to close, no exit code, no
+   * idempotency guard (this is a private step inside `stop()`, not a
+   * process-wide signal handler).
+   *
+   * @returns {Promise<void>}
+   */
+  async waitForActiveOperationToDrain() {
+    if (!this.activeOperationPromise) {
+      return;
+    }
+
+    logger.info({ timeoutMs: SHUTDOWN_DRAIN_TIMEOUT_MS }, 'Waiting for in-flight sync operation to finish before shutting down');
+
+    const outcome = await Promise.race([
+      this.activeOperationPromise.then(() => 'settled').catch(() => 'settled'),
+      new Promise((resolve) => setTimeout(() => resolve('timeout'), SHUTDOWN_DRAIN_TIMEOUT_MS))
+    ]);
+
+    if (outcome === 'timeout') {
+      logger.warn(
+        { timeoutMs: SHUTDOWN_DRAIN_TIMEOUT_MS },
+        'Shutdown drain timeout elapsed before the in-flight sync operation finished; proceeding to close the database pool anyway'
+      );
+    } else {
+      logger.info('In-flight sync operation finished; proceeding with shutdown');
     }
   }
 
   async stop() {
     this.isRunning = false;
     logger.info('Sync worker stopping...');
+
+    // Resiliency-hardening: give the currently in-flight operation cycle
+    // (if any) a bounded chance to finish before tearing down the pool
+    // out from under it. Mirrors the main server's HTTP-request drain in
+    // spirit (server/utils/gracefulShutdown.js) -- see
+    // `waitForActiveOperationToDrain`'s own doc comment for why this is
+    // a simpler, bespoke wait rather than a reuse of that module.
+    await this.waitForActiveOperationToDrain();
 
     await this.stopHealthServer();
 
@@ -678,7 +779,7 @@ class SyncWorker {
         
         if (operations.length === 0) {
           await client.query('ROLLBACK');
-          return;
+          return 0;
         }
         
         // Mark every fetched row as processing, in one statement, within
@@ -705,7 +806,7 @@ class SyncWorker {
         }
         
         if (attempt === this.maxRetries) {
-          throw new Error(`Failed to get operation after ${this.maxRetries} attempts`);
+          throw new Error(`Failed to get operation after ${this.maxRetries} attempts`, { cause: error });
         }
         
         await this.sleep(this.retryDelay * attempt); // Exponential backoff
@@ -737,6 +838,14 @@ class SyncWorker {
         })
       )
     );
+
+    // Performance-hardening: the caller (the poll loop, below) uses this
+    // count to decide whether to skip its fixed inter-cycle sleep -- a
+    // full batch (`operations.length === this.batchSize`) is a strong
+    // signal the queue likely still has more pending work waiting behind
+    // this one, so the next cycle should start immediately rather than
+    // wait out `this.pollInterval` for no reason.
+    return operations.length;
   }
 
   async executeOperationSafely(operation) {
@@ -882,7 +991,7 @@ class SyncWorker {
         },
         'Failed to parse operation payload'
       );
-      throw new Error(`Invalid payload: ${parseError.message}`);
+      throw new Error(`Invalid payload: ${parseError.message}`, { cause: parseError });
     }
 
     // Requirement 9.3/9.4: validate the parsed payload against the
@@ -1288,7 +1397,7 @@ class SyncWorker {
     if (!user) throw new Error(`User ${payload.target_user_id} not found`);
     
     // Add user to Authentik group using existing service
-    const response = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${payload.target_group_id}/add_user/`, {
+    const response = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${payload.target_group_id}/add_user/`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
@@ -1308,7 +1417,7 @@ class SyncWorker {
     if (!user) throw new Error(`User ${payload.target_user_id} not found`);
     
     // Remove user from Authentik group
-    const response = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${payload.target_group_id}/remove_user/`, {
+    const response = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${payload.target_group_id}/remove_user/`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
@@ -1324,7 +1433,7 @@ class SyncWorker {
   }
 
   async createGroup(payload) {
-    const response = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
+    const response = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
@@ -1386,7 +1495,7 @@ class SyncWorker {
     // own fallback shape.
     const authentikDescription = description || channel_name;
     
-    const readGroupResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
+    const readGroupResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
@@ -1398,7 +1507,7 @@ class SyncWorker {
       })
     });
     
-    const writeGroupResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
+    const writeGroupResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
@@ -1428,7 +1537,7 @@ class SyncWorker {
     // being pointed at a stale/duplicate username, could still consult
     // this attribute) can identify an account this app created for this
     // exact channel.
-    const userResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/`, {
+    const userResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/users/`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
@@ -1451,7 +1560,7 @@ class SyncWorker {
     const serviceAccount = await userResponse.json();
     
     // Set service account password
-    await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${serviceAccount.pk}/set_password/`, {
+    await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${serviceAccount.pk}/set_password/`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
@@ -1461,7 +1570,7 @@ class SyncWorker {
     });
     
     // Add service account to write group
-    await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${writeGroup.pk}/add_user/`, {
+    await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${writeGroup.pk}/add_user/`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
@@ -1533,7 +1642,7 @@ class SyncWorker {
     // for reuse when it was tagged as belonging to this exact channel
     // (see the method's own doc comment above on why).
     let serviceAccount;
-    const createResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/`, {
+    const createResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/users/`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
@@ -1551,7 +1660,7 @@ class SyncWorker {
     if (createResponse.ok) {
       serviceAccount = await createResponse.json();
     } else {
-      const lookupResponse = await fetch(
+      const lookupResponse = await fetchWithTimeout(
         `${process.env.AUTHENTIK_URL}/api/v3/core/users/?username=${encodeURIComponent(service_account_username)}`,
         { headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` } }
       );
@@ -1598,7 +1707,7 @@ class SyncWorker {
     // freshly generated one `provisionServiceAccount` just wrote to the
     // database, so the credential this app can display always matches
     // what Authentik actually accepts.
-    const passwordResponse = await fetch(
+    const passwordResponse = await fetchWithTimeout(
       `${process.env.AUTHENTIK_URL}/api/v3/core/users/${serviceAccount.pk}/set_password/`,
       {
         method: 'POST',
@@ -1625,7 +1734,7 @@ class SyncWorker {
     for (const groupId of [read_group_id, write_group_id]) {
       if (!groupId) continue;
 
-      const addResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${groupId}/add_user/`, {
+      const addResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${groupId}/add_user/`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
@@ -1677,7 +1786,7 @@ class SyncWorker {
   async rotateBchServiceAccountPassword(payload) {
     const { bch_channel_id, service_account_username, service_account_password } = payload;
 
-    const lookupResponse = await fetch(
+    const lookupResponse = await fetchWithTimeout(
       `${process.env.AUTHENTIK_URL}/api/v3/core/users/?username=${encodeURIComponent(service_account_username)}`,
       { headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` } }
     );
@@ -1698,7 +1807,7 @@ class SyncWorker {
       );
     }
 
-    const passwordResponse = await fetch(
+    const passwordResponse = await fetchWithTimeout(
       `${process.env.AUTHENTIK_URL}/api/v3/core/users/${serviceAccount.pk}/set_password/`,
       {
         method: 'POST',
@@ -1747,7 +1856,7 @@ class SyncWorker {
     let serviceAccountId = service_account_id;
 
     if (!serviceAccountId) {
-      const lookupResponse = await fetch(
+      const lookupResponse = await fetchWithTimeout(
         `${process.env.AUTHENTIK_URL}/api/v3/core/users/?username=${encodeURIComponent(service_account_username)}`,
         { headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` } }
       );
@@ -1771,7 +1880,7 @@ class SyncWorker {
       serviceAccountId = serviceAccount.pk;
     }
 
-    const deleteResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${serviceAccountId}/`, {
+    const deleteResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${serviceAccountId}/`, {
       method: 'DELETE',
       headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
     });
@@ -1830,7 +1939,7 @@ class SyncWorker {
     const description = channelResult.rows[0]?.description || channel_name;
     const authentikDescription = `${description} (Bi-directional location sharing)`;
     
-    const groupResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
+    const groupResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
@@ -1904,7 +2013,7 @@ class SyncWorker {
       
       logger.debug({ bch_channel_id, groupType: 'read' }, 'Updating BCH read group');
       
-      const readResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${read_group_id}/`, {
+      const readResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${read_group_id}/`, {
         method: 'PATCH',
         headers: {
           'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
@@ -1930,7 +2039,7 @@ class SyncWorker {
       
       logger.debug({ bch_channel_id, groupType: 'write' }, 'Updating BCH write group');
       
-      const writeResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${write_group_id}/`, {
+      const writeResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${write_group_id}/`, {
         method: 'PATCH',
         headers: {
           'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
@@ -1996,7 +2105,7 @@ class SyncWorker {
     };
     
     try {
-      const updateResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${group_id}/`, {
+      const updateResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${group_id}/`, {
         method: 'PATCH',
         headers: {
           'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
@@ -2050,21 +2159,21 @@ class SyncWorker {
         
         // Delete groups and service account
         if (read_group_id) {
-          await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${read_group_id}/`, {
+          await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${read_group_id}/`, {
             method: 'DELETE',
             headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
           });
         }
         
         if (write_group_id) {
-          await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${write_group_id}/`, {
+          await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${write_group_id}/`, {
             method: 'DELETE',
             headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
           });
         }
         
         if (service_account_id) {
-          await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${service_account_id}/`, {
+          await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${service_account_id}/`, {
             method: 'DELETE',
             headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
           });
@@ -2081,7 +2190,7 @@ class SyncWorker {
         const { group_id } = channelResult.rows[0];
         
         if (group_id) {
-          await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${group_id}/`, {
+          await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${group_id}/`, {
             method: 'DELETE',
             headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
           });
@@ -2108,7 +2217,7 @@ class SyncWorker {
    * already-deleted resource has nothing further to reconcile.
    */
   async cleanupOrphanedAuthentikUser(payload) {
-    const response = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${payload.authentik_user_id}/`, {
+    const response = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${payload.authentik_user_id}/`, {
       method: 'DELETE',
       headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
     });
@@ -2164,7 +2273,7 @@ class SyncWorker {
     ].filter((groupId) => groupId != null);
 
     for (const groupId of groupIds) {
-      const response = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${groupId}/`, {
+      const response = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${groupId}/`, {
         method: 'DELETE',
         headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
       });
@@ -2215,7 +2324,7 @@ class SyncWorker {
     ].filter((groupId) => groupId != null);
 
     for (const groupId of groupIds) {
-      const response = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${groupId}/`, {
+      const response = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${groupId}/`, {
         method: 'PATCH',
         headers: {
           'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
@@ -2321,7 +2430,7 @@ class SyncWorker {
     // Team.createTeamChannel).
     let group;
     let createdFresh = false;
-    const createResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
+    const createResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
@@ -2337,7 +2446,7 @@ class SyncWorker {
       // Create_Or_Reuse: a name-conflict (or any non-2xx) triggers a
       // lookup by exact name. This is NOT treated as a permanent failure
       // (Requirement 10.1).
-      const lookupResponse = await fetch(
+      const lookupResponse = await fetchWithTimeout(
         `${process.env.AUTHENTIK_URL}/api/v3/core/groups/?name=${encodeURIComponent(name)}`,
         { headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` } }
       );
@@ -2366,7 +2475,7 @@ class SyncWorker {
     // pre-existing group without attributes gets them -- Requirement 2.5).
     // Skipped on the fresh-create path, where the POST already set them.
     if (!createdFresh) {
-      const patchResponse = await fetch(
+      const patchResponse = await fetchWithTimeout(
         `${process.env.AUTHENTIK_URL}/api/v3/core/groups/${groupPk}/`,
         {
           method: 'PATCH',
@@ -2422,7 +2531,7 @@ class SyncWorker {
       .filter((id) => id !== null && id !== undefined);
 
     // Current: the group's member pks.
-    const groupResponse = await fetch(
+    const groupResponse = await fetchWithTimeout(
       `${process.env.AUTHENTIK_URL}/api/v3/core/groups/${groupPk}/`,
       {
         headers: {
@@ -2470,7 +2579,7 @@ class SyncWorker {
    * @param {string} name
    */
   async reconcileMembership(groupPk, memberPk, action, name) {
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `${process.env.AUTHENTIK_URL}/api/v3/core/groups/${groupPk}/${action}/`,
       {
         method: 'POST',
@@ -2524,7 +2633,7 @@ class SyncWorker {
     const name = groupName(payload.team_id);
 
     // Step 1: resolve the group by exact name.
-    const lookupResponse = await fetch(
+    const lookupResponse = await fetchWithTimeout(
       `${process.env.AUTHENTIK_URL}/api/v3/core/groups/?name=${encodeURIComponent(name)}`,
       { headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` } }
     );
@@ -2558,7 +2667,7 @@ class SyncWorker {
     }
 
     // Step 2: delete the resolved group.
-    const deleteResponse = await fetch(
+    const deleteResponse = await fetchWithTimeout(
       `${process.env.AUTHENTIK_URL}/api/v3/core/groups/${group.pk}/`,
       {
         method: 'DELETE',
@@ -3395,7 +3504,7 @@ class SyncWorker {
     // fresh (not from any local cache), intersected with managedGroupIds.
     let currentManagedGroupIds = [];
     if (user.authentik_user_id) {
-      const userResponse = await fetch(
+      const userResponse = await fetchWithTimeout(
         `${process.env.AUTHENTIK_URL}/api/v3/core/users/${user.authentik_user_id}/`,
         {
           headers: {
@@ -3525,12 +3634,13 @@ class SyncWorker {
       null // System operation, triggered by an Organisation flag change.
     );
 
-    for (const userId of userIds) {
-      await EventPublisher.publishOperation('assign_user_to_global_channels', {
-        target_user_id: userId,
-        bulk_operation_id: bulkOpId
-      });
-    }
+    // Performance-hardening: one multi-row INSERT (chunked internally by
+    // EventPublisher.publishOperationsBatch) instead of one INSERT per
+    // user in a sequential loop.
+    await EventPublisher.publishOperationsBatch(
+      'assign_user_to_global_channels',
+      userIds.map((userId) => ({ target_user_id: userId, bulk_operation_id: bulkOpId }))
+    );
 
     logger.info(
       { organisation_id, tier, usersQueued: userIds.length, bulkOperationId: bulkOpId },
@@ -3538,6 +3648,21 @@ class SyncWorker {
     );
   }
 
+  /**
+   * Resiliency-hardening doc note (no behavior change): this handler is
+   * deliberately import/update-only. It INSERTs a new `bch_channels`/
+   * `region_channels` row for an Authentik group it does not yet
+   * recognise locally, and UPDATEs an existing row's description/group
+   * id(s) to match Authentik -- but it never DELETEs or deactivates a
+   * local row whose Authentik group is absent from the fetched list. See
+   * `GlobalChannelService.syncExistingChannels`'s own doc comment (the
+   * enqueue site) for why: a channel absent from this run's fetch is
+   * indistinguishable from "genuinely removed in Authentik" versus "this
+   * fetch itself was partial/incomplete", and treating the latter as a
+   * delete signal would risk destroying a channel -- and its attached
+   * BCH service-account credentials / Region group-membership rules --
+   * over a transient fetch problem.
+   */
   async syncExistingGlobalChannels(payload) {
     logger.debug('Syncing existing global channels from Authentik');
     
@@ -3556,7 +3681,7 @@ class SyncWorker {
       let hasMorePages = true;
 
       while (hasMorePages) {
-        const groupsResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/?page_size=1000&page=${currentPage}`, {
+        const groupsResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/?page_size=1000&page=${currentPage}`, {
           headers: {
             'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
             'Content-Type': 'application/json'
@@ -3781,12 +3906,40 @@ class SyncWorker {
 
 // Start worker if run directly
 if (require.main === module) {
-  // Requirement 15.2/6.4: await the (now-async) config validation before
-  // constructing the worker or starting the poll loop, so a missing
-  // required variable or an unreachable production secrets manager exits
-  // non-zero before any DB pool is opened or any operation is polled.
+  // Resiliency-hardening: mirrors server/index.js's exact pattern --
+  // an unhandled rejection is logged and the process keeps running
+  // (this worker's own retry/backoff machinery is what recovers a
+  // transient failure, not a process restart), while an uncaught
+  // exception is logged and followed by a controlled shutdown, since
+  // continuing to run after one risks operating on corrupted in-memory
+  // state. Previously this worker registered NEITHER handler -- an
+  // unhandled rejection or uncaught exception anywhere outside
+  // `start()`'s own top-level `.catch()` (e.g. inside a scheduled job's
+  // `setInterval` callback) fell through to Node's default behavior,
+  // which for `uncaughtException` is an immediate, ungraceful process
+  // exit with no chance to close the pool or log via the structured
+  // logger.
+  //
+  // Declared here (inside the `require.main === module` guard, alongside
+  // the SIGINT/SIGTERM handlers below) rather than at module scope,
+  // since `worker` -- needed for the uncaughtException handler's
+  // controlled-shutdown call -- only exists once this block runs; a
+  // module that only `require()`s this file (e.g. a test) never
+  // registers these process-wide handlers as a side effect of loading
+  // it.
   validateConfig().then(() => {
     const worker = new SyncWorker();
+
+    process.on('unhandledRejection', (reason, promise) => {
+      logger.error({ err: reason, promise }, 'Unhandled promise rejection');
+    });
+
+    process.on('uncaughtException', (err) => {
+      logger.error({ err }, 'Uncaught exception');
+      worker.stop().catch((stopErr) => {
+        logger.error({ err: stopErr }, 'Error while stopping worker during uncaughtException shutdown');
+      }).finally(() => process.exit(1));
+    });
 
     process.on('SIGINT', async () => {
       logger.info('Received SIGINT, shutting down gracefully...');

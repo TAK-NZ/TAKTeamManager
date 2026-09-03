@@ -18,6 +18,21 @@ module.exports = [
   },
   js.configs.recommended,
   {
+    // This config file is itself linted (it matches no `ignores` pattern
+    // above), and runs under Node/CommonJS just like the rest of the
+    // files below -- without its own languageOptions it fell back to
+    // ESLint's default (browser-less, Node-less) globals, so its own
+    // top-level `require`/`module` flagged as undefined (no-undef).
+    files: ['eslint.config.js'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'commonjs',
+      globals: {
+        ...globals.node,
+      },
+    },
+  },
+  {
     files: ['server/**/*.js', 'scripts/**/*.js', 'database/*.js'],
     languageOptions: {
       ecmaVersion: 2022,
@@ -33,7 +48,12 @@ module.exports = [
     },
   },
   {
-    files: ['server/**/*.test.js', 'scripts/**/*.test.js'],
+    // `database/*.test.js`/`database/*.integration.test.js` (e.g.
+    // schemaConsistency.integration.test.js) match `database/*.js` above
+    // but not `server/**/*.test.js`/`scripts/**/*.test.js` below, so
+    // without this block they got no-console disabled but still no
+    // jest globals -- describe/it/expect flagged as undefined (no-undef).
+    files: ['server/**/*.test.js', 'scripts/**/*.test.js', 'database/*.test.js', 'database/*.integration.test.js'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'commonjs',

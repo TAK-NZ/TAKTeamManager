@@ -3,7 +3,9 @@ jest.mock('../config/database', () => ({
   query: jest.fn()
 }));
 jest.mock('./EventPublisher', () => ({
-  publishOperation: jest.fn()
+  publishOperation: jest.fn(),
+  publishOperationsBatch: jest.fn(),
+  publishBulkOperation: jest.fn()
 }));
 jest.mock('./CredentialEncryptionService', () => ({
   encrypt: jest.fn(),
@@ -994,5 +996,59 @@ describe('GlobalChannelService.provisionServiceAccount', () => {
 
       expect(result.serviceAccountUsername).toBe('etl-data-packages');
     });
+  });
+});
+
+
+/**
+ * Performance-hardening: `assignAllUsersToGlobalChannels` enqueues its
+ * per-user `assign_user_to_global_channels` operations via
+ * `EventPublisher.publishOperationsBatch` (one/few multi-row INSERTs)
+ * rather than one `publishOperation` call per user in a sequential loop
+ * -- at the documented 50,000-user scale, the former issued 50,000
+ * individual round trips before the Sync_Worker even started draining
+ * the queue.
+ */
+describe('GlobalChannelService.assignAllUsersToGlobalChannels', () => {
+  let service;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    service = new GlobalChannelService();
+  });
+
+  it('enqueues one batched publishOperationsBatch call with one payload per active user, after a single bulk-operation record', async () => {
+    pool.query.mockResolvedValue({ rows: [{ id: 1 }, { id: 2 }, { id: 3 }] });
+    EventPublisher.publishBulkOperation.mockResolvedValue('bulk-op-99');
+
+    const result = await service.assignAllUsersToGlobalChannels();
+
+    expect(pool.query).toHaveBeenCalledWith('SELECT id FROM users WHERE is_active = true');
+    expect(EventPublisher.publishBulkOperation).toHaveBeenCalledWith(
+      expect.stringContaining('3'),
+      3,
+      null
+    );
+    expect(EventPublisher.publishOperationsBatch).toHaveBeenCalledTimes(1);
+    expect(EventPublisher.publishOperationsBatch).toHaveBeenCalledWith(
+      'assign_user_to_global_channels',
+      [
+        { target_user_id: 1, bulk_operation_id: 'bulk-op-99' },
+        { target_user_id: 2, bulk_operation_id: 'bulk-op-99' },
+        { target_user_id: 3, bulk_operation_id: 'bulk-op-99' }
+      ]
+    );
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+    expect(result).toEqual({ usersProcessed: 3, bulkOperationId: 'bulk-op-99' });
+  });
+
+  it('does nothing (no bulk op, no batch enqueue) when there are no active users', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+
+    const result = await service.assignAllUsersToGlobalChannels();
+
+    expect(EventPublisher.publishBulkOperation).not.toHaveBeenCalled();
+    expect(EventPublisher.publishOperationsBatch).not.toHaveBeenCalled();
+    expect(result).toEqual({ usersProcessed: 0 });
   });
 });

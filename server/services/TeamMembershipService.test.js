@@ -11,7 +11,9 @@ jest.mock('../config/database', () => ({
   query: jest.fn()
 }));
 jest.mock('./EventPublisher', () => ({
-  publishOperation: jest.fn()
+  publishOperation: jest.fn(),
+  publishOperationsBatch: jest.fn(),
+  publishBulkOperation: jest.fn()
 }));
 jest.mock('../models/Team', () => ({
   getFullMemberList: jest.fn()
@@ -903,5 +905,50 @@ describe('TeamMembershipService.removeUserFromTeam CloudTAK enqueue (Requirement
       typeof sql === 'string' && sql.includes("role = 'admin' AND inherited_from_team_id IS NULL")
     );
     expect(capturedCapture).toBe(false);
+  });
+});
+
+/**
+ * Performance-hardening: `bulkAddUsersToTeam` enqueues its per-user
+ * `bulk_add_user_to_team` operations via
+ * `EventPublisher.publishOperationsBatch` (one/few multi-row INSERTs)
+ * rather than one `publishOperation` call per user in a sequential loop.
+ */
+describe('TeamMembershipService.bulkAddUsersToTeam', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('enqueues one batched publishOperationsBatch call with one payload per user, after a single bulk-operation record', async () => {
+    EventPublisher.publishBulkOperation.mockResolvedValue('bulk-op-7');
+
+    const result = await TeamMembershipService.bulkAddUsersToTeam([10, 11, 12], 5, 'member', 9);
+
+    expect(EventPublisher.publishBulkOperation).toHaveBeenCalledWith(
+      expect.stringContaining('3'),
+      3,
+      9
+    );
+    expect(EventPublisher.publishOperationsBatch).toHaveBeenCalledTimes(1);
+    expect(EventPublisher.publishOperationsBatch).toHaveBeenCalledWith(
+      'bulk_add_user_to_team',
+      [
+        { target_user_id: 10, team_id: 5, role: 'member', bulk_operation_id: 'bulk-op-7' },
+        { target_user_id: 11, team_id: 5, role: 'member', bulk_operation_id: 'bulk-op-7' },
+        { target_user_id: 12, team_id: 5, role: 'member', bulk_operation_id: 'bulk-op-7' }
+      ],
+      9
+    );
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+    expect(result).toEqual({ bulkOperationId: 'bulk-op-7', usersQueued: 3 });
+  });
+
+  it('passes an empty array through to publishOperationsBatch for an empty userIds list', async () => {
+    EventPublisher.publishBulkOperation.mockResolvedValue('bulk-op-8');
+
+    const result = await TeamMembershipService.bulkAddUsersToTeam([], 5, 'member', 9);
+
+    expect(EventPublisher.publishOperationsBatch).toHaveBeenCalledWith('bulk_add_user_to_team', [], 9);
+    expect(result).toEqual({ bulkOperationId: 'bulk-op-8', usersQueued: 0 });
   });
 });

@@ -208,7 +208,10 @@ app.set('trust proxy', getTrustProxyHops());
     }
   });
 
-  // Error handling
+  // Error handling. Express recognizes an error handler by its
+  // 4-argument signature; `next` must be declared even though it is
+  // never called (this handler always terminates the response itself).
+  // eslint-disable-next-line no-unused-vars
   app.use((err, req, res, next) => {
     getLogger().error({ err }, err.message || 'Unhandled request error');
     res.status(500).json({

@@ -39,11 +39,11 @@ const router = express.Router();
  *
  * `site_config`'s baseline schema/seed data has no pre-existing org-name
  * or logo `config_key` (only `request_access_title`/`_subtitle`/
- * `_footer` -- see `server/models/SiteConfig.js` and
- * `database/migrations/1786596755665_baseline-schema.cjs`). Migration
- * `1786800000000_seed-branding-site-config.cjs` (part of this task)
- * therefore establishes two new `site_config` rows, following the
- * existing lowercase/underscore-separated `config_key` convention:
+ * `_footer` -- see `server/models/SiteConfig.js` and the baseline
+ * migration's seed blocks in `database/migrations/`). The baseline
+ * migration's seed block establishes two new `site_config` rows,
+ * following the existing lowercase/underscore-separated `config_key`
+ * convention:
  *   - `organization_display_name` -- the org name shown in the App's UI.
  *   - `organization_logo_path` -- a plain reference (path/URL) to the
  *     org's logo asset. Per this task's scope, the branding PUT below
@@ -99,8 +99,8 @@ const ROLE_KEY_LABELS = {
 // edit against the set of roles ROLE_KEY_LABELS defines.
 const TAK_ROLE_VALUES = Object.values(ROLE_KEY_LABELS);
 
-// Branding config_keys backed by site_config, seeded by this task's
-// migration (1786800000000_seed-branding-site-config.cjs).
+// Branding config_keys backed by site_config, seeded by the baseline
+// migration's own seed block (database/migrations/).
 const BRANDING_CONFIG_KEYS = {
   organizationDisplayName: 'organization_display_name',
   organizationLogoPath: 'organization_logo_path'

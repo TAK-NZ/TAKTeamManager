@@ -339,6 +339,33 @@ describe('AuthentikSyncService.reconcileOrphanedAccounts (account-lifecycle-mana
     reconcileSpy.mockRestore();
   });
 
+  it('resiliency-hardening: refuses to run the sweep at all against an empty fetched-id list, and issues no query', async () => {
+    await authentikSync.reconcileOrphanedAccounts([]);
+
+    expect(db.query).not.toHaveBeenCalled();
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+    expect(mockLoggerInstance.error).toHaveBeenCalledWith(
+      expect.objectContaining({ fetchedAuthentikIds: [] }),
+      expect.stringContaining('empty or malformed fetched-id list')
+    );
+  });
+
+  it.each([
+    ['undefined', undefined],
+    ['null', null],
+    ['a string', 'not-an-array'],
+    ['a plain object', { length: 3 }]
+  ])('resiliency-hardening: refuses to run the sweep for a malformed fetchedAuthentikIds (%s), and issues no query', async (_label, malformed) => {
+    await authentikSync.reconcileOrphanedAccounts(malformed);
+
+    expect(db.query).not.toHaveBeenCalled();
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+    expect(mockLoggerInstance.error).toHaveBeenCalledWith(
+      expect.objectContaining({ fetchedAuthentikIds: malformed }),
+      expect.stringContaining('empty or malformed fetched-id list')
+    );
+  });
+
   it('excludes rows already account_status = \'orphaned\' from its candidate query', async () => {
     db.query.mockResolvedValue({ rows: [] });
 
@@ -369,7 +396,7 @@ describe('AuthentikSyncService.reconcileOrphanedAccounts (account-lifecycle-mana
     });
     EventPublisher.publishOperation.mockResolvedValue(1);
 
-    await authentikSync.reconcileOrphanedAccounts([]);
+    await authentikSync.reconcileOrphanedAccounts(['unrelated-fetched-id']);
 
     expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
       'revoke_tak_certificates',
@@ -407,7 +434,7 @@ describe('AuthentikSyncService.reconcileOrphanedAccounts (account-lifecycle-mana
     });
     EventPublisher.publishOperation.mockResolvedValue(1);
 
-    await authentikSync.reconcileOrphanedAccounts([]);
+    await authentikSync.reconcileOrphanedAccounts(['unrelated-fetched-id']);
 
     expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
       'revoke_tak_certificates',
@@ -442,7 +469,7 @@ describe('AuthentikSyncService.reconcileOrphanedAccounts (account-lifecycle-mana
     });
     EventPublisher.publishOperation.mockResolvedValue(1);
 
-    await authentikSync.reconcileOrphanedAccounts([]);
+    await authentikSync.reconcileOrphanedAccounts(['unrelated-fetched-id']);
 
     const deleteCalls = db.query.mock.calls.filter(
       ([sql]) => typeof sql === 'string' && /^\s*DELETE/i.test(sql)
@@ -468,7 +495,7 @@ describe('AuthentikSyncService.reconcileOrphanedAccounts (account-lifecycle-mana
       return Promise.resolve(1);
     });
 
-    await authentikSync.reconcileOrphanedAccounts([]);
+    await authentikSync.reconcileOrphanedAccounts(['unrelated-fetched-id']);
 
     // The ok-user's steps still ran despite the failing-user's enqueue
     // rejecting first.

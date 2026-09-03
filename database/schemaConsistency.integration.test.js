@@ -19,31 +19,40 @@
  * unnecessary coupling to `pool` (the shared app-wide singleton) inside a
  * throwaway-schema test.
  *
- * "Throwaway database": rather than provisioning an entirely separate
- * Postgres *database* (which would need its own connection/teardown
- * dance and isn't supported by a quick `CREATE DATABASE ... ` inside a
- * transaction), this test runs the full migration chain into a dedicated,
- * uniquely-named Postgres *schema* on the same already-reachable test
- * database used by every other `*.integration.test.js` file in this
- * repo (`tak_migration_test_501`) -- `node-pg-migrate`'s `schema` +
- * `createSchema: true` options (confirmed present in
- * `node_modules/node-pg-migrate/dist/legacy/runner.d.ts`) run the entire
- * migration chain with `search_path` pointed at that schema, so every
- * unqualified `CREATE TABLE`/`CREATE FUNCTION`/etc. in
- * `database/migrations/*.cjs` lands there instead of `public` -- this is
- * "fresh"/"throwaway" in the sense the requirement cares about (a schema
- * this test creates from nothing and fully controls), without needing a
- * second database or superuser `CREATE DATABASE` privileges. The schema
- * is dropped (`DROP SCHEMA ... CASCADE`) in `afterAll` regardless of
- * pass/fail, so no residue is left in the shared test database.
+ * "Throwaway database": this test runs the full migration chain into a
+ * dedicated, uniquely-named Postgres *database* (`CREATE DATABASE ...`
+ * on the same server the other `*.integration.test.js` files connect
+ * to), created via an admin connection to the server's `postgres`
+ * maintenance database and dropped in `afterAll` regardless of
+ * pass/fail, so no residue is left behind.
  *
- * Connection convention: mirrors
- * `server/workers/syncWorker.integration.test.js` exactly --
- * `DB_HOST`/`DB_PORT`/`DB_NAME`/`DB_USER`/`DB_PASSWORD` are read from the
- * environment if already set, otherwise defaulted to the local
- * Docker-based test container (`tak_migration_test_501`, Postgres 15,
- * host port 15433, database `tak_team_manager`, user `postgres`,
- * password `postgres123`).
+ * This test used to isolate into a dedicated *schema* inside the shared
+ * test database instead, via `node-pg-migrate`'s `schema` +
+ * `createSchema: true` options pointing `search_path` at that schema so
+ * every unqualified `CREATE TABLE`/`CREATE FUNCTION`/etc. would land
+ * there instead of `public`. That stopped working once the migration
+ * chain was squashed into a single baseline file
+ * (`database/migrations/1789200000000_baseline-schema.cjs`): the
+ * baseline's DDL is a cleaned `pg_dump --schema-only` copy (see that
+ * file's own header comment), and `pg_dump` always schema-qualifies
+ * every statement (`CREATE TABLE public.foo (...)`), so `search_path`
+ * has no effect and every run collided with the real `public` schema
+ * objects already present on the shared test database. A dedicated
+ * throwaway DATABASE has no such collision: its own `public` schema
+ * starts empty, so `public.foo` resolves exactly where a real
+ * deployment's does. (`database/migrations/__tests__/baselineMigration.integration.test.js`
+ * documents this same root cause and uses the identical database-level
+ * fix.)
+ *
+ * Connection convention: `DB_HOST`/`DB_PORT`/`DB_USER`/`DB_PASSWORD` are
+ * read from the environment if already set, otherwise defaulted to the
+ * local Docker-based test container (`tak_migration_test_501`, Postgres
+ * 15, host port 15433, user `postgres`, password `postgres123`),
+ * matching `server/workers/syncWorker.integration.test.js`. `DB_NAME`
+ * itself is NOT reused from the environment/default here -- this test
+ * creates and connects to its own uniquely-named throwaway database
+ * instead, via an admin connection to the server's `postgres`
+ * maintenance database (see above).
  *
  * Running the migration chain as a child process, not a direct
  * `require('node-pg-migrate')`: `node-pg-migrate` v9 ships as a pure ESM
@@ -124,18 +133,22 @@ const { Pool } = require('pg');
 const ORIGINAL_ENV = {
   DB_HOST: process.env.DB_HOST,
   DB_PORT: process.env.DB_PORT,
-  DB_NAME: process.env.DB_NAME,
   DB_USER: process.env.DB_USER,
   DB_PASSWORD: process.env.DB_PASSWORD
 };
 
 process.env.DB_HOST = process.env.DB_HOST || 'localhost';
 process.env.DB_PORT = process.env.DB_PORT || '15433';
-process.env.DB_NAME = process.env.DB_NAME || 'tak_team_manager';
 process.env.DB_USER = process.env.DB_USER || 'postgres';
 process.env.DB_PASSWORD = process.env.DB_PASSWORD || 'postgres123';
 
-const SCHEMA_NAME = `schema_consistency_test_${Date.now()}`;
+// The throwaway database this test creates and drops -- see the
+// file-level comment for why this is a dedicated DATABASE rather than a
+// dedicated schema inside a shared one. `DB_NAME` itself is deliberately
+// NOT read from/defaulted into the environment here: an admin connection
+// to the server's `postgres` maintenance database is used to create and
+// later drop it.
+const DB_NAME = `schema_consistency_test_${Date.now()}`;
 // This file lives in database/ (one level up from database/migrations/) so
 // that node-pg-migrate's `dir` scan of the real migrations directory never
 // picks up this test file itself as a migration to parse.
@@ -162,7 +175,14 @@ const SQL_KEYWORD_STOPLIST = new Set([
   // MouService's `FOR UPDATE OF s`); the tableRegex below matches
   // "UPDATE" as a keyword trigger and would otherwise misread the
   // following "OF" as the target table name.
-  'of'
+  'of',
+  // "JOIN LATERAL (...)" (used e.g. by `SignupFlowService.js`'s
+  // ancestor-chain lookups) and "FROM UNNEST(...)" (used e.g. by
+  // `CertExpiryNotificationService.js`'s batched IN-list queries) are
+  // both SQL syntax, not table names -- the tableRegex below matches
+  // "JOIN"/"FROM" as a keyword trigger and would otherwise misread the
+  // following "LATERAL"/"UNNEST" as the target table name.
+  'lateral', 'unnest'
 ]);
 
 function readServerJsFiles(dir) {
@@ -217,6 +237,29 @@ function extractQueryStrings(source) {
   while ((match = queryCallRegex.exec(source)) !== null) {
     segments.push(match[2] ?? match[3] ?? match[4] ?? '');
   }
+
+  // A SQL fragment is sometimes built as its OWN template-literal
+  // constant and later spliced into the actual `.query(...)` argument via
+  // `${fragmentName}` (e.g. `server/routes/users.js`'s `candidatesCte`,
+  // interpolated into a second template literal as
+  // `${candidatesCte}, counted AS (...)`). `stripInterpolations` below
+  // deliberately erases every `${...}` span (so an interpolated VALUE is
+  // never misread as a literal identifier), which would otherwise also
+  // erase a spliced-in CTE's own `<name> AS (` declaration -- losing
+  // `candidates` from `extractCteNamesAndLocalAliases` and causing its
+  // CTE name to be misread as a missing real table. Scanning
+  // `const <name> = \`...\`;`/`let <name> = \`...\`;` assignments whose
+  // body looks like SQL (contains a leading `WITH`/`SELECT`/`INSERT`/
+  // `UPDATE`/`DELETE` keyword) picks up that fragment's own text
+  // alongside the `.query(...)` argument text, so its CTE name is seen
+  // before the interpolation-stripping pass ever runs.
+  const sqlFragmentConstRegex = /\b(?:const|let)\s+\w+\s*=\s*`([^`]*)`/g;
+  while ((match = sqlFragmentConstRegex.exec(source)) !== null) {
+    if (/^\s*(WITH|SELECT|INSERT|UPDATE|DELETE)\b/i.test(match[1])) {
+      segments.push(match[1]);
+    }
+  }
+
   return segments;
 }
 
@@ -230,7 +273,15 @@ function extractQueryStrings(source) {
  * `server/`.
  */
 function stripInterpolations(source) {
-  return source.replace(/\$\{[^}]*\}/g, '__INTERP__');
+  // The replacement is a SPACE, not a bare identifier fragment: an
+  // interpolation abutting the preceding text with no separating
+  // whitespace (e.g. `tak_role${mirrorsSuffix ? ', callsign_suffix' : ''}`
+  // in `TeamTransferService.js`) would otherwise glue onto the adjacent
+  // real identifier, misreading `tak_role` as the column
+  // `tak_role__interp__`. A space keeps the two apart while still
+  // preventing an interpolation's own text from ever being read as a
+  // literal SQL identifier.
+  return source.replace(/\$\{[^}]*\}/g, ' __INTERP__ ');
 }
 
 /**
@@ -243,6 +294,23 @@ function stripInterpolations(source) {
  */
 function stripSqlLineComments(source) {
   return source.replace(/--.*$/gm, '');
+}
+
+/**
+ * Strips single-quoted SQL string literals (e.g. the audit-log action
+ * name `'user.team_transfer'` in `TeamTransferService.js`'s `INSERT INTO
+ * audit_logs ... VALUES ($1, 'user.team_transfer', 'user', $2, $3)`).
+ * Postgres uses single quotes exclusively for string literal DATA, never
+ * for an identifier (identifiers needing quoting use double quotes) --
+ * so a literal's content is never a real column/table reference, but a
+ * value happening to contain a `.` (like an audit action name styled
+ * `resource.verb`) would otherwise be misread by the `<alias>.<column>`
+ * regex below as a real qualified column reference. `''` (an escaped
+ * single quote inside a literal) is handled so it does not prematurely
+ * end the match.
+ */
+function stripSqlStringLiterals(source) {
+  return source.replace(/'(?:[^'\\]|\\.|'')*'/g, "''");
 }
 
 /**
@@ -302,6 +370,7 @@ function extractIdentifiers(source) {
   const cleaned = extractQueryStrings(source)
     .map(stripInterpolations)
     .map(stripSqlLineComments)
+    .map(stripSqlStringLiterals)
     .join('\n');
 
   const { cteNames, localAliases } = extractCteNamesAndLocalAliases(cleaned);
@@ -372,13 +441,13 @@ function collectServerIdentifiers() {
 }
 
 describe('Schema-consistency test: migration chain vs. server/ SQL identifiers (Requirement 16.5, task 35.5)', () => {
-  let adminPool;
+  let pool;
 
   beforeAll(async () => {
-    adminPool = new Pool({
+    const adminPool = new Pool({
       host: process.env.DB_HOST,
       port: process.env.DB_PORT,
-      database: process.env.DB_NAME,
+      database: 'postgres',
       user: process.env.DB_USER,
       password: process.env.DB_PASSWORD
     });
@@ -386,21 +455,32 @@ describe('Schema-consistency test: migration chain vs. server/ SQL identifiers (
     try {
       await adminPool.query('SELECT 1');
     } catch (error) {
+      await adminPool.end();
       throw new Error(
         `Real Postgres test database is not reachable at ` +
-          `${process.env.DB_HOST}:${process.env.DB_PORT}/${process.env.DB_NAME} ` +
-          `(user "${process.env.DB_USER}"). This schema-consistency test (task 35.5) ` +
-          `requires a real, running Postgres instance to run the full migration chain ` +
-          `against a fresh schema. Underlying error: ${error.message}`,
+          `${process.env.DB_HOST}:${process.env.DB_PORT} (user "${process.env.DB_USER}"). ` +
+          `This schema-consistency test (task 35.5) requires a real, running Postgres ` +
+          `instance to run the full migration chain against a fresh database. ` +
+          `Underlying error: ${error.message}`,
         { cause: error }
       );
     }
 
-    // Run the FULL migration chain into a dedicated, freshly-created
-    // schema -- the "throwaway database" for this test -- using the same
-    // `database/migrations` directory and `pgmigrations` tracking table
-    // name already used by `database/init.js`/`database/migrate-config.js`,
-    // just redirected at SCHEMA_NAME instead of `public`. Run out-of-process
+    await adminPool.query(`CREATE DATABASE "${DB_NAME}"`);
+    await adminPool.end();
+
+    pool = new Pool({
+      host: process.env.DB_HOST,
+      port: process.env.DB_PORT,
+      database: DB_NAME,
+      user: process.env.DB_USER,
+      password: process.env.DB_PASSWORD
+    });
+
+    // Run the FULL migration chain into the freshly-created throwaway
+    // database, using the same `database/migrations` directory and
+    // `pgmigrations` tracking table name already used by
+    // `database/init.js`/`database/migrate-config.js`. Run out-of-process
     // (see file-level comment on why `node-pg-migrate` can't be
     // `require()`'d directly from inside a Jest test file).
     const migrationScript = `
@@ -409,17 +489,13 @@ describe('Schema-consistency test: migration chain vs. server/ SQL identifiers (
         databaseUrl: {
           user: ${JSON.stringify(process.env.DB_USER)},
           host: ${JSON.stringify(process.env.DB_HOST)},
-          database: ${JSON.stringify(process.env.DB_NAME)},
+          database: ${JSON.stringify(DB_NAME)},
           password: ${JSON.stringify(process.env.DB_PASSWORD)},
           port: ${JSON.stringify(process.env.DB_PORT)},
           ssl: false
         },
         dir: ${JSON.stringify(MIGRATIONS_DIR)},
-        schema: ${JSON.stringify(SCHEMA_NAME)},
-        createSchema: true,
         migrationsTable: 'pgmigrations',
-        migrationsSchema: ${JSON.stringify(SCHEMA_NAME)},
-        createMigrationsSchema: true,
         direction: 'up',
         verbose: false
       }).then(() => process.exit(0)).catch((err) => {
@@ -435,12 +511,28 @@ describe('Schema-consistency test: migration chain vs. server/ SQL identifiers (
   }, 60000);
 
   afterAll(async () => {
-    await adminPool.query(`DROP SCHEMA IF EXISTS "${SCHEMA_NAME}" CASCADE`);
+    if (pool) await pool.end();
+
+    const adminPool = new Pool({
+      host: process.env.DB_HOST,
+      port: process.env.DB_PORT,
+      database: 'postgres',
+      user: process.env.DB_USER,
+      password: process.env.DB_PASSWORD
+    });
+    // Terminate any lingering backends on the throwaway database first --
+    // a still-open connection from this same test otherwise blocks DROP
+    // DATABASE.
+    await adminPool.query(
+      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+       WHERE datname = $1 AND pid <> pg_backend_pid()`,
+      [DB_NAME]
+    );
+    await adminPool.query(`DROP DATABASE IF EXISTS "${DB_NAME}"`);
     await adminPool.end();
 
     process.env.DB_HOST = ORIGINAL_ENV.DB_HOST;
     process.env.DB_PORT = ORIGINAL_ENV.DB_PORT;
-    process.env.DB_NAME = ORIGINAL_ENV.DB_NAME;
     process.env.DB_USER = ORIGINAL_ENV.DB_USER;
     process.env.DB_PASSWORD = ORIGINAL_ENV.DB_PASSWORD;
   });
@@ -448,9 +540,8 @@ describe('Schema-consistency test: migration chain vs. server/ SQL identifiers (
   it('contains every table referenced by name in server/ (FROM/JOIN/UPDATE/INSERT INTO/ALTER TABLE)', async () => {
     const { allTables, tableSources } = collectServerIdentifiers();
 
-    const schemaTablesResult = await adminPool.query(
-      `SELECT table_name FROM information_schema.tables WHERE table_schema = $1`,
-      [SCHEMA_NAME]
+    const schemaTablesResult = await pool.query(
+      `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`
     );
     const schemaTableNames = new Set(schemaTablesResult.rows.map((r) => r.table_name.toLowerCase()));
 
@@ -472,9 +563,8 @@ describe('Schema-consistency test: migration chain vs. server/ SQL identifiers (
   it('contains every qualified column referenced by name in server/ (<alias>.<column>, INSERT INTO column lists) somewhere in the schema', async () => {
     const { allColumns, columnSources } = collectServerIdentifiers();
 
-    const schemaColumnsResult = await adminPool.query(
-      `SELECT column_name FROM information_schema.columns WHERE table_schema = $1`,
-      [SCHEMA_NAME]
+    const schemaColumnsResult = await pool.query(
+      `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public'`
     );
     const schemaColumnNames = new Set(schemaColumnsResult.rows.map((r) => r.column_name.toLowerCase()));
 

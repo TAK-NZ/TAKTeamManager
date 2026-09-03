@@ -1,9 +1,24 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import React, { act } from 'react'
 import { createRoot } from 'react-dom/client'
 
 import { TakGovBadge } from './StoreBadges.jsx'
 import Downloads from '../pages/Downloads.jsx'
+import { configAPI } from '../services/api'
+
+// Downloads.jsx's mount effect calls configAPI.getPublic() directly to
+// resolve the data-driven CloudTAK_Row (downloads-page-os-sections
+// Requirement 4). Mocked here the same way `Downloads.test.jsx` already
+// does, defaulted to "feature off" (`cloudtak_url: null`) -- this guard's
+// own EXPECTED_HREFS below is deliberately scoped to the fixed,
+// takserver-enrollment-era link set (Criterion 12.7) and was never meant
+// to include the separately-gated CloudTAK_Row. Without this mock the
+// effect fires a REAL, unmocked network request in jsdom; nothing here
+// should depend on whether something happens to be listening on
+// `localhost:3000` in the environment the suite runs in.
+vi.mock('../services/api', () => ({
+  configAPI: { getPublic: vi.fn().mockResolvedValue({ data: { cloudtak_url: null } }) },
+}))
 
 // Validates: Requirements 12.3, 12.4, 12.5, 12.7, 12.8
 //
@@ -186,6 +201,7 @@ describe('storeBadgeFidelity guard: Downloads_Page link set (Criteria 12.7, 12.8
 
   beforeEach(async () => {
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    configAPI.getPublic.mockResolvedValue({ data: { cloudtak_url: null } })
     container = document.createElement('div')
     document.body.appendChild(container)
     root = createRoot(container)
@@ -237,6 +253,7 @@ describe('storeBadgeFidelity guard: exactly two Recommended_Option_Markers (Crit
 
   beforeEach(async () => {
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    configAPI.getPublic.mockResolvedValue({ data: { cloudtak_url: null } })
     container = document.createElement('div')
     document.body.appendChild(container)
     root = createRoot(container)

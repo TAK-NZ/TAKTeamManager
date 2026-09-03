@@ -139,38 +139,56 @@ router.get('/', async (req, res) => {
 // Requirement 14.3/14.4: GET /ready (mounted at GET /health/ready) verifies
 // both Database connectivity and Authentik reachability concurrently, each
 // bounded to its own 3-second timeout, returning 200 only if both succeed.
+//
+// Resiliency-hardening: wrapped in a top-level try/catch. `Promise.
+// allSettled` itself never rejects, but nothing downstream of it (building
+// `reasons`, calling `res.status().json()`) was previously guarded either
+// -- a bug in that code would become an unhandled promise rejection inside
+// this `async` handler, which Express does NOT automatically catch and
+// convert into a response (unlike a synchronous throw). Without a catch,
+// that failure mode left the request hanging with no response ever sent,
+// rather than surfacing as a 503 the way every other failure on this route
+// already does.
 router.get('/ready', async (req, res) => {
-  const [dbResult, authentikResult] = await Promise.allSettled([
-    checkDatabaseConnectivity(READY_DB_CHECK_TIMEOUT_MS),
-    checkAuthentikReachability()
-  ]);
+  try {
+    const [dbResult, authentikResult] = await Promise.allSettled([
+      checkDatabaseConnectivity(READY_DB_CHECK_TIMEOUT_MS),
+      checkAuthentikReachability()
+    ]);
 
-  const reasons = [];
+    const reasons = [];
 
-  if (dbResult.status === 'rejected') {
-    logger.error(
-      { err: dbResult.reason },
-      'Readiness check failed: database connectivity check failed or timed out'
-    );
-    reasons.push('Database connectivity check failed or timed out');
+    if (dbResult.status === 'rejected') {
+      logger.error(
+        { err: dbResult.reason },
+        'Readiness check failed: database connectivity check failed or timed out'
+      );
+      reasons.push('Database connectivity check failed or timed out');
+    }
+
+    if (authentikResult.status === 'rejected') {
+      logger.error(
+        { err: authentikResult.reason },
+        'Readiness check failed: Authentik reachability check failed or timed out'
+      );
+      reasons.push('Authentik reachability check failed or timed out');
+    }
+
+    if (reasons.length === 0) {
+      return res.status(200).json({ status: 'ready' });
+    }
+
+    return res.status(503).json({
+      status: 'not_ready',
+      reason: reasons.join('; ')
+    });
+  } catch (err) {
+    logger.error({ err }, 'Readiness check failed: unexpected error');
+    return res.status(503).json({
+      status: 'not_ready',
+      reason: 'Readiness check failed unexpectedly'
+    });
   }
-
-  if (authentikResult.status === 'rejected') {
-    logger.error(
-      { err: authentikResult.reason },
-      'Readiness check failed: Authentik reachability check failed or timed out'
-    );
-    reasons.push('Authentik reachability check failed or timed out');
-  }
-
-  if (reasons.length === 0) {
-    return res.status(200).json({ status: 'ready' });
-  }
-
-  return res.status(503).json({
-    status: 'not_ready',
-    reason: reasons.join('; ')
-  });
 });
 
 // Requirement 14.5: GET /live (mounted at GET /health/live) verifies only

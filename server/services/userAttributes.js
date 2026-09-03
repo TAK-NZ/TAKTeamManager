@@ -3,6 +3,7 @@ const logger = require('../config/logger').createLogger('userAttributes');
 const Team = require('../models/Team');
 const CallsignService = require('./CallsignService');
 const { MAX_TEAM_DEPTH } = require('../config/constants');
+const { fetchWithTimeout } = require('../utils/fetchWithTimeout');
 
 class UserAttributesService {
   static splitFullName(fullName) {
@@ -144,7 +145,7 @@ class UserAttributesService {
     try {
       // Fetch the user's CURRENT Authentik attributes first, so the PATCH
       // below is a merge, never a wholesale replace.
-      const getUserResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
+      const getUserResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
         headers: {
           'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`
         }
@@ -184,7 +185,7 @@ class UserAttributesService {
 
       logger.debug({ authentikUserId, payload }, 'Updating user attributes');
       
-      const response = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
+      const response = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
         method: 'PATCH',
         headers: {
           'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
@@ -207,7 +208,7 @@ class UserAttributesService {
   static async clearUserAttributes(authentikUserId) {
     try {
       // Get current user attributes
-      const getUserResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
+      const getUserResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
         headers: {
           'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`
         }
@@ -224,7 +225,7 @@ class UserAttributesService {
       delete currentAttributes.takCallsign;
       delete currentAttributes.takColor;
       
-      const response = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
+      const response = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
         method: 'PATCH',
         headers: {
           'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,

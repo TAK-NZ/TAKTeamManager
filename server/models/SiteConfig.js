@@ -5,6 +5,7 @@ const { MAX_TEAM_DEPTH } = require('../config/constants');
 const { isRecaptchaDisabledForTesting } = require('../middleware/captcha');
 const { resolveCloudTakUrl } = require('../utils/cloudtakUrl');
 const { isForceSsoLoginEnabled } = require('../config/forceSso');
+const logger = require('../config/logger').createLogger('SiteConfig');
 
 /**
  * Default Expiry_Warning_Days: how far ahead of a certificate's `expires_at`
@@ -62,6 +63,7 @@ class SiteConfig {
       try {
         config.authentik_origin = new URL(process.env.AUTHENTIK_URL).origin;
       } catch (error) {
+        logger.error({ err: error }, 'AUTHENTIK_URL is not a valid URL; omitting authentik_origin from public config');
         config.authentik_origin = null;
       }
     } else {

@@ -125,6 +125,36 @@ describe('Permission_Registry completeness (Requirement 24 Criteria 6-7)', () =>
       expect(registryRoutes[key]).toBeUndefined();
     }
   });
+
+  /**
+   * Security-hardening regression test: `server/routes/deviceManagement.js`
+   * is mounted CONDITIONALLY in `server/index.js` (behind
+   * `isDeviceMgmtEnabled()`), and `buildTestApp()` previously did not
+   * mount it at all -- meaning this file's own completeness check above
+   * silently never walked its four routes, regardless of whether they
+   * had registry entries. Asserts directly that `buildTestApp()`'s
+   * walked inventory actually includes them now, so a regression that
+   * dropped the mount from `routeInventory.js` again would be caught
+   * here specifically, not just incidentally by the broader "no missing
+   * route" check above (which would still pass vacuously if this
+   * router's routes were silently absent from `collected` entirely).
+   */
+  it('includes deviceManagement.js routes in the walked inventory (previously a blind spot)', () => {
+    const app = buildTestApp();
+
+    const collected = [];
+    collectRouteKeys(app._router.stack, '', collected);
+
+    const deviceMgmtKeys = collected.filter((key) => key.includes('/api/device-management'));
+    expect(deviceMgmtKeys.length).toBeGreaterThan(0);
+
+    // And each one must actually have a registry entry -- not just be
+    // present in the walk. This closes the loop: the routes are walked
+    // AND accounted for, not merely walked.
+    for (const key of deviceMgmtKeys) {
+      expect(registryRoutes[key]).toBeDefined();
+    }
+  });
 });
 
 // Re-exported for backward compatibility with existing consumers

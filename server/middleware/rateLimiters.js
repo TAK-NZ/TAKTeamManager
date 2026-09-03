@@ -56,6 +56,8 @@
 
 const rateLimit = require('express-rate-limit');
 const { MemoryStore } = rateLimit;
+const EmailRateLimitService = require('../services/EmailRateLimitService');
+const { getLogger } = require('./requestContext');
 
 // Requirement 7.1: no more than 20 requests per IP per 15-minute window on
 // the OAuth2 `/api/auth/*` routes.
@@ -203,19 +205,120 @@ const requestAccessLimiter = rateLimit({
   store: requestAccessLimiterStore
 });
 
+// ---------------------------------------------------------------------------
+// Requirement 7.2: emailRequestAccessLimiter -- per-EMAIL throttling for the
+// request-access/sign-up flow, backed by `EmailRateLimitService`
+// (`email_rate_tracking` table). Complements the per-IP limiter above:
+// `requestAccessLimiter` resets its budget for every new source IP, so an
+// attacker who rotates IPs is otherwise unconstrained from flooding a
+// single victim email address with verification/notification emails. This
+// limiter closes that gap by tracking attempts against the SUBMITTED email
+// address itself, independent of which IP submitted it.
+// ---------------------------------------------------------------------------
+
+/**
+ * Requirement 7.2: factory for a per-EMAIL rate-limiting middleware. Takes
+ * an async `extractEmail(req)` function so different routes can supply
+ * different ways of identifying "the email this request is about" --
+ * `POST /requests/initiate` carries the email directly in the body,
+ * while `POST /requests/team-access` only carries a verification token
+ * and must resolve it to an email first (see
+ * `SignupFlowService.resolveEmailByToken`). Kept generic here rather than
+ * importing `SignupFlowService` directly, so this middleware module has
+ * no dependency on any one route's service layer.
+ *
+ * Fails OPEN on a database error (via `EmailRateLimitService`) and also
+ * treats "no email could be determined for this request" as pass-through
+ * -- e.g. an already-invalid/expired token resolves to no email, in which
+ * case this middleware has nothing to rate-limit and the route handler's
+ * own token validation produces the actual error response.
+ *
+ * @param {(req: import('express').Request) => Promise<string|null>} extractEmail
+ * @returns {import('express').RequestHandler}
+ */
+function createEmailKeyedLimiter(extractEmail) {
+  return async function emailKeyedLimiter(req, res, next) {
+    let email;
+    try {
+      email = await extractEmail(req);
+    } catch (error) {
+      // Resolving the email itself failed (e.g. a DB error looking up a
+      // token) -- fail open, consistent with EmailRateLimitService's own
+      // fail-open stance; the route handler's own logic will still run
+      // and surface any real problem.
+      getLogger().warn({ err: error }, 'Failed to resolve email for email-keyed rate limiting; failing open');
+      return next();
+    }
+
+    if (typeof email !== 'string' || email.trim().length === 0) {
+      return next();
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+    const { allowed } = await EmailRateLimitService.checkAndRecordEmailAttempt(normalizedEmail);
+
+    if (!allowed) {
+      getLogger().warn({ email: normalizedEmail }, 'Email-keyed request-access rate limit exceeded');
+      return res.status(429).json({
+        error: 'Too many requests for this email address. Please try again later.'
+      });
+    }
+
+    next();
+  };
+}
+
+/**
+ * Requirement 7.2: no more than 5 requests associated with a given email
+ * address within a 60-minute window on `POST /api/requests/initiate`,
+ * keyed off `req.body.email` directly.
+ */
+const emailRequestAccessLimiter = createEmailKeyedLimiter(async (req) => {
+  return req.body && typeof req.body.email === 'string' ? req.body.email : null;
+});
+
+// ---------------------------------------------------------------------------
+// Requirement 7.1/7.2: availableTeamsLimiter -- `GET /api/requests/
+// available-teams` is the closest analog in this codebase to the
+// documented "GET /api/requests/verify/:token" route (that exact path was
+// never implemented; this is the actual public, token-in-query-string
+// route that plays the equivalent role). Unauthenticated and reachable
+// with only a token guess, so it gets the same 20/15min per-IP budget as
+// the other public request-access routes.
+// ---------------------------------------------------------------------------
+
+const AVAILABLE_TEAMS_LIMITER_WINDOW_MS = 15 * 60 * 1000;
+const AVAILABLE_TEAMS_LIMITER_MAX = 20;
+
+const availableTeamsLimiterStore = new MemoryStore();
+
+const availableTeamsLimiter = rateLimit({
+  windowMs: AVAILABLE_TEAMS_LIMITER_WINDOW_MS,
+  max: AVAILABLE_TEAMS_LIMITER_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: availableTeamsLimiterStore
+});
+
 module.exports = {
   authLimiter,
   authCallbackFailureLimiter,
   recordAuthCallbackFailure,
   requestAccessLimiter,
+  createEmailKeyedLimiter,
+  emailRequestAccessLimiter,
+  availableTeamsLimiter,
   // Exposed for tests only, to reset in-memory counters between cases.
   authLimiterStore,
   authCallbackFailureStore,
   requestAccessLimiterStore,
+  availableTeamsLimiterStore,
   AUTH_LIMITER_WINDOW_MS,
   AUTH_LIMITER_MAX,
   AUTH_CALLBACK_FAILURE_WINDOW_MS,
   AUTH_CALLBACK_FAILURE_MAX,
   REQUEST_ACCESS_LIMITER_WINDOW_MS,
-  REQUEST_ACCESS_LIMITER_MAX
+  REQUEST_ACCESS_LIMITER_MAX,
+  AVAILABLE_TEAMS_LIMITER_WINDOW_MS,
+  AVAILABLE_TEAMS_LIMITER_MAX
 };

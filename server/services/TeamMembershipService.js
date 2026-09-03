@@ -1,6 +1,5 @@
 const pool = require('../config/database');
 const EventPublisher = require('./EventPublisher');
-const GroupMembershipCalculator = require('./GroupMembershipCalculator');
 const { checkCallsignSuffixUniqueness } = require('./CallsignSuffixUniquenessService');
 const { isCloudTakEnabled } = require('../config/cloudtak');
 
@@ -314,17 +313,21 @@ class TeamMembershipService {
       userIds.length,
       createdBy
     );
-    
-    // Queue individual operations
-    for (const userId of userIds) {
-      await EventPublisher.publishOperation('bulk_add_user_to_team', {
+
+    // Performance-hardening: one multi-row INSERT (chunked internally by
+    // EventPublisher.publishOperationsBatch) instead of one INSERT per
+    // user in a sequential loop.
+    await EventPublisher.publishOperationsBatch(
+      'bulk_add_user_to_team',
+      userIds.map((userId) => ({
         target_user_id: userId,
         team_id: teamId,
         role: role,
         bulk_operation_id: bulkOpId
-      }, createdBy);
-    }
-    
+      })),
+      createdBy
+    );
+
     return { bulkOperationId: bulkOpId, usersQueued: userIds.length };
   }
 }

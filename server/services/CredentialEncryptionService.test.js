@@ -15,7 +15,6 @@ function loadServiceWithKey(keyValue) {
   } else {
     process.env.CREDENTIAL_ENCRYPTION_KEY = keyValue;
   }
-  // eslint-disable-next-line global-require
   return require(MODULE_PATH);
 }
 

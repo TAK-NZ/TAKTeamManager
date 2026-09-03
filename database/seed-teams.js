@@ -17,28 +17,28 @@ const teams = [
 
 async function seedTeams() {
   try {
-    console.log('Seeding teams...');
-    
+    process.stdout.write('Seeding teams...\n');
+
     for (const team of teams) {
       try {
-        const result = await pool.query(
+        await pool.query(
           'INSERT INTO teams (name, description, slug, color, visibility, can_join) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
           [team.name, team.name, team.slug, team.color, 'public', false]
         );
-        console.log(`✓ Created team: ${team.name}`);
+        process.stdout.write(`✓ Created team: ${team.name}\n`);
       } catch (error) {
         if (error.code === '23505') {
-          console.log(`- Team already exists: ${team.name}`);
+          process.stdout.write(`- Team already exists: ${team.name}\n`);
         } else {
           throw error;
         }
       }
     }
-    
-    console.log('Team seeding completed!');
+
+    process.stdout.write('Team seeding completed!\n');
     process.exit(0);
   } catch (error) {
-    console.error('Error seeding teams:', error);
+    process.stderr.write(`Error seeding teams: ${error && error.stack ? error.stack : error}\n`);
     process.exit(1);
   }
 }

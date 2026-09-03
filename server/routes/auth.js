@@ -330,6 +330,9 @@ router.get('/callback', authFlowLimiter, authCallbackFailureLimiter, async (req,
 // `authenticateToken` with 401.
 // GET /logout for browser-navigable logout (redirects to login page)
 router.get('/logout', async (req, res) => {
+  // maxAge is destructured out deliberately -- clearCookie sets its own
+  // expiry, and a stale maxAge in clearOptions would fight that.
+  // eslint-disable-next-line no-unused-vars
   const { maxAge, ...clearOptions } = getSessionCookieOptions();
   res.clearCookie('tak_session', clearOptions);
   res.redirect(process.env.FRONTEND_URL || '/');
@@ -359,7 +362,7 @@ router.post('/logout', async (req, res) => {
           getLogger().error({ err: revocationError.message }, 'Failed to record token revocation on logout');
         }
       }
-    } catch (verifyError) {
+    } catch {
       // Missing, expired, or invalid-signature token - logout still
       // succeeds; there is simply no `jti` to revoke.
     }
@@ -369,6 +372,7 @@ router.post('/logout', async (req, res) => {
   // set (minus maxAge, since clearCookie sets its own expiry) so the
   // browser actually removes it - a path/domain/secure/sameSite mismatch
   // would otherwise silently no-op.
+  // eslint-disable-next-line no-unused-vars
   const { maxAge, ...clearOptions } = getSessionCookieOptions();
   res.clearCookie('tak_session', clearOptions);
 

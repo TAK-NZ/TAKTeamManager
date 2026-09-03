@@ -392,7 +392,6 @@ describe('TeamVisibilityService.filterVisibleBranches', () => {
 
     const perRow = [];
     for (const team of teams) {
-      // eslint-disable-next-line no-await-in-loop
       const visible = await TeamVisibilityService.isVisibleBranch(team.id, user);
       if (visible) {
         perRow.push(team);

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import React from 'react'
 import { useParams, useSearchParams, Link } from 'react-router-dom'
 import { PlusIcon, UsersIcon, UserPlusIcon, ShieldCheckIcon, BuildingOfficeIcon, FolderPlusIcon, SignalIcon, XMarkIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, TrashIcon, PencilIcon, CheckIcon, ArrowLeftOnRectangleIcon, ArrowPathIcon, DevicePhoneMobileIcon, ArrowUpTrayIcon, EnvelopeIcon, ArrowRightCircleIcon, LockClosedIcon, LockOpenIcon } from '@heroicons/react/24/outline'
@@ -926,7 +926,26 @@ export default function TeamDetail({ user, refreshUser }) {
       if (addMemberRole === 'admin') {
         // For promoting to admin: show existing team members (not already admin)
         // that match the search term, rather than only unassigned users.
+        //
+        // Bugfix (data-corruption incident): `members` deliberately includes
+        // role='inherited' rows (a user who is a DIRECT member of a
+        // Sub_Team, showing up here via inheritance on an ancestor's page --
+        // see the setMembers filter below). Promoting one of THOSE to admin
+        // via teamsAPI.addMember/Team.addMember hits that call's
+        // `ON CONFLICT (user_id, team_id) DO UPDATE SET role` upsert against
+        // their EXISTING inherited row for this team, which sets
+        // role='admin' but leaves inherited_from_team_id untouched --
+        // producing a row that is simultaneously 'admin' and inherited. That
+        // violates this app's own Team_Admin definition (a DIRECT admin row,
+        // per Team.isAdmin/the glossary): it displays as an admin here (this
+        // list only filters on `role`) but Team.isAdmin correctly excludes
+        // it, so the user gets 403'd on every real team-admin-gated action
+        // (e.g. the Team Devices tab). Excluding `role === 'inherited'`
+        // candidates here closes the picker-side hole; a genuine promotion
+        // for such a user has to go through a real Team_Transfer (moving
+        // their Direct_Membership to this team) first.
         const candidates = members.filter(m => {
+          if (m.role === 'inherited') return false
           const isAlreadyAdmin = admins.some(a => a.id === m.id)
           if (isAlreadyAdmin) return false
           if (!userSearch) return true
@@ -1418,34 +1437,6 @@ export default function TeamDetail({ user, refreshUser }) {
     }
   }, [devicesEnabled, teamId, deviceListVersion])
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary-600"></div>
-      </div>
-    )
-  }
-
-  if (error) {
-    return (
-      <div className="card text-center py-12">
-        <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-2">Error loading team</h3>
-        <p className="text-gray-500 dark:text-gray-400">{error}</p>
-      </div>
-    )
-  }
-
-
-
-  if (!team && !loading) {
-    return (
-      <div className="card text-center py-12">
-        <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-2">Team not found</h3>
-        <p className="text-gray-500 dark:text-gray-400">The team you're looking for doesn't exist or you don't have access.</p>
-      </div>
-    )
-  }
-
   // Generic filter and sort function
   const filterAndSort = (items, searchTerm, sortField, sortDirection) => {
     let filtered = items
@@ -1474,20 +1465,71 @@ export default function TeamDetail({ user, refreshUser }) {
     })
   }
 
-  // Process data for each tab
-  const processedData = {
-    members: filterAndSort(members, searchTerms.members, sortFields.members, sortDirections.members),
-    admins: filterAndSort(admins, searchTerms.admins, sortFields.admins, sortDirections.admins),
-    channels: filterAndSort(channels, searchTerms.channels, sortFields.channels, sortDirections.channels),
-    subteams: filterAndSort(subTeams, searchTerms.subteams, sortFields.subteams, sortDirections.subteams)
+  // Performance-hardening: this used to eagerly build a `processedData`
+  // object filtering+sorting ALL FOUR tabs' full lists on every render,
+  // regardless of which one was actually visible -- three quarters of
+  // that work was always thrown away immediately, and it ran again on
+  // every unrelated re-render (opening an edit row, a dialog, toggling a
+  // selection). Only the ACTIVE tab's own source list/searchTerm/
+  // sortField/sortDirection is looked up and filtered+sorted now,
+  // memoized against just those four values. The Team Devices tab is not
+  // one of the four keys this map covers (it owns its own list/fetch
+  // entirely, via `TeamDeviceList` -- see that tab's own render branch),
+  // so it falls back to an empty array here rather than an undefined
+  // source list and every `.length`/`.slice()` call below throwing.
+  const ACTIVE_TAB_SOURCE_LISTS = { members, admins, channels, subteams: subTeams }
+  const activeTabItems = ACTIVE_TAB_SOURCE_LISTS[activeTab] || []
+  const activeSearchTerm = searchTerms[activeTab]
+  const activeSortField = sortFields[activeTab]
+  const activeSortDirection = sortDirections[activeTab]
+
+  // Bugfix: this `useMemo` (and the plain values it depends on, above)
+  // used to sit AFTER the three early `return`s below (loading/error/
+  // team-not-found). `loading` starts `true` on every mount, so the
+  // FIRST render of every page load took the `if (loading) return`
+  // branch and never reached this `useMemo` -- one hook short. Once
+  // `fetchTeamData` finished and called `setLoading(false)`, the NEXT
+  // render fell through every guard and DID call it -- one hook longer
+  // than the previous render's list. React's hook list must be IDENTICAL
+  // in length and order across renders of the same component instance,
+  // so that render-over-render growth threw "Rendered more hooks than
+  // during the previous render" and crashed the page. Hoisting this
+  // `useMemo` (and `filterAndSort`/the derived values above, so they're
+  // in scope before it runs) above the early returns makes it run
+  // unconditionally on every render, exactly like every other hook in
+  // this component. Its inputs are all safe before `team` resolves --
+  // they default to `[]`/`''` while state is still loading.
+  const currentData = useMemo(
+    () => filterAndSort(activeTabItems, activeSearchTerm, activeSortField, activeSortDirection),
+    [activeTabItems, activeSearchTerm, activeSortField, activeSortDirection]
+  )
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary-600"></div>
+      </div>
+    )
   }
 
-  // Pagination for current tab. The Team Devices tab is not one of the
-  // four keys above (it owns its own list/fetch entirely, via
-  // `TeamDeviceList` -- see that tab's own render branch), so it falls
-  // back to an empty array here rather than `processedData['devices']`
-  // being `undefined` and every `.length`/`.slice()` call below throwing.
-  const currentData = processedData[activeTab] || []
+  if (error) {
+    return (
+      <div className="card text-center py-12">
+        <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-2">Error loading team</h3>
+        <p className="text-gray-500 dark:text-gray-400">{error}</p>
+      </div>
+    )
+  }
+
+  if (!team && !loading) {
+    return (
+      <div className="card text-center py-12">
+        <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-2">Team not found</h3>
+        <p className="text-gray-500 dark:text-gray-400">The team you're looking for doesn't exist or you don't have access.</p>
+      </div>
+    )
+  }
+
   const totalPages = Math.ceil(currentData.length / itemsPerPage)
   const startIndex = (currentPages[activeTab] - 1) * itemsPerPage
   const paginatedData = currentData.slice(startIndex, startIndex + itemsPerPage)

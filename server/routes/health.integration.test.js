@@ -93,9 +93,9 @@ describe('Health endpoints against a real, reachable test database (task 34.5)',
     // jest.resetModules(), so `../config/database`'s module-level `pool`
     // singleton (required transitively by `./health`) is constructed
     // against THIS describe block's target database.
-    axiosMock = require('axios'); // eslint-disable-line global-require
-    const healthRouter = require('./health'); // eslint-disable-line global-require
-    pool = require('../config/database'); // eslint-disable-line global-require
+    axiosMock = require('axios');
+    const healthRouter = require('./health');
+    pool = require('../config/database');
     app = buildApp(healthRouter);
 
     try {
@@ -167,9 +167,9 @@ describe('Health endpoints against a real, unreachable database connection (task
     process.env.AUTHENTIK_URL = process.env.AUTHENTIK_URL || 'https://authentik.example.com';
     process.env.AUTHENTIK_API_TOKEN = process.env.AUTHENTIK_API_TOKEN || 'admin-token-value';
 
-    axiosMock = require('axios'); // eslint-disable-line global-require
-    const healthRouter = require('./health'); // eslint-disable-line global-require
-    pool = require('../config/database'); // eslint-disable-line global-require
+    axiosMock = require('axios');
+    const healthRouter = require('./health');
+    pool = require('../config/database');
     app = buildApp(healthRouter);
   });
 

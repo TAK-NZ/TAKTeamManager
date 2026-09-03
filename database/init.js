@@ -43,11 +43,11 @@ async function runMigrations() {
 
 async function initializeDatabase() {
   try {
-    console.log('Initializing database...');
+    process.stdout.write('Initializing database...\n');
 
     await runMigrations();
 
-    console.log('Database migrations applied successfully');
+    process.stdout.write('Database migrations applied successfully\n');
     
     // Insert initial sync status
     await pool.query(`
@@ -126,10 +126,10 @@ If you have questions, contact your team administrator.$tpl$,
       ON CONFLICT DO NOTHING
     `);
     
-    console.log('Default data inserted');
+    process.stdout.write('Default data inserted\n');
     process.exit(0);
   } catch (error) {
-    console.error('Database initialization failed:', error);
+    process.stderr.write(`Database initialization failed: ${error && error.stack ? error.stack : error}\n`);
     process.exit(1);
   }
 }

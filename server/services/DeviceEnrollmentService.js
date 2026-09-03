@@ -14,6 +14,7 @@ const { partitionCandidates } = require('../utils/directoryScope');
 const { MAX_TEAM_DEPTH } = require('../config/constants');
 const { IDENTIFIER_TYPE_MARKERS } = require('../utils/managedIdentifier');
 const { isValidCallsignPrefix } = require('../utils/callsignValidation');
+const { fetchWithTimeout } = require('../utils/fetchWithTimeout');
 const { checkCallsignSuffixUniqueness } = require('./CallsignSuffixUniquenessService');
 const logger = require('../config/logger').createLogger('DeviceEnrollmentService');
 
@@ -485,7 +486,7 @@ class DeviceEnrollmentService {
     // enqueued cleanup operation for the Sync_Worker to retry.
     let compensationOutcome;
     try {
-      const deleteResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
+      const deleteResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
       });
@@ -1077,7 +1078,7 @@ class DeviceEnrollmentService {
 
     if (authentikUserId) {
       try {
-        await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
+        await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
           method: 'DELETE',
           headers: { Authorization: `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
         });

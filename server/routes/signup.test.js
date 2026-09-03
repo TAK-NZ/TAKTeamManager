@@ -16,9 +16,15 @@ jest.mock('../middleware/requestContext', () => ({
   getLogger: () => ({ info: jest.fn(), error: jest.fn(), warn: jest.fn() })
 }));
 
-// Mock rate limiter to be a pass-through
+// Mock rate limiters to be pass-throughs. createEmailKeyedLimiter must
+// return an actual pass-through middleware function (not the factory
+// itself) since signup.js calls it at module load time to build
+// `teamAccessEmailLimiter`.
 jest.mock('../middleware/rateLimiters', () => ({
-  requestAccessLimiter: (req, res, next) => next()
+  requestAccessLimiter: (req, res, next) => next(),
+  emailRequestAccessLimiter: (req, res, next) => next(),
+  availableTeamsLimiter: (req, res, next) => next(),
+  createEmailKeyedLimiter: () => (req, res, next) => next()
 }));
 
 // Mock captcha to be a pass-through

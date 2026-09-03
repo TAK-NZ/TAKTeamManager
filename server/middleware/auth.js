@@ -1,5 +1,4 @@
 const jwt = require('jsonwebtoken');
-const User = require('../models/User');
 const pool = require('../config/database');
 const { getLogger } = require('./requestContext');
 
@@ -162,6 +161,7 @@ const requireTeamAdmin = async (req, res, next) => {
     }
     next();
   } catch (error) {
+    getLogger().error({ err: error, ip: getRequestIp(req), route: getRequestRoute(req) }, 'Team admin authorization check failed');
     res.status(500).json({ error: 'Authorization check failed' });
   }
 };

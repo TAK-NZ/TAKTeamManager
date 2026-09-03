@@ -3,6 +3,7 @@ const logger = require('../config/logger').createLogger('Team');
 const EventPublisher = require('../services/EventPublisher');
 const { isCloudTakEnabled } = require('../config/cloudtak');
 const { MAX_TEAM_DEPTH } = require('../config/constants');
+const { fetchWithTimeout } = require('../utils/fetchWithTimeout');
 
 /**
  * Requirement 2.2-2.3 (task 5.1): thrown by `Team.create` when the
@@ -92,6 +93,44 @@ class ChannelTierAccessSubTeamError extends Error {
     super(`${fieldName} can only be set on an Organisation`);
     this.name = 'ChannelTierAccessSubTeamError';
     this.fieldName = fieldName;
+  }
+}
+
+/**
+ * Data-corruption bugfix: thrown by `Team.addMember` when `userId`'s
+ * EXISTING `team_memberships` row for `teamId` is an INHERITED one
+ * (`inherited_from_team_id` NOT NULL). Thrown BEFORE any write is
+ * attempted, mirroring `TeamDepthExceededError`'s placement outside this
+ * method's existing try/catch, so it is never swallowed by that catch's
+ * fallback-to-basic-insert path.
+ *
+ * `addMember`'s `INSERT ... ON CONFLICT (user_id, team_id) DO UPDATE SET
+ * role = $3` upsert is designed for a DIRECT row (adding a brand-new
+ * member, or promoting/demoting an existing direct member/admin) -- it
+ * sets `role` alone and never touches `inherited_from_team_id`. Calling
+ * it against a user's INHERITED row for this team (e.g. a Sub_Team
+ * member appearing on their Organisation's Member_List purely via
+ * inheritance) hits that same conflict target and would set
+ * `role = 'admin'` on a row that keeps `inherited_from_team_id` set --
+ * producing a row that is simultaneously an admin row AND an inherited
+ * one, which violates this app's own Team_Admin definition (a DIRECT
+ * admin row, per `Team.isAdmin`/the glossary). Every real authorization
+ * check keys off `inherited_from_team_id IS NULL`, so such a row reads
+ * as "admin" in any UI that only filters on `role` (e.g. the Team Admins
+ * tab) while being denied by every actual `Team.isAdmin` check --
+ * exactly the corrupted state this error prevents from being created.
+ *
+ * A user with an inherited row here has a genuine Direct_Membership
+ * elsewhere; making them a real Team_Admin of `teamId` requires moving
+ * that Direct_Membership via a Team_Transfer
+ * (`TeamTransferService.executeTransfer`), not this method.
+ */
+class InheritedMembershipPromotionError extends Error {
+  constructor(teamId, userId) {
+    super('This user belongs to this team only by inheritance from a Sub_Team. Transfer their membership to this team before making them an admin here.');
+    this.name = 'InheritedMembershipPromotionError';
+    this.teamId = teamId;
+    this.userId = userId;
   }
 }
 
@@ -645,6 +684,20 @@ class Team {
   }
 
   static async addMember(teamId, userId, role = 'member') {
+    // Data-corruption bugfix: reject BEFORE the upsert below when
+    // `userId`'s existing row for `teamId` (if any) is inherited. See
+    // `InheritedMembershipPromotionError`'s own doc comment for the full
+    // rationale. A user with no existing row at all for this team (the
+    // ordinary "add a new member" case) has nothing here to match, so
+    // this check is a no-op for that case.
+    const existingResult = await pool.query(
+      'SELECT inherited_from_team_id FROM team_memberships WHERE user_id = $1 AND team_id = $2',
+      [userId, teamId]
+    );
+    if (existingResult.rows[0] && existingResult.rows[0].inherited_from_team_id != null) {
+      throw new InheritedMembershipPromotionError(teamId, userId);
+    }
+
     try {
       const result = await pool.query(
         'INSERT INTO team_memberships (team_id, user_id, role) VALUES ($1, $2, $3) ON CONFLICT (user_id, team_id) DO UPDATE SET role = $3 RETURNING *',
@@ -1471,9 +1524,16 @@ class Team {
    * only when the selected Team's Organisation's format is `user_defined`,
    * without an extra request.
    */
-  static async getJoinableTeams() {
+  // Performance-hardening: `limit`/`offset` are optional so any other
+  // caller (there are none elsewhere in the codebase today, per a
+  // repo-wide grep) keeps the original unbounded behavior by simply
+  // omitting them. Mirrors `getAllTeams(limit, offset)`'s own optional-
+  // pagination shape above. `GET /api/teams/joinable` (the sole caller)
+  // always supplies both, via the shared `paginationParams` middleware.
+  static async getJoinableTeams(limit, offset) {
     try {
-      const result = await pool.query(`
+      const hasPagination = Number.isInteger(limit) && Number.isInteger(offset);
+      const query = `
         SELECT t.id, t.name, t.description, t.visibility,
                rt.callsign_name_format AS "callsignNameFormat",
                CASE 
@@ -1504,11 +1564,46 @@ class Team {
           WHERE anc.visibility = 'private'
         )
         ORDER BY display_name
-      `);
+        ${hasPagination ? 'LIMIT $1 OFFSET $2' : ''}
+      `;
+      const result = hasPagination
+        ? await pool.query(query, [limit, offset])
+        : await pool.query(query);
       return result.rows;
     } catch (error) {
       logger.error({ err: error }, 'Error fetching joinable teams');
       return [];
+    }
+  }
+
+  // Performance-hardening: total joinable-team count, used alongside the
+  // paginated `getJoinableTeams()` result to report pagination metadata
+  // to GET /api/teams/joinable's caller. Mirrors the exact same
+  // WHERE/NOT EXISTS predicate `getJoinableTeams()` filters on, so the
+  // reported total always matches what a full (unpaginated) fetch of
+  // that same predicate would return.
+  static async getJoinableTeamsCount() {
+    try {
+      const result = await pool.query(`
+        SELECT COUNT(*) as count
+        FROM teams t
+        WHERE t.can_join = true AND t.visibility = 'public'
+        AND NOT EXISTS (
+          WITH RECURSIVE ancestors AS (
+            SELECT parent_team_id FROM teams WHERE id = t.id
+            UNION ALL
+            SELECT p.parent_team_id FROM teams p
+            JOIN ancestors a ON p.id = a.parent_team_id
+          )
+          SELECT 1 FROM teams anc
+          JOIN ancestors a ON anc.id = a.parent_team_id
+          WHERE anc.visibility = 'private'
+        )
+      `);
+      return parseInt(result.rows[0].count, 10);
+    } catch (error) {
+      logger.error({ err: error }, 'Error counting joinable teams');
+      return 0;
     }
   }
 
@@ -1565,7 +1660,7 @@ class Team {
         // (groupResponse.ok was never verified, so `group.pk` was
         // `undefined` and got inserted as NULL with no error surfaced).
         let group;
-        const groupResponse = await fetch(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
+        const groupResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
@@ -1582,7 +1677,7 @@ class Team {
         if (groupResponse.ok) {
           group = await groupResponse.json();
         } else {
-          const lookupResponse = await fetch(
+          const lookupResponse = await fetchWithTimeout(
             `${process.env.AUTHENTIK_URL}/api/v3/core/groups/?name=${encodeURIComponent(authentikGroupName)}`,
             { headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` } }
           );
@@ -1634,5 +1729,6 @@ Team.PseudonymousUsernamePolicyImmutableError = PseudonymousUsernamePolicyImmuta
 Team.OrganisationCallsignPrefixImmutableError = OrganisationCallsignPrefixImmutableError;
 Team.CallsignPrefixConflictError = CallsignPrefixConflictError;
 Team.ChannelTierAccessSubTeamError = ChannelTierAccessSubTeamError;
+Team.InheritedMembershipPromotionError = InheritedMembershipPromotionError;
 
 module.exports = Team;

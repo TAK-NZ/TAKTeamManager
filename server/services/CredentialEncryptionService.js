@@ -27,7 +27,7 @@ function loadKey() {
   try {
     key = Buffer.from(rawKey, 'base64');
   } catch (err) {
-    throw new Error('CREDENTIAL_ENCRYPTION_KEY is not valid base64.');
+    throw new Error('CREDENTIAL_ENCRYPTION_KEY is not valid base64.', { cause: err });
   }
 
   if (key.length !== KEY_LENGTH_BYTES) {
@@ -109,9 +109,11 @@ function decrypt(encryptedValue) {
     ]);
 
     return plaintext.toString('utf8');
-  } catch (err) {
-    // Deliberately do not re-throw the underlying crypto error or include
-    // the ciphertext, to avoid leaking internals to callers/logs.
+  } catch {
+    // Deliberately do not attach the underlying crypto error as `cause`
+    // or otherwise re-throw/include it, and do not include the
+    // ciphertext, to avoid leaking internals to callers/logs
+    // (Requirement 6.3).
     throw new Error('Decryption failed');
   }
 }

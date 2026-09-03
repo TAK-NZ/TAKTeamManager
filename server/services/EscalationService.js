@@ -187,6 +187,7 @@ class EscalationService {
       const result = await pool.query('SELECT config_value FROM system_config WHERE config_key = $1', [key]);
       return result.rows[0]?.config_value || defaultValue;
     } catch (error) {
+      logger.warn({ err: error, key }, 'Failed to read system_config value; falling back to default');
       return defaultValue;
     }
   }

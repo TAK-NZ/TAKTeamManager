@@ -73,7 +73,6 @@ const pool = require('../config/database');
 const UserProvisioningService = require('./UserProvisioningService');
 const { TeamTransferService } = require('./TeamTransferService');
 const UserAttributesService = require('./userAttributes');
-const EmailService = require('./EmailService');
 const EventPublisher = require('./EventPublisher');
 const Team = require('../models/Team');
 const CallsignService = require('./CallsignService');

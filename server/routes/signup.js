@@ -1,7 +1,12 @@
 const express = require('express');
 const { body, query, validationResult } = require('express-validator');
 const { getLogger } = require('../middleware/requestContext');
-const { requestAccessLimiter } = require('../middleware/rateLimiters');
+const {
+  requestAccessLimiter,
+  emailRequestAccessLimiter,
+  availableTeamsLimiter,
+  createEmailKeyedLimiter
+} = require('../middleware/rateLimiters');
 const { verifyCaptcha } = require('../middleware/captcha');
 const SignupFlowService = require('../services/SignupFlowService');
 const OrgInterestService = require('../services/OrgInterestService');
@@ -10,9 +15,20 @@ const router = express.Router();
 const signupFlowService = new SignupFlowService();
 const orgInterestService = new OrgInterestService();
 
+// Requirement 7.2: POST /requests/team-access carries a verification
+// token rather than an email address directly, so its email-keyed
+// limiter must resolve the token to an email first via
+// `SignupFlowService.resolveEmailByToken` before the shared
+// `EmailRateLimitService` check can run.
+const teamAccessEmailLimiter = createEmailKeyedLimiter((req) =>
+  signupFlowService.resolveEmailByToken(req.body && req.body.token)
+);
+
 // POST /requests/initiate — initiate sign-up (email verification step)
-// Public route: rate-limited + CAPTCHA protected
-router.post('/requests/initiate', requestAccessLimiter, verifyCaptcha, [
+// Public route: IP rate-limited, EMAIL rate-limited (Requirement 7.2 --
+// so an attacker cycling source IPs can't flood one victim's inbox with
+// verification emails), and CAPTCHA protected.
+router.post('/requests/initiate', requestAccessLimiter, emailRequestAccessLimiter, verifyCaptcha, [
   body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
   body('code').optional().isString().trim()
 ], async (req, res) => {
@@ -34,8 +50,13 @@ router.post('/requests/initiate', requestAccessLimiter, verifyCaptcha, [
 });
 
 // GET /requests/available-teams — get teams available for a verified email
-// Public route: no auth, token in query params provides verification
-router.get('/requests/available-teams', [
+// Public route: no auth, token in query params provides verification.
+// Rate-limited per IP (Requirement 7.1) -- this is the actual public,
+// token-in-query route that plays the role the production-hardening spec
+// described as "GET /api/requests/verify/:token" (that exact path was
+// never implemented; this route is its real-world equivalent and was
+// previously unthrottled).
+router.get('/requests/available-teams', availableTeamsLimiter, [
   query('token').notEmpty().withMessage('token is required')
 ], async (req, res) => {
   const errors = validationResult(req);
@@ -57,8 +78,13 @@ router.get('/requests/available-teams', [
 });
 
 // POST /requests/team-access — submit team access request after verification
-// Public route: token in body provides verification
-router.post('/requests/team-access', [
+// Public route: token in body provides verification. Rate-limited per IP,
+// rate-limited per EMAIL (via the resolved token -> email, Requirement
+// 7.2), and CAPTCHA protected (Requirement 7.3/7.4) -- this is the route
+// `verifyCaptcha`'s own RECAPTCHA_EXPECTED_ACTION ('team_access_request')
+// was always named for, previously mounted only on /requests/initiate by
+// mistake.
+router.post('/requests/team-access', requestAccessLimiter, teamAccessEmailLimiter, verifyCaptcha, [
   body('token').notEmpty().withMessage('token is required'),
   body('firstName').trim().isLength({ min: 1, max: 255 }).withMessage('firstName is required'),
   body('lastName').trim().isLength({ min: 1, max: 255 }).withMessage('lastName is required'),

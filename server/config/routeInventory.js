@@ -65,6 +65,22 @@ const express = require('express');
  * mounts, not routers of authenticated route handlers, and are excluded --
  * see this module's doc comment).
  *
+ * Security-hardening: `server/routes/deviceManagement.js` is mounted
+ * CONDITIONALLY in `server/index.js`, behind `isDeviceMgmtEnabled()`
+ * (`DEVICE_MGMT_ENABLED='true'`) -- but it is mounted UNCONDITIONALLY
+ * here, regardless of that flag's real value. `deviceManagement.js`
+ * itself only reads `isDeviceMgmtEnabled()` inside its own handlers
+ * (per-request), not at require()/module-load time, so requiring and
+ * mounting the router here carries no dependency on the flag. This
+ * module exists to build a COMPLETE route inventory for completeness
+ * tests, not to reproduce `server/index.js`'s runtime feature-gating
+ * behavior -- mounting conditionally here would have left this router's
+ * routes permanently unwalked by
+ * `permissions.registry.completeness.test.js` (previously the actual
+ * case), meaning a future route added there with no registry entry
+ * would not have been caught by that test the way every other router's
+ * routes are.
+ *
  * None of `validateConfig()`, `app.listen()`, or any background service
  * start is invoked here -- only the plain `express.Router()` instances
  * each route file exports.
@@ -92,6 +108,13 @@ function buildTestApp() {
   app.use('/api/enrollment', require('../routes/enrollment'));
   app.use('/api/bulk-import', require('../routes/bulkImport'));
   app.use('/api', require('../routes/openapi'));
+
+  // Mount unconditionally for inventory-completeness purposes -- see the
+  // doc comment above. `deviceManagement.js` itself only reads
+  // `isDeviceMgmtEnabled()` inside its own handlers (per-request), not at
+  // require()/module-load time, so no environment override is needed
+  // just to require() and mount the router.
+  app.use('/api/device-management', require('../routes/deviceManagement'));
 
   app.use('/health', require('../routes/health'));
 

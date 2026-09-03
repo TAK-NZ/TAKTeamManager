@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { MagnifyingGlassIcon, XMarkIcon, ChevronUpIcon, ChevronDownIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import { devicesAPI } from '../services/api'
@@ -107,26 +107,35 @@ export default function Devices({ user }) {
     fetchDevices()
   }, [fetchDevices])
 
-  const sortedDevices = sortField
-    ? [...devices].sort((a, b) => {
-        let aValue
-        let bValue
-        if (sortField === 'createdAt') {
-          const aTime = Date.parse(a.createdAt)
-          const bTime = Date.parse(b.createdAt)
-          aValue = Number.isNaN(aTime) ? -Infinity : aTime
-          bValue = Number.isNaN(bTime) ? -Infinity : bTime
-        } else {
-          aValue = (deviceDisplayName(a) || '').toLowerCase()
-          bValue = (deviceDisplayName(b) || '').toLowerCase()
-        }
+  // Performance-hardening: memoized against [devices, sortField,
+  // sortDirection] so an unrelated re-render (e.g. opening an edit row or
+  // a dialog) does not re-sort the fetched device page from scratch.
+  // Filtering itself is already server-side (searchQuery is sent to
+  // GET /api/devices), so this page's own list is already bounded by
+  // pagination.pageSize -- this is purely a wasted-work fix, not a
+  // scaling one.
+  const sortedDevices = useMemo(() => (
+    sortField
+      ? [...devices].sort((a, b) => {
+          let aValue
+          let bValue
+          if (sortField === 'createdAt') {
+            const aTime = Date.parse(a.createdAt)
+            const bTime = Date.parse(b.createdAt)
+            aValue = Number.isNaN(aTime) ? -Infinity : aTime
+            bValue = Number.isNaN(bTime) ? -Infinity : bTime
+          } else {
+            aValue = (deviceDisplayName(a) || '').toLowerCase()
+            bValue = (deviceDisplayName(b) || '').toLowerCase()
+          }
 
-        if (sortDirection === 'asc') {
-          return aValue < bValue ? -1 : aValue > bValue ? 1 : 0
-        }
-        return aValue > bValue ? -1 : aValue < bValue ? 1 : 0
-      })
-    : devices
+          if (sortDirection === 'asc') {
+            return aValue < bValue ? -1 : aValue > bValue ? 1 : 0
+          }
+          return aValue > bValue ? -1 : aValue < bValue ? 1 : 0
+        })
+      : devices
+  ), [devices, sortField, sortDirection])
 
   const handleSort = (field) => {
     setSortDirection(sortField === field && sortDirection === 'asc' ? 'desc' : 'asc')

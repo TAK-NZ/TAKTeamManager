@@ -156,7 +156,14 @@ describe('Property 2: The Reconciliation_Sweep never orphans a fetched row, and 
   test.prop(
     [
       fc.uniqueArray(rowArb, { minLength: 0, maxLength: 15, selector: (r) => r.id }),
-      fc.array(fc.integer({ min: 1, max: 50 }).map(String), { minLength: 0, maxLength: 20 })
+      // Resiliency-hardening: `reconcileOrphanedAccounts` now refuses to run
+      // the sweep at all against an EMPTY fetched-id list (a dedicated,
+      // separate guard covered by `authentikSync.test.js` -- an empty list
+      // would otherwise make Postgres's `<> ALL(...)` vacuously true for
+      // every row and orphan the whole table). This property is about the
+      // sweep's NORMAL behaviour once it does run, so `minLength: 1` keeps
+      // every generated case a case the sweep actually executes against.
+      fc.array(fc.integer({ min: 1, max: 50 }).map(String), { minLength: 1, maxLength: 20 })
     ],
     { numRuns: 200 }
   )(

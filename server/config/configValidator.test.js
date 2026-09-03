@@ -36,6 +36,7 @@ const { test } = require('@fast-check/jest');
 const {
   validateConfig,
   validateProductionSecrets,
+  collectNodeEnvConfigIssues,
   collectTakServerConfigIssues,
   collectRetentionConfigIssues,
   isWellFormedUrl,
@@ -70,6 +71,66 @@ function buildValidBaseEnv(overrides = {}) {
     ...overrides
   };
 }
+
+/**
+ * Security-hardening: `NODE_ENV`, if set, must exactly match one of
+ * `VALID_NODE_ENV_VALUES`. A typo'd/miscased value would otherwise
+ * silently fail every `NODE_ENV === 'production'` check elsewhere in
+ * this codebase in a deployment intended to be production.
+ */
+describe('collectNodeEnvConfigIssues', () => {
+  it('reports no issues when NODE_ENV is unset', () => {
+    const env = buildValidBaseEnv();
+    delete env.NODE_ENV;
+
+    expect(collectNodeEnvConfigIssues(env)).toEqual([]);
+  });
+
+  it.each(['production', 'development', 'test'])('reports no issues for the recognized value "%s"', (value) => {
+    expect(collectNodeEnvConfigIssues({ NODE_ENV: value })).toEqual([]);
+  });
+
+  it.each(['prod', 'Production', 'PRODUCTION', ' production', 'production ', 'staging', ''])(
+    'reports an issue for the unrecognized/mistyped value %j',
+    (value) => {
+      if (value === '') {
+        // An empty string is treated as "unset" (findMissingOrEmpty's
+        // own convention), not as a mistyped value -- covered by the
+        // "unset" test above, not here.
+        expect(collectNodeEnvConfigIssues({ NODE_ENV: value })).toEqual([]);
+        return;
+      }
+      const issues = collectNodeEnvConfigIssues({ NODE_ENV: value });
+      expect(issues).toHaveLength(1);
+      expect(issues[0]).toContain(`NODE_ENV is set to "${value}"`);
+    }
+  );
+
+  it('causes validateConfig to exit non-zero for a mistyped NODE_ENV', async () => {
+    const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => {});
+    const env = buildValidBaseEnv({ NODE_ENV: 'Production' });
+
+    await validateConfig(env);
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(mockLoggerInstance.error).toHaveBeenCalledWith(
+      expect.stringContaining('NODE_ENV is set to "Production"')
+    );
+
+    exitSpy.mockRestore();
+  });
+
+  it('does not exit for a correctly-cased NODE_ENV=production with an otherwise-valid config', async () => {
+    const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => {});
+    const env = buildValidBaseEnv({ NODE_ENV: 'production' });
+
+    await validateConfig(env);
+
+    expect(exitSpy).not.toHaveBeenCalled();
+
+    exitSpy.mockRestore();
+  });
+});
 
 /**
  * Requirement 26.1/26.2 (task 48.1): TAK Server mutual TLS credential gate,
@@ -768,26 +829,37 @@ describe('Property 9: JWT expiry duration bounds (isValidJwtExpiry)', () => {
 });
 
 /**
- * Requirement 15.5: WHERE the App or Sync_Worker is started
- * with NODE_ENV=production, a warning identifying that TLS certificate
- * validation is disabled for the database pool must be logged at
- * startup, mirroring `server/config/database.js`'s unconditional
- * `ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false`.
- * This must be a warning only -- it must never cause `validateConfig` to
- * exit non-zero.
+ * Requirement 15.5 (security-hardening follow-up): `server/config/
+ * database.js` no longer disables TLS certificate validation in
+ * production -- it now sets `rejectUnauthorized: true` by default,
+ * optionally loading a CA bundle from `DB_CA_PATH`. This predicate/
+ * warning pair is now a DIAGNOSTIC for the one remaining case worth
+ * flagging: `DB_CA_PATH` unset in production, meaning verification
+ * relies on the system trust store rather than an explicitly configured
+ * CA. This must be a warning only -- it must never cause
+ * `validateConfig` to exit non-zero.
  */
 describe('isDatabaseTlsCertificateValidationDisabled / warnIfDatabaseTlsCertificateValidationDisabled (Requirement 15.5)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });
 
-  it('is false when NODE_ENV is not production', () => {
+  it('is false when NODE_ENV is not production, regardless of DB_CA_PATH', () => {
     expect(isDatabaseTlsCertificateValidationDisabled({ NODE_ENV: 'test' })).toBe(false);
     expect(isDatabaseTlsCertificateValidationDisabled({})).toBe(false);
+    expect(isDatabaseTlsCertificateValidationDisabled({ NODE_ENV: 'test', DB_CA_PATH: '' })).toBe(false);
   });
 
-  it('is true when NODE_ENV is production', () => {
+  it('is true when NODE_ENV is production and DB_CA_PATH is unset or empty', () => {
     expect(isDatabaseTlsCertificateValidationDisabled({ NODE_ENV: 'production' })).toBe(true);
+    expect(isDatabaseTlsCertificateValidationDisabled({ NODE_ENV: 'production', DB_CA_PATH: '' })).toBe(true);
+    expect(isDatabaseTlsCertificateValidationDisabled({ NODE_ENV: 'production', DB_CA_PATH: '   ' })).toBe(true);
+  });
+
+  it('is false when NODE_ENV is production and DB_CA_PATH is configured', () => {
+    expect(
+      isDatabaseTlsCertificateValidationDisabled({ NODE_ENV: 'production', DB_CA_PATH: '/certs/rds-ca.pem' })
+    ).toBe(false);
   });
 
   it('does not log a warning when NODE_ENV is not production', () => {
@@ -795,10 +867,15 @@ describe('isDatabaseTlsCertificateValidationDisabled / warnIfDatabaseTlsCertific
     expect(mockLoggerInstance.warn).not.toHaveBeenCalled();
   });
 
-  it('logs a warning identifying disabled TLS certificate validation when NODE_ENV is production', () => {
+  it('does not log a warning when NODE_ENV is production and DB_CA_PATH is configured', () => {
+    warnIfDatabaseTlsCertificateValidationDisabled({ NODE_ENV: 'production', DB_CA_PATH: '/certs/rds-ca.pem' });
+    expect(mockLoggerInstance.warn).not.toHaveBeenCalled();
+  });
+
+  it('logs a warning when NODE_ENV is production and DB_CA_PATH is unset', () => {
     warnIfDatabaseTlsCertificateValidationDisabled({ NODE_ENV: 'production' });
     expect(mockLoggerInstance.warn).toHaveBeenCalledTimes(1);
-    expect(mockLoggerInstance.warn.mock.calls[0][0]).toMatch(/TLS certificate validation is disabled/);
+    expect(mockLoggerInstance.warn.mock.calls[0][0]).toMatch(/DB_CA_PATH is not configured/);
   });
 });
 
@@ -815,13 +892,13 @@ describe('validateConfig (Requirement 15.5 TLS certificate validation warning in
     jest.restoreAllMocks();
   });
 
-  it('logs the TLS warning but does not exit when NODE_ENV=production and config is otherwise valid', async () => {
+  it('logs the TLS warning but does not exit when NODE_ENV=production, DB_CA_PATH is unset, and config is otherwise valid', async () => {
     const env = buildValidBaseEnv({ NODE_ENV: 'production' });
 
     await validateConfig(env);
 
     expect(mockLoggerInstance.warn).toHaveBeenCalledTimes(1);
-    expect(mockLoggerInstance.warn.mock.calls[0][0]).toMatch(/TLS certificate validation is disabled/);
+    expect(mockLoggerInstance.warn.mock.calls[0][0]).toMatch(/DB_CA_PATH is not configured/);
     expect(exitSpy).not.toHaveBeenCalled();
   });
 

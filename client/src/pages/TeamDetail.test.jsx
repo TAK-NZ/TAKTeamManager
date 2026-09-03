@@ -1308,8 +1308,16 @@ describe('Team Devices tab (between Members and Team Admins)', () => {
     expect(source).toContain('<TeamDeviceList key={deviceListVersion}')
   })
 
-  it('guards processedData/currentData against the devices tab id, which is not one of the four filterAndSort-backed arrays', () => {
-    expect(source).toContain('const currentData = processedData[activeTab] || []')
+  // Performance-hardening: currentData is now computed from only the
+  // ACTIVE tab's own source list (memoized), rather than eagerly building
+  // a processedData object for all four tabs on every render. The devices
+  // tab id is still not one of the four filterAndSort-backed source
+  // lists (it owns its own list/fetch via TeamDeviceList), so it must
+  // still fall back to an empty array rather than an undefined source
+  // list reaching filterAndSort/.length/.slice.
+  it('guards currentData against the devices tab id, which is not one of the four filterAndSort-backed source lists', () => {
+    expect(source).toContain('const ACTIVE_TAB_SOURCE_LISTS = { members, admins, channels, subteams: subTeams }')
+    expect(source).toContain('const activeTabItems = ACTIVE_TAB_SOURCE_LISTS[activeTab] || []')
   })
 
   it('suppresses the generic empty-state and pagination blocks while the devices tab is active, since TeamDeviceList renders its own', () => {

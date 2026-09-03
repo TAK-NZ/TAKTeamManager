@@ -213,7 +213,8 @@ class AwsSecretsManagerProvider {
       );
     } catch (err) {
       throw new Error(
-        `AwsSecretsManagerProvider: failed to resolve secret "${secretName}": ${err.message}`
+        `AwsSecretsManagerProvider: failed to resolve secret "${secretName}": ${err.message}`,
+        { cause: err }
       );
     }
 
