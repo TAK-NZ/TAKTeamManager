@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { PlusIcon, XMarkIcon } from '@heroicons/react/24/outline'
 import { orgDomainsAPI } from '../services/api'
 import toast from 'react-hot-toast'
@@ -19,12 +19,11 @@ export default function OrgDomainManager({ orgId, isAdmin }) {
   const [saving, setSaving] = useState(false)
   const [dirty, setDirty] = useState(false)
 
-  useEffect(() => {
-    if (!orgId || !isAdmin) return
-    fetchDomains()
-  }, [orgId, isAdmin])
-
-  const fetchDomains = async () => {
+  // Wrapped in useCallback (stable per orgId) so the effect below can list
+  // it as a dependency without re-running on every render -- satisfies
+  // react-hooks/exhaustive-deps without changing behaviour (the effect
+  // still fetches once per orgId/isAdmin change).
+  const fetchDomains = useCallback(async () => {
     setLoading(true)
     try {
       const res = await orgDomainsAPI.get(orgId)
@@ -35,7 +34,12 @@ export default function OrgDomainManager({ orgId, isAdmin }) {
     } finally {
       setLoading(false)
     }
-  }
+  }, [orgId])
+
+  useEffect(() => {
+    if (!orgId || !isAdmin) return
+    fetchDomains()
+  }, [orgId, isAdmin, fetchDomains])
 
   const handleAdd = () => {
     const trimmed = newDomain.trim().toLowerCase()

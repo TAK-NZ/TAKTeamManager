@@ -173,4 +173,43 @@ router.patch('/admin/org-interest/:id', authenticateToken, authorize, [
   }
 });
 
+// GET /admin/stats — Global_Manager-only aggregate counts for the /admin
+// dashboard's stat cards. Returns the two counts the page can't already
+// derive from its existing calls:
+//   - totalDevices:  Team_Owned_Devices, defined app-wide the SAME way the
+//                    /teams overview's per-team `device_count` is -- a
+//                    `users` row with `is_team_device = true` (see
+//                    Team.getAllTeams / getSubtreeMemberDeviceCounts). An
+//                    app-wide total is a single unqualified COUNT of those
+//                    rows (a device belongs to exactly one team, so this is
+//                    per-device, not per-membership).
+//   - totalChannels: EVERY channel, team AND global -- team channels
+//                    (`channels`) plus both global-channel kinds
+//                    (`bch_channels` + `region_channels`), matching the
+//                    user's "include all team channels and global channels".
+// Local-only counts (no Authentik round-trip); all three run in one query.
+// Global_Manager-only via the 'admin:stats:read' permission identifier
+// (not in roleDefaults.authenticated_user), mirroring audit_log:read's gate.
+router.get('/admin/stats', authenticateToken, authorize, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT
+        (SELECT COUNT(*) FROM users WHERE is_team_device = true) AS total_devices,
+        (
+          (SELECT COUNT(*) FROM channels)
+          + (SELECT COUNT(*) FROM bch_channels)
+          + (SELECT COUNT(*) FROM region_channels)
+        ) AS total_channels
+    `);
+    const row = result.rows[0] || {};
+    res.json({
+      totalDevices: parseInt(row.total_devices, 10) || 0,
+      totalChannels: parseInt(row.total_channels, 10) || 0
+    });
+  } catch (error) {
+    getLogger().error({ err: error }, 'Failed to get admin stats');
+    res.status(500).json({ error: 'Failed to get admin stats' });
+  }
+});
+
 module.exports = router;

@@ -100,7 +100,6 @@ export default function Devices({ user }) {
     } finally {
       setLoading(false)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pagination.page, pagination.pageSize, searchQuery])
 
   useEffect(() => {

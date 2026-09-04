@@ -417,7 +417,15 @@ describe('registry completeness: every required identifier is satisfiable', () =
    * `users`/`user_cache` rows outright, so widening who may destroy an
    * account is a separate decision that has not been made.
    */
-  const REVIEWED_GLOBAL_MANAGER_ONLY = ['user:team:remove', 'user:bulk_remove_from_team'];
+  // `admin:stats:read` (GET /api/admin/stats) is intentionally
+  // Global_Manager-only: it returns deployment-wide aggregate counts
+  // (total Team_Owned_Devices, total channels across every team plus the
+  // global BCH/region channels) for the /admin dashboard, which is itself
+  // a Global_Manager-only page. There is no per-team scoping to resolve --
+  // it is an all-tenants view by design -- so it correctly has no resolver
+  // and is satisfiable only by the global_manager wildcard, exactly like
+  // `audit_log:read`. Reviewed and deliberate.
+  const REVIEWED_GLOBAL_MANAGER_ONLY = ['user:team:remove', 'user:bulk_remove_from_team', 'admin:stats:read'];
 
   /**
    * UNREVIEWED pre-existing exceptions. Each of these is satisfiable only

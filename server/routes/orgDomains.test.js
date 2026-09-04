@@ -218,4 +218,43 @@ describe('orgDomains routes (Task 9.2)', () => {
       expect(res.status).toBe(404);
     });
   });
+
+  describe('GET /admin/stats', () => {
+    it('returns totalDevices and totalChannels from the aggregate query', async () => {
+      pool.query.mockResolvedValueOnce({
+        rows: [{ total_devices: '7', total_channels: '42' }]
+      });
+
+      const res = await request(app).get('/api/admin/stats');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ totalDevices: 7, totalChannels: 42 });
+
+      // The single query counts Team_Owned_Devices and sums team + BCH +
+      // region channels -- the "all team channels and global channels" total.
+      const [sql] = pool.query.mock.calls[0];
+      expect(sql).toContain('FROM users WHERE is_team_device = true');
+      expect(sql).toContain('FROM channels');
+      expect(sql).toContain('FROM bch_channels');
+      expect(sql).toContain('FROM region_channels');
+    });
+
+    it('coerces the counts to numbers and defaults missing values to 0', async () => {
+      pool.query.mockResolvedValueOnce({ rows: [{}] });
+
+      const res = await request(app).get('/api/admin/stats');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ totalDevices: 0, totalChannels: 0 });
+    });
+
+    it('returns 500 when the query fails', async () => {
+      pool.query.mockRejectedValueOnce(new Error('db down'));
+
+      const res = await request(app).get('/api/admin/stats');
+
+      expect(res.status).toBe(500);
+      expect(res.body.error).toBe('Failed to get admin stats');
+    });
+  });
 });

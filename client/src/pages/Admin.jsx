@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
-import { UserGroupIcon, UsersIcon, CogIcon, CheckIcon, ArrowUpTrayIcon, ArrowDownTrayIcon, DocumentTextIcon, EnvelopeIcon, NoSymbolIcon, ArrowsRightLeftIcon } from '@heroicons/react/24/outline'
-import { configAPI, usersAPI, teamsAPI, syncAPI, bulkImportAPI, communicationsAPI, settingsAPI } from '../services/api'
+import { UserGroupIcon, UsersIcon, CogIcon, CheckIcon, ArrowUpTrayIcon, ArrowDownTrayIcon, DocumentTextIcon, EnvelopeIcon, NoSymbolIcon, ArrowsRightLeftIcon, DevicePhoneMobileIcon, SignalIcon } from '@heroicons/react/24/outline'
+import { configAPI, usersAPI, teamsAPI, syncAPI, bulkImportAPI, communicationsAPI, settingsAPI, adminAPI } from '../services/api'
 import FormattedDate, { DATE_PRECISION, TOOLTIP_SIDES } from '../components/FormattedDate'
 import { getVariableHints } from '../utils/templateVariableHints'
 import { buildTemplateUpdatePayload, validateTemplateDraft } from '../utils/templateUpdatePayload'
@@ -8,7 +8,7 @@ import { unzipExportedArchive, isImportPayloadShape } from '../utils/settingsImp
 import ExcludedDomainsManager from '../components/ExcludedDomainsManager'
 
 export default function Admin({ user }) {
-  const [stats, setStats] = useState({ totalUsers: 0, totalTeams: 0 })
+  const [stats, setStats] = useState({ totalUsers: 0, totalTeams: 0, totalDevices: 0, totalChannels: 0 })
   const [syncStatus, setSyncStatus] = useState(null)
   const [syncing, setSyncing] = useState(false)
   // --- Site Content editor state (dropdown-selector pattern, matching the
@@ -86,7 +86,7 @@ export default function Admin({ user }) {
     // functions.
     const fetchStats = async () => {
       try {
-        const [usersCountResponse, teamsResponse] = await Promise.all([
+        const [usersCountResponse, teamsResponse, adminStatsResponse] = await Promise.all([
           // Bugfix: "Total Users" previously read GET /api/users' own
           // pagination.total, which is Authentik's raw type=internal count
           // -- it included AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES matches
@@ -95,7 +95,10 @@ export default function Admin({ user }) {
           // deliberately does not (see its doc comment). GET /api/users/count
           // is a dedicated, exact, unpaginated count excluding both.
           usersAPI.getCount(),
-          teamsAPI.getMyTeams()
+          teamsAPI.getMyTeams(),
+          // Total Team Devices + Total Channels (team + global) -- a
+          // dedicated Global-Manager-only aggregate endpoint.
+          adminAPI.getStats()
         ])
 
         // teams.getMyTeams is paginated (default pageSize 50 -- see
@@ -104,7 +107,9 @@ export default function Admin({ user }) {
         // undercount once there are more than one page of teams.
         setStats({
           totalUsers: usersCountResponse.data.count ?? 0,
-          totalTeams: teamsResponse.data.pagination?.total ?? teamsResponse.data.teams?.length ?? 0
+          totalTeams: teamsResponse.data.pagination?.total ?? teamsResponse.data.teams?.length ?? 0,
+          totalDevices: adminStatsResponse.data.totalDevices ?? 0,
+          totalChannels: adminStatsResponse.data.totalChannels ?? 0
         })
       } catch (error) {
         console.error('Failed to fetch stats:', error)
@@ -157,7 +162,12 @@ export default function Admin({ user }) {
     fetchSyncStatus()
     fetchSiteConfig()
     fetchTemplateList()
-  }, [])
+    // `user?.isAdmin` is a dependency: fetchTemplateList guards on it
+    // internally (it must not fetch templates for a non-admin), so the
+    // effect must re-run if the caller's admin status changes. The four
+    // fetch functions are defined inline in this effect, so they are not
+    // themselves dependencies.
+  }, [user?.isAdmin])
   const [activeTab, setActiveTab] = useState('site')
 
   // --- Bulk Import (Team CSV) state (Requirements 9.14, 14.1) ---
@@ -604,8 +614,11 @@ export default function Admin({ user }) {
         </p>
       </div>
 
-      {/* Admin Stats */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+      {/* Admin Stats: four count cards -- two per row on a tablet, all four
+          on one row at `lg`, stacked on a phone. The User Sync card moved to
+          its own full-width row below so adding these two counts didn't
+          squeeze it. */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
         <div className="card">
           <div className="flex items-center">
             <div className="flex-shrink-0">
@@ -630,12 +643,43 @@ export default function Admin({ user }) {
           </div>
         </div>
 
-        {/* Mobile fix: below `sm:`, the icon/label/status block and the Sync
-            Now button stack instead of squeezing onto one row (a
-            `text-xs px-3 py-1` button was also below this app's ~36px tap
-            target floor -- bumped to `text-sm px-3 py-1.5`, matching the
-            floor other small secondary buttons on this page already use,
-            e.g. "Send test email"'s sizing). */}
+        <div className="card">
+          <div className="flex items-center">
+            <div className="flex-shrink-0">
+              <DevicePhoneMobileIcon className="h-8 w-8 text-amber-600" />
+            </div>
+            <div className="ml-4">
+              <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Total Team Devices</p>
+              <p className="text-2xl font-bold text-gray-900 dark:text-gray-100">{stats.totalDevices}</p>
+            </div>
+          </div>
+        </div>
+
+        <div className="card">
+          <div className="flex items-center">
+            <div className="flex-shrink-0">
+              <SignalIcon className="h-8 w-8 text-purple-600" />
+            </div>
+            <div className="ml-4">
+              {/* Total Channels = team channels + global channels (BCH +
+                  region), per the server's GET /api/admin/stats. */}
+              <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Total Channels</p>
+              <p className="text-2xl font-bold text-gray-900 dark:text-gray-100">{stats.totalChannels}</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* User Sync card -- its own row (was the third cell of the old
+          3-col stats grid, moved out when the two new count cards were
+          added).
+          Mobile fix: below `sm:`, the icon/label/status block and the Sync
+          Now button stack instead of squeezing onto one row (a
+          `text-xs px-3 py-1` button was also below this app's ~36px tap
+          target floor -- bumped to `text-sm px-3 py-1.5`, matching the
+          floor other small secondary buttons on this page already use,
+          e.g. "Send test email"'s sizing). */}
+      <div className="grid grid-cols-1">
         <div className="card">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
             <div className="flex items-center">

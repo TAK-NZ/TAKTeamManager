@@ -1557,8 +1557,16 @@ export default function TeamDetail({ user, refreshUser }) {
   // entirely, via `TeamDeviceList` -- see that tab's own render branch),
   // so it falls back to an empty array here rather than an undefined
   // source list and every `.length`/`.slice()` call below throwing.
-  const ACTIVE_TAB_SOURCE_LISTS = { members, admins, channels, subteams: subTeams }
-  const activeTabItems = ACTIVE_TAB_SOURCE_LISTS[activeTab] || []
+  // Memoized so the `|| []` fallback doesn't hand `currentData`'s useMemo a
+  // brand-new array identity on every render (which would defeat that memo
+  // and re-run filterAndSort each time). Recomputes only when the active
+  // tab or one of the four source lists actually changes. The Team Devices
+  // tab is intentionally absent from the map (it owns its own list/fetch via
+  // TeamDeviceList), so it falls back to a stable [] here.
+  const activeTabItems = useMemo(
+    () => ({ members, admins, channels, subteams: subTeams }[activeTab] || []),
+    [activeTab, members, admins, channels, subTeams]
+  )
   const activeSearchTerm = searchTerms[activeTab]
   const activeSortField = sortFields[activeTab]
   const activeSortDirection = sortDirections[activeTab]

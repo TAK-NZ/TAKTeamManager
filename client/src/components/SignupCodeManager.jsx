@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { ClipboardDocumentIcon, ArrowPathIcon, TrashIcon, QrCodeIcon, DocumentIcon } from '@heroicons/react/24/outline'
 import { signupCodesAPI } from '../services/api'
 import toast from 'react-hot-toast'
@@ -17,12 +17,10 @@ export default function SignupCodeManager({ teamId, teamName, isAdmin }) {
   const [showConfirm, setShowConfirm] = useState(false) // generate confirmation
   const [showRevokeConfirm, setShowRevokeConfirm] = useState(false)
 
-  useEffect(() => {
-    if (!teamId || !isAdmin) return
-    fetchCode()
-  }, [teamId, isAdmin])
-
-  const fetchCode = async () => {
+  // Wrapped in useCallback (stable per teamId) so the effect can depend on
+  // it without re-running every render -- satisfies exhaustive-deps with no
+  // behaviour change (still one fetch per teamId/isAdmin change).
+  const fetchCode = useCallback(async () => {
     setLoading(true)
     try {
       const res = await signupCodesAPI.get(teamId)
@@ -36,7 +34,12 @@ export default function SignupCodeManager({ teamId, teamName, isAdmin }) {
     } finally {
       setLoading(false)
     }
-  }
+  }, [teamId])
+
+  useEffect(() => {
+    if (!teamId || !isAdmin) return
+    fetchCode()
+  }, [teamId, isAdmin, fetchCode])
 
   const handleGenerate = async () => {
     setShowConfirm(false)

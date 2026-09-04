@@ -545,6 +545,13 @@ const routes = {
   'PUT /api/admin/excluded-domains': ['admin:excluded_domains:manage'],
   'GET /api/admin/org-interest': ['admin:org_interest:read'],
   'PATCH /api/admin/org-interest/:id': ['admin:org_interest:manage'],
+  // Aggregate counts for the /admin dashboard stat cards (Total Team
+  // Devices, Total Channels). Global_Manager-only: 'admin:stats:read' is
+  // NOT in roleDefaults.authenticated_user, so only the global_manager
+  // wildcard satisfies it -- the same shape as audit_log:read. The counts
+  // span every team/channel/device in the deployment, which is a
+  // Global_Manager-scoped view.
+  'GET /api/admin/stats': ['admin:stats:read'],
 
   // --- /api/openapi (server/routes/openapi.js) ---
   // Generated OpenAPI document (server/config/openapi.js), derived from

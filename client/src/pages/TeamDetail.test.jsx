@@ -1432,8 +1432,15 @@ describe('Team Devices tab (between Members and Team Admins)', () => {
   // still fall back to an empty array rather than an undefined source
   // list reaching filterAndSort/.length/.slice.
   it('guards currentData against the devices tab id, which is not one of the four filterAndSort-backed source lists', () => {
-    expect(source).toContain('const ACTIVE_TAB_SOURCE_LISTS = { members, admins, channels, subteams: subTeams }')
-    expect(source).toContain('const activeTabItems = ACTIVE_TAB_SOURCE_LISTS[activeTab] || []')
+    // activeTabItems is now memoized (its own useMemo) so the `|| []`
+    // fallback doesn't hand currentData's useMemo a fresh array identity
+    // every render -- but the guarantee under test is unchanged: the four
+    // source lists are members/admins/channels/subTeams, and any other tab
+    // id (notably 'devices', which owns its own list via TeamDeviceList)
+    // falls back to a stable empty array rather than an undefined source
+    // list reaching filterAndSort/.length/.slice.
+    expect(source).toContain('{ members, admins, channels, subteams: subTeams }[activeTab] || []')
+    expect(source).toMatch(/const activeTabItems = useMemo\(/)
   })
 
   it('suppresses the generic empty-state and pagination blocks while the devices tab is active, since TeamDeviceList renders its own', () => {

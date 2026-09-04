@@ -474,7 +474,12 @@ export default function Dashboard({ user }) {
     return items
   }
 
-  const fetchChannelData = async () => {
+  // Wrapped in useCallback so the effect below can depend on it (satisfying
+  // exhaustive-deps) without being recreated every render. It reads `user`
+  // (and `canManageTeams`, itself derived from `user`) to decide which
+  // admin-scoped stat fetches to include, so those are its dependencies --
+  // which preserves the effect's original re-run-on-`user`-change behaviour.
+  const fetchChannelData = useCallback(async () => {
     try {
       // Fetch user's team assignment and channel descriptions in parallel
       // (channel descriptions don't depend on the user response)
@@ -597,7 +602,7 @@ export default function Dashboard({ user }) {
     } finally {
       setLoading(false)
     }
-  }
+  }, [user, canManageTeams])
 
   useEffect(() => {
     fetchChannelData()
@@ -618,7 +623,10 @@ export default function Dashboard({ user }) {
       window.removeEventListener('userAssignmentChanged', handleUserAssignmentChanged)
       stopRefresh()
     }
-  }, [user])
+    // `fetchChannelData` is the dependency (it is memoized on `user`/
+    // `canManageTeams`), so the effect still re-subscribes/re-fetches when
+    // the user changes, exactly as the former `[user]` dep array did.
+  }, [fetchChannelData])
 
 
   // Filter channels based on search query

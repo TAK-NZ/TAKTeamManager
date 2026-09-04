@@ -149,7 +149,6 @@ export default function AddServiceAccountDialog({ channelId, channelName, onClos
         clearTimeout(debounceTimerRef.current)
       }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [suffix, suffixValid, channelId])
 
   const canSubmit = suffixValid && availability === 'available' && !submitting

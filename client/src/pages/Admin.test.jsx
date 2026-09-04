@@ -195,3 +195,32 @@ describe('Admin.jsx non-table Date_Render_Positions (task 6.7)', () => {
     expect(normalized).toContain("Last updated:{' '} <FormattedDate")
   })
 })
+
+// The /admin dashboard's stat cards. In addition to the pre-existing Total
+// Teams / Total Users, the page now shows Total Team Devices and Total
+// Channels (team + global), backed by GET /api/admin/stats via
+// adminAPI.getStats(). Source-contract assertions, matching this file's
+// established convention (Admin.jsx is a large stateful page with no
+// exported pure helpers for this UI).
+describe('Admin.jsx stat cards (Total Team Devices, Total Channels)', () => {
+  it('fetches the aggregate counts via adminAPI.getStats() alongside the existing users/teams calls', () => {
+    expect(adminSource).toContain("import { configAPI, usersAPI, teamsAPI, syncAPI, bulkImportAPI, communicationsAPI, settingsAPI, adminAPI } from '../services/api'")
+    expect(adminSource).toContain('adminAPI.getStats()')
+  })
+
+  it('seeds the stats state with the two new keys and populates them from the response', () => {
+    expect(adminSource).toContain('totalDevices: 0, totalChannels: 0')
+    expect(normalized).toContain('totalDevices: adminStatsResponse.data.totalDevices ?? 0')
+    expect(normalized).toContain('totalChannels: adminStatsResponse.data.totalChannels ?? 0')
+  })
+
+  it('renders a Total Team Devices card bound to stats.totalDevices', () => {
+    expect(normalized).toContain('Total Team Devices')
+    expect(normalized).toContain('{stats.totalDevices}')
+  })
+
+  it('renders a Total Channels card bound to stats.totalChannels', () => {
+    expect(normalized).toContain('Total Channels')
+    expect(normalized).toContain('{stats.totalChannels}')
+  })
+})

@@ -32,7 +32,6 @@ export function isValidBaseUrl(value) {
   }
   if (/^https?:\/\//i.test(value)) {
     try {
-      // eslint-disable-next-line no-new
       new URL(value);
       return true;
     } catch {
@@ -45,7 +44,6 @@ export function isValidBaseUrl(value) {
     return false;
   }
   try {
-    // eslint-disable-next-line no-new
     new URL(value, window.location.origin);
     return true;
   } catch {
@@ -65,7 +63,6 @@ try {
   // Requirement 2.7: log a descriptive error and do NOT attempt to construct
   // login/API URLs from the invalid value. Fall back to a safe same-origin
   // default so the app doesn't completely break.
-  // eslint-disable-next-line no-console
   console.error('[api] Invalid backend base URL configuration:', err.message);
   validatedBase = '';
 }
@@ -185,6 +182,46 @@ export const teamsAPI = {
   // don't need pagination (Teams.jsx, TeamDetail.jsx), matching the
   // regular-user branch which ignores pagination anyway.
   getMyTeams: (params = {}) => api.get('/teams/my-teams', { params }),
+  // Fetches the caller's ENTIRE team list, following the server's
+  // pagination across as many pages as needed, and resolves to a flat
+  // array of team rows (NOT an axios response).
+  //
+  // Why this exists: the admin "all teams" branch of GET /teams/my-teams
+  // is paginated and hard-capped at MAX_PAGE_SIZE (200,
+  // server/middleware/pagination.js). Any consumer that reconstructs the
+  // hierarchy client-side by walking parent_team_id -- the Orgs & Teams
+  // overview tree (Teams.jsx) and the Team-detail Display_Name /
+  // depth / parent-dropdown logic (TeamDetail.jsx) -- needs EVERY team,
+  // or a team whose ancestor didn't fit in the first 200 rows is silently
+  // mis-rooted (empty tree) or falls back to the WRONG label (e.g.
+  // "BAYO - Edgecumbe" using the immediate parent's prefix instead of
+  // "FENZ - Edgecumbe" using the root Organisation's). A single 200-row
+  // request could never satisfy a real org larger than 200 teams; this
+  // loops using the response's own pagination.total.
+  //
+  // The regular-user branch returns its whole org-scoped, visibility-
+  // filtered set in one unpaginated response (no `pagination` field);
+  // this handles that too -- with no pagination metadata the loop stops
+  // after page 1.
+  getAllMyTeams: async () => {
+    const PAGE_SIZE = 200 // server's MAX_PAGE_SIZE (server/middleware/pagination.js)
+    const first = await api.get('/teams/my-teams', { params: { page: 1, pageSize: PAGE_SIZE } })
+    let teams = first.data.teams || []
+    const total = first.data.pagination?.total
+    if (!Number.isInteger(total) || teams.length >= total) {
+      return teams
+    }
+    const totalPages = Math.ceil(total / PAGE_SIZE)
+    const rest = await Promise.all(
+      Array.from({ length: totalPages - 1 }, (_, i) =>
+        api.get('/teams/my-teams', { params: { page: i + 2, pageSize: PAGE_SIZE } })
+      )
+    )
+    for (const response of rest) {
+      teams = teams.concat(response.data.teams || [])
+    }
+    return teams
+  },
   getJoinable: () => api.get('/teams/joinable'),
   create: (data) => api.post('/teams', data),
   update: (id, data) => api.put(`/teams/${id}`, data),
@@ -464,6 +501,9 @@ export const orgDomainsAPI = {
 };
 
 export const adminAPI = {
+  // Aggregate counts for the /admin dashboard stat cards (Total Team
+  // Devices, Total Channels = team + BCH + region). Global-Manager-only.
+  getStats: () => api.get('/admin/stats'),
   getExcludedDomains: () => api.get('/admin/excluded-domains'),
   updateExcludedDomains: (domains) => api.put('/admin/excluded-domains', { domains }),
   getOrgInterest: (params) => api.get('/admin/org-interest', { params }),
