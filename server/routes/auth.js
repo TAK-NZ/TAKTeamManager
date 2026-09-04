@@ -229,24 +229,60 @@ router.get('/callback', authFlowLimiter, authCallbackFailureLimiter, async (req,
     const authentikSync = require('../services/authentikSync');
     const adminGroupName = process.env.ADMIN_GROUP_NAME || 'TakTeamManager_Admin';
 
+    // `authentikUser` (this login's Authentik user object) and `groupMap`
+    // (the pk->name map) are captured at this outer scope so the
+    // first-login self-heal below can reuse them for a SINGLE-user sync
+    // instead of re-fetching or running a whole-directory sync.
+    let authentikUser = null;
+    let groupMap = null;
     try {
       const userDetailResponse = await axios.get(
         `${process.env.AUTHENTIK_URL}/api/v3/core/users/?username=${encodeURIComponent(basicUser.preferred_username)}`,
         { headers: { Authorization: `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }, timeout: 10000 }
       );
-      const authentikUser = userDetailResponse.data.results && userDetailResponse.data.results[0];
+      authentikUser = userDetailResponse.data.results && userDetailResponse.data.results[0];
       if (!authentikUser) throw new Error("User not found in Authentik");
 
       const groupNames = [];
       if (authentikUser.groups && authentikUser.groups.length > 0) {
-        const groupResponse = await axios.get(
-          `${process.env.AUTHENTIK_URL}/api/v3/core/groups/?page_size=500`,
-          { headers: { Authorization: `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }, timeout: 10000 }
-        );
-        const groupMap = {};
-        for (const g of (groupResponse.data.results || [])) {
-          groupMap[g.pk] = g.name;
+        // Perf bugfix (slow login redirect): resolve the user's group ids
+        // to names from `groups_obj` -- an array of `{ pk, name }` for
+        // EXACTLY this user's groups that Authentik's user serializer
+        // already returns on the user-detail response fetched just above.
+        // This costs ZERO extra Authentik calls.
+        //
+        // It replaces a per-login `authentikSync.fetchGroupMap()`, which
+        // PAGINATES the WHOLE Authentik group list (Authentik caps a page
+        // at 100 regardless of requested page_size, so this deployment's
+        // ~1400 groups meant ~14 sequential API round-trips on the login
+        // critical path, blocking the redirect to /dashboard every time).
+        //
+        // `groupMap` is still built (pk -> name, but only for this user's
+        // groups) because the first-login self-heal below passes it to
+        // `syncSingleUser`, which does its own `groupMap[groupId]` lookup.
+        //
+        // Fallback: if `groups_obj` is somehow absent or malformed (an
+        // older Authentik, or an unexpected serializer), fall back to the
+        // paginated full-list walk so admin resolution still works
+        // correctly -- correctness over speed for that edge case. Without
+        // this, an empty groupMap would resolve zero names, compute
+        // isAdmin=false, and clobber a Global_Manager's row (the original
+        // "admin stripped on every login" bug this whole block guards).
+        if (Array.isArray(authentikUser.groups_obj) && authentikUser.groups_obj.length > 0) {
+          groupMap = {};
+          for (const group of authentikUser.groups_obj) {
+            if (group && group.pk != null && group.name != null) {
+              groupMap[group.pk] = group.name;
+            }
+          }
+        } else {
+          getLogger().warn(
+            { username: basicUser.preferred_username },
+            'Authentik user-detail response had no groups_obj; falling back to paginated fetchGroupMap for group-name resolution'
+          );
+          groupMap = await authentikSync.fetchGroupMap();
         }
+
         for (const gid of authentikUser.groups) {
           if (groupMap[gid]) groupNames.push(groupMap[gid]);
         }
@@ -265,17 +301,44 @@ router.get('/callback', authFlowLimiter, authCallbackFailureLimiter, async (req,
     let cachedUser = await authentikSync.getUserFromCache(basicUser.preferred_username);
 
     if (!cachedUser) {
-      // Self-heal: the user exists in Authentik (we just fetched authentikUser
-      // above) but has no user_cache row yet — e.g. first boot before the
-      // initial periodic sync completed, or a user added to Authentik since the
-      // last sync. Run one on-demand sync and retry the lookup once, rather than
-      // bouncing a valid user to ?error=user_not_synced and making them wait for
-      // the next periodic sync (up to SYNC_INTERVAL_MINUTES).
-      getLogger().warn({ username: basicUser.preferred_username }, 'User not found in cache; running on-demand Authentik sync');
-      try {
-        await authentikSync.syncUsers();
-      } catch (syncErr) {
-        getLogger().error({ err: syncErr.message, username: basicUser.preferred_username }, 'On-demand Authentik sync failed during login');
+      // First-login self-heal: the user exists in Authentik but has no
+      // user_cache row yet (first boot before the initial periodic sync,
+      // or a user added to Authentik since the last sync).
+      //
+      // Perf bugfix (slow first login): this used to run a WHOLE-DIRECTORY
+      // `authentikSync.syncUsers()` synchronously inside the login request
+      // -- fetching every Authentik user, paginating the entire ~1400-group
+      // list, and issuing a per-user PATCH for every attribute drift across
+      // the directory -- just to onboard THIS one user, blocking the
+      // redirect on dozens-to-hundreds of sequential Authentik round-trips.
+      // Instead, sync only THIS user via `syncSingleUser`, reusing the
+      // `authentikUser` object and `groupMap` already fetched above (so no
+      // extra Authentik calls at all when the group refresh succeeded). It
+      // performs the same authoritative users + user_cache upsert one row
+      // at a time, so a subsequent login is fast for the exact same reason
+      // every other user's is: the cache row now exists.
+      if (authentikUser) {
+        getLogger().info({ username: basicUser.preferred_username }, 'User not found in cache; syncing this single user on first login');
+        try {
+          // `groupMap` may be null when the user has no groups at all (the
+          // refresh block only fetches it when authentikUser.groups is
+          // non-empty); pass an empty map so syncSingleUser resolves zero
+          // group names rather than throwing.
+          await authentikSync.syncSingleUser(authentikUser, groupMap || {}, adminGroupName);
+        } catch (syncErr) {
+          getLogger().error({ err: syncErr.message, username: basicUser.preferred_username }, 'On-demand single-user sync failed during login');
+        }
+      } else {
+        // Fallback: the group-refresh block above failed before resolving
+        // `authentikUser` (e.g. the Authentik user lookup itself errored).
+        // Fall back to the full sync so a transient lookup blip still
+        // onboards the user rather than bouncing them to the error page.
+        getLogger().warn({ username: basicUser.preferred_username }, 'No Authentik user object available; falling back to full on-demand sync');
+        try {
+          await authentikSync.syncUsers();
+        } catch (syncErr) {
+          getLogger().error({ err: syncErr.message, username: basicUser.preferred_username }, 'On-demand Authentik sync failed during login');
+        }
       }
       cachedUser = await authentikSync.getUserFromCache(basicUser.preferred_username);
     }
@@ -287,11 +350,33 @@ router.get('/callback', authFlowLimiter, authCallbackFailureLimiter, async (req,
 
 
 
+    // Resolve the LOCAL users.id for the token's `userId` claim. The
+    // `user_cache.id` (cachedUser.id) is that cache table's own serial and
+    // is NOT the same as `users.id` -- see the matching fix in
+    // resolveUserFromRequest (server/middleware/auth.js). The middleware
+    // authoritatively re-resolves the request's user from the `username`
+    // claim on every request, so this `userId` claim is not itself trusted
+    // for lookup, but it should still carry the correct local id rather
+    // than a mismatched cache id. Falls back to cachedUser.id only if the
+    // users row can't be resolved (should not happen for a synced user).
+    let tokenUserId = cachedUser.id;
+    try {
+      const usersRow = await pool.query(
+        'SELECT id FROM users WHERE authentik_user_id::text = $1::text',
+        [String(cachedUser.authentik_id)]
+      );
+      if (usersRow.rows.length > 0) {
+        tokenUserId = usersRow.rows[0].id;
+      }
+    } catch (idErr) {
+      getLogger().warn({ err: idErr.message, username: basicUser.preferred_username }, 'Failed to resolve local users.id for token; using cache id');
+    }
+
     // Create minimal JWT token with just user ID. A `jti` claim is added
     // so the token can be individually revoked on logout (Requirement 3.3).
     const jwtToken = jwt.sign(
       { 
-        userId: cachedUser.id,
+        userId: tokenUserId,
         username: cachedUser.username,
         jti: crypto.randomUUID()
       },

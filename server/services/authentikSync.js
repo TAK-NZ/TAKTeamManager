@@ -448,9 +448,10 @@ class AuthentikSyncService {
       // path must leave whatever value the row already holds untouched.
       let isTeamDevice = false;
       let localUserId = null;
+      let localTakRole = null;
       try {
         const usersUpsertResult = await db.query(
-          'INSERT INTO users (authentik_user_id, username, email, first_name, last_name, is_active, tak_role, is_team_device) VALUES ($1, $2, $3, $4, $5, true, COALESCE($6, \'Team Member\'), COALESCE((SELECT is_team_device FROM users WHERE authentik_user_id = $1), false)) ON CONFLICT (authentik_user_id) DO UPDATE SET username = $2, email = $3 RETURNING id, is_team_device',
+          'INSERT INTO users (authentik_user_id, username, email, first_name, last_name, is_active, tak_role, is_team_device) VALUES ($1, $2, $3, $4, $5, true, COALESCE($6, \'Team Member\'), COALESCE((SELECT is_team_device FROM users WHERE authentik_user_id = $1), false)) ON CONFLICT (authentik_user_id) DO UPDATE SET username = $2, email = $3 RETURNING id, is_team_device, tak_role',
           [
             user.pk,
             user.username,
@@ -462,6 +463,18 @@ class AuthentikSyncService {
         );
         localUserId = usersUpsertResult.rows[0]?.id ?? null;
         isTeamDevice = usersUpsertResult.rows[0]?.is_team_device === true;
+        // Bugfix (TAK Role blank on /dashboard for bulk-import/create-and-add
+        // users): tak_role is LOCAL-authoritative (Authentik carries no
+        // takRole for users provisioned locally, so `user.attributes?.takRole`
+        // is null/undefined for them). Seed the user_cache mirror from the
+        // effective value the `users` upsert just resolved -- which already
+        // COALESCEs to 'Team Member' on INSERT and preserves the existing
+        // local value on UPDATE -- rather than from the (often-absent)
+        // Authentik attribute, which left user_cache.tak_role NULL and made
+        // the Dashboard's "My TAK Role" block (reads user_cache via
+        // GET /api/users/me) render nothing. This mirrors how the sibling
+        // `users` upsert already treats tak_role as bootstrap-then-local.
+        localTakRole = usersUpsertResult.rows[0]?.tak_role ?? null;
       } catch (usersUpsertError) {
         if (
           usersUpsertError.code === '23514' &&
@@ -478,9 +491,13 @@ class AuthentikSyncService {
 
       // user_cache upsert: TAK Team Manager is authoritative for first_name,
       // last_name, tak_role, tak_color, tak_callsign, is_active after initial
-      // bootstrap. On INSERT, seed all values from Authentik. On UPDATE, only
-      // sync identity fields (username, email) and admin-related fields
-      // (groups, is_admin) from Authentik.
+      // bootstrap. On INSERT, seed identity/attribute values -- tak_color and
+      // tak_callsign from Authentik's attributes, but tak_role from the LOCAL
+      // `users` row (`localTakRole`, resolved by the upsert above), since
+      // tak_role is local-authoritative and Authentik carries no takRole for
+      // locally-provisioned users. On UPDATE, only sync identity fields
+      // (username, email) and admin-related fields (groups, is_admin) from
+      // Authentik.
       //
       // takserver-enrollment Requirement 5.6: is_team_device is added to the
       // INSERT column list, sourced from the `users` upsert's
@@ -508,7 +525,12 @@ class AuthentikSyncService {
         seedFirstName,
         seedLastName,
         true,
-        user.attributes?.takRole,
+        // tak_role: seeded from the local-authoritative `users` row (see the
+        // usersUpsertResult.tak_role bugfix note above), NOT from Authentik's
+        // often-absent takRole attribute. tak_color/tak_callsign remain
+        // Authentik-sourced here -- those ARE pushed to and mirrored from
+        // Authentik's attributes, unlike tak_role.
+        localTakRole,
         user.attributes?.takColor,
         user.attributes?.takCallsign,
         groupNames,

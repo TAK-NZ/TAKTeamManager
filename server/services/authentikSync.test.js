@@ -818,7 +818,50 @@ describe('AuthentikSyncService.syncSingleUser users.tak_role reconciliation (Req
     // tak_role is NOT in the ON CONFLICT DO UPDATE SET (local authoritative)
     expect(cacheSql).not.toContain('tak_role = EXCLUDED.tak_role');
     // tak_role is the 7th positional value (index 6) in the user_cache insert.
-    expect(cacheParams[6]).toBeUndefined();
+    // Bugfix: it is now seeded from the `users` upsert's RETURNING tak_role
+    // (`localTakRole`), not from Authentik's attribute. This mock returns
+    // `{ rows: [] }` for the users upsert, so localTakRole resolves to null
+    // (via `?? null`) rather than the previous `undefined` from
+    // `user.attributes?.takRole`.
+    expect(cacheParams[6]).toBeNull();
+  });
+
+  it('seeds user_cache.tak_role from the local users row (RETURNING tak_role), NOT from Authentik\'s takRole attribute', async () => {
+    // The Dashboard bug: for a bulk-import/create-and-add user, Authentik
+    // carries no takRole attribute but the local `users.tak_role` holds the
+    // authoritative value (e.g. the 'Team Member' default). The cache mirror
+    // must be seeded from that local value, or user_cache.tak_role stays
+    // NULL and the "My TAK Role" block renders nothing.
+    const user = {
+      pk: 'user-role-seed',
+      username: 'erin',
+      email: 'erin@example.com',
+      groups: [],
+      is_active: true,
+      // Authentik has NO takRole -- exactly the locally-provisioned case.
+      attributes: {}
+    };
+    // The users upsert's RETURNING resolves the local authoritative value
+    // (COALESCE'd to 'Team Member' on insert). Every other query resolves
+    // empty. `tak_role` must be present on the returned row for this path.
+    db.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO users')) {
+        return Promise.resolve({ rows: [{ id: 42, is_team_device: false, tak_role: 'Team Member' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await authentikSync.processBatch([user], {});
+
+    const usersInsert = db.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO users'));
+    // The users upsert asks Postgres to RETURN tak_role, so the cache seed
+    // can mirror the effective (defaulted/local) value.
+    expect(usersInsert[0]).toContain('RETURNING id, is_team_device, tak_role');
+
+    const [, cacheParams] = db.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO user_cache'));
+    // Index 6 = tak_role: comes from the users RETURNING value, not the
+    // (absent) Authentik attribute.
+    expect(cacheParams[6]).toBe('Team Member');
   });
 });
 

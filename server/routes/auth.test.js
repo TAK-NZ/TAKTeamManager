@@ -28,7 +28,16 @@ jest.mock('../config/database', () => ({
 }));
 jest.mock('../services/authentikSync', () => ({
   getUserFromCache: jest.fn(),
-  syncUsers: jest.fn()
+  syncUsers: jest.fn(),
+  // Perf bugfix (slow first login): first-login onboarding now syncs the
+  // SINGLE logging-in user via syncSingleUser (reusing the already-fetched
+  // Authentik user + group map), instead of a whole-directory syncUsers().
+  syncSingleUser: jest.fn(),
+  // The login callback resolves a user's Authentik group ids to names via
+  // the PAGINATED group-map builder (bugfix: a single capped page dropped
+  // most groups, incl. ADMIN_GROUP_NAME, silently demoting admins on
+  // every login). Stubbed so the callback path never makes a real fetch.
+  fetchGroupMap: jest.fn(() => Promise.resolve({}))
 }));
 
 const axios = require('axios');
@@ -237,6 +246,43 @@ describe('GET /api/auth/callback cache-miss self-heal', () => {
     expect(res.headers['set-cookie'][0]).toContain('tak_session=');
     expect(authentikSync.syncUsers).toHaveBeenCalledTimes(1);
     expect(authentikSync.getUserFromCache).toHaveBeenCalledTimes(2);
+  });
+
+  // Perf bugfix (slow first login): when the Authentik user object IS
+  // resolved (the common first-login case), onboarding syncs only THAT one
+  // user via syncSingleUser -- NOT the whole-directory syncUsers() -- so
+  // the redirect isn't blocked on a directory-wide sync.
+  it('(b2) miss then hit WITH a resolved Authentik user: syncs the single user, never the whole directory', async () => {
+    const app = buildApp();
+    const pool = require('../config/database');
+    // Group-refresh UPDATE + the JWT-userId SELECT both go through pool.query.
+    pool.query.mockResolvedValue({ rows: [{ id: 2 }] });
+
+    // #1 userinfo (preferred_username), #2 user-detail lookup (results[0]
+    // with a groups array so the group refresh resolves authentikUser).
+    axios.get
+      .mockResolvedValueOnce({ data: { preferred_username: 'jdoe' } })
+      .mockResolvedValueOnce({ data: { results: [{ pk: 55, username: 'jdoe', groups: ['g1'] }] } });
+    authentikSync.fetchGroupMap.mockResolvedValue({ g1: 'tak_Teams - FENZ' });
+
+    authentikSync.getUserFromCache
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: 2, username: 'jdoe', authentik_id: 55 });
+    authentikSync.syncSingleUser.mockResolvedValue(undefined);
+
+    const res = await request(app).get('/api/auth/callback').query({ code: 'abc' });
+
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe('https://app.example.com/dashboard');
+    expect(res.headers['set-cookie'][0]).toContain('tak_session=');
+    // Single-user sync used; whole-directory sync never called.
+    expect(authentikSync.syncSingleUser).toHaveBeenCalledTimes(1);
+    expect(authentikSync.syncSingleUser).toHaveBeenCalledWith(
+      expect.objectContaining({ pk: 55, username: 'jdoe' }),
+      expect.any(Object),
+      'TakTeamManager_Admin'
+    );
+    expect(authentikSync.syncUsers).not.toHaveBeenCalled();
   });
 
   it('(c) miss + syncUsers throws: swallows the sync error, still redirects to ?error=user_not_synced, and does not crash', async () => {
@@ -482,5 +528,128 @@ describe('GET /api/auth/silent and /silent-callback (Requirement 1.3)', () => {
       expect(res.text).toContain('"success":false');
       expect(res.headers['set-cookie']).toBeUndefined();
     });
+  });
+});
+
+/**
+ * Bugfix (admin status stripped on every login): the callback's group
+ * refresh resolves the logged-in user's Authentik group IDs to names to
+ * decide `is_admin` (membership of ADMIN_GROUP_NAME). It used to fetch the
+ * group list with a single `?page_size=500` request, but Authentik caps a
+ * page at 100 results regardless -- so in a deployment with >100 groups,
+ * any user whose admin group sorted past the first page had it silently
+ * dropped, computing `is_admin = false` and clobbering the cached row on
+ * EVERY login. The fix resolves names via the PAGINATED
+ * `authentikSync.fetchGroupMap()`; these tests pin that behaviour.
+ */
+describe('GET /api/auth/callback admin group refresh (paginated group map)', () => {
+  const ORIGINAL_ENV = process.env;
+  const pool = require('../config/database');
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    authLimiterStore.resetAll();
+    authCallbackFailureStore.resetAll();
+    process.env = {
+      ...ORIGINAL_ENV,
+      AUTHENTIK_CLIENT_ID: 'client-id',
+      AUTHENTIK_CLIENT_SECRET: 'client-secret',
+      AUTHENTIK_TOKEN_URL: 'https://authentik.example.com/token',
+      AUTHENTIK_USERINFO_URL: 'https://authentik.example.com/userinfo',
+      AUTHENTIK_URL: 'https://authentik.example.com',
+      AUTHENTIK_API_TOKEN: 'admin-token',
+      APP_URL: 'https://app.example.com',
+      FRONTEND_URL: 'https://app.example.com',
+      ADMIN_GROUP_NAME: 'TakTeamManager_Admin'
+    };
+    pool.query.mockResolvedValue({ rows: [] });
+    authentikSync.getUserFromCache.mockResolvedValue({ id: 2, username: 'chris@example.net' });
+  });
+
+  afterEach(() => {
+    process.env = ORIGINAL_ENV;
+  });
+
+  // Arrange the two callback GETs: #1 userinfo (preferred_username), #2 the
+  // user-detail lookup by username. Perf bugfix: the login path now resolves
+  // group names from the user-detail response's `groups_obj` ([{ pk, name }]
+  // for exactly this user's groups) -- NOT from a paginated full-directory
+  // fetchGroupMap walk. `groupNameByPk` maps each of the user's group pks to
+  // its name; the arranged response carries both `groups` (pks, the order
+  // the code iterates) and the matching `groups_obj`.
+  function arrangeCallback(groupNameByPk) {
+    const userGroupIds = Object.keys(groupNameByPk);
+    const groupsObj = userGroupIds.map((pk) => ({ pk, name: groupNameByPk[pk] }));
+    axios.post.mockResolvedValue({ data: { access_token: 'tok' } });
+    axios.get
+      .mockResolvedValueOnce({ data: { preferred_username: 'chris@example.net' } })
+      .mockResolvedValueOnce({ data: { results: [{ pk: 99, groups: userGroupIds, groups_obj: groupsObj }] } });
+  }
+
+  it('resolves group names from groups_obj (no paginated fetchGroupMap) and writes is_admin=true when the user is in ADMIN_GROUP_NAME', async () => {
+    const app = buildApp();
+    arrangeCallback({ 'g-admin': 'TakTeamManager_Admin', 'g-other': 'tak_Teams - FENZ' });
+
+    const res = await request(app).get('/api/auth/callback').query({ code: 'abc' });
+    expect(res.status).toBe(302);
+
+    // The whole point of the perf fix: names come from `groups_obj`, so the
+    // login path makes NO paginated group-list walk and NO raw core/groups
+    // fetch of its own.
+    expect(authentikSync.fetchGroupMap).not.toHaveBeenCalled();
+    const groupListFetch = axios.get.mock.calls.find(([url]) => /\/core\/groups\//.test(url));
+    expect(groupListFetch).toBeUndefined();
+
+    // The cache UPDATE recorded is_admin=true and the full resolved group list.
+    const adminUpdate = pool.query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && /UPDATE user_cache SET groups/.test(sql)
+    );
+    expect(adminUpdate).toBeDefined();
+    const [, params] = adminUpdate;
+    expect(params[0]).toEqual(['TakTeamManager_Admin', 'tak_Teams - FENZ']); // groups
+    expect(params[1]).toBe(true); // is_admin
+  });
+
+  it('writes is_admin=false when the resolved groups do not include ADMIN_GROUP_NAME', async () => {
+    const app = buildApp();
+    arrangeCallback({ 'g-other': 'tak_Teams - FENZ' });
+
+    const res = await request(app).get('/api/auth/callback').query({ code: 'abc' });
+    expect(res.status).toBe(302);
+
+    expect(authentikSync.fetchGroupMap).not.toHaveBeenCalled();
+    const adminUpdate = pool.query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && /UPDATE user_cache SET groups/.test(sql)
+    );
+    expect(adminUpdate).toBeDefined();
+    expect(adminUpdate[1][1]).toBe(false); // is_admin
+  });
+
+  it('falls back to the paginated fetchGroupMap when the user-detail response has no groups_obj', async () => {
+    // Defensive fallback: an older Authentik / unexpected serializer that
+    // omits `groups_obj` must still resolve admin status correctly, or the
+    // login would clobber a Global_Manager's is_admin to false. When
+    // `groups_obj` is absent, the code walks the paginated full list.
+    const app = buildApp();
+    axios.post.mockResolvedValue({ data: { access_token: 'tok' } });
+    axios.get
+      .mockResolvedValueOnce({ data: { preferred_username: 'chris@example.net' } })
+      // No `groups_obj` key at all -- only the pk list.
+      .mockResolvedValueOnce({ data: { results: [{ pk: 99, groups: ['g-admin', 'g-other'] }] } });
+    authentikSync.fetchGroupMap.mockResolvedValue({
+      'g-admin': 'TakTeamManager_Admin',
+      'g-other': 'tak_Teams - FENZ'
+    });
+
+    const res = await request(app).get('/api/auth/callback').query({ code: 'abc' });
+    expect(res.status).toBe(302);
+
+    expect(authentikSync.fetchGroupMap).toHaveBeenCalledTimes(1);
+    const adminUpdate = pool.query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && /UPDATE user_cache SET groups/.test(sql)
+    );
+    expect(adminUpdate).toBeDefined();
+    expect(adminUpdate[1][0]).toEqual(['TakTeamManager_Admin', 'tak_Teams - FENZ']);
+    expect(adminUpdate[1][1]).toBe(true); // is_admin
   });
 });
