@@ -21,19 +21,23 @@ jobs:
   #
   # Exit-code note (Req 20.4 - "audit itself fails to complete" must also fail the
   # build, not just "audit completed and found something"):
-  # `npm audit` is a normal npm CLI command. Per npm's own documentation
-  # (https://docs.npmjs.com/cli/v11/commands/npm-audit/), it exits non-zero whenever it
-  # finds a vulnerability at or above --audit-level. Separately, npm's CLI error handling
-  # is uniform across all subcommands: if the command cannot complete at all (registry
-  # unreachable, ECONNRESET, "does not support audit requests", timeout, etc.), npm prints
-  # an `npm ERR!` block and terminates the process with a non-zero exit code rather than
-  # exiting 0 - npm does not have a code path that swallows a network/transport failure
-  # and reports success. GitHub Actions' default shell for `run:` steps on Linux runners
-  # is `bash` invoked with `-e` and `-o pipefail` already active, so *any* non-zero exit
-  # from `npm audit` (found-vulnerability case OR incomplete-scan case) fails this step,
-  # and a failed step fails the job, with no extra flag or wrapping required. We
-  # deliberately do NOT add `continue-on-error: true` or `|| true` to this step, since
-  # doing so is the only way an incomplete/errored audit could be mistaken for a pass.
+  # This runs `scripts/ci-audit.js` rather than a bare `npm audit --audit-level=high`.
+  # A bare invocation conflates two very different non-zero exits: a real high/critical
+  # finding, AND npm's remote audit endpoint
+  # (`https://registry.npmjs.org/-/npm/v1/security/audits/quick`) returning a transient
+  # transport error (observed in CI: HTTP 400 and 503) that has nothing to do with the
+  # dependency tree. The wrapper tells those apart via `npm audit --json`, whose
+  # `metadata.vulnerabilities` object is present only when the audit actually completed:
+  #   - completed + high/critical > 0  -> exit 1 (Req 20.3), printing the report.
+  #   - completed + none               -> exit 0.
+  #   - did NOT complete (transport error) -> retry with backoff; if it never completes
+  #     after all attempts, exit 1 (Req 20.4).
+  # So a genuine finding still fails immediately (never retried), and a genuinely
+  # uncompletable audit still fails - an errored/incomplete scan is NEVER mistaken for a
+  # pass. We deliberately do NOT add `continue-on-error: true` or `|| true` to this step,
+  # for the same reason: only a real, completed, clean audit exits 0. The only behaviour
+  # added over the bare command is riding out a transient endpoint blip instead of
+  # turning it into a red build. See scripts/ci-audit.js for the full rationale.
   #
   # Exceptions record: as of this workflow's creation, no documented/reviewed exceptions
   # record exists anywhere in this repository (checked for "audit" / "exceptions" files
@@ -67,15 +71,18 @@ jobs:
         working-directory: ${{ matrix.directory }}
         run: npm ci
 
-      - name: npm audit --audit-level=high (${{ matrix.tree }})
+      - name: Dependency audit (high/critical, retried on transient endpoint errors) (${{ matrix.tree }})
         working-directory: ${{ matrix.directory }}
         # Fails the job on:
-        #   - any high/critical severity finding (Req 20.3), reported by npm audit's own
-        #     human-readable output (package name, severity, and advisory/vulnerability id
-        #     per finding), or
-        #   - the audit itself failing to complete, e.g. a registry/network error (Req 20.4)
-        # See the job-level comment above for why no additional exit-code handling is needed.
-        run: npm audit --audit-level=high
+        #   - any high/critical severity finding (Req 20.3), printing the full JSON audit
+        #     report so each failing advisory is visible in the log, or
+        #   - the audit failing to COMPLETE after bounded retries, e.g. a persistent
+        #     registry/network error (Req 20.4).
+        # A transient endpoint error (HTTP 400/503 from npm's audit endpoint) is retried
+        # rather than failing the build outright. See the job-level comment above and
+        # scripts/ci-audit.js for why this preserves both requirements. `working-directory`
+        # sets the cwd, which ci-audit.js audits by default.
+        run: node ${{ github.workspace }}/scripts/ci-audit.js
 
   # ---------------------------------------------------------------------------
   # test: Requirement 12.6
