@@ -79,13 +79,32 @@ const broadPrefixArb = fc
   .array(alphanumericCharArb, { minLength: 1, maxLength: 64 })
   .map((chars) => ({ prefix: chars.join(''), category: 'broad' }));
 
+// A valid Organisation_Prefix has NO `-`-separated segment shaped like a
+// Managed_Identifier's marker+body suffix -- one of the markers `D`/`U`
+// followed by exactly 7 Identifier_Alphabet characters -- because
+// `managedIdentifier.js`'s right-anchored parse would otherwise be
+// ambiguous, so `generateManagedIdentifier` rejects such a prefix
+// (`isValidCallsignPrefix`). The property is stated "for any VALID
+// Organisation_Prefix", so the generators must not emit that shape; without
+// this filter an arm can randomly produce e.g. `DAAAAAAA` (seed-dependent),
+// feeding the subject an input it correctly refuses and throwing.
+//
+// The markers are written out literally (matching `markerArb` below and the
+// requirements text), and `AMBIGUITY_FREE_ALPHABET` is this property's ONE
+// sanctioned re-derivation exception (already imported and used for the
+// alphabet-membership assertion) -- so no NEW dependency on the subject's
+// internals is introduced here.
+const MARKER_BODY_SEGMENT_RE = new RegExp(`^[DU][${AMBIGUITY_FREE_ALPHABET}]{7}$`);
+const hasNoMarkerBodySegment = ({ prefix }) =>
+  prefix.split('-').every((segment) => !MARKER_BODY_SEGMENT_RE.test(segment));
+
 const prefixCaseArb = fc.oneof(
   { weight: 3, arbitrary: oneCharPrefixArb },
   { weight: 3, arbitrary: allDigitPrefixArb },
   { weight: 3, arbitrary: allLetterPrefixArb },
   { weight: 3, arbitrary: the255PrefixArb },
   { weight: 4, arbitrary: broadPrefixArb }
-);
+).filter(hasNoMarkerBodySegment);
 
 /** Both Identifier_Type_Markers, written out literally rather than imported. */
 const markerArb = fc.constantFrom('D', 'U');
