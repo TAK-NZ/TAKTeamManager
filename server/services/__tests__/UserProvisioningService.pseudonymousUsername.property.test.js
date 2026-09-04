@@ -368,11 +368,31 @@ describe('Property 7: The Pseudonymous_Username_Policy decides the username and 
         // avoid it, since it never inspects the email when minting. First
         // and last name remain checked unconditionally: they are the
         // actual PII this assertion exists to protect.
+        //
+        // Flaky-false-failure fix: the guard scans the username with its
+        // 7-character RANDOM body masked out. The minted username is
+        // `<prefix>-U<7 random Identifier_Alphabet chars>`, and that body
+        // comes from `crypto.randomInt` -- the resolver never inspects the
+        // name/email while minting (verified: firstName/lastName are passed
+        // only as Claim_Row INSERT columns, never into the identifier). A
+        // random 7-char body collides with some 3-char window of an
+        // arbitrary generated name by pure chance often enough (~1/2500 per
+        // mint, observed lastName "...QZM..." vs body "...QZM...") that a
+        // 3-char scan of the WHOLE username fails intermittently across
+        // CI's re-rolled random source -- a coincidence of shared FORMAT,
+        // never a leak, exactly like the `-<marker>` and prefix cases above.
+        // Masking the body leaves the DETERMINISTIC `<prefix>-U` structure
+        // -- the only place a real "resolver echoed the name into the
+        // username" regression could surface here -- fully scanned, while a
+        // name landing in the body position would independently break
+        // `managedIdentifier.property.test.js`'s alphabet/shape assertions.
+        const MINTED_BODY_LENGTH = 7;
+        const usernameWithoutRandomBody = result.username.slice(0, -MINTED_BODY_LENGTH);
         const overlapSources = emailScenario.kind === 'managedIdLocal'
           ? [firstName, lastName]
           : [localPart, firstName, lastName];
         expect(
-          sharesSubstringOfAtLeastThreeChars(overlapSources, result.username)
+          sharesSubstringOfAtLeastThreeChars(overlapSources, usernameWithoutRandomBody)
         ).toBe(false);
 
         // requestedUsername is IGNORED, never used as the resolved value
