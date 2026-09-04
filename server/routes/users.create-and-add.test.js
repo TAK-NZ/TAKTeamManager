@@ -420,6 +420,12 @@ describe('POST /api/users/create-and-add callsign_suffix resolution (task 22.2)'
     };
     pool.connect.mockResolvedValue(mockClient);
     pool.query.mockResolvedValue({ rows: [] });
+    // createAndAddUser now unconditionally enqueues an
+    // assign_user_to_global_channels op via EventPublisher.publishOperation
+    // (the global-channels bugfix). Give the shared mock a benign resolve
+    // so it does not inherit a rejected implementation left by an earlier
+    // suite under jest.clearAllMocks() (which clears calls, not impl).
+    EventPublisher.publishOperation.mockResolvedValue('op-id');
 
     const res = await request(app).post('/api/users/create-and-add').send(VALID_BODY);
 
@@ -473,6 +479,10 @@ describe('POST /api/users/create-and-add callsign_suffix resolution (task 22.2)'
     };
     pool.connect.mockResolvedValue(mockClient);
     pool.query.mockResolvedValue({ rows: [] });
+    // See the sibling test above: give the shared publishOperation mock a
+    // benign resolve so the new unconditional assign_user_to_global_channels
+    // enqueue does not inherit an earlier suite's rejected implementation.
+    EventPublisher.publishOperation.mockResolvedValue('op-id');
 
     const createAndAddUserSpy = jest.spyOn(UserProvisioningService, 'createAndAddUser');
 

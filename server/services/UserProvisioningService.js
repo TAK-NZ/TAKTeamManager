@@ -308,6 +308,24 @@ class UserProvisioningService {
       }
     }
 
+    // Bugfix (create-and-add / bulk-imported users had NO global channels):
+    // the above only assigns TEAM channels (the target team's primary
+    // channel plus each ancestor's). Global channels -- every BCH read
+    // group unconditionally, plus the Organisation's Response/Support
+    // region groups -- are assigned by a separate, idempotent per-user
+    // reconcile driven by the `assign_user_to_global_channels`
+    // Sync_Operation. `TeamMembershipService.addUserToTeam` (the
+    // add-to-team route's path) already enqueues it; this path (the
+    // create-and-add route AND the CSV bulk import, both via
+    // createAndAddUser) never did, so those users got their team channels
+    // but none of the ~12 BCH + region global channels. Enqueue it here,
+    // on the caller's SAME transaction client (Requirement 17.5's
+    // client-threading pattern, matching the add_user_to_group enqueues
+    // above) so it commits/rolls back atomically with this row's writes.
+    await EventPublisher.publishOperation('assign_user_to_global_channels', {
+      target_user_id: localUserId
+    }, createdBy, client);
+
     return { localUserId, queuedGroups };
   }
 

@@ -110,6 +110,45 @@ describe('UserProvisioningService.createAndAddUser', () => {
     );
   });
 
+  it('enqueues assign_user_to_global_channels for the new user, on the same transactional client', async () => {
+    // Bugfix: create-and-add and CSV-bulk-imported users (both via
+    // createAndAddUser) previously got only their TEAM channels and none of
+    // the global BCH/region channels, because -- unlike
+    // TeamMembershipService.addUserToTeam -- this path never enqueued the
+    // per-user global-channel reconcile. It must enqueue exactly one
+    // `assign_user_to_global_channels` op for the created user, on the
+    // caller's open `client` so it commits/rolls back atomically.
+    const client = buildMockClient((sql) => {
+      if (sql.includes('SELECT id FROM users WHERE authentik_user_id')) {
+        return Promise.resolve({ rows: [{ id: 101 }] });
+      }
+      if (sql.includes('WITH RECURSIVE parent_teams')) {
+        return Promise.resolve({ rows: [] });
+      }
+      if (sql.includes("SELECT id, authentik_group_id FROM channels")) {
+        return Promise.resolve({ rows: [{ id: 5, authentik_group_id: 'grp-team' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await UserProvisioningService.createAndAddUser(client, {
+      authentikUserId: 999,
+      username: 'alice',
+      email: 'alice@example.com',
+      firstName: 'Alice',
+      lastName: 'Smith',
+      teamId: 7,
+      createdBy: 3
+    });
+
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'assign_user_to_global_channels',
+      { target_user_id: 101 },
+      3,
+      client
+    );
+  });
+
   it('creates an inherited team_membership row and queues a group operation for each parent team', async () => {
     const client = buildMockClient((sql, params) => {
       if (sql.includes('SELECT id FROM users WHERE authentik_user_id')) {
