@@ -112,6 +112,35 @@ export function formatTeamPath(team, allTeams) {
 }
 
 /**
+ * Filters the destination-team options by a free-text search term, matched
+ * case-insensitively (and whitespace-trimmed) as a SUBSTRING against each
+ * option's already-formatted `label` (the `A > B > C` team path). An empty
+ * or whitespace-only term returns every option unchanged, so the dropdown
+ * shows the full list until the operator starts typing.
+ *
+ * Matching the label (not just the leaf name) means typing an ancestor
+ * segment -- e.g. "FENZ" or a region prefix -- narrows to that whole
+ * branch, which is the point of the search on a large hierarchy.
+ *
+ * Exported for direct unit testing, matching this file's convention of
+ * testing extracted pure logic rather than rendering the component.
+ *
+ * @param {Array<{id: number|string, label: string}>} options
+ * @param {string|null|undefined} searchTerm
+ * @returns {Array<{id: number|string, label: string}>}
+ */
+export function filterDestinationOptionsBySearch(options, searchTerm) {
+  if (!Array.isArray(options)) {
+    return []
+  }
+  const term = (searchTerm || '').trim().toLowerCase()
+  if (term === '') {
+    return options
+  }
+  return options.filter((option) => String(option?.label || '').toLowerCase().includes(term))
+}
+
+/**
  * Requirement 9.6: recognises the 400 raised by
  * `CallsignSuffixConflictError`, whose message is
  * `Callsign Suffix "<value>" is already in use within this Team`. Matched
@@ -277,6 +306,11 @@ export default function TransferMemberDialog({ member, team, user, onClose, onCo
   const [submitting, setSubmitting] = useState(false)
   const [availableTeams, setAvailableTeams] = useState([])
   const [loadingTeams, setLoadingTeams] = useState(true)
+  // Destination-team search: the FENZ-scale hierarchy can hold hundreds of
+  // teams, so a plain scrolling <select> is unusable. This free-text filter
+  // narrows the options by team-path/name (case-insensitive), the same
+  // "find a team by typing its name" affordance /request-access offers.
+  const [destinationSearch, setDestinationSearch] = useState('')
 
   const isGlobalAdmin = !!user?.isAdmin
 
@@ -343,11 +377,46 @@ export default function TransferMemberDialog({ member, team, user, onClose, onCo
   const destinationOptions = useMemo(() => {
     const options = filterDestinationTeams(availableTeams, team?.id).map((t) => ({
       id: t.id,
-      label: formatTeamPath(t, availableTeams)
+      label: formatTeamPath(t, availableTeams),
+      // An Organisation is a top-level team (no parent). Surface these
+      // first in the list -- a transfer to the Organisation itself is a
+      // common destination, but its label is a bare name (no ` > ` path
+      // prefix), so a plain alphabetical sort scatters it among the
+      // sub-teams and often buries it near the bottom (the reason it was
+      // easy to miss). `parent_team_id` is the authoritative signal here,
+      // NOT the label shape.
+      isOrg: t.parent_team_id == null
     }))
-    options.sort((a, b) => a.label.localeCompare(b.label))
+    // Organisations first, then everything else; alphabetical by label
+    // within each group.
+    options.sort((a, b) => {
+      if (a.isOrg !== b.isOrg) {
+        return a.isOrg ? -1 : 1
+      }
+      return a.label.localeCompare(b.label)
+    })
     return options
   }, [availableTeams, team?.id])
+
+  const filteredDestinationOptions = useMemo(
+    () => filterDestinationOptionsBySearch(destinationOptions, destinationSearch),
+    [destinationOptions, destinationSearch]
+  )
+
+  // If the operator has a team selected and then types a search that hides
+  // it, clear the selection so the <select> never shows a blank-but-selected
+  // value (a browser renders a selected <option> that isn't in the list as
+  // empty) and the submit button correctly disables until they pick a
+  // still-visible option.
+  useEffect(() => {
+    if (!targetTeamId) {
+      return
+    }
+    const stillVisible = filteredDestinationOptions.some((o) => String(o.id) === String(targetTeamId))
+    if (!stillVisible) {
+      setTargetTeamId('')
+    }
+  }, [filteredDestinationOptions, targetTeamId])
 
   const memberName = [member?.first_name, member?.last_name].filter(Boolean).join(' ') || member?.email || 'this member'
   const sourceTeamName = team?.display_name || team?.name || 'this team'
@@ -446,6 +515,22 @@ export default function TransferMemberDialog({ member, team, user, onClose, onCo
             <label htmlFor="transfer-target-team" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
               Destination team *
             </label>
+            {/* Search box: filters the destination options by team-path/name
+                as the operator types, so a large hierarchy (hundreds of
+                teams) is navigable -- the "find a team by name" affordance,
+                mirroring /request-access's team selection. */}
+            <input
+              id="transfer-target-team-search"
+              type="text"
+              value={destinationSearch}
+              onChange={(e) => setDestinationSearch(e.target.value)}
+              disabled={loadingTeams || submitting}
+              autoComplete="off"
+              className="input w-full mb-2"
+              placeholder={loadingTeams ? 'Loading teams...' : 'Search destination teams by name'}
+              aria-label="Search destination teams by name"
+              aria-controls="transfer-target-team"
+            />
             <select
               id="transfer-target-team"
               required
@@ -455,7 +540,7 @@ export default function TransferMemberDialog({ member, team, user, onClose, onCo
               className="input w-full"
             >
               <option value="">{loadingTeams ? 'Loading teams...' : 'Select a destination team'}</option>
-              {destinationOptions.map((option) => (
+              {filteredDestinationOptions.map((option) => (
                 <option key={option.id} value={option.id}>
                   {option.label}
                 </option>
@@ -464,6 +549,11 @@ export default function TransferMemberDialog({ member, team, user, onClose, onCo
             {!loadingTeams && destinationOptions.length === 0 && (
               <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                 No other team is available as a destination.
+              </p>
+            )}
+            {!loadingTeams && destinationOptions.length > 0 && filteredDestinationOptions.length === 0 && (
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                No destination team matches &ldquo;{destinationSearch.trim()}&rdquo;.
               </p>
             )}
           </div>

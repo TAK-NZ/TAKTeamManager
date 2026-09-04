@@ -67,18 +67,28 @@ describe('deviceDisplayName (Criterion 5.10)', () => {
 })
 
 describe('interpretTeamDeviceListError', () => {
-  it('returns a plain message for a 403', () => {
-    expect(interpretTeamDeviceListError({ response: { status: 403 } })).toMatch(/administer/)
+  it('returns a plain, info-toned message for a 403 (an expected permission outcome, not an error)', () => {
+    const result = interpretTeamDeviceListError({ response: { status: 403 } })
+    expect(result.tone).toBe('info')
+    expect(result.message).toMatch(/team admins/i)
   })
 
-  it('prefers the server message when present', () => {
-    expect(
-      interpretTeamDeviceListError({ response: { status: 403, data: { error: 'nope' } } })
-    ).toBe('nope')
+  it('does NOT surface the raw server string for a 403 (it is the terse "Forbidden"); always uses friendly copy', () => {
+    const result = interpretTeamDeviceListError({ response: { status: 403, data: { error: 'Forbidden' } } })
+    expect(result.tone).toBe('info')
+    expect(result.message).not.toBe('Forbidden')
+    expect(result.message).toMatch(/team admins/i)
   })
 
-  it('falls back to a generic message for anything else', () => {
-    expect(interpretTeamDeviceListError({})).toMatch(/Failed to load/)
+  it('prefers the server message for a 400, tagged as an error', () => {
+    const result = interpretTeamDeviceListError({ response: { status: 400, data: { error: 'bad id' } } })
+    expect(result).toEqual({ message: 'bad id', tone: 'error' })
+  })
+
+  it('falls back to a generic error-toned message for anything else', () => {
+    const result = interpretTeamDeviceListError({})
+    expect(result.tone).toBe('error')
+    expect(result.message).toMatch(/Failed to load/)
   })
 })
 
@@ -356,8 +366,8 @@ describe('TeamDeviceList (mounted)', () => {
     )
   })
 
-  it('shows an inline message and no device rows on a fetch failure', async () => {
-    devicesAPI.getTeamDevices.mockRejectedValue({ response: { status: 403 } })
+  it('shows a polite, non-alert info message (role=status, not red/alert) and no device rows on a 403', async () => {
+    devicesAPI.getTeamDevices.mockRejectedValue({ response: { status: 403, data: { error: 'Forbidden' } } })
 
     root = createRoot(container)
     await act(async () => {
@@ -367,7 +377,32 @@ describe('TeamDeviceList (mounted)', () => {
       await Promise.resolve()
     })
 
-    expect(container.querySelector('[role="alert"]').textContent).toMatch(/administer/)
+    // A 403 is an expected permission outcome: announced as status, not alert,
+    // and never the raw "Forbidden" server string.
+    const status = container.querySelector('[role="status"]')
+    expect(status).not.toBeNull()
+    expect(status.textContent).toMatch(/team admins/i)
+    expect(status.textContent).not.toBe('Forbidden')
+    expect(status.className).toContain('text-gray-500')
+    expect(container.querySelector('[role="alert"]')).toBeNull()
+    expect(container.querySelectorAll('li').length).toBe(0)
+  })
+
+  it('shows a red alert message and no device rows on a genuine (5xx) fetch failure', async () => {
+    devicesAPI.getTeamDevices.mockRejectedValue({ response: { status: 500 } })
+
+    root = createRoot(container)
+    await act(async () => {
+      root.render(<TeamDeviceList teamId={5} onEnroll={() => {}} />)
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    const alert = container.querySelector('[role="alert"]')
+    expect(alert).not.toBeNull()
+    expect(alert.textContent).toMatch(/Failed to load/)
+    expect(alert.className).toContain('text-red-600')
     expect(container.querySelectorAll('li').length).toBe(0)
   })
 

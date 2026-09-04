@@ -271,11 +271,22 @@ describe('isValidSubTeamCallsignPrefix (Req 3.10)', () => {
 
 // Mirrors TeamDetail.jsx:
 //   const isGlobalAdmin = user?.isAdmin
-//   const isTeamAdmin = admins.some(a => String(a.id) === String(user?.userId))
+//   const managedFlag = allTeams.find(t => String(t.id) === String(team.id))?.can_manage
+//   const isTeamAdmin = managedFlag === true || admins.some(a => String(a.id) === String(user?.userId))
 //   const canManageTeam = isGlobalAdmin || isTeamAdmin
-function computeCanManageTeam(user, admins) {
+//
+// Bugfix (a Team_Admin of an Organisation could not manage its sub-teams):
+// admin rights INHERIT down the tree. `admins` is only the VIEWED team's
+// DIRECT admins, so an inherited admin (a FENZ org admin viewing a FENZ
+// sub-team) never appeared there. The viewed team's own `can_manage` flag
+// (server-computed via `Team.getManagedTeamIds`, ancestor-inclusive, carried
+// on every `allTeams` row) is the authoritative signal; the direct-admin
+// scan is kept as a fallback for before `allTeams` has loaded. `managedFlag`
+// is passed here in place of "look it up from allTeams" so the pure gate is
+// directly testable, mirroring the component's resolved value.
+function computeCanManageTeam(user, admins, managedFlag = false) {
   const isGlobalAdmin = user?.isAdmin
-  const isTeamAdmin = admins.some(a => String(a.id) === String(user?.userId))
+  const isTeamAdmin = managedFlag === true || admins.some(a => String(a.id) === String(user?.userId))
   return isGlobalAdmin || isTeamAdmin
 }
 
@@ -286,7 +297,7 @@ describe('canManageTeam gate for the transfer action (Req 15.1)', () => {
     expect(computeCanManageTeam({ userId: 42, isAdmin: true }, admins)).toBe(true)
   })
 
-  it('offers the transfer action to a Team_Admin of the displayed team who is not a Global_Manager', () => {
+  it('offers the transfer action to a DIRECT Team_Admin of the displayed team who is not a Global_Manager', () => {
     expect(computeCanManageTeam({ userId: 9, isAdmin: false }, admins)).toBe(true)
   })
 
@@ -298,6 +309,19 @@ describe('canManageTeam gate for the transfer action (Req 15.1)', () => {
     expect(computeCanManageTeam({ userId: 42, isAdmin: false }, admins)).toBe(false)
   })
 
+  // Bugfix core: an INHERITED admin (admin of an ancestor org, NOT a direct
+  // admin row on this sub-team) is not in `admins`, but the viewed team's
+  // `can_manage` flag is true -- so management is offered on the sub-team.
+  it('offers the transfer action to an INHERITED admin (can_manage true, not in the direct admins list)', () => {
+    // userId 42 is NOT in admins [7,9], and not a Global_Manager -- but the
+    // server says this team is manageable (ancestor-inclusive can_manage).
+    expect(computeCanManageTeam({ userId: 42, isAdmin: false }, admins, true)).toBe(true)
+  })
+
+  it('withholds management when can_manage is false and the user is neither global nor a direct admin', () => {
+    expect(computeCanManageTeam({ userId: 42, isAdmin: false }, admins, false)).toBe(false)
+  })
+
   it('matches a Team_Admin across the number/string id boundary (String() coercion on both sides)', () => {
     // The admins list comes from the API as numeric ids; `user.userId` may
     // arrive as a string from the JWT payload.
@@ -305,7 +329,7 @@ describe('canManageTeam gate for the transfer action (Req 15.1)', () => {
     expect(computeCanManageTeam({ userId: 9, isAdmin: false }, [{ id: '9' }])).toBe(true)
   })
 
-  it('withholds the transfer action while the admins list is still empty (not yet loaded)', () => {
+  it('withholds the transfer action while the admins list is empty AND can_manage is not yet known (not loaded)', () => {
     expect(computeCanManageTeam({ userId: 9, isAdmin: false }, [])).toBe(false)
   })
 
@@ -321,6 +345,41 @@ describe('canManageTeam gate for the transfer action (Req 15.1)', () => {
     // 'undefined' string and match -- unreachable here, but the reason this
     // case is asserted against real rows rather than a synthetic idless one.
     expect(computeCanManageTeam({ isAdmin: false }, admins)).toBe(false)
+  })
+})
+
+// The Team Devices tab is a management-only surface (the server gates
+// GET /api/devices/team/:teamId on team-admin and 403s a regular member).
+// It must be hidden from non-managers entirely rather than shown-then-denied:
+// both the tab entry in the tab array AND its render branch are gated on
+// `canManageTeam` in addition to the `devicesEnabled` feature flag. Source-
+// contract check (no component-render harness in this project).
+describe('Team Devices tab is gated on canManageTeam, not just devicesEnabled', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  it('gates the tab-array entry on `devicesEnabled && canManageTeam`', () => {
+    // Anti-vacuity: the Team Devices tab entry must exist...
+    expect(source).toContain("id: 'devices', label: 'Team Devices'")
+    // ...and be spread in only under both the flag and the manage gate.
+    expect(source).toContain('devicesEnabled && canManageTeam ? [{ id: \'devices\', label: \'Team Devices\'')
+  })
+
+  it('gates the tab render branch on `canManageTeam` too', () => {
+    expect(source).toContain("activeTab === 'devices' && devicesEnabled && canManageTeam &&")
+  })
+
+  it('skips the device-count prefetch for a non-manager (guards the effect on a manage check)', () => {
+    // The prefetch effect computes an inline manage signal and bails when it
+    // is false, so a regular member never fires the doomed team-devices GET.
+    expect(source).toContain('canManageForCount')
+    expect(source).toMatch(/!devicesEnabled \|\| !teamId \|\| !canManageForCount/)
+  })
+
+  it('keeps `devices` a valid deep-link tab id (a stale ?tab=devices still resolves, just renders nothing extra)', () => {
+    // Deliberately NOT removed from VALID_TAB_IDS -- a stale link must resolve
+    // to a valid id rather than falling back oddly; the render gate above is
+    // what makes it render nothing for a non-manager.
+    expect(source).toMatch(/VALID_TAB_IDS\s*=\s*\[[^\]]*'devices'/)
   })
 })
 
@@ -1445,15 +1504,20 @@ describe('Tab bar: icon+count below sm:, full "Label (count)" text at sm: and up
 describe('Team Devices tab count: fetched independently of TeamDeviceList mounting (bugfix)', () => {
   const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
 
-  it('fetches the device count in its own effect, gated on devicesEnabled and teamId, and re-run on deviceListVersion', () => {
+  it('fetches the device count in its own effect, gated on devicesEnabled/teamId AND a manage check, and re-run on deviceListVersion', () => {
     const effectIndex = source.indexOf('devicesAPI.getTeamDevices(teamId)')
     expect(effectIndex).toBeGreaterThan(-1)
     const effectBlockStart = source.lastIndexOf('useEffect(() => {', effectIndex)
-    const effectBlockEnd = source.indexOf('}, [devicesEnabled, teamId, deviceListVersion])', effectIndex)
+    // The dependency array now also lists the inputs of the inline manage
+    // check (allTeams, admins, user), so the effect re-evaluates once the
+    // caller's manage capability is known.
+    const effectBlockEnd = source.indexOf('}, [devicesEnabled, teamId, deviceListVersion, allTeams, admins, user])', effectIndex)
     expect(effectBlockStart).toBeGreaterThan(-1)
     expect(effectBlockEnd).toBeGreaterThan(effectBlockStart)
     const effectBlock = source.slice(effectBlockStart, effectBlockEnd)
-    expect(effectBlock).toContain('if (!devicesEnabled || !teamId)')
+    // Perf/permission bugfix: the guard now also skips the fetch for a
+    // non-manager, who would only get a 403 from the team-admin-gated route.
+    expect(effectBlock).toContain('if (!devicesEnabled || !teamId || !canManageForCount)')
     expect(effectBlock).toContain('setDeviceCount(response.data?.devices?.length ?? 0)')
   })
 
@@ -1601,6 +1665,32 @@ describe('TeamFormDialog isAdmin wiring (Allowed Email Domains, now nested in th
     expect(dialogIndex).toBeGreaterThan(-1)
     const dialogBlock = source.slice(dialogIndex, dialogIndex + 400)
     expect(dialogBlock).toContain('isAdmin={canManageTeam}')
+  })
+})
+
+// Bugfix (stale callsigns/devices after a team edit): editing a team's
+// callsign_prefix (or callsign_name_format / callsign_level_selection, or
+// re-parenting) recomputes every member's and every Team_Owned_Device's
+// assembled callsign server-side (PUT /:teamId -> updateTeamUserAttributes,
+// awaited before the response). The Edit Team dialog's onSaved used to only
+// setTeam(updatedTeam), leaving the already-fetched Members list and the Team
+// Devices tab showing the OLD callsigns until a full navigation re-fetch. It
+// now also re-fetches members and remounts the device list.
+describe("TeamDetail.jsx: Edit Team onSaved refreshes members and the device list (bugfix)", () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  it('the Edit Team dialog onSaved (the one that calls setTeam) also calls refreshMembers() and bumps deviceListVersion', () => {
+    // Anchor on the Edit Team dialog's onSaved specifically -- it is the
+    // handler that calls setTeam(updatedTeam) (the sub-team editor dialog's
+    // onSaved does not).
+    const anchor = source.indexOf('setTeam(updatedTeam)')
+    expect(anchor).toBeGreaterThan(-1)
+    // The refreshes live in the same onSaved body, after setTeam.
+    const handlerEnd = source.indexOf('}}', anchor)
+    expect(handlerEnd).toBeGreaterThan(anchor)
+    const handlerBody = source.slice(anchor, handlerEnd)
+    expect(handlerBody).toContain('refreshMembers()')
+    expect(handlerBody).toContain('setDeviceListVersion((version) => version + 1)')
   })
 })
 
@@ -2560,20 +2650,22 @@ describe('Members tab multi-select (bulk actions)', () => {
 
 // Bugfix (same defect as Teams.jsx's own hierarchy fix -- see its
 // matching test's doc comment): `allTeams` here feeds
-// `computeTeamDepth`/`isPseudonymousOrganisation` (both walk
-// parent_team_id chains against this exact list) and the Parent-Team
-// dropdown, all of which need every team, not just the first paginated
-// (default pageSize: 50) page.
-describe('TeamDetail.jsx: fetches the full (non-default-paginated) team list for allTeams (bugfix)', () => {
+// `rootOrganisationLabel` (the "<root Org prefix> - <team name>"
+// Display_Name), `computeTeamDepth`/`isPseudonymousOrganisation` (both
+// walk parent_team_id chains against this exact list) and the
+// Parent-Team dropdown, all of which need EVERY team. A single 200-row
+// page left a deeply-nested team's root Organisation missing, so the
+// Display_Name fell back to the wrong immediate-parent prefix
+// ("BAYO - Edgecumbe" instead of "FENZ - Edgecumbe"). Fixed by fetching
+// every page via teamsAPI.getAllMyTeams.
+describe('TeamDetail.jsx: fetches EVERY page of the team list for allTeams (bugfix)', () => {
   const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
 
-  it('calls teamsAPI.getMyTeams with an explicit pageSize of 200, not the bare no-args call', () => {
-    expect(source).toContain('teamsAPI.getMyTeams({ pageSize: 200 })')
-    // Narrowly targets the actual CALL expression (an immediately
-    // following `(` with no arguments before the closing paren) --
-    // this file also mentions `teamsAPI.getMyTeams()` generically in an
-    // unrelated doc comment, which this assertion must not flag.
+  it('uses teamsAPI.getAllMyTeams (all pages), not a single capped or default request', () => {
+    expect(source).toContain('teamsAPI.getAllMyTeams()')
+    // Must NOT fall back to the old single capped call or the bare
+    // no-args call in the fetch effect.
+    expect(source).not.toContain('teamsAPI.getMyTeams({ pageSize: 200 })')
     expect(source).not.toMatch(/teamsAPI\.getMyTeams\(\)\s*,?\s*\n\s*teamsAPI\.getSubTeams/)
-    expect(source.match(/teamsAPI\.getSubTeams\(teamId\),\s*\n\s*teamsAPI\.getMyTeams\(([^)]*)\)/)?.[1]).toBe('{ pageSize: 200 }')
   })
 })

@@ -6,6 +6,7 @@ import TransferMemberDialog, {
   CALLSIGN_CHANGE_STATEMENT,
   ADMIN_DEMOTION_STATEMENT,
   filterDestinationTeams,
+  filterDestinationOptionsBySearch,
   shouldFallBackToAllTeams,
   formatTeamPath,
   isCallsignSuffixConflictMessage,
@@ -86,6 +87,45 @@ describe('TransferMemberDialog pure helpers', () => {
     it('returns an empty list for a non-array input rather than throwing', () => {
       expect(filterDestinationTeams(undefined, 2)).toEqual([])
       expect(filterDestinationTeams(null, 2)).toEqual([])
+    })
+  })
+
+  describe('filterDestinationOptionsBySearch (destination search)', () => {
+    const options = [
+      { id: 1, label: 'ORG > Alpha' },
+      { id: 3, label: 'ORG > Bravo' },
+      { id: 9, label: 'FENZ > Bay of Plenty > Eastern Bay' }
+    ]
+
+    it('returns every option unchanged for an empty or whitespace-only term', () => {
+      expect(filterDestinationOptionsBySearch(options, '')).toEqual(options)
+      expect(filterDestinationOptionsBySearch(options, '   ')).toEqual(options)
+      expect(filterDestinationOptionsBySearch(options, null)).toEqual(options)
+      expect(filterDestinationOptionsBySearch(options, undefined)).toEqual(options)
+    })
+
+    it('matches the label case-insensitively as a substring', () => {
+      expect(filterDestinationOptionsBySearch(options, 'bravo').map((o) => o.id)).toEqual([3])
+      expect(filterDestinationOptionsBySearch(options, 'EASTERN').map((o) => o.id)).toEqual([9])
+    })
+
+    it('matches an ANCESTOR segment, narrowing to that whole branch', () => {
+      // Typing an org/region prefix narrows to its branch, not just leaves.
+      expect(filterDestinationOptionsBySearch(options, 'FENZ').map((o) => o.id)).toEqual([9])
+      expect(filterDestinationOptionsBySearch(options, 'org').map((o) => o.id)).toEqual([1, 3])
+    })
+
+    it('trims surrounding whitespace from the term before matching', () => {
+      expect(filterDestinationOptionsBySearch(options, '  bay  ').map((o) => o.id)).toEqual([9])
+    })
+
+    it('returns an empty list when nothing matches', () => {
+      expect(filterDestinationOptionsBySearch(options, 'zzz')).toEqual([])
+    })
+
+    it('returns an empty list for a non-array input rather than throwing', () => {
+      expect(filterDestinationOptionsBySearch(undefined, 'x')).toEqual([])
+      expect(filterDestinationOptionsBySearch(null, 'x')).toEqual([])
     })
   })
 
@@ -279,6 +319,7 @@ describe('TransferMemberDialog (mounted)', () => {
 
   const text = () => container.textContent
   const select = () => container.querySelector('#transfer-target-team')
+  const searchInput = () => container.querySelector('#transfer-target-team-search')
   const suffixInput = () => container.querySelector('#transfer-callsign-suffix')
   const optionValues = () => Array.from(select().options).map((o) => o.value).filter(Boolean)
 
@@ -305,6 +346,15 @@ describe('TransferMemberDialog (mounted)', () => {
 
   const setSuffixValue = async (value) => {
     const el = suffixInput()
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+    await act(async () => {
+      setter.call(el, value)
+      el.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+  }
+
+  const setSearchValue = async (value) => {
+    const el = searchInput()
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
     await act(async () => {
       setter.call(el, value)
@@ -342,6 +392,55 @@ describe('TransferMemberDialog (mounted)', () => {
     expect(optionValues()).toEqual(expect.arrayContaining(['1', '3']))
     expect(optionValues()).not.toContain('2')
     expect(text()).toContain('ORG > Bravo')
+  })
+
+  it('sorts the Organisation (top-level team) to the TOP of the destination list', async () => {
+    // Bugfix (org easy to miss): the Organisation itself (id 1,
+    // parent_team_id: null) is a common destination but its bare-name label
+    // sorted it among/after the sub-teams. It must now be the FIRST option,
+    // ahead of the sub-team(s), regardless of alphabetical order.
+    await mount()
+    // Displayed team is the sub-team Alpha (id 2), excluded -- so the options
+    // are the Organisation (id 1) and the sibling sub-team Bravo (id 3).
+    // The org must come first.
+    expect(optionValues()[0]).toBe('1')
+    expect(optionValues()).toEqual(['1', '3'])
+  })
+
+  it('renders a destination search box that filters the option list by name as the operator types', async () => {
+    await mount()
+    // Full list initially (both non-displayed teams offered).
+    expect(optionValues()).toEqual(expect.arrayContaining(['1', '3']))
+
+    // Typing narrows to the matching team only.
+    await setSearchValue('Bravo')
+    expect(optionValues()).toEqual(['3'])
+    expect(text()).toContain('ORG > Bravo')
+    expect(text()).not.toContain('ORG > Alpha')
+
+    // Clearing the search restores the full list.
+    await setSearchValue('')
+    expect(optionValues()).toEqual(expect.arrayContaining(['1', '3']))
+  })
+
+  it('shows a "no match" hint when the search matches no destination team', async () => {
+    await mount()
+    await setSearchValue('zzz-nonexistent')
+    expect(optionValues()).toEqual([])
+    expect(text()).toContain('No destination team matches')
+  })
+
+  it('clears a selection that the search filters out, so no blank-but-selected value remains', async () => {
+    await mount()
+    // Pick Bravo (id 3), then search for something that excludes it.
+    await setSelectValue('3')
+    expect(select().value).toBe('3')
+
+    await setSearchValue('Organisation') // matches ORG-root option (id 1), not Bravo
+    // The now-hidden selection is cleared.
+    expect(select().value).toBe('')
+    // And the submit button is disabled again (no target selected).
+    expect(container.querySelector('button[type="submit"]').disabled).toBe(true)
   })
 
   it('falls back to the all-teams call on an empty scoped list for an admin (Req 15.9)', async () => {

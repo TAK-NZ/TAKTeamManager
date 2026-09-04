@@ -228,38 +228,33 @@ export default function Teams({ user }) {
 
   useEffect(() => {
     const fetchData = async () => {
-      try {
-        // Bugfix (hierarchy rendered incorrectly after a large CSV
-        // import): GET /teams/my-teams's admin "all teams" branch is
-        // paginated, defaulting to pageSize: 50 (server/middleware/
-        // pagination.js) when no pageSize is supplied at all -- which
-        // this call used to do. `buildTeamHierarchy` below needs EVERY
-        // team in one pass to resolve parent_team_id correctly; once a
-        // database holds more than 50 teams (order is alphabetical by
-        // name), any team sorting past position 50 was silently missing
-        // from this list, and `buildTeamHierarchy` treats a team whose
-        // parent isn't in the fetched set as an orphan ROOT team --
-        // exactly the "Specialist Teams' own sub-teams rendered as if
-        // they were separate top-level orgs" defect this fixes.
-        // `MAX_PAGE_SIZE` (200, server/middleware/pagination.js) is the
-        // server's own hard cap; a database exceeding that would need
-        // real multi-page fetching, which this page does not yet do
-        // (the paginated response's own `pagination.total` would need
-        // to drive that, and there are no more than ~200 teams in any
-        // real deployment considered by this app to date).
-        const [teamsResponse, configResponse, publicConfigResponse] = await Promise.all([
-          teamsAPI.getMyTeams({ pageSize: 200 }),
-          api.get('/config/color-mappings'),
-          configAPI.getPublic()
-        ])
-        setTeams(teamsResponse.data.teams)
-        setColorMappings(configResponse.data.colorMappings || {})
-        setMaxTeamDepth(publicConfigResponse.data.maxTeamDepth ?? null)
-      } catch (error) {
-        console.error('Failed to fetch data:', error)
-      } finally {
-        setLoading(false)
+      // Bugfix (regular user saw "No teams yet"): these three fetches used
+      // to be one `Promise.all`, so a rejection in ANY of them cleared the
+      // whole page. GET /api/config/color-mappings is Global_Manager-only
+      // (permissions.registry.js: 'config:read:mappings') and 403s for a
+      // regular member -- which sank the team-list fetch alongside it and
+      // rendered the empty state even though the user has teams. Colour
+      // mappings and max-depth are purely cosmetic here, so each fetch is
+      // now isolated with Promise.allSettled: a forbidden/failed config
+      // call no longer blanks the team list.
+      const [teamsResult, colorResult, publicConfigResult] = await Promise.allSettled([
+        teamsAPI.getAllMyTeams(),
+        api.get('/config/color-mappings'),
+        configAPI.getPublic()
+      ])
+
+      if (teamsResult.status === 'fulfilled') {
+        setTeams(teamsResult.value)
+      } else {
+        console.error('Failed to fetch teams:', teamsResult.reason)
       }
+      if (colorResult.status === 'fulfilled') {
+        setColorMappings(colorResult.value.data.colorMappings || {})
+      }
+      if (publicConfigResult.status === 'fulfilled') {
+        setMaxTeamDepth(publicConfigResult.value.data.maxTeamDepth ?? null)
+      }
+      setLoading(false)
     }
 
     fetchData()
@@ -590,9 +585,21 @@ export default function Teams({ user }) {
                       </div>
                       <div className="flex items-baseline gap-1">
                         <span className="text-xs text-gray-500 dark:text-gray-400">Team Devices:</span>
-                        <Link to={`/teams/${team.id}?tab=devices`} className="text-gray-900 dark:text-gray-100 hover:text-primary-600 dark:hover:text-primary-400 hover:underline">
-                          {team.device_count || 0}
-                        </Link>
+                        {/* The Team Devices tab is management-only (the
+                            server 403s a non-admin listing a team's devices),
+                            and TeamDetail now hides that tab unless the caller
+                            can manage the team. So only link the count into
+                            `?tab=devices` for a team this caller `can_manage`
+                            -- otherwise the link would land on a tab that
+                            renders nothing. The other counts stay linked;
+                            their tabs are visible to everyone. */}
+                        {team.can_manage ? (
+                          <Link to={`/teams/${team.id}?tab=devices`} className="text-gray-900 dark:text-gray-100 hover:text-primary-600 dark:hover:text-primary-400 hover:underline">
+                            {team.device_count || 0}
+                          </Link>
+                        ) : (
+                          <span className="text-gray-900 dark:text-gray-100">{team.device_count || 0}</span>
+                        )}
                       </div>
                       <div className="flex items-baseline gap-1">
                         <span className="text-xs text-gray-500 dark:text-gray-400">Team Admins:</span>
@@ -814,9 +821,17 @@ export default function Teams({ user }) {
                       </Link>
                     </td>
                     <td className="hidden md:table-cell px-3 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                      <Link to={`/teams/${team.id}?tab=devices`} className="hover:text-primary-600 dark:hover:text-primary-400 hover:underline">
-                        {team.device_count || 0}
-                      </Link>
+                      {/* Only link the device count for a team this caller
+                          can manage -- see the mobile card's matching note:
+                          the `?tab=devices` tab is hidden from non-managers,
+                          so a link would dead-end there. */}
+                      {team.can_manage ? (
+                        <Link to={`/teams/${team.id}?tab=devices`} className="hover:text-primary-600 dark:hover:text-primary-400 hover:underline">
+                          {team.device_count || 0}
+                        </Link>
+                      ) : (
+                        <span>{team.device_count || 0}</span>
+                      )}
                     </td>
                     <td className="hidden md:table-cell px-3 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                       <Link to={`/teams/${team.id}?tab=admins`} className="hover:text-primary-600 dark:hover:text-primary-400 hover:underline">

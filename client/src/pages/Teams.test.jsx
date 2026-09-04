@@ -149,9 +149,12 @@ describe('Teams.jsx overview counts link to the corresponding TeamDetail.jsx tab
   const cardBlock = source.slice(cardBlockStart, tableBlockStart)
   const tableBlock = source.slice(tableBlockStart)
 
+  // Members, Team Admins and Sub-teams tabs are visible to everyone, so
+  // their counts are UNCONDITIONALLY linked. Team Devices is the exception
+  // (see the next test): that tab is management-only, so its count is only a
+  // Link when `team.can_manage`.
   it.each([
     ['Members', 'members', '{team.member_count || 0}'],
-    ['Team Devices', 'devices', '{team.device_count || 0}'],
     ['Team Admins', 'admins', '{team.admin_count || 0}'],
     ['Sub-teams', 'subteams', '{team.sub_teams_count || 0}']
   ])('%s count is wrapped in a Link to ?tab=%s, in both the card and the table block', (_label, tabId, countExpr) => {
@@ -167,6 +170,27 @@ describe('Teams.jsx overview counts link to the corresponding TeamDetail.jsx tab
       const closingLinkIndex = block.indexOf('</Link>', linkIndex)
       expect(closingLinkIndex).toBeGreaterThan(-1)
       expect(countIndex).toBeLessThan(closingLinkIndex)
+    }
+  })
+
+  // Team Devices tab is management-only: TeamDetail hides it unless the
+  // caller can manage the team, so linking a non-manager's device count into
+  // ?tab=devices would dead-end on an empty tab. The count is therefore
+  // gated behind `team.can_manage`: a Link when true, plain <span> otherwise,
+  // in BOTH the card and the table block.
+  it('gates the Team Devices count Link behind team.can_manage (Link when true, plain span otherwise), in both blocks', () => {
+    const linkPrefix = `<Link to={\`/teams/${'$'}{team.id}?tab=devices\`}`
+
+    for (const [blockName, block] of [['card', cardBlock], ['table', tableBlock]]) {
+      // The ?tab=devices Link still exists (the can_manage===true branch)...
+      expect(block, `${blockName} block should still contain a ?tab=devices Link for managers`).toContain(linkPrefix)
+      // ...but it is guarded by a can_manage ternary, with a non-linked
+      // fallback rendering the same count.
+      expect(block, `${blockName} block should gate the devices count on team.can_manage`).toContain('team.can_manage ?')
+      // Anti-vacuity: the fallback branch renders the device count in a plain
+      // <span>, not a Link.
+      expect(block, `${blockName} block should render a plain-span device-count fallback`)
+        .toMatch(/<span[^>]*>\{team\.device_count \|\| 0\}<\/span>/)
     }
   })
 })
@@ -354,26 +378,46 @@ describe('Teams.jsx: pagination row wraps on a narrow viewport (bugfix)', () => 
   })
 })
 
-// Bugfix (hierarchy rendered incorrectly for a database with more than
-// 50 teams -- specifically, a large CSV import of a multi-level Team
-// hierarchy): GET /teams/my-teams' admin "all teams" branch is
-// paginated, defaulting to pageSize: 50 (server/middleware/
-// pagination.js) whenever no pageSize is supplied at all.
-// `buildTeamHierarchy` needs EVERY team in one fetch to resolve
-// parent_team_id correctly -- a team whose parent sorted past the
-// default 50-row cutoff was silently missing from the fetched list,
-// and any of ITS OWN children then rendered as if they were separate
-// top-level Organisations, since `buildTeamHierarchy` treats a team
-// whose parent isn't in the fetched set as an orphan root. Fixed by
-// requesting the server's own MAX_PAGE_SIZE (200) explicitly.
-describe('Teams.jsx: fetches the full (non-default-paginated) team list for hierarchy building (bugfix)', () => {
+// Bugfix (hierarchy rendered flat/empty for a database with more teams
+// than one page): GET /teams/my-teams' admin "all teams" branch is
+// paginated and hard-capped at MAX_PAGE_SIZE (200,
+// server/middleware/pagination.js). `buildTeamHierarchy` needs EVERY
+// team in one pass to resolve parent_team_id correctly -- a team whose
+// parent isn't in the fetched set is silently re-rooted as a top-level
+// Organisation. A single capped request could therefore never render a
+// real org larger than 200 teams (e.g. FENZ, ~660 teams): 460+ of its
+// teams never arrived, so the whole tree below the org looked empty.
+//
+// The earlier mitigation bumped the single request to pageSize 200,
+// which merely moved the ceiling; the real fix loops over every page
+// using the response's own `pagination.total`, so the overview always
+// receives the full set regardless of size.
+describe('Teams.jsx: fetches EVERY page of the team list for hierarchy building (bugfix)', () => {
   const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'Teams.jsx'), 'utf8')
 
-  it('calls teamsAPI.getMyTeams with an explicit pageSize of 200, not the bare no-args call', () => {
-    expect(source).toContain('teamsAPI.getMyTeams({ pageSize: 200 })')
-    // Guards against a future edit reverting to the old bare call
-    // anywhere in this file's fetch effect.
+  it('uses teamsAPI.getAllMyTeams (all pages), not a single capped or default request', () => {
+    // The all-pages fetch (which loops over pagination.total in
+    // services/api.js) is what the overview's fetch effect uses.
+    expect(source).toContain('teamsAPI.getAllMyTeams()')
+    // It must NOT fall back to the old single-shot capped call or the
+    // bare no-args call anywhere in the file.
+    expect(source).not.toContain('teamsAPI.getMyTeams({ pageSize: 200 })')
     expect(source).not.toMatch(/teamsAPI\.getMyTeams\(\)/)
+  })
+
+  // Bugfix (a regular member saw "No teams yet"): the fetch effect bundled
+  // the team list with the Global_Manager-only GET /api/config/color-mappings
+  // in one Promise.all, so that endpoint's 403 for a non-admin rejected the
+  // whole batch and blanked the team list. The three fetches must be
+  // isolated (Promise.allSettled) so a forbidden config call can't clear
+  // the teams the user actually has.
+  it('isolates the team fetch from the (admin-only) color-mappings fetch via Promise.allSettled', () => {
+    // The overview's fetch effect uses allSettled, and the team result is
+    // applied independently of the config results.
+    expect(source).toContain('Promise.allSettled([')
+    // It must NOT wrap these fetches in a plain Promise.all (which sinks
+    // the whole batch on any one rejection).
+    expect(source).not.toMatch(/Promise\.all\(\[\s*\n\s*teamsAPI\.getAllMyTeams\(\)/)
   })
 })
 

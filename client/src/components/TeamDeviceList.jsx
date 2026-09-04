@@ -134,19 +134,29 @@ import { describeAccountStatusBadge } from '../utils/accountStatusBadge'
  * testing extracted pure logic (see `RevokeDeviceDialog.jsx`'s helpers).
  *
  * @param {{response?: {status?: number, data?: object}}} error an axios error.
- * @returns {string} a user-facing message.
+ * @returns {{message: string, tone: 'info'|'error'}} a user-facing message
+ *   plus its tone: `'info'` for the expected 403 permission outcome (shown
+ *   muted, not red), `'error'` for genuine failures (shown red).
  */
 export function interpretTeamDeviceListError(error) {
   const status = error?.response?.status
   const serverMessage = error?.response?.data?.error
 
   if (status === 403) {
-    return serverMessage || 'You can only view devices for a team you administer.'
+    // An expected permission outcome, not a failure: this caller is neither
+    // a Team_Admin of the team's Ancestor_Chain nor a Global_Manager. Do NOT
+    // surface the raw server string here -- it is the terse literal
+    // "Forbidden", which reads as an alarming error. Always use plain,
+    // human copy, and tag `tone: 'info'` so the render shows it in a neutral
+    // (muted) style rather than red. (The Team Devices tab is normally hidden
+    // from non-managers entirely; this message only appears via a stale
+    // `?tab=devices` deep link or an inherited-admin edge case.)
+    return { message: 'Only team admins can view this team\'s devices.', tone: 'info' }
   }
   if (status === 400) {
-    return serverMessage || 'Unable to load this team\'s devices.'
+    return { message: serverMessage || 'Unable to load this team\'s devices.', tone: 'error' }
   }
-  return 'Failed to load this team\'s devices. Please try again.'
+  return { message: 'Failed to load this team\'s devices. Please try again.', tone: 'error' }
 }
 
 /**
@@ -730,8 +740,19 @@ export default function TeamDeviceList({ teamId, onEnroll, user, onCountChange }
       )}
 
       {error && (
-        <p role="alert" className="text-sm text-red-600 dark:text-red-400 mb-4">
-          {error}
+        // Tone-driven: an expected 403 permission outcome (`tone: 'info'`)
+        // is announced politely (`role="status"`) in the same muted grey the
+        // empty-list state uses, so it doesn't read as a failure; a genuine
+        // error (`tone: 'error'`) keeps `role="alert"` and the red treatment.
+        <p
+          role={error.tone === 'info' ? 'status' : 'alert'}
+          className={`text-sm mb-4 ${
+            error.tone === 'info'
+              ? 'text-gray-500 dark:text-gray-400'
+              : 'text-red-600 dark:text-red-400'
+          }`}
+        >
+          {error.message}
         </p>
       )}
 

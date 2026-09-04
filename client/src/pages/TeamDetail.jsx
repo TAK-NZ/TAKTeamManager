@@ -1400,22 +1400,28 @@ export default function TeamDetail({ user, refreshUser }) {
         // CHANNEL_FOLDER_SEPARATOR).
         if (!isCancelled) {
           try {
-            // Bugfix (same defect as Teams.jsx's own hierarchy fix):
-            // `allTeams` feeds `computeTeamDepth`/`isPseudonymousOrganisation`
-            // (both walk `parent_team_id` chains against this exact
-            // list) and the Parent-Team dropdown -- all three need
-            // every team, not just the first paginated page. See
-            // Teams.jsx's identical `{ pageSize: 200 }` fix for the
-            // full defect explanation.
-            const [subTeamsResponse, allTeamsResponse, configResponse, publicConfigResponse] = await Promise.all([
+            // `allTeams` feeds `rootOrganisationLabel` (the Display_Name
+            // "<root Org prefix> - <team name>" shown in the header and
+            // Display Name line), `computeTeamDepth`/
+            // `isPseudonymousOrganisation` (both walk `parent_team_id`
+            // chains against this exact list), and the Parent-Team
+            // dropdown -- all of which need EVERY team, not just one
+            // paginated page. `getAllMyTeams` follows the server's
+            // pagination across every page: a single 200-row-capped
+            // request left a deeply-nested team's root Organisation
+            // missing from the list, so `rootOrganisationLabel` returned
+            // null and the Display_Name fell back to the WRONG immediate-
+            // parent prefix (e.g. "BAYO - Edgecumbe" instead of
+            // "FENZ - Edgecumbe"). See teamsAPI.getAllMyTeams.
+            const [subTeamsResponse, allTeamsList, configResponse, publicConfigResponse] = await Promise.all([
               teamsAPI.getSubTeams(teamId),
-              teamsAPI.getMyTeams({ pageSize: 200 }),
+              teamsAPI.getAllMyTeams(),
               api.get('/config/color-mappings'),
               configAPI.getPublic()
             ])
             if (!isCancelled) {
               setSubTeams(subTeamsResponse.data.subTeams || [])
-              setAllTeams(allTeamsResponse.data.teams || [])
+              setAllTeams(allTeamsList || [])
               setColorMappings(configResponse.data.colorMappings || {})
               setFolderSeparator(publicConfigResponse.data.channel_folder_separator || ' - ')
               setMaxTeamDepth(publicConfigResponse.data.maxTeamDepth ?? null)
@@ -1478,7 +1484,22 @@ export default function TeamDetail({ user, refreshUser }) {
   // inside that component (edit/delete/transfer), which this effect has
   // no visibility into.
   useEffect(() => {
-    if (!devicesEnabled || !teamId) {
+    // Only a manager of this team can list its devices -- the server gates
+    // GET /api/devices/team/:teamId on 'device:read:team_admin' and 403s a
+    // regular member. This prefetch (which only exists to populate the tab's
+    // count badge) is therefore pointless for a non-manager and would fire a
+    // doomed request on every team page load, so skip it -- mirroring the
+    // `canManageTeam` gate now placed on the Team Devices tab itself. The
+    // manage signal is computed inline here (rather than reusing the
+    // `canManageTeam` const, which is defined further down, after this
+    // hook's position in source order) from the same inputs: the viewed
+    // team's own `can_manage` flag from GET /api/teams/my-teams
+    // (ancestor-inclusive), falling back to a direct-admin membership check.
+    const managedFlag = allTeams.find((t) => String(t.id) === String(teamId))?.can_manage
+    const canManageForCount = user?.isAdmin
+      || managedFlag === true
+      || admins.some((a) => String(a.id) === String(user?.userId))
+    if (!devicesEnabled || !teamId || !canManageForCount) {
       return
     }
     let isCancelled = false
@@ -1494,7 +1515,7 @@ export default function TeamDetail({ user, refreshUser }) {
     return () => {
       isCancelled = true
     }
-  }, [devicesEnabled, teamId, deviceListVersion])
+  }, [devicesEnabled, teamId, deviceListVersion, allTeams, admins, user])
 
   // Generic filter and sort function
   const filterAndSort = (items, searchTerm, sortField, sortDirection) => {
@@ -1658,9 +1679,23 @@ export default function TeamDetail({ user, refreshUser }) {
     })
   }
 
-  // Determine if current user can manage this team (global admin or team admin)
+  // Determine if current user can manage this team (global admin or team admin).
   const isGlobalAdmin = user?.isAdmin
-  const isTeamAdmin = admins.some(a => String(a.id) === String(user?.userId))
+  // Bugfix (a Team_Admin of an Organisation could not manage its sub-teams):
+  // admin rights INHERIT down the tree -- an admin of a team is an admin of
+  // every descendant (server-side `Team.isAdmin` walks the Ancestor_Chain,
+  // and every team-mutation authorize resolver uses it). But `admins` here is
+  // only THIS team's DIRECT admins (`role === 'admin'` rows on the viewed
+  // team), so an inherited admin -- e.g. a FENZ org admin viewing a FENZ
+  // sub-team -- never appeared in it, making `canManageTeam` false and hiding
+  // every action the server would actually permit. The authoritative,
+  // ancestor-inclusive signal is the viewed team's own `can_manage` flag from
+  // GET /api/teams/my-teams (server-computed via `Team.getManagedTeamIds`,
+  // which is the downward-facing counterpart of `Team.isAdmin`); `allTeams`
+  // carries it for every team the caller can see. Fall back to the direct
+  // check if the row isn't present yet (e.g. allTeams still loading).
+  const managedFlag = allTeams.find(t => String(t.id) === String(team.id))?.can_manage
+  const isTeamAdmin = managedFlag === true || admins.some(a => String(a.id) === String(user?.userId))
   const canManageTeam = isGlobalAdmin || isTeamAdmin
 
   // Requirement 1.1/1.2: "Organisation" for a root team, "Team" otherwise.
@@ -1958,7 +1993,19 @@ export default function TeamDetail({ user, refreshUser }) {
               // `TeamDeviceList`'s own `onCountChange` callback. `null`
               // (rendered as the icon alone, no badge, same as before)
               // only until that first fetch resolves.
-              ...(devicesEnabled ? [{ id: 'devices', label: 'Team Devices', icon: DevicePhoneMobileIcon, count: deviceCount }] : []),
+              // The Team Devices tab is a management-only surface: the server
+              // gates GET /api/devices/team/:teamId on team-admin, so a
+              // regular member could only ever see a "you don't administer
+              // this team" message behind it. Gate the tab on `canManageTeam`
+              // (in addition to the `devicesEnabled` feature flag), matching
+              // how every other action on this page is gated -- hidden
+              // entirely for a non-manager rather than shown-then-denied. A
+              // stale `?tab=devices` deep link still resolves to a valid id
+              // (VALID_TAB_IDS) but renders nothing extra, the same as any
+              // other unavailable tab; the render branch below also requires
+              // `canManageTeam`, and TeamDeviceList's own 403 handling is the
+              // final safety net for an inherited-admin edge case.
+              ...(devicesEnabled && canManageTeam ? [{ id: 'devices', label: 'Team Devices', icon: DevicePhoneMobileIcon, count: deviceCount }] : []),
               { id: 'admins', label: 'Team Admins', icon: ShieldCheckIcon, count: admins.length },
               // SignalIcon, matching the icon Dashboard.jsx already uses
               // for its own "Total Channels" stat tile -- the closest
@@ -2030,7 +2077,7 @@ export default function TeamDetail({ user, refreshUser }) {
               member-count query this page renders elsewhere, so this
               tab cannot reintroduce a Team_Owned_Device into either
               (`production-hardening` Criterion 27.9). */}
-          {activeTab === 'devices' && devicesEnabled && (
+          {activeTab === 'devices' && devicesEnabled && canManageTeam && (
             <TeamDeviceList key={deviceListVersion} teamId={team.id} onEnroll={setEnrollingDevice} user={user} onCountChange={setDeviceCount} />
           )}
 
@@ -4400,6 +4447,21 @@ export default function TeamDetail({ user, refreshUser }) {
               setParentTeam(null)
             }
           }
+
+          // Bugfix (stale callsigns after a team edit): editing this team's
+          // callsign_prefix (or callsign_name_format / callsign_level_selection,
+          // or re-parenting it) recomputes the assembled Callsign of every
+          // member AND every Team_Owned_Device -- the server persists those and
+          // pushes them to Authentik, but this page's already-fetched `members`
+          // list and the Team Devices tab both keep showing the OLD callsigns
+          // until a full navigation re-fetch. Refresh both here so the display
+          // matches what was just saved without leaving /teams:
+          //  - refreshMembers() re-fetches the Members/Team Admins roster.
+          //  - bumping deviceListVersion remounts TeamDeviceList (key=) and
+          //    re-runs this page's own device-count effect, exactly as
+          //    AddTeamDeviceDialog's onCreated already does.
+          refreshMembers()
+          setDeviceListVersion((version) => version + 1)
         }}
       />
 
