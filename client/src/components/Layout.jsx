@@ -52,7 +52,11 @@ const getNavigation = (user) => {
   // entries below), rather than after them, since it is unconditional.
   baseNavigation.push({ name: 'Tasks', href: '/tasks', icon: ClipboardDocumentListIcon })
 
-  if (user?.isAdmin || user?.is_global_manager) {
+  // Bugfix: this gate used to check only isAdmin/is_global_manager
+  // (Global_Manager), leaving a plain Team_Admin -- who IS authorized
+  // server-side, see below -- with no way to reach either page from the
+  // nav. isTeamAdmin is added here to match.
+  if (user?.isAdmin || user?.is_global_manager || user?.isTeamAdmin) {
     baseNavigation.push({ name: 'Users', href: '/users', icon: UsersIcon })
     // Placed directly beneath Users, same role gate: the org-wide
     // Team_Owned_Device listing (GET /api/devices, 'device:read:org') is

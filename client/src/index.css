@@ -8,6 +8,22 @@
   }
 }
 
+/* Bugfix (bulk team CSV import had no feedback while the server processed
+   rows): an indeterminate progress-bar sweep, used by Admin.jsx's bulk
+   team import indicator once the upload itself completes and the
+   server's row-by-row processing (no progress signal of its own) is
+   underway. Tailwind's arbitrary `animate-[...]` utility only emits the
+   `animation` property -- it does not generate a `@keyframes` rule for
+   an arbitrary name, so this must be declared explicitly. */
+@keyframes bulk-import-indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
+
 @layer components {
   .btn-primary {
     @apply bg-primary-600 hover:bg-primary-700 text-white font-medium py-2 px-4 rounded-lg transition-colors;

@@ -33,7 +33,12 @@ module.exports = [
     },
   },
   {
-    files: ['server/**/*.js', 'scripts/**/*.js', 'database/*.js'],
+    // `database/**/*.js` (not the non-recursive `database/*.js`) so a
+    // file in a subdirectory -- e.g. `database/testHelpers/
+    // throwawayDatabase.js` -- is actually linted rather than silently
+    // skipped. `database/migrations/**` stays excluded via the
+    // `ignores` block above regardless.
+    files: ['server/**/*.js', 'scripts/**/*.js', 'database/**/*.js'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'commonjs',
@@ -48,12 +53,12 @@ module.exports = [
     },
   },
   {
-    // `database/*.test.js`/`database/*.integration.test.js` (e.g.
-    // schemaConsistency.integration.test.js) match `database/*.js` above
-    // but not `server/**/*.test.js`/`scripts/**/*.test.js` below, so
+    // `database/**/*.test.js`/`database/**/*.integration.test.js` (e.g.
+    // schemaConsistency.integration.test.js) match `database/**/*.js`
+    // above but not `server/**/*.test.js`/`scripts/**/*.test.js` below, so
     // without this block they got no-console disabled but still no
     // jest globals -- describe/it/expect flagged as undefined (no-undef).
-    files: ['server/**/*.test.js', 'scripts/**/*.test.js', 'database/*.test.js', 'database/*.integration.test.js'],
+    files: ['server/**/*.test.js', 'scripts/**/*.test.js', 'database/**/*.test.js', 'database/**/*.integration.test.js'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'commonjs',

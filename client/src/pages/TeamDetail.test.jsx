@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { formatCallsignLevels, formatCallsignNameFormatExample, computeTeamDepth, getInitialMemberEditForm, isValidMemberCallsignSuffix, isValidSubTeamCallsignPrefix, extractCallsignSuffixServerError, isValidNewUserEmail, isPseudonymousOrganisation, resolveInitialTab, describeAccountStatusBadge } from './TeamDetail.jsx';
+import { formatCallsignLevels, formatCallsignNameFormatExample, computeTeamDepth, getInitialMemberEditForm, isValidMemberCallsignSuffix, isValidSubTeamCallsignPrefix, extractCallsignSuffixServerError, isValidNewUserEmail, isPseudonymousOrganisation, rootOrganisationLabel, resolveInitialTab, describeAccountStatusBadge } from './TeamDetail.jsx';
 
 // Validates: Requirements 1.1, 1.2, 2.4, 2.5
 //
@@ -981,6 +981,63 @@ describe('isPseudonymousOrganisation (takserver-enrollment Req 6.7/9.7)', () => 
   it('terminates without looping forever when an ancestor is missing from allTeams (e.g. a hidden private ancestor)', () => {
     const subTeam = { id: 10, parent_team_id: 999, pseudonymous_usernames: null }
     expect(isPseudonymousOrganisation(subTeam, [subTeam])).toBe(false)
+  })
+})
+
+// Bugfix (/teams detail showed the IMMEDIATE parent's prefix, not the
+// root Organisation's): `rootOrganisationLabel` resolves the ROOT
+// Organisation's callsign_prefix (or name fallback) for a Sub_Team's
+// Display_Name, by walking `parent_team_id` up to the root through the
+// already-fetched `allTeams` list -- matching the server's ancestor-
+// chain-root rule and what /request-access shows. A deeply-nested team
+// like LandSAR > Specialist Teams > Cave Search and Rescue > Auckland
+// must resolve to "LSAR", never "CAVE" (the immediate parent).
+describe('rootOrganisationLabel (root Organisation prefix, not immediate parent)', () => {
+  it('returns null for an Organisation (root) row -- it has no prefix to prepend', () => {
+    const org = { id: 1, parent_team_id: null, callsign_prefix: 'LSAR' }
+    expect(rootOrganisationLabel(org, [org])).toBeNull()
+  })
+
+  it('returns null for a null/undefined team', () => {
+    expect(rootOrganisationLabel(null, [])).toBeNull()
+    expect(rootOrganisationLabel(undefined, [])).toBeNull()
+  })
+
+  it("returns the root Organisation's callsign_prefix for a direct child", () => {
+    const org = { id: 1, parent_team_id: null, callsign_prefix: 'LSAR' }
+    const sub = { id: 2, parent_team_id: 1, callsign_prefix: 'AUCK' }
+    expect(rootOrganisationLabel(sub, [org, sub])).toBe('LSAR')
+  })
+
+  it("resolves the ROOT org's prefix for a deeply-nested team, NOT the immediate parent's (the CAVE-vs-LSAR bug)", () => {
+    const org = { id: 10, parent_team_id: null, callsign_prefix: 'LSAR' }
+    const spec = { id: 11, parent_team_id: 10, callsign_prefix: 'SPEC' }
+    const cave = { id: 12, parent_team_id: 11, callsign_prefix: 'CAVE' }
+    const auckland = { id: 13, parent_team_id: 12, callsign_prefix: 'AUCK' }
+    const all = [org, spec, cave, auckland]
+    // Auckland's immediate parent is Cave (CAVE); its root org is LSAR.
+    expect(rootOrganisationLabel(auckland, all)).toBe('LSAR')
+    expect(rootOrganisationLabel(cave, all)).toBe('LSAR')
+    expect(rootOrganisationLabel(spec, all)).toBe('LSAR')
+  })
+
+  it("falls back to the root Organisation's name when the root has no callsign_prefix", () => {
+    const org = { id: 1, parent_team_id: null, callsign_prefix: null, name: 'Land Search and Rescue' }
+    const sub = { id: 2, parent_team_id: 1 }
+    expect(rootOrganisationLabel(sub, [org, sub])).toBe('Land Search and Rescue')
+  })
+
+  it('returns null when an ancestor is missing from allTeams (e.g. a hidden private ancestor)', () => {
+    const sub = { id: 10, parent_team_id: 999 }
+    expect(rootOrganisationLabel(sub, [sub])).toBeNull()
+  })
+
+  it('does not loop forever on a cyclic parent_team_id chain (defensive)', () => {
+    const a = { id: 20, parent_team_id: 21, callsign_prefix: 'A' }
+    const b = { id: 21, parent_team_id: 20, callsign_prefix: 'B' }
+    const result = rootOrganisationLabel(a, [a, b])
+    // Terminates and returns one of the two labels, never hangs.
+    expect(['A', 'B']).toContain(result)
   })
 })
 
@@ -2498,5 +2555,25 @@ describe('Members tab multi-select (bulk actions)', () => {
     const block = source.slice(index, source.indexOf('\n  }', index))
     expect(block).toContain('clearMemberSelection()')
     expect(block).toContain('refreshMembers()')
+  })
+})
+
+// Bugfix (same defect as Teams.jsx's own hierarchy fix -- see its
+// matching test's doc comment): `allTeams` here feeds
+// `computeTeamDepth`/`isPseudonymousOrganisation` (both walk
+// parent_team_id chains against this exact list) and the Parent-Team
+// dropdown, all of which need every team, not just the first paginated
+// (default pageSize: 50) page.
+describe('TeamDetail.jsx: fetches the full (non-default-paginated) team list for allTeams (bugfix)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'TeamDetail.jsx'), 'utf8')
+
+  it('calls teamsAPI.getMyTeams with an explicit pageSize of 200, not the bare no-args call', () => {
+    expect(source).toContain('teamsAPI.getMyTeams({ pageSize: 200 })')
+    // Narrowly targets the actual CALL expression (an immediately
+    // following `(` with no arguments before the closing paren) --
+    // this file also mentions `teamsAPI.getMyTeams()` generically in an
+    // unrelated doc comment, which this assertion must not flag.
+    expect(source).not.toMatch(/teamsAPI\.getMyTeams\(\)\s*,?\s*\n\s*teamsAPI\.getSubTeams/)
+    expect(source.match(/teamsAPI\.getSubTeams\(teamId\),\s*\n\s*teamsAPI\.getMyTeams\(([^)]*)\)/)?.[1]).toBe('{ pageSize: 200 }')
   })
 })

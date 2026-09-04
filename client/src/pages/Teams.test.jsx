@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { isValidCallsignPrefixInput } from '../components/TeamFormDialog.jsx';
-import { getParentBreadcrumb } from './Teams.jsx';
+import { getParentBreadcrumb, rootOrgLabel } from './Teams.jsx';
 
 // Validates: Requirement 3.10
 //
@@ -64,8 +64,16 @@ describe('isValidCallsignPrefixInput (Req 3.10)', () => {
 describe('Teams.jsx overview table: Team Devices / Team Admins columns between Members and Sub-teams', () => {
   const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'Teams.jsx'), 'utf8')
 
-  it('renders a "Team Devices" column header sorting on device_count, positioned after Members and before Sub-teams', () => {
-    const membersIndex = source.indexOf('<span>Members</span>')
+  // The four count columns' ORDER (Members, Team Devices, Team Admins,
+  // Sub-teams) is anchored on the durable `handleSort('<field>')` sort
+  // call sites -- which survived the "text label -> icon header" change
+  // -- rather than on the header's rendered text, which is now an icon
+  // (see the icon-header test just below). This is the "tighten the
+  // query, don't loosen the assertion" convention: the column set and
+  // ordering are still asserted, just via a signal the icon change
+  // didn't remove.
+  it('renders the four count column headers sorting on member/device/admin/sub_teams count, in that left-to-right order', () => {
+    const membersIndex = source.indexOf("handleSort('member_count')")
     const devicesIndex = source.indexOf("handleSort('device_count')")
     const adminsIndex = source.indexOf("handleSort('admin_count')")
     const subTeamsIndex = source.indexOf("handleSort('sub_teams_count')")
@@ -73,13 +81,56 @@ describe('Teams.jsx overview table: Team Devices / Team Admins columns between M
     expect(devicesIndex).toBeGreaterThan(membersIndex)
     expect(adminsIndex).toBeGreaterThan(devicesIndex)
     expect(subTeamsIndex).toBeGreaterThan(adminsIndex)
-    expect(source).toContain('<span>Team Devices</span>')
-    expect(source).toContain('<span>Team Admins</span>')
   })
 
   it('renders the device_count/admin_count data cells, defaulting to 0', () => {
     expect(source).toContain('{team.device_count || 0}')
     expect(source).toContain('{team.admin_count || 0}')
+  })
+})
+
+// The four count columns (Members, Team Devices, Team Admins, Sub-teams)
+// use an ICON header rather than a text label, to make the columns
+// narrower and avoid the table overflow-scrolling on a typical desktop.
+// Accessibility requires the meaning NOT be carried by the icon alone,
+// so each header must keep an `aria-label`/`title` naming the column and
+// mark the icon `aria-hidden`. Icons match TeamDetail.jsx's own tab
+// iconography for these concepts. Source-contract check, matching this
+// file's own established convention.
+describe('Teams.jsx overview table: count columns use accessible icon headers (bugfix: narrower columns)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'Teams.jsx'), 'utf8')
+  // Scope to the desktop table block so the mobile card's own text
+  // labels ("Members:", etc.) are not what these assertions match.
+  const tableBlock = source.slice(source.indexOf('hidden sm:block overflow-x-auto'))
+
+  it.each([
+    ['member_count', 'Members', 'UsersIcon'],
+    ['device_count', 'Team Devices', 'DevicePhoneMobileIcon'],
+    ['admin_count', 'Team Admins', 'ShieldCheckIcon'],
+    ['sub_teams_count', 'Sub-teams', 'BuildingOfficeIcon']
+  ])('the %s header renders %s as an aria-hidden icon (%s) with an aria-label and title carrying the name', (field, label, iconName) => {
+    // Locate this specific header by its sort field, then inspect the
+    // <th> element around it.
+    const sortIdx = tableBlock.indexOf(`handleSort('${field}')`)
+    expect(sortIdx, `header for ${field} should exist`).toBeGreaterThan(-1)
+    const thStart = tableBlock.lastIndexOf('<th', sortIdx)
+    const thEnd = tableBlock.indexOf('</th>', sortIdx)
+    const th = tableBlock.slice(thStart, thEnd)
+
+    expect(th).toContain(`aria-label="${label}"`)
+    expect(th).toContain(`title="${label}"`)
+    expect(th).toContain(`<${iconName} `)
+    expect(th).toContain('aria-hidden="true"')
+    // The meaning must NOT be a bare visible text label anymore -- the
+    // old `<span>Members</span>`-style header is gone.
+    expect(th).not.toContain(`<span>${label}</span>`)
+  })
+
+  it('imports the four heroicons it uses for the count-column headers', () => {
+    expect(source).toContain('UsersIcon')
+    expect(source).toContain('DevicePhoneMobileIcon')
+    expect(source).toContain('ShieldCheckIcon')
+    expect(source).toContain('BuildingOfficeIcon')
   })
 })
 
@@ -203,12 +254,26 @@ describe('Teams.jsx mobile card fallback (sm:hidden cards + hidden sm:block tabl
   })
 })
 
-describe('getParentBreadcrumb', () => {
+// Bugfix (/teams showed the IMMEDIATE parent's prefix, not the root
+// Organisation's): a deeply-nested team like LandSAR > Specialist Teams
+// > Cave Search and Rescue > Auckland rendered as "CAVE - Auckland"
+// (the immediate parent Cave's prefix) instead of the correct "LSAR -
+// Auckland" (the root Organisation's prefix), which is what
+// /request-access already shows. `getParentBreadcrumb` now resolves the
+// ROOT org via `rootOrgLabel`, matching the server's canonical rule
+// (root = the ancestor with `parent_team_id IS NULL`).
+describe('getParentBreadcrumb / rootOrgLabel (root Organisation, not immediate parent)', () => {
   const teams = [
     { id: 1, name: 'Org One', callsign_prefix: 'FENZ' },
-    { id: 2, name: 'Sub Team', callsign_prefix: null, parent_team_id: 1 },
-    { id: 3, name: 'No Prefix Parent', callsign_prefix: null },
+    { id: 2, name: 'Sub Team', callsign_prefix: 'SUB', parent_team_id: 1 },
+    { id: 3, name: 'No Prefix Org', callsign_prefix: null },
     { id: 4, name: 'Child of No Prefix', callsign_prefix: null, parent_team_id: 3 },
+    // A three-deep chain mirroring the real LandSAR case:
+    // LSAR (10) > Specialist Teams (11) > Cave (12) > Auckland (13).
+    { id: 10, name: 'Land Search and Rescue New Zealand', callsign_prefix: 'LSAR' },
+    { id: 11, name: 'Specialist Teams', callsign_prefix: 'SPEC', parent_team_id: 10 },
+    { id: 12, name: 'Cave Search and Rescue', callsign_prefix: 'CAVE', parent_team_id: 11 },
+    { id: 13, name: 'Auckland', callsign_prefix: 'AUCK', parent_team_id: 12 },
   ]
 
   it('returns null for a root team (level 0)', () => {
@@ -220,16 +285,34 @@ describe('getParentBreadcrumb', () => {
     expect(getParentBreadcrumb(undefined, teams)).toBeNull()
   })
 
-  it("returns the parent's callsign_prefix when present", () => {
-    expect(getParentBreadcrumb({ level: 1, parent_team_id: 1 }, teams)).toBe('FENZ')
+  it("returns the root Organisation's callsign_prefix for a direct child", () => {
+    expect(getParentBreadcrumb({ level: 1, id: 2, parent_team_id: 1 }, teams)).toBe('FENZ')
   })
 
-  it("falls back to the parent's name when it has no callsign_prefix", () => {
-    expect(getParentBreadcrumb({ level: 1, parent_team_id: 3 }, teams)).toBe('No Prefix Parent')
+  it("falls back to the root Organisation's name when the root has no callsign_prefix", () => {
+    expect(getParentBreadcrumb({ level: 1, id: 4, parent_team_id: 3 }, teams)).toBe('No Prefix Org')
   })
 
-  it('returns null when the parent is not present in `teams` (e.g. a regular user who only sees their own team)', () => {
-    expect(getParentBreadcrumb({ level: 1, parent_team_id: 999 }, teams)).toBeNull()
+  it("resolves the ROOT org's prefix for a deeply-nested team, NOT the immediate parent's (the CAVE-vs-LSAR bug)", () => {
+    // Auckland's immediate parent is Cave (CAVE); its root org is LSAR.
+    expect(getParentBreadcrumb({ level: 3, id: 13, parent_team_id: 12 }, teams)).toBe('LSAR')
+    // And directly via rootOrgLabel, for the intermediate levels too.
+    expect(rootOrgLabel({ id: 12, parent_team_id: 11 }, teams)).toBe('LSAR')
+    expect(rootOrgLabel({ id: 11, parent_team_id: 10 }, teams)).toBe('LSAR')
+  })
+
+  it('returns null when the parent chain is not present in `teams` (e.g. a regular user who only sees their own team)', () => {
+    expect(getParentBreadcrumb({ level: 1, id: 900, parent_team_id: 999 }, teams)).toBeNull()
+  })
+
+  it('does not loop forever on a cyclic parent_team_id chain (defensive)', () => {
+    const cyclic = [
+      { id: 20, name: 'A', callsign_prefix: 'A', parent_team_id: 21 },
+      { id: 21, name: 'B', callsign_prefix: 'B', parent_team_id: 20 },
+    ]
+    // Should terminate and return one of the two labels, never hang.
+    const result = getParentBreadcrumb({ level: 1, id: 20, parent_team_id: 21 }, cyclic)
+    expect(['A', 'B']).toContain(result)
   })
 })
 
@@ -268,5 +351,139 @@ describe('Teams.jsx: pagination row wraps on a narrow viewport (bugfix)', () => 
     expect(rowLine).toContain('flex-wrap')
     expect(rowLine).toContain('justify-between')
     expect(rowLine).toContain('gap-2')
+  })
+})
+
+// Bugfix (hierarchy rendered incorrectly for a database with more than
+// 50 teams -- specifically, a large CSV import of a multi-level Team
+// hierarchy): GET /teams/my-teams' admin "all teams" branch is
+// paginated, defaulting to pageSize: 50 (server/middleware/
+// pagination.js) whenever no pageSize is supplied at all.
+// `buildTeamHierarchy` needs EVERY team in one fetch to resolve
+// parent_team_id correctly -- a team whose parent sorted past the
+// default 50-row cutoff was silently missing from the fetched list,
+// and any of ITS OWN children then rendered as if they were separate
+// top-level Organisations, since `buildTeamHierarchy` treats a team
+// whose parent isn't in the fetched set as an orphan root. Fixed by
+// requesting the server's own MAX_PAGE_SIZE (200) explicitly.
+describe('Teams.jsx: fetches the full (non-default-paginated) team list for hierarchy building (bugfix)', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'Teams.jsx'), 'utf8')
+
+  it('calls teamsAPI.getMyTeams with an explicit pageSize of 200, not the bare no-args call', () => {
+    expect(source).toContain('teamsAPI.getMyTeams({ pageSize: 200 })')
+    // Guards against a future edit reverting to the old bare call
+    // anywhere in this file's fetch effect.
+    expect(source).not.toMatch(/teamsAPI\.getMyTeams\(\)/)
+  })
+})
+
+// Bugfix (table overflowed into horizontal scroll on long nested names):
+// the desktop table's Team Name cell shows ONLY the team's own name --
+// the parent org/team prefix is deliberately NOT prepended (the
+// hierarchy is already conveyed by the row's indentation and the expand
+// tree, so "LANDSAR - Local Groups" would be redundant). The full parent
+// context stays reachable via the Link's `title` ("Parent > Name"), and
+// the name `truncate`s (rather than the table horizontal-scrolling) when
+// a single name is genuinely too long. Source-contract check, matching
+// this file's own established convention.
+describe('Teams.jsx overview table: Team Name shows the bare name (no parent prefix), truncating instead of horizontal scroll', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'Teams.jsx'), 'utf8')
+  const tableBlock = source.slice(source.indexOf('hidden sm:block overflow-x-auto'))
+
+  it('renders the bare team name in the Link, never a prefixed "PARENT - Name" as the displayed text', () => {
+    const linkIdx = tableBlock.indexOf('to={`/teams/${team.id}`}')
+    expect(linkIdx, 'the name Link should exist').toBeGreaterThan(-1)
+    const linkBlock = tableBlock.slice(linkIdx, tableBlock.indexOf('</Link>', linkIdx))
+    // Displayed text is the bare name.
+    expect(linkBlock).toContain('{team.name}')
+    // The old inline prefixed forms (rendered as the Link's TEXT, with a
+    // " - " separator) must be gone from the displayed name. The `title`
+    // attribute legitimately still references the parent, but it now uses
+    // a " > " breadcrumb separator, so a stray " - ${team.name}" rendered
+    // child would be a regression this catches.
+    expect(linkBlock).not.toContain('- ${team.name}`')
+    expect(linkBlock).not.toContain("|| 'Root'} - ")
+  })
+
+  it('gives the name cell a bounded width and min-w-0 flex so a long name truncates rather than the table scrolling', () => {
+    // The Name <td> is the flexible one (max-w-0 w-full) and its inner
+    // flex row carries min-w-0 so `truncate` on the name Link can take
+    // effect.
+    expect(tableBlock).toContain('max-w-0 w-full')
+    expect(tableBlock).toMatch(/relative group flex items-center min-w-0/)
+    const linkIdx = tableBlock.indexOf('to={`/teams/${team.id}`}')
+    const linkOpen = tableBlock.slice(linkIdx, tableBlock.indexOf('>', linkIdx))
+    expect(linkOpen).toContain('truncate min-w-0')
+  })
+
+  it('keeps the full ROOT-org context reachable via the name Link\'s title attribute (breadcrumb form)', () => {
+    // The title carries "<RootOrgPrefix> > Name" for a non-root row so
+    // the hierarchy is still discoverable on hover/focus even though the
+    // displayed name is bare -- and it uses the ROOT organisation's
+    // prefix (via rootOrgLabel), not the immediate parent's, matching
+    // what /request-access shows.
+    expect(tableBlock).toMatch(/title=\{team\.level > 0 \? `\$\{rootOrgLabel\(team, teams\)/)
+    expect(tableBlock).toContain('} > ${team.name}`')
+  })
+})
+
+// Cascade-delete feature: a Global_Manager may now delete a team that
+// HAS sub-teams (the whole subtree is removed, gated server-side on the
+// subtree being empty of members/devices). The delete action-icon is no
+// longer disabled for a team-with-sub-teams, and PERMANENT deletion now
+// uses this app's type-to-confirm tier (type the team's name exactly).
+// Source-contract checks, matching this file's own established
+// convention.
+describe('Teams.jsx: cascade delete (enabled for teams-with-sub-teams) + type-to-confirm dialog', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'Teams.jsx'), 'utf8')
+
+  it('TeamRowActions no longer renders a disabled delete button for a team with sub-teams', () => {
+    // The old dedicated "disabled + Cannot delete team with sub-teams"
+    // branch is gone; a single enabled delete button covers both cases.
+    expect(source).not.toContain('Cannot delete team with sub-teams')
+    expect(source).not.toContain('dangerDisabledClass')
+  })
+
+  it('the single delete button is gated only on isGlobalAdmin (not on hasSubTeams) and titles the cascade', () => {
+    const fnIdx = source.indexOf('function TeamRowActions(')
+    const fnBlock = source.slice(fnIdx, source.indexOf('export default function Teams', fnIdx))
+    // Exactly one delete <button> (onDelete) remains.
+    const deleteButtons = fnBlock.split('onClick={() => onDelete(team.id)}').length - 1
+    expect(deleteButtons).toBe(1)
+    // Its title reflects the cascade when the team has sub-teams.
+    expect(fnBlock).toContain("hasSubTeams ? 'Delete team and all its sub-teams' : 'Delete team'")
+  })
+
+  it('the delete dialog is type-to-confirm: Confirm is gated on the typed name matching the target exactly', () => {
+    expect(source).toContain('const confirmDisabled = deleting || deleteConfirmInput !== targetName')
+    // The type-to-confirm input exists and is labelled with the target name.
+    expect(source).toContain('id="delete-team-confirm"')
+    expect(source).toMatch(/Type "<span[^>]*>\{targetName\}<\/span>" to confirm:/)
+  })
+
+  it('the dialog warns about deleting the whole subtree when the target has sub-teams', () => {
+    expect(source).toMatch(/also permanently delete all \{subTeamsCount\} sub-team/)
+    expect(source).toContain('no team in this branch has any members or team devices')
+  })
+
+  it('surfaces the server refusal inline via deleteError rather than only a toast, and keeps the dialog open', () => {
+    // handleDeleteTeam sets deleteError from the server response and does
+    // NOT close the dialog on error.
+    expect(source).toContain('setDeleteError(error.response?.data?.error')
+    expect(source).toMatch(/\{deleteError && \(/)
+    expect(source).toContain('role="alert"')
+  })
+
+  it('a successful delete removes the WHOLE subtree from local state, not just the one row', () => {
+    expect(source).toContain('const subtreeTeamIds =')
+    expect(source).toContain('const removed = subtreeTeamIds(deleteTeamId)')
+    expect(source).toContain('setTeams(teams.filter(team => !removed.has(team.id)))')
+  })
+
+  it('Cancel clears the typed name and the error so a re-open never starts pre-filled', () => {
+    const fnIdx = source.indexOf('const closeDeleteDialog =')
+    const fnBlock = source.slice(fnIdx, source.indexOf('}', source.indexOf('{', fnIdx)) + 1)
+    expect(fnBlock).toContain('setDeleteConfirmInput(\'\')')
+    expect(fnBlock).toContain('setDeleteError(null)')
   })
 })

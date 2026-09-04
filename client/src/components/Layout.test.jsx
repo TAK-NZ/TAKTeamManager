@@ -348,6 +348,101 @@ describe('Layout "Tasks" nav item visibility and badge-fetch gating (cert-expiry
   })
 })
 
+/**
+ * Bugfix: the Users/Devices nav gate used to check only
+ * isAdmin/is_global_manager (Global_Manager), so a plain Team_Admin --
+ * who IS authorized server-side for both GET /api/users*
+ * ('user:read:team_admin') and GET /api/devices ('device:read:org') via
+ * a resolver that accepts any direct Team_Admin, not just a
+ * Global_Manager -- had no way to reach either page from the nav.
+ */
+describe('Layout "Users"/"Devices" nav item visibility (bugfix: Team_Admin was missing both)', () => {
+  let container
+  let root
+  let matchMediaStubbed = false
+
+  const PLAIN_USER = { userId: 99, isAdmin: false, isTeamAdmin: false, is_global_manager: false }
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    vi.clearAllMocks()
+    requestsAPI.getPending.mockResolvedValue({ data: { requests: [] } })
+    adminAPI.getOrgInterest.mockResolvedValue({ data: { requests: [] } })
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    if (typeof window.matchMedia !== 'function') {
+      window.matchMedia = () => ({
+        matches: false,
+        addEventListener() {},
+        removeEventListener() {},
+        addListener() {},
+        removeListener() {}
+      })
+      matchMediaStubbed = true
+    }
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    if (matchMediaStubbed) {
+      delete window.matchMedia
+      matchMediaStubbed = false
+    }
+    localStorage.removeItem('theme')
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  const mount = async (user) => {
+    root = createRoot(container)
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={['/dashboard']}>
+          <ThemeProvider>
+            <Layout user={user}>
+              <div />
+            </Layout>
+          </ThemeProvider>
+        </MemoryRouter>
+      )
+    })
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+  }
+
+  const navLink = (label) =>
+    Array.from(container.querySelectorAll('a')).find((a) => a.textContent.trim().endsWith(label))
+
+  it('shows neither Users nor Devices for a plain, non-admin user', async () => {
+    await mount(PLAIN_USER)
+
+    expect(navLink('Users')).toBeUndefined()
+    expect(navLink('Devices')).toBeUndefined()
+  })
+
+  it('shows both Users and Devices for a plain Team_Admin (isTeamAdmin only, no isAdmin/is_global_manager)', async () => {
+    await mount(TEAM_ADMIN)
+
+    expect(navLink('Users')?.getAttribute('href')).toBe('/users')
+    expect(navLink('Devices')?.getAttribute('href')).toBe('/devices')
+  })
+
+  it('shows both Users and Devices for a Global_Manager', async () => {
+    await mount(GLOBAL_MANAGER)
+
+    expect(navLink('Users')?.getAttribute('href')).toBe('/users')
+    expect(navLink('Devices')?.getAttribute('href')).toBe('/devices')
+  })
+})
+
 // Version display at the bottom of the left-hand nav, sourced from
 // GET /api (server/routes/version.js).
 describe('Layout version display', () => {

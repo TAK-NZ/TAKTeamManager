@@ -92,6 +92,13 @@
  * `runner()` call; every assertion is a plain `pg` query run from inside
  * Jest.
  *
+ * The three throwaway-database primitives (`createThrowawayDatabase`,
+ * `dropThrowawayDatabase`, the underlying `runMigrationChain`) live in
+ * `database/testHelpers/throwawayDatabase.js`, shared with
+ * `server/services/teamMembershipInvariants.model.integration.test.js`'s
+ * stateful/model-based fast-check test -- this file no longer defines
+ * its own copies.
+ *
  * Scoped generically to every `.cjs` file present in
  * `database/migrations/` (there is currently exactly one), not to a
  * named baseline filename -- the migration chain simply runs `direction:
@@ -117,8 +124,11 @@
  */
 
 const path = require('path');
-const { execFileSync } = require('child_process');
-const { Pool } = require('pg');
+const {
+  createThrowawayDatabase,
+  dropThrowawayDatabase,
+  runMigrationChain: runMigrationChainAgainst
+} = require('../../testHelpers/throwawayDatabase');
 
 const ORIGINAL_ENV = {
   DB_HOST: process.env.DB_HOST,
@@ -133,7 +143,6 @@ process.env.DB_USER = process.env.DB_USER || 'postgres';
 process.env.DB_PASSWORD = process.env.DB_PASSWORD || 'postgres123';
 
 const MIGRATIONS_DIR = path.join(__dirname, '..');
-const REPO_ROOT = path.join(__dirname, '..', '..', '..');
 
 function restoreEnv() {
   process.env.DB_HOST = ORIGINAL_ENV.DB_HOST;
@@ -143,102 +152,19 @@ function restoreEnv() {
 }
 
 /**
- * Creates a throwaway database named `dbName` via an admin connection to
- * the server's `postgres` maintenance database, and returns a `Pool`
- * already connected to the new database.
- */
-async function createThrowawayDatabase(dbName, guardName) {
-  const adminPool = new Pool({
-    host: process.env.DB_HOST,
-    port: process.env.DB_PORT,
-    database: 'postgres',
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD
-  });
-
-  try {
-    await adminPool.query('SELECT 1');
-  } catch (error) {
-    await adminPool.end();
-    throw new Error(
-      `Real Postgres test database is not reachable at ` +
-        `${process.env.DB_HOST}:${process.env.DB_PORT} (user "${process.env.DB_USER}"). ` +
-        `${guardName} requires a real, running Postgres instance. ` +
-        `Underlying error: ${error.message}`,
-      { cause: error }
-    );
-  }
-
-  await adminPool.query(`CREATE DATABASE "${dbName}"`);
-  await adminPool.end();
-
-  return new Pool({
-    host: process.env.DB_HOST,
-    port: process.env.DB_PORT,
-    database: dbName,
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD
-  });
-}
-
-/** Drops `dbName` via an admin connection, terminating any lingering
- * backends on it first (a fresh Pool from the same test can otherwise
- * still hold a connection open, which blocks DROP DATABASE). */
-async function dropThrowawayDatabase(dbName) {
-  const adminPool = new Pool({
-    host: process.env.DB_HOST,
-    port: process.env.DB_PORT,
-    database: 'postgres',
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD
-  });
-
-  await adminPool.query(
-    `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-     WHERE datname = $1 AND pid <> pg_backend_pid()`,
-    [dbName]
-  );
-  await adminPool.query(`DROP DATABASE IF EXISTS "${dbName}"`);
-  await adminPool.end();
-}
-
-/**
- * Runs the full migration chain against `dbName` out-of-process, using
- * the same `runner()` entry point `database/init.js` uses -- into that
- * database's own `public` schema, exactly as a real deployment does.
+ * Thin wrapper binding `database/testHelpers/throwawayDatabase.js`'s
+ * generic `runMigrationChain(dbName, migrationsDir, options)` to THIS
+ * file's own `MIGRATIONS_DIR`, so every call site below reads exactly as
+ * it did before this helper was extracted (`runMigrationChain(DB_NAME)` /
+ * `runMigrationChain(DB_NAME, { direction: 'down', count })`).
  *
  * @param {string} dbName
  * @param {object} [options]
  * @param {'up'|'down'} [options.direction]
  * @param {number} [options.count] Only used for `down`.
  */
-function runMigrationChain(dbName, { direction = 'up', count } = {}) {
-  const script = `
-    const { runner } = require('node-pg-migrate');
-    runner({
-      databaseUrl: {
-        user: ${JSON.stringify(process.env.DB_USER)},
-        host: ${JSON.stringify(process.env.DB_HOST)},
-        database: ${JSON.stringify(dbName)},
-        password: ${JSON.stringify(process.env.DB_PASSWORD)},
-        port: ${JSON.stringify(process.env.DB_PORT)},
-        ssl: false
-      },
-      dir: ${JSON.stringify(MIGRATIONS_DIR)},
-      migrationsTable: 'pgmigrations',
-      direction: ${JSON.stringify(direction)},
-      ${count !== undefined ? `count: ${JSON.stringify(count)},` : ''}
-      verbose: false
-    }).then(() => process.exit(0)).catch((err) => {
-      console.error(err);
-      process.exit(1);
-    });
-  `;
-
-  execFileSync(process.execPath, ['-e', script], {
-    cwd: REPO_ROOT,
-    stdio: 'inherit'
-  });
+function runMigrationChain(dbName, options) {
+  runMigrationChainAgainst(dbName, MIGRATIONS_DIR, options);
 }
 
 describe('users.origin_org_id -> teams(id) foreign key is ON DELETE SET NULL', () => {

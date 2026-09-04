@@ -14,14 +14,14 @@ Client: React 18, Vite, Tailwind, React Router, Vitest + fast-check, jsdom.
 - Server tests: `npm test` (root; Jest, `--forceExit`). Integration tests are excluded by `testPathIgnorePatterns` and must be run explicitly.
 - Coverage: `npm test -- --coverage`. Floor is 60% global statements.
 - Client tests: `cd client && npm test` (Vitest, already non-watching). Single file: `cd client && npx vitest run src/path/file.test.jsx`.
-- Lint: `npm run lint` (root).
+- Lint: `npm run lint` (root). Client lint: `cd client && npm run lint`.
 - Pinned-dependency check: `npm run lint:pinned-deps`.
 - Migrations: `npm run migrate:up`, `npm run migrate:create`. `node database/init.js` runs the chain.
 - Dev: `npm run dev` (concurrent server + client).
 
 ## Two things that surprise people
 
-- **`npm run lint` does not lint `client/`.** Its scope is `server scripts database/*.js eslint.config.js`, and `client/` has no lint script. The Vitest suite is the only gate on client code.
+- **`npm run lint` (root) does not lint `client/`.** Its scope is `server scripts database eslint.config.js` (`database/migrations/**` excluded via `eslint.config.js`'s own `ignores`). `client/` has its OWN separate lint (`cd client && npm run lint`, its own `client/eslint.config.js`) — deliberately narrow, checking only `eslint-plugin-react-hooks`'s `rules-of-hooks`/`exhaustive-deps` against `**/*.jsx`, not general JS style. It exists specifically to catch a hooks-order violation statically (a hook called after a conditional early `return`) — the class of bug that crashed `TeamDetail.jsx` on every page load and was invisible to the Vitest suite. The Vitest suite is still the primary gate on client code; this lint is a narrow, deliberately-scoped addition, not a general style pass.
 - **There are two independent test runners and two dependency trees.** Root Jest for `server/`, `client/`'s Vitest for `client/`. A client dependency must be added to `client/package.json`.
 - **`TAK_SERVER_ENROLLMENT_URL` and `TAK_SERVER_URL` are deliberately different hosts, not aliases.** `TAK_SERVER_URL` is the Marti certadmin API's mutual-TLS endpoint (`TakServerService.js`), often internal/admin-only. `TAK_SERVER_ENROLLMENT_URL` is the public, client-dialable host `DeviceEnrollmentService` builds enrollment URIs/QR payloads from. They can legitimately point at different hostnames and/or ports — never collapse them to one var.
 

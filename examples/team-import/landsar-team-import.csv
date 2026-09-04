@@ -1,0 +1,83 @@
+rowId,parentRowRef,parentTeamName,parentTeamId,name,visibility,callsignPrefix,color,canJoin
+org1,,,,Land Search and Rescue New Zealand,public,LSAR,Orange,true
+locgroups,org1,,,Local Groups,public,LOCG,,false
+spec,org1,,,Specialist Teams,public,SPEC,,false
+lg1,locgroups,,,Arthurs Pass Rescue,public,ARTH,,true
+lg2,locgroups,,,Auckland Land Search and Rescue,public,AUCK,,true
+lg3,locgroups,,,Banks Peninsula Search and Rescue Club Inc.,public,BANK,,true
+lg4,locgroups,,,Catlins Search and Rescue (including Tokanui),public,CATL,,true
+lg5,locgroups,,,Central Otago SAR,public,COTA,,true
+lg6,locgroups,,,Christchurch Search and Rescue,public,CHRI,,true
+lg7,locgroups,,,Clutha District Search and Rescue,public,CLUT,,true
+lg8,locgroups,,,Dunedin District Land Search and Rescue Committee,public,DUNE,,true
+lg9,locgroups,,,Eastern Southland Combined SAR,public,ESOU,,true
+lg10,locgroups,,,Ellesmere Search and Rescue Inc.,public,ELLE,,true
+lg11,locgroups,,,Far North Search and Rescue Organisation Inc.,public,FARN,,true
+lg12,locgroups,,,Fiordland SAR Committee,public,FIOR,,true
+lg13,locgroups,,,Gisborne Land Search and Rescue,public,GISB,,true
+lg14,locgroups,,,Golden Bay Search and Rescue,public,GBAY,,true
+lg15,locgroups,,,Greymouth LandSAR,public,GREY,,true
+lg16,locgroups,,,Haast LandSAR,public,HAAS,,true
+lg17,locgroups,,,Hamilton Search and Rescue,public,HAMI,,true
+lg18,locgroups,,,Hanmer Springs Search and Rescue,public,HSPR,,true
+lg19,locgroups,,,Hawke's Bay LandSAR,public,HAWK,,true
+lg20,locgroups,,,Hokitika LandSAR Group,public,HOKI,,true
+lg21,locgroups,,,Horowhenua Search and Rescue Committee,public,HORO,,true
+lg22,locgroups,,,Hurunui Land Search and Rescue Group,public,HURU,,true
+lg23,locgroups,,,Kaikoura Search and Rescue,public,KAIK,,true
+lg24,locgroups,,,Kuaotunu Land Search & Rescue,public,KUAO,,true
+lg25,locgroups,,,LandSAR Wanaka,public,WANA,,true
+lg26,locgroups,,,Marlborough Search and Rescue,public,MARL,,true
+lg27,locgroups,,,Methven Search and Rescue Inc,public,METH,,true
+lg28,locgroups,,,Motueka Search and Rescue,public,MOTU,,true
+lg29,locgroups,,,Murchison Search and Rescue Group,public,MURC,,true
+lg30,locgroups,,,North Otago Search and Rescue Inc,public,NOTA,,true
+lg31,locgroups,,,Northland Search and Rescue,public,NLAN,,true
+lg32,locgroups,,,Oxford Search and Rescue,public,OXFO,,true
+lg33,locgroups,,,Paeroa Search & Rescue,public,PAER,,true
+lg34,locgroups,,,Palmerston North Land Search and Rescue Advisory Committee Inc.,public,PALM,,true
+lg35,locgroups,,,Rakaia Search and Rescue,public,RAKA,,true
+lg36,locgroups,,,Reefton Search and Rescue Squad,public,REEF,,true
+lg37,locgroups,,,Rotorua LandSAR,public,ROTO,,true
+lg38,locgroups,,,Ruapehu Search and Rescue Group,public,RUAP,,true
+lg39,locgroups,,,Search and Rescue Karamea,public,KARA,,true
+lg40,locgroups,,,Search and Rescue Nelson Inc,public,NELS,,true
+lg41,locgroups,,,South Canterbury Group,public,SCAN,,true
+lg42,locgroups,,,South Westland Search and Rescue,public,SWLA,,true
+lg43,locgroups,,,Southland LandSAR,public,SLAN,,true
+lg44,locgroups,,,Stewart Island/Rakiura Search and Rescue,public,STEW,,true
+lg45,locgroups,,,Taihape Search and Rescue Group,public,TAIH,,true
+lg46,locgroups,,,Tairua-Pauanui Land Search and Rescue Inc,public,TAIR,,true
+lg47,locgroups,,,Taranaki Search and Rescue Group,public,TNAK,,true
+lg48,locgroups,,,Tararua Search and Rescue Club Inc.,public,TRUA,,true
+lg49,locgroups,,,Taupo Search and Rescue Group,public,TAUP,,true
+lg50,locgroups,,,Tauranga Search and Rescue,public,TAUR,,true
+lg51,locgroups,,,Thames Land Search and Rescue Inc,public,THAM,,true
+lg52,locgroups,,,Turangi Search and Rescue Group,public,TURA,,true
+lg53,locgroups,,,Waihi LandSAR,public,WAIH,,true
+lg54,locgroups,,,Wairarapa Search and Rescue Inc,public,WRAR,,true
+lg55,locgroups,,,Wairoa Search and Rescue Inc,public,WROA,,true
+lg56,locgroups,,,Waitomo Search and Rescue,public,WTOM,,true
+lg57,locgroups,,,Wakatipu LandSAR,public,WAKA,,true
+lg58,locgroups,,,Wanganui Search and Rescue Inc.,public,WANG,,true
+lg59,locgroups,,,Wellington Land Search and Rescue,public,WELL,,true
+lg60,locgroups,,,Westport Land Search and Rescue Inc,public,WPOR,,true
+lg61,locgroups,,,Whakatane Land Search and Rescue,public,WHAK,,true
+spec-dogs,spec,,,Search Dogs,public,DOGS,,true
+spec-tsw,spec,,,Tasman Swift Water,public,TSW,,true
+spec-cave,spec,,,Cave Search and Rescue,public,CAVE,,false
+spec-ysar,spec,,,Youth Search and Rescue - Tauranga,public,YSAR,,true
+spec-acr,spec,,,Alpine Cliff Rescue,public,ACR,,false
+cave1,spec-cave,,,Auckland (Cave),public,AUCK,,true
+cave2,spec-cave,,,Hamilton/Waitomo (Cave),public,HAMI,,true
+cave3,spec-cave,,,Manawatu (Cave),public,MANA,,true
+cave4,spec-cave,,,Wellington (Cave),public,WELL,,true
+cave5,spec-cave,,,Canterbury (Cave),public,CANT,,true
+cave6,spec-cave,,,Coast Cave,public,COAS,,true
+cave7,spec-cave,,,Nelson (Cave),public,NELS,,true
+acr1,spec-acr,,,Christchurch (ACR),public,CHRI,,true
+acr2,spec-acr,,,Ruapehu (RARO),public,RUAP,,true
+acr3,spec-acr,,,Tasman (ACR),public,TASM,,true
+acr4,spec-acr,,,Wakatipu Aoraki/Mt Cook (ACR),public,AORA,,true
+acr5,spec-acr,,,Taranaki (ACR),public,TARA,,true
+acr6,spec-acr,,,Wanaka (ACR),public,WANA,,true

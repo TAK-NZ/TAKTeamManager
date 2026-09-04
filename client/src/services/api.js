@@ -204,7 +204,23 @@ export const teamsAPI = {
 };
 
 export const bulkImportAPI = {
-  importTeams: (formData) => api.post('/bulk-import/teams', formData, { headers: { 'Content-Type': 'multipart/form-data' } }),
+  // Bugfix (bulk team import gave no feedback while uploading/
+  // processing a large CSV -- an 82-row file took ~30 seconds server-
+  // side with nothing on screen but a static "Uploading..." label):
+  // `onUploadProgress` is an OPTIONAL axios progress-event callback
+  // (`(progressEvent) => void`, called with `.loaded`/`.total` as the
+  // upload's bytes stream to the server), wired straight through to
+  // axios's own native `onUploadProgress` config option -- no polling,
+  // no server change, since axios/XHR already tracks this for any
+  // request body. This only covers the UPLOAD phase (the browser
+  // pushing the file's bytes); the server's own multi-second per-row
+  // processing that follows has no equivalent progress signal today (a
+  // regular request/response, not a stream) -- see Admin.jsx's
+  // indeterminate "still working" indicator for that phase.
+  importTeams: (formData, onUploadProgress) => api.post('/bulk-import/teams', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    ...(onUploadProgress ? { onUploadProgress } : {})
+  }),
   // CSV user import: formData carries `csv` and,
   // optionally, `teamId` (a team-scoped upload's fixed target team,
   // used as a fallback for any row whose own `teamId` column is blank)

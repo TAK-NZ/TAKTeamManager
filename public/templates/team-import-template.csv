@@ -1,7 +1,7 @@
-rowId,parentRowRef,parentTeamName,parentTeamId,name,visibility,callsignPrefix
-org1,,,,Fire and Emergency New Zealand,public,FENZ
-region1,org1,,,Te Ihu,public,TEIHU
-district1,region1,,,Canterbury,,CHC
-station1,district1,,,Station 40,private,S40
-,,Wellington Regional Council,,Wellington District,public,WGN
-,,,42,Northern Sub-team,,
+rowId,parentRowRef,parentTeamName,parentTeamId,name,visibility,callsignPrefix,color,canJoin
+org1,,,,Fire and Emergency New Zealand,public,FENZ,Red,false
+region1,org1,,,Te Ihu,public,TEIHU,,false
+district1,region1,,,Canterbury,,CHC,,true
+station1,district1,,,Station 40,private,S40,,false
+,,Wellington Regional Council,,Wellington District,public,WGN,,true
+,,,42,Northern Sub-team,,,,

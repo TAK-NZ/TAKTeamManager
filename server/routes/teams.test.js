@@ -37,7 +37,10 @@ jest.mock('../models/Team', () => {
     CallsignLevelSelectionSubTeamError,
     PseudonymousUsernamePolicySubTeamError,
     PseudonymousUsernamePolicyImmutableError,
-    ChannelTierAccessSubTeamError
+    ChannelTierAccessSubTeamError,
+    OrganisationCallsignPrefixImmutableError,
+    CallsignPrefixConflictError,
+    TeamNameConflictError
   } = jest.requireActual('../models/Team');
   return {
     getAllTeams: jest.fn(),
@@ -54,12 +57,18 @@ jest.mock('../models/Team', () => {
     getMembers: jest.fn(),
     create: jest.fn(),
     update: jest.fn(),
+    getSubtreeMemberDeviceCounts: jest.fn(),
+    deleteWithSubtree: jest.fn(),
+    delete: jest.fn(),
     TeamDepthExceededError,
     CallsignLevelSelectionRangeError,
     CallsignLevelSelectionSubTeamError,
     PseudonymousUsernamePolicySubTeamError,
     PseudonymousUsernamePolicyImmutableError,
-    ChannelTierAccessSubTeamError
+    ChannelTierAccessSubTeamError,
+    OrganisationCallsignPrefixImmutableError,
+    CallsignPrefixConflictError,
+    TeamNameConflictError
   };
 });
 
@@ -1250,6 +1259,39 @@ describe('pseudonymousUsernames validation (takserver-enrollment Requirements 6.
       expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ pseudonymous_usernames: undefined }));
       expect(res.body.team.pseudonymous_usernames).toBeNull();
     });
+
+    // Bugfix (callsign-handling): Team.create now throws
+    // CallsignPrefixConflictError (rather than silently falling back to
+    // creating the team with no prefix at all) on a duplicate
+    // callsignPrefix -- this asserts the route maps it to a 400 naming
+    // the conflict, mirroring PUT /:teamId's identical handling of the
+    // same error from Team.update.
+    it('responds 400 with the CallsignPrefixConflictError message when Team.create throws it', async () => {
+      Team.create.mockRejectedValue(new Team.CallsignPrefixConflictError('STL'));
+
+      const res = await request(app)
+        .post('/api/teams')
+        .send({ name: 'LandSAR', callsignPrefix: 'STL' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Callsign Prefix "STL" is already in use by another team');
+      expect(res.body.team).toBeUndefined();
+    });
+
+    // Org-wide-team-name-uniqueness: Team.create throws TeamNameConflictError
+    // when a new Sub_Team's name already exists elsewhere in the same
+    // Organisation; the route maps it to a client-correctable 400.
+    it('responds 400 with the TeamNameConflictError message when Team.create throws it', async () => {
+      Team.create.mockRejectedValue(new Team.TeamNameConflictError('Auckland'));
+
+      const res = await request(app)
+        .post('/api/teams')
+        .send({ name: 'Auckland', parentTeamId: 2 });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('A team named "Auckland" already exists in this Organisation');
+      expect(res.body.team).toBeUndefined();
+    });
   });
 
   describe('PUT /api/teams/:teamId', () => {
@@ -1288,6 +1330,22 @@ describe('pseudonymousUsernames validation (takserver-enrollment Requirements 6.
       expect(res.status).toBe(400);
       expect(res.body.error).toMatch(/re-enroll/);
       expect(res.body.error).toMatch(/certificate Common Name/);
+      expect(res.body.team).toBeUndefined();
+    });
+
+    // Org-wide-team-name-uniqueness: Team.update throws TeamNameConflictError
+    // when a rename OR a re-parent would make this team's name collide
+    // with another team in the same Organisation; the route maps it to
+    // a client-correctable 400.
+    it('responds 400 with the TeamNameConflictError message when Team.update throws it', async () => {
+      Team.update.mockRejectedValue(new Team.TeamNameConflictError('Auckland'));
+
+      const res = await request(app)
+        .put('/api/teams/42')
+        .send({ name: 'Auckland' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('A team named "Auckland" already exists in this Organisation');
       expect(res.body.team).toBeUndefined();
     });
 
@@ -2169,5 +2227,108 @@ describe("GET /api/teams/:teamId team.allowed_domains summary field", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.team.allowed_domains).toBeNull();
+  });
+});
+
+/**
+ * Integration tests for `DELETE /api/teams/:teamId` (cascade-delete
+ * feature). Authorization (`team:delete:global`, Global_Manager-only) is
+ * enforced by the real authorize.js/Permission_Registry in production;
+ * in this suite `authorize` is a pass-through mock (module-level), so
+ * these tests focus on the route's own logic: the 404 for a missing
+ * team, the empty-subtree GATE (refuse with 409 + counts when the
+ * subtree still has members or team devices), and the delegation to
+ * `Team.deleteWithSubtree` (which cascades) once the gate passes.
+ */
+describe('DELETE /api/teams/:teamId (cascade-delete + empty-subtree gate)', () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockIsAdmin = true;
+    app = buildApp();
+    pool.query.mockResolvedValue({ rows: [] });
+  });
+
+  it('responds 404 without consulting the gate when the team does not exist', async () => {
+    Team.findById.mockResolvedValue(undefined);
+
+    const res = await request(app).delete('/api/teams/999');
+
+    expect(res.status).toBe(404);
+    expect(Team.getSubtreeMemberDeviceCounts).not.toHaveBeenCalled();
+    expect(Team.deleteWithSubtree).not.toHaveBeenCalled();
+  });
+
+  it('deletes a leaf team (no sub-teams, empty) via deleteWithSubtree', async () => {
+    Team.findById.mockResolvedValue({ id: 5, name: 'Leaf Team', parent_team_id: 3 });
+    Team.getSubtreeMemberDeviceCounts.mockResolvedValue({ memberCount: 0, deviceCount: 0, subTeamCount: 0 });
+    Team.deleteWithSubtree.mockResolvedValue({ id: 5, name: 'Leaf Team' });
+
+    const res = await request(app).delete('/api/teams/5');
+
+    expect(res.status).toBe(200);
+    expect(Team.deleteWithSubtree).toHaveBeenCalledWith('5', 1);
+  });
+
+  it('cascade-deletes a team WITH sub-teams when the whole subtree is empty of members and devices', async () => {
+    Team.findById.mockResolvedValue({ id: 3, name: 'FENZ', parent_team_id: null });
+    Team.getSubtreeMemberDeviceCounts.mockResolvedValue({ memberCount: 0, deviceCount: 0, subTeamCount: 12 });
+    Team.deleteWithSubtree.mockResolvedValue({ id: 3, name: 'FENZ' });
+
+    const res = await request(app).delete('/api/teams/3');
+
+    expect(res.status).toBe(200);
+    expect(Team.deleteWithSubtree).toHaveBeenCalledWith('3', 1);
+  });
+
+  it('refuses (409) and never deletes when the subtree still has members, naming the member count', async () => {
+    Team.findById.mockResolvedValue({ id: 3, name: 'FENZ', parent_team_id: null });
+    Team.getSubtreeMemberDeviceCounts.mockResolvedValue({ memberCount: 5, deviceCount: 0, subTeamCount: 12 });
+
+    const res = await request(app).delete('/api/teams/3');
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/5 members/);
+    expect(res.body.error).toMatch(/sub-teams/);
+    expect(res.body).toMatchObject({ memberCount: 5, deviceCount: 0, subTeamCount: 12 });
+    expect(Team.deleteWithSubtree).not.toHaveBeenCalled();
+  });
+
+  it('refuses (409) and never deletes when the subtree still has team devices, naming the device count', async () => {
+    Team.findById.mockResolvedValue({ id: 3, name: 'FENZ', parent_team_id: null });
+    Team.getSubtreeMemberDeviceCounts.mockResolvedValue({ memberCount: 0, deviceCount: 1, subTeamCount: 0 });
+
+    const res = await request(app).delete('/api/teams/3');
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/1 team device\b/);
+    // subTeamCount 0 -> the message scopes to "this team", not "sub-teams".
+    expect(res.body.error).toMatch(/this team\b/);
+    expect(res.body.error).not.toMatch(/sub-teams/);
+    expect(Team.deleteWithSubtree).not.toHaveBeenCalled();
+  });
+
+  it('names BOTH counts when the subtree has members AND devices', async () => {
+    Team.findById.mockResolvedValue({ id: 3, name: 'FENZ', parent_team_id: null });
+    Team.getSubtreeMemberDeviceCounts.mockResolvedValue({ memberCount: 2, deviceCount: 3, subTeamCount: 4 });
+
+    const res = await request(app).delete('/api/teams/3');
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/2 members/);
+    expect(res.body.error).toMatch(/3 team devices/);
+    expect(Team.deleteWithSubtree).not.toHaveBeenCalled();
+  });
+
+  it('responds 500 when the cascade delete itself throws', async () => {
+    Team.findById.mockResolvedValue({ id: 3, name: 'FENZ', parent_team_id: null });
+    Team.getSubtreeMemberDeviceCounts.mockResolvedValue({ memberCount: 0, deviceCount: 0, subTeamCount: 0 });
+    Team.deleteWithSubtree.mockRejectedValue(new Error('boom'));
+
+    const res = await request(app).delete('/api/teams/3');
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Failed to delete team');
   });
 });

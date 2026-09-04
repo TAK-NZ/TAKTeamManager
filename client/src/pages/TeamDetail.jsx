@@ -215,6 +215,58 @@ export function isPseudonymousOrganisation(team, allTeams) {
   return false
 }
 
+// Bugfix (/teams detail showed the IMMEDIATE parent's prefix, not the
+// root Organisation's): a Sub_Team's Display_Name is
+// "<Organisation prefix> - <team name>", where the Organisation is the
+// ROOT of the Ancestor_Chain (`parent_team_id IS NULL`), NOT the
+// immediate parent. The header/Display-Name line previously used
+// `parentTeam` (the immediate parent, fetched via
+// `teamsAPI.getById(parent_team_id)`), so a deeply-nested team like
+// LandSAR > Specialist Teams > Cave Search and Rescue > Auckland showed
+// "CAVE - Auckland" (Cave being the immediate parent) instead of the
+// correct "LSAR - Auckland" that the server's own display-name query
+// (`SignupFlowService.getAvailableTeams` / `Team.getJoinableTeams`, both
+// resolving the org via the ancestor-chain root) and the `/request-access`
+// page already produce.
+//
+// This resolves the root Organisation's label by walking `parent_team_id`
+// up through the already-fetched `allTeams` list to the root -- the SAME
+// list and the SAME defensive walk `isPseudonymousOrganisation` above
+// uses, so it needs no new network call and mirrors the server's
+// root-first ancestor rule. Terminates defensively (returning the
+// deepest ancestor actually found) if an ancestor is missing from
+// `allTeams`, and guards against a cyclic chain via `seen`.
+//
+// Exported for direct unit testing, matching this file's convention of
+// testing extracted pure logic.
+//
+// @param {{parent_team_id?: number|string|null}} team - a Sub_Team.
+// @param {Array} allTeams - every Team in the caller's Organisation.
+// @returns {string|null} the root Organisation's prefix (or name
+//   fallback), or null when it cannot be resolved from `allTeams`.
+export function rootOrganisationLabel(team, allTeams) {
+  if (!team || !team.parent_team_id) {
+    return null
+  }
+  const teamsById = new Map((allTeams || []).map((t) => [t.id, t]))
+  const seen = new Set([team.id])
+  let current = teamsById.get(team.parent_team_id)
+  let root = current
+  while (current && current.parent_team_id != null && !seen.has(current.id)) {
+    seen.add(current.id)
+    const next = teamsById.get(current.parent_team_id)
+    if (!next) {
+      break
+    }
+    current = next
+    root = current
+  }
+  if (!root) {
+    return null
+  }
+  return root.callsign_prefix || root.name || null
+}
+
 // Users-page-action-parity: `isValidNewUserEmail` and
 // `extractCallsignSuffixServerError` now live in `utils/newUserForm.js`
 // (shared with `Users.jsx`'s Create User dialog) and are imported above;
@@ -1348,9 +1400,16 @@ export default function TeamDetail({ user, refreshUser }) {
         // CHANNEL_FOLDER_SEPARATOR).
         if (!isCancelled) {
           try {
+            // Bugfix (same defect as Teams.jsx's own hierarchy fix):
+            // `allTeams` feeds `computeTeamDepth`/`isPseudonymousOrganisation`
+            // (both walk `parent_team_id` chains against this exact
+            // list) and the Parent-Team dropdown -- all three need
+            // every team, not just the first paginated page. See
+            // Teams.jsx's identical `{ pageSize: 200 }` fix for the
+            // full defect explanation.
             const [subTeamsResponse, allTeamsResponse, configResponse, publicConfigResponse] = await Promise.all([
               teamsAPI.getSubTeams(teamId),
-              teamsAPI.getMyTeams(),
+              teamsAPI.getMyTeams({ pageSize: 200 }),
               api.get('/config/color-mappings'),
               configAPI.getPublic()
             ])
@@ -1632,7 +1691,7 @@ export default function TeamDetail({ user, refreshUser }) {
                 behaviour to fall back on at narrow widths. */}
             <div className="flex items-center flex-wrap gap-2 mb-2">
               <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100 break-words">
-                {team.parent_team_id ? `${parentTeam?.callsign_prefix || parentTeam?.name || 'Organisation'} - ${team.name}` : team.name}
+                {team.parent_team_id ? `${rootOrganisationLabel(team, allTeams) || parentTeam?.callsign_prefix || parentTeam?.name || 'Organisation'} - ${team.name}` : team.name}
               </h1>
               {team.color && (
                 <div 
@@ -1651,7 +1710,7 @@ export default function TeamDetail({ user, refreshUser }) {
                   <span className="font-medium">{teamLabel} Name:</span> {team.name}
                 </div>
                 <div className="text-sm text-gray-500 dark:text-gray-400">
-                  <span className="font-medium">Display Name:</span> {parentTeam?.callsign_prefix || parentTeam?.name || 'Organisation'} - {team.name}
+                  <span className="font-medium">Display Name:</span> {rootOrganisationLabel(team, allTeams) || parentTeam?.callsign_prefix || parentTeam?.name || 'Organisation'} - {team.name}
                 </div>
               </div>
             )}

@@ -187,16 +187,62 @@ class OrganisationCallsignPrefixImmutableError extends Error {
 }
 
 /**
- * Bugfix (callsign-handling): thrown by `Team.update` when a
- * `callsign_prefix` edit collides with `idx_teams_callsign_prefix`, the
- * UNIQUE partial index over every non-null `callsign_prefix` value across
- * ALL teams (Organisations and Sub_Teams alike).
+ * Bugfix (callsign-handling): thrown by `Team.create`/`Team.update` when
+ * a `callsign_prefix` value collides with `idx_teams_callsign_prefix`.
+ *
+ * Scoping fix: that index is now UNIQUE over non-null `callsign_prefix`
+ * values among ORGANISATIONS ONLY (`parent_team_id IS NULL`), not across
+ * every team -- see `1789400000000_scope-callsign-prefix-uniqueness-to-organisations.cjs`'s
+ * own header comment for why a Sub_Team's prefix never needed this
+ * protection in the first place (only an Organisation's prefix ever
+ * feeds a Managed_Identifier). So this error can now only actually fire
+ * for: (a) creating or promoting-to-root a second Organisation whose
+ * prefix collides with an existing Organisation's, or (b) a
+ * still-possible-in-principle collision if a future migration ever adds
+ * a second Sub_Team-scoped uniqueness rule -- there is none today, so in
+ * practice this is purely an Organisation-vs-Organisation conflict now.
  */
 class CallsignPrefixConflictError extends Error {
   constructor(conflictingValue) {
     super(`Callsign Prefix "${conflictingValue}" is already in use by another team`);
     this.name = 'CallsignPrefixConflictError';
     this.conflictingValue = conflictingValue;
+  }
+}
+
+/**
+ * Org-wide-team-name-uniqueness feature: thrown by `Team.create`/
+ * `Team.update` when the team being created/updated/re-parented would
+ * share its `name` with ANOTHER team in the SAME Organisation (the whole
+ * subtree under one root, `parent_team_id IS NULL`), not merely under
+ * the same immediate parent.
+ *
+ * The baseline DB constraint `teams_name_parent_team_id_key`
+ * (`UNIQUE (name, parent_team_id)`) only prevents two teams sharing a
+ * name under the SAME immediate parent -- it cannot express org-wide
+ * uniqueness, which spans many different `parent_team_id` values under
+ * one root. Enforcing that declaratively would require a denormalized
+ * `organisation_id` column maintained across every insert/update/
+ * re-parent; instead this is enforced at the application layer, resolving
+ * the Organisation via `getAncestorChain(...)[0]` -- the SAME primitive
+ * and the SAME "check before the write, throw a typed error" approach
+ * the sibling `CallsignPrefixConflictError` path already uses. The DB
+ * constraint is kept as a strict-subset backstop.
+ *
+ * Matching the DB constraint's own case-sensitive behaviour, the name
+ * comparison is case-sensitive ("Auckland" and "auckland" are distinct).
+ *
+ * Thrown BEFORE any INSERT/UPDATE (outside the fallback try/catch), so
+ * it propagates distinctly to the caller (mapped to a 400 by the
+ * `POST`/`PUT /api/teams` routes and recorded as a per-row failure by
+ * the bulk import), never swallowed by the fallback-to-basic-creation
+ * path.
+ */
+class TeamNameConflictError extends Error {
+  constructor(conflictingName) {
+    super(`A team named "${conflictingName}" already exists in this Organisation`);
+    this.name = 'TeamNameConflictError';
+    this.conflictingName = conflictingName;
   }
 }
 
@@ -261,6 +307,19 @@ class Team {
       if (organisation) {
         color = organisation.color;
         callsign_name_format = organisation.callsign_name_format;
+
+        // Org-wide-team-name-uniqueness feature: a Sub_Team's `name` must
+        // be unique across its whole Organisation (the subtree under
+        // `organisation.id`), not just under its immediate parent (which
+        // is all the baseline `teams_name_parent_team_id_key` constraint
+        // enforces). Otherwise two sub-teams under different parents in
+        // the same org could both be "Auckland", producing two identical
+        // "LSAR - Auckland" Display_Names. Checked here -- reusing the
+        // Organisation already resolved for color/format inheritance --
+        // and OUTSIDE the try/catch below so the typed
+        // `TeamNameConflictError` propagates distinctly rather than being
+        // swallowed by the fallback-to-basic-creation catch.
+        await this.assertNameUniqueInOrganisation(organisation.id, name);
       }
     }
 
@@ -393,6 +452,20 @@ class Team {
 
       return team;
     } catch (error) {
+      // Bugfix (callsign-handling): a duplicate `callsign_prefix` used to
+      // fall straight into the generic "new columns don't exist" fallback
+      // below, which silently created the team WITHOUT a prefix at all
+      // rather than surfacing the conflict -- a bulk import or a create
+      // request hitting a real collision got an apparently-successful
+      // 201 whose resulting Organisation had no Organisation_Prefix,
+      // discovered only much later when Managed_Identifier minting failed
+      // for a wholly unrelated reason. Checked and thrown BEFORE the
+      // fallback, mirroring `Team.update`'s own `23505`-on-
+      // `idx_teams_callsign_prefix` -> `CallsignPrefixConflictError`
+      // translation exactly, so both entry points behave identically.
+      if (error.code === '23505' && error.constraint === 'idx_teams_callsign_prefix') {
+        throw new CallsignPrefixConflictError(callsign_prefix);
+      }
       logger.error({ err: error }, 'Error creating team');
       // Fallback to basic creation if new columns don't exist
       const result = await pool.query(
@@ -557,6 +630,51 @@ class Team {
   }
 
   /**
+   * Org-wide-team-name-uniqueness feature: throws `TeamNameConflictError`
+   * if `name` is already used by ANY team in the Organisation rooted at
+   * `organisationId` -- the whole subtree under that root, spanning every
+   * `parent_team_id` -- OTHER than `excludeTeamId` (the team being
+   * updated, so it never conflicts with itself). Case-sensitive, matching
+   * the baseline `teams_name_parent_team_id_key` constraint.
+   *
+   * A single recursive CTE walks DOWNWARD from `organisationId` (the
+   * Organisation root) collecting every descendant team id, then checks
+   * for a name collision within that set. Bounded by the Organisation's
+   * total Team count, never large. Called from `Team.create`/
+   * `Team.update` BEFORE the write, so the typed error propagates
+   * distinctly rather than surfacing as a raw constraint 500 or being
+   * swallowed by the fallback-to-basic-creation path.
+   *
+   * @param {number|string} organisationId - the Organisation root id
+   *   (a `parent_team_id IS NULL` team). Resolve it via
+   *   `getAncestorChain(parentId)[0].id` (or the team's own id when
+   *   creating/keeping a root Organisation).
+   * @param {string} name - the candidate team name.
+   * @param {number|string|null} [excludeTeamId] - a team id to exclude
+   *   from the collision check (the team being updated). Omitted/null
+   *   for a create.
+   * @throws {TeamNameConflictError} on a collision.
+   * @returns {Promise<void>}
+   */
+  static async assertNameUniqueInOrganisation(organisationId, name, excludeTeamId = null) {
+    const result = await pool.query(
+      `WITH RECURSIVE org_subtree AS (
+         SELECT id, name, parent_team_id FROM teams WHERE id = $1
+         UNION ALL
+         SELECT t.id, t.name, t.parent_team_id
+         FROM teams t JOIN org_subtree s ON t.parent_team_id = s.id
+       )
+       SELECT id FROM org_subtree
+       WHERE name = $2 AND ($3::int IS NULL OR id <> $3)
+       LIMIT 1`,
+      [organisationId, name, excludeTeamId != null ? excludeTeamId : null]
+    );
+    if (result.rows.length > 0) {
+      throw new TeamNameConflictError(name);
+    }
+  }
+
+  /**
    * Requirement 5.8-5.11 (task 8.3): returns, for the given Organisation's
    * whole hierarchy, ONE flat row per (Team_Depth, `callsign_prefix`)
    * pair present among that Organisation's Sub_Teams at Team_Depth 1
@@ -672,7 +790,27 @@ class Team {
              WHERE tm.team_id = oh.id AND tm.user_id = $2
              AND tm.inherited_from_team_id IS NOT NULL
              LIMIT 1)
-          ) as role
+          ) as role,
+          -- Team Display_Name (bugfix: consistent "<Org prefix> - <team
+          -- name>" everywhere). Every row in this CTE descends from the
+          -- single Organisation root ($1), so the Organisation's own
+          -- prefix/name -- looked up once from that root row -- is the
+          -- correct prefix for EVERY Sub_Team here, matching the
+          -- ancestor-chain-root rule the other display_name query sites
+          -- (Team.getJoinableTeams, SignupFlowService.getAvailableTeams,
+          -- GET /users/me) already use. The Organisation's own row shows
+          -- its bare name (no prefix), same as those sites. This lets the
+          -- Users Create-User picker and the Transfer dialog's source-
+          -- team heading show the same Display_Name /request-access does,
+          -- rather than falling back to the bare team name.
+          CASE
+            WHEN oh.parent_team_id IS NOT NULL THEN
+              COALESCE(
+                (SELECT COALESCE(org.callsign_prefix, org.name, '') FROM teams org WHERE org.id = $1),
+                ''
+              ) || ' - ' || oh.name
+            ELSE oh.name
+          END as display_name
         FROM org_hierarchy oh
         ORDER BY oh.name
       `, [organisationId, userId]);
@@ -1174,6 +1312,54 @@ class Team {
       callsign_prefix = undefined;
     }
 
+    // Org-wide-team-name-uniqueness feature: enforce that the team's
+    // EFFECTIVE post-update name is unique across its EFFECTIVE
+    // post-update Organisation -- covering both a plain rename and a
+    // re-parent (moving a team into an org where the name already
+    // exists). Runs BEFORE the UPDATE, deliberately outside the
+    // try/catch below, so the typed `TeamNameConflictError` propagates
+    // distinctly rather than surfacing as a raw constraint 500 or being
+    // swallowed by a fallback path.
+    //
+    // Skipped entirely when neither `name` nor `parent_team_id` is being
+    // touched (both `undefined`), since nothing that could introduce a
+    // name collision is changing. A promotion-to-root
+    // (`parent_team_id === null`) is also skipped here: the team becomes
+    // its OWN Organisation, and a root-vs-root name collision is already
+    // enforced by the baseline `teams_name_parent_team_id_key`
+    // constraint (`UNIQUE (name, parent_team_id)` with
+    // `parent_team_id IS NULL`), which surfaces via the existing
+    // `23505` handling.
+    if (name !== undefined || parent_team_id !== undefined) {
+      if (!existingTeam) {
+        existingTeam = await this.findById(teamId);
+      }
+      // The effective parent after this update: `parent_team_id` when
+      // supplied (including `null` for promote-to-root), else the team's
+      // current parent. Note `update`'s SQL sets `parent_team_id = $5`
+      // directly (not COALESCE), so an omitted `parent_team_id` in
+      // `updateData` means "keep current" only because the route always
+      // re-sends the current value; resolve against `existingTeam` here
+      // to be correct regardless of how the caller supplies it.
+      const effectiveParentId = parent_team_id !== undefined
+        ? parent_team_id
+        : (existingTeam ? existingTeam.parent_team_id : null);
+      const effectiveName = name !== undefined ? name : (existingTeam ? existingTeam.name : undefined);
+
+      if (effectiveParentId != null && effectiveName !== undefined) {
+        // Sub_Team (has, or is being moved under, a parent): resolve its
+        // effective Organisation (the root of the effective parent's
+        // ancestor chain) and check the name across that whole subtree,
+        // excluding this team itself so a no-op rename never conflicts
+        // with its own current row.
+        const ancestorChain = await this.getAncestorChain(effectiveParentId);
+        const organisation = ancestorChain[0];
+        if (organisation) {
+          await this.assertNameUniqueInOrganisation(organisation.id, effectiveName, teamId);
+        }
+      }
+    }
+
     try {
       const result = await pool.query(
         'UPDATE teams SET name = COALESCE($1, name), description = COALESCE($2, description), visibility = COALESCE($3, visibility), can_join = COALESCE($4, can_join), parent_team_id = $5, callsign_name_format = COALESCE($6, callsign_name_format), color = COALESCE($8, color), callsign_level_selection = COALESCE($9, callsign_level_selection), pseudonymous_usernames = COALESCE($10, pseudonymous_usernames), callsign_prefix = COALESCE($11, callsign_prefix), response_channel_access = COALESCE($12, response_channel_access), support_channel_access = COALESCE($13, support_channel_access), updated_at = CURRENT_TIMESTAMP WHERE id = $7 RETURNING *',
@@ -1247,14 +1433,32 @@ class Team {
       return updatedTeam;
     } catch (error) {
       // Bugfix (callsign-handling): `idx_teams_callsign_prefix` is UNIQUE
-      // over non-null `callsign_prefix` values across ALL teams
-      // (Organisations and Sub_Teams alike). A Sub_Team prefix edit that
-      // collides with another team's prefix hits this constraint --
-      // translated into a typed, callsign_prefix-specific rejection
-      // rather than the update's own generic 500 (this codebase's
-      // established `23505` -> typed-error translation convention).
+      // over non-null `callsign_prefix` values among ORGANISATIONS ONLY
+      // (see `1789400000000_scope-callsign-prefix-uniqueness-to-organisations.cjs`).
+      // A Sub_Team prefix edit that collides with an existing
+      // Organisation's prefix hits this constraint the same way it
+      // always did -- translated into a typed, callsign_prefix-specific
+      // rejection rather than the update's own generic 500 (this
+      // codebase's established `23505` -> typed-error translation
+      // convention).
+      //
+      // Promotion case: this constraint can ALSO now fire when this same
+      // call is promoting an existing Sub_Team to an Organisation
+      // (`parent_team_id` going from non-null to `null`) and its own
+      // ALREADY-STORED `callsign_prefix` (not a value supplied on THIS
+      // request -- `callsign_prefix` here is `undefined`, since it was
+      // never part of this promotion request) collides with a different
+      // Organisation's prefix. `existingTeam` is not guaranteed to be
+      // populated in that scenario (its own fetch above is gated on the
+      // Organisation-only fields being supplied, none of which a
+      // pure-reparent request supplies), so the conflicting value is
+      // read fresh here rather than reporting the literal string
+      // "undefined" to the caller.
       if (error.code === '23505' && error.constraint === 'idx_teams_callsign_prefix') {
-        throw new CallsignPrefixConflictError(callsign_prefix);
+        const conflictingValue = callsign_prefix !== undefined
+          ? callsign_prefix
+          : (existingTeam?.callsign_prefix ?? (await this.findById(teamId))?.callsign_prefix);
+        throw new CallsignPrefixConflictError(conflictingValue);
       }
       logger.error({ err: error, teamId }, 'Error updating team');
       throw error;
@@ -1262,16 +1466,26 @@ class Team {
   }
 
   /**
-   * Requirement 17.3/17.4 (task 36.3): deletes a team, and everything that
-   * references it, inside a single transaction on one acquired client, in
-   * FK-dependency order (deepest first): `channel_memberships` for every
-   * channel belonging to this team, then the `channels` rows themselves,
-   * then `team_memberships`, then the `teams` row. The baseline schema's
-   * `channels.team_id`/`channel_memberships.channel_id` foreign keys do
-   * NOT declare `ON DELETE CASCADE` (only `teams.parent_team_id` and
+   * Requirement 17.3/17.4 (task 36.3): deletes a SINGLE team, and
+   * everything that references it, inside a single transaction on one
+   * acquired client, in FK-dependency order (deepest first):
+   * `channel_memberships` for every channel belonging to this team, then
+   * the `channels` rows themselves, then `team_memberships`, then the
+   * `teams` row. The baseline schema's `channels.team_id`/
+   * `channel_memberships.channel_id` foreign keys do NOT declare `ON
+   * DELETE CASCADE` (only `teams.parent_team_id` and
    * `team_memberships.team_id`/`.user_id` do), so those two deletes must
    * be performed explicitly here rather than relying on the database to
    * cascade them.
+   *
+   * Cascade-delete feature: the per-team deletion work is factored into
+   * `_deleteSingleTeamInTransaction`, shared with `deleteWithSubtree`
+   * (which deletes a whole subtree deepest-first). This method remains
+   * the single-team entry point and additionally rejects a team that has
+   * sub-teams at the ROUTE layer (`DELETE /api/teams/:teamId` calls
+   * `deleteWithSubtree` instead once its empty-subtree gate passes) --
+   * `Team.delete` itself does not cascade into sub-teams, matching its
+   * long-standing single-team contract.
    *
    * On successful commit, one `remove_team_channel_group` Sync_Operation
    * is enqueued per deleted channel (each carrying that channel's
@@ -1314,32 +1528,20 @@ class Team {
     try {
       await client.query('BEGIN');
 
-      // Fetch the channels belonging to this team BEFORE deleting them,
-      // so their Authentik group ids are available for the post-delete
-      // Sync_Operation enqueue below.
-      const channelsResult = await client.query(
-        'SELECT id, authentik_group_id, authentik_read_group_id, authentik_write_group_id FROM channels WHERE team_id = $1',
-        [teamId]
-      );
-      const deletedChannels = channelsResult.rows;
-      const channelIds = deletedChannels.map((channel) => channel.id);
-
       // Requirement 26.7: resolve every affected user's TAK username
       // (this team's members plus every sub-team's members, direct or
-      // inherited) BEFORE any team_memberships row is deleted. The
-      // recursive CTE mirrors getTeamHierarchy's descendants-of-teamId
-      // traversal (its recursive step joins t.parent_team_id = th.id,
-      // i.e. "find children of the accumulated set"), scoped here to just
-      // the id column since only team_memberships.team_id membership is
-      // needed.
+      // inherited) BEFORE any team_memberships row is deleted, so a
+      // SINGLE bulk revoke_tak_certificates covers the whole subtree.
+      // The recursive CTE mirrors getTeamHierarchy's descendants-of-
+      // teamId traversal (its recursive step joins t.parent_team_id =
+      // th.id, i.e. "find children of the accumulated set"), scoped here
+      // to just the id column since only team_memberships.team_id
+      // membership is needed.
       // Bugfix (Dashboard/Enrollment callsign-and-color divergence): the
       // SAME query also carries `u.id`, captured as `affectedUserIds`
       // below -- the set of users whose team-derived callsign/color
       // attributes need re-checking once this deletion commits, per the
-      // post-commit block at the end of this method. Resolved from the
-      // same single query as `affectedTakUsernames` rather than a second
-      // one, since both need the identical "member of this team or a
-      // sub-team" row set.
+      // post-commit block at the end of this method.
       const affectedUsersResult = await client.query(
         `WITH RECURSIVE team_and_subteams AS (
           SELECT id FROM teams WHERE id = $1
@@ -1357,43 +1559,13 @@ class Team {
         .filter((username) => username != null);
       const affectedUserIds = affectedUsersResult.rows.map((row) => row.id);
 
-      // 1. channel_memberships for every channel belonging to this team.
-      if (channelIds.length > 0) {
-        await client.query('DELETE FROM channel_memberships WHERE channel_id = ANY($1)', [channelIds]);
-      }
-
-      // 2. channels rows for this team.
-      await client.query('DELETE FROM channels WHERE team_id = $1', [teamId]);
-
-      // 3. team_memberships for this team.
-      await client.query('DELETE FROM team_memberships WHERE team_id = $1', [teamId]);
-
-      // 4. the teams row itself.
-      const result = await client.query('DELETE FROM teams WHERE id = $1 RETURNING *', [teamId]);
-
-      // Requirement 17.4: enqueue one remove_team_channel_group
-      // Sync_Operation per deleted channel, inside this same transaction
-      // (Requirement 17.5's client-threading pattern), so the enqueue
-      // commits/rolls back atomically with the deletion above. Group-id
-      // fields that are null on the channel row are omitted entirely
-      // (rather than passed through as `null`) so that
-      // `operationSchemas.js`'s optional-field type check -- which only
-      // skips a field when it is `undefined`, not merely falsy -- doesn't
-      // reject an otherwise-valid payload for a channel that never had a
-      // read/write group pair (e.g. a primary team channel).
-      for (const channel of deletedChannels) {
-        const payload = { channel_id: channel.id };
-        if (channel.authentik_group_id != null) {
-          payload.authentik_group_id = channel.authentik_group_id;
-        }
-        if (channel.authentik_read_group_id != null) {
-          payload.authentik_read_group_id = channel.authentik_read_group_id;
-        }
-        if (channel.authentik_write_group_id != null) {
-          payload.authentik_write_group_id = channel.authentik_write_group_id;
-        }
-        await EventPublisher.publishOperation('remove_team_channel_group', payload, deletedBy, client);
-      }
+      // Delete this single team (channels/memberships/teams row + the
+      // per-channel/CloudTAK enqueues), reusing the shared per-team
+      // routine. The bulk cert-revocation for the whole subtree is
+      // enqueued separately below rather than inside the per-team
+      // routine, so a single-team delete still emits exactly ONE
+      // revoke_tak_certificates operation (Requirement 26.7).
+      const deletedRow = await this._deleteSingleTeamInTransaction(client, teamId, deletedBy);
 
       // Requirement 26.7: a single bulk revoke_tak_certificates
       // Sync_Operation for the whole team + sub-team batch, rather than
@@ -1407,24 +1579,176 @@ class Team {
         );
       }
 
-      // Requirement 7.1/9.1/9.2 (task 7.1): enqueue a CloudTAK_Group
-      // deletion Sync_Operation for the just-deleted Team, inside this
-      // same transaction (design.md "Exact enqueue points" #3), passing
-      // the open `client` through so the `sync_operations` row
-      // commits/rolls back atomically with the deletion above -- this is
-      // the intentional transactional-site behaviour (Requirement 9.2),
-      // distinct from the non-transactional Team.create/update/addMember
-      // sites which omit the client. Guarded by isCloudTakEnabled() so
-      // nothing is enqueued while the integration is off (Requirement
-      // 1.4). `deletedTeamId` is captured/coerced to a number from the
-      // deleted row (falling back to the coerced `teamId` argument) so
-      // the payload's `team_id` satisfies the schema's `number` type even
-      // though the row is already removed by the DELETE above.
-      if (isCloudTakEnabled()) {
-        const deletedTeamId = Number(result.rows[0]?.id ?? teamId);
+      await client.query('COMMIT');
+
+      await this._clearTeamlessUserAttributesPostCommit(affectedUserIds, teamId);
+
+      return deletedRow;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      logger.error({ err: error, teamId }, 'Error deleting team');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Cascade-delete feature (Global_Manager deletion of a team/org that
+   * has sub-teams): counts how many HUMAN members and how many
+   * Team_Owned_Devices exist anywhere in the given team's subtree (the
+   * team itself plus every descendant, to any depth), so a caller can
+   * refuse the cascade delete when the subtree is not empty.
+   *
+   * "Member" and "device" are counted the SAME way the /teams overview's
+   * own `member_count`/`device_count` columns are (see `getAllTeams`/
+   * `getOrganisationTeams`): a member is a `team_memberships` row whose
+   * user has `is_team_device IS NOT TRUE`; a device is a DIRECT
+   * (`inherited_from_team_id IS NULL`) membership row whose user has
+   * `is_team_device = true`. A single human who is a member of two teams
+   * in the subtree is counted once (DISTINCT user id); the device count
+   * counts direct device-membership rows (a device belongs directly to
+   * exactly one team, so this is effectively per-device).
+   *
+   * Inherited human memberships are deliberately INCLUDED in the member
+   * count: an inherited member still "is in" a subtree team from an
+   * operator's point of view, and surfacing them in the gate's refusal
+   * message ("contains N members") is the honest, non-surprising
+   * behaviour -- even though those inherited rows would themselves
+   * cascade away cleanly. The gate exists to force the operator to
+   * consciously empty the subtree first, not to make a fine distinction
+   * about which membership rows are "real".
+   *
+   * @param {number|string} teamId
+   * @returns {Promise<{ memberCount: number, deviceCount: number, subTeamCount: number }>}
+   */
+  static async getSubtreeMemberDeviceCounts(teamId) {
+    try {
+      const result = await pool.query(
+        `WITH RECURSIVE team_and_subteams AS (
+          SELECT id FROM teams WHERE id = $1
+          UNION ALL
+          SELECT t.id FROM teams t JOIN team_and_subteams ts ON t.parent_team_id = ts.id
+        )
+        SELECT
+          (SELECT COUNT(DISTINCT u.id)
+             FROM team_memberships tm
+             JOIN users u ON u.id = tm.user_id
+            WHERE tm.team_id IN (SELECT id FROM team_and_subteams)
+              AND u.is_team_device IS NOT TRUE) AS member_count,
+          (SELECT COUNT(*)
+             FROM team_memberships tm
+             JOIN users u ON u.id = tm.user_id
+            WHERE tm.team_id IN (SELECT id FROM team_and_subteams)
+              AND tm.inherited_from_team_id IS NULL
+              AND u.is_team_device = true) AS device_count,
+          (SELECT COUNT(*)
+             FROM team_and_subteams
+            WHERE id <> $1) AS sub_team_count`,
+        [teamId]
+      );
+      const row = result.rows[0] || {};
+      return {
+        memberCount: parseInt(row.member_count, 10) || 0,
+        deviceCount: parseInt(row.device_count, 10) || 0,
+        subTeamCount: parseInt(row.sub_team_count, 10) || 0
+      };
+    } catch (error) {
+      logger.error({ err: error, teamId }, 'Error counting subtree members/devices');
+      throw error;
+    }
+  }
+
+  /**
+   * Cascade-delete feature: deletes the given team AND every descendant
+   * team (to any depth), in one transaction, DEEPEST-FIRST. Each team is
+   * removed via the SAME per-team routine `Team.delete` uses
+   * (`_deleteSingleTeamInTransaction`), so every descendant's channels
+   * and its Authentik/CloudTAK groups get their own
+   * `remove_team_channel_group`/`delete_cloudtak_group` Sync_Operations
+   * enqueued -- rather than relying on the raw
+   * `teams.parent_team_id ON DELETE CASCADE` FK, which would silently
+   * drop descendant `teams` rows WITHOUT any of that cleanup, orphaning
+   * their groups (exactly the orphaned-group class of bug this codebase
+   * has hit before).
+   *
+   * Deepest-first ordering matters: deleting a parent first would let
+   * the FK cascade remove its children out from under the loop before
+   * their own cleanup ran. Ordering by descending depth guarantees every
+   * child is fully cleaned up and removed before its parent's own
+   * `DELETE FROM teams` executes.
+   *
+   * This method does NOT enforce the empty-subtree gate itself -- that is
+   * the route's responsibility (it calls `getSubtreeMemberDeviceCounts`
+   * first and refuses with a clear message). By the time this runs the
+   * subtree is expected to be empty of members/devices, so it enqueues
+   * NO bulk `revoke_tak_certificates` (there is nothing to revoke) and
+   * the post-commit teamless-attribute clear is a no-op in practice --
+   * both are still driven off the actually-resolved affected-user set so
+   * the method stays correct even if called on a non-empty subtree.
+   *
+   * @param {number|string} teamId - the subtree root (an Organisation or
+   *   any Sub_Team).
+   * @param {number|null} [deletedBy]
+   * @returns {Promise<object>} the deleted ROOT team's row (the
+   *   `teamId` team), matching `Team.delete`'s own return shape.
+   */
+  static async deleteWithSubtree(teamId, deletedBy = null) {
+    const client = await pool.connect();
+
+    try {
+      await client.query('BEGIN');
+
+      // Resolve every team in the subtree WITH its depth, so we can
+      // delete deepest-first. Mirrors getTeamHierarchy's descendants
+      // traversal, carrying a `depth` accumulator.
+      const subtreeResult = await client.query(
+        `WITH RECURSIVE subtree AS (
+          SELECT id, 0 AS depth FROM teams WHERE id = $1
+          UNION ALL
+          SELECT t.id, s.depth + 1 FROM teams t JOIN subtree s ON t.parent_team_id = s.id
+        )
+        SELECT id, depth FROM subtree ORDER BY depth DESC`,
+        [teamId]
+      );
+      const orderedTeamIds = subtreeResult.rows.map((row) => row.id);
+
+      // Resolve every affected user across the WHOLE subtree up front
+      // (before any membership row is deleted), for the same reasons
+      // Team.delete does: a single bulk cert-revocation and the
+      // post-commit teamless-attribute clear.
+      const affectedUsersResult = await client.query(
+        `WITH RECURSIVE team_and_subteams AS (
+          SELECT id FROM teams WHERE id = $1
+          UNION ALL
+          SELECT t.id FROM teams t JOIN team_and_subteams ts ON t.parent_team_id = ts.id
+        )
+        SELECT DISTINCT u.id, u.username
+        FROM team_memberships tm
+        JOIN users u ON u.id = tm.user_id
+        WHERE tm.team_id IN (SELECT id FROM team_and_subteams)`,
+        [teamId]
+      );
+      const affectedTakUsernames = affectedUsersResult.rows
+        .map((row) => row.username)
+        .filter((username) => username != null);
+      const affectedUserIds = affectedUsersResult.rows.map((row) => row.id);
+
+      let rootDeletedRow = null;
+      for (const subtreeTeamId of orderedTeamIds) {
+        const deletedRow = await this._deleteSingleTeamInTransaction(client, subtreeTeamId, deletedBy);
+        if (String(subtreeTeamId) === String(teamId)) {
+          rootDeletedRow = deletedRow;
+        }
+      }
+
+      // One bulk revoke_tak_certificates for the whole subtree, matching
+      // Team.delete. In the gated (empty-subtree) case this list is
+      // empty and nothing is enqueued.
+      if (affectedTakUsernames.length > 0) {
         await EventPublisher.publishOperation(
-          'delete_cloudtak_group',
-          { team_id: deletedTeamId },
+          'revoke_tak_certificates',
+          { tak_usernames: affectedTakUsernames },
           deletedBy,
           client
         );
@@ -1432,60 +1756,164 @@ class Team {
 
       await client.query('COMMIT');
 
-      // Bugfix (Dashboard/Enrollment callsign-and-color divergence): a
-      // deleted Team's `team_memberships` rows are removed above (step 3),
-      // but that leaves any affected user's CACHED `tak_callsign`/
-      // `tak_color` (and their Authentik `takCallsign`/`takColor`
-      // attributes) pointing at a Team that no longer exists -- nothing
-      // else in this codebase invalidates them, so the Dashboard goes on
-      // showing a stale callsign/color indefinitely while other surfaces
-      // that read live (e.g. the Enrollment_View's preview) correctly
-      // report 'None'. Run strictly AFTER the COMMIT above, per this
-      // codebase's "no HTTP call inside a transaction" convention
-      // (`TeamTransferService.applyPostCommitEffects` is the existing
-      // precedent for this shape) -- `updateUserAttributes` calls
-      // Authentik. Individually caught and logged per user, never
-      // thrown, so a single failure never turns an already-committed
-      // team deletion into a reported error.
-      //
-      // Deliberately scoped to users who have NO team_memberships row
-      // left at all (not just none in the deleted team/sub-teams): a
-      // user who belonged to two teams and lost only this one still has
-      // a valid callsign/color from their remaining team, and clearing
-      // it here would be wrong. `affectedUserIds` (captured before the
-      // deletes, alongside `affectedTakUsernames` above) is exactly the
-      // set of users whose membership picture could have changed.
-      //
-      // Lazy `require`, matching `server/routes/teams.js`'s existing
-      // pattern for the same module: `userAttributes.js` itself requires
-      // `../models/Team`, so a top-level require here would be circular.
-      if (affectedUserIds.length > 0) {
-        const UserAttributesService = require('../services/userAttributes');
-        for (const affectedUserId of affectedUserIds) {
-          try {
-            const remaining = await pool.query(
-              'SELECT 1 FROM team_memberships WHERE user_id = $1 LIMIT 1',
-              [affectedUserId]
-            );
-            if (remaining.rows.length === 0) {
-              await UserAttributesService.clearTeamAttributes(affectedUserId);
-            }
-          } catch (postCommitError) {
-            logger.error(
-              { err: postCommitError, teamId, affectedUserId },
-              'Team deletion post-commit: failed to clear team-derived attributes for a now-teamless user'
-            );
-          }
-        }
-      }
+      await this._clearTeamlessUserAttributesPostCommit(affectedUserIds, teamId);
 
-      return result.rows[0];
+      return rootDeletedRow;
     } catch (error) {
       await client.query('ROLLBACK');
-      logger.error({ err: error, teamId }, 'Error deleting team');
+      logger.error({ err: error, teamId }, 'Error deleting team subtree');
       throw error;
     } finally {
       client.release();
+    }
+  }
+
+  /**
+   * Shared per-team deletion routine used by BOTH `Team.delete` (single
+   * team) and `Team.deleteWithSubtree` (each team in a subtree),
+   * operating on an ALREADY-OPEN transaction client the caller owns
+   * (this method issues no BEGIN/COMMIT/ROLLBACK of its own -- the caller
+   * controls the transaction boundary, matching this codebase's
+   * "atomicity is the caller's guarantee" convention).
+   *
+   * Deletes, for the single team `teamId`, in FK-dependency order:
+   *   1. channel_memberships for every channel belonging to the team
+   *   2. the channels rows themselves
+   *   3. team_memberships for the team
+   *   4. the teams row itself
+   * then enqueues (on the SAME client, so they commit/roll back
+   * atomically) one `remove_team_channel_group` per deleted channel and,
+   * when CloudTAK is enabled, one `delete_cloudtak_group` for the team.
+   *
+   * Deliberately does NOT enqueue `revoke_tak_certificates` or perform
+   * the post-commit teamless-attribute clear: those are subtree-wide
+   * concerns the CALLER handles once for the whole operation (a single
+   * bulk cert revocation; one attribute-clear pass), so calling this
+   * per-team in a subtree loop does not emit N cert-revocation
+   * operations.
+   *
+   * @param {import('pg').PoolClient} client - the caller's open client.
+   * @param {number|string} teamId
+   * @param {number|null} deletedBy
+   * @returns {Promise<object>} the deleted teams row.
+   */
+  static async _deleteSingleTeamInTransaction(client, teamId, deletedBy) {
+    // Fetch the channels belonging to this team BEFORE deleting them,
+    // so their Authentik group ids are available for the enqueue below.
+    const channelsResult = await client.query(
+      'SELECT id, authentik_group_id, authentik_read_group_id, authentik_write_group_id FROM channels WHERE team_id = $1',
+      [teamId]
+    );
+    const deletedChannels = channelsResult.rows;
+    const channelIds = deletedChannels.map((channel) => channel.id);
+
+    // 1. channel_memberships for every channel belonging to this team.
+    if (channelIds.length > 0) {
+      await client.query('DELETE FROM channel_memberships WHERE channel_id = ANY($1)', [channelIds]);
+    }
+
+    // 2. channels rows for this team.
+    await client.query('DELETE FROM channels WHERE team_id = $1', [teamId]);
+
+    // 3. team_memberships for this team.
+    await client.query('DELETE FROM team_memberships WHERE team_id = $1', [teamId]);
+
+    // 4. the teams row itself.
+    const result = await client.query('DELETE FROM teams WHERE id = $1 RETURNING *', [teamId]);
+
+    // Requirement 17.4: enqueue one remove_team_channel_group
+    // Sync_Operation per deleted channel, inside the caller's
+    // transaction (Requirement 17.5's client-threading pattern). Group-id
+    // fields that are null on the channel row are omitted entirely
+    // (rather than passed through as `null`) so that
+    // `operationSchemas.js`'s optional-field type check -- which only
+    // skips a field when it is `undefined`, not merely falsy -- doesn't
+    // reject an otherwise-valid payload for a channel that never had a
+    // read/write group pair (e.g. a primary team channel).
+    for (const channel of deletedChannels) {
+      const payload = { channel_id: channel.id };
+      if (channel.authentik_group_id != null) {
+        payload.authentik_group_id = channel.authentik_group_id;
+      }
+      if (channel.authentik_read_group_id != null) {
+        payload.authentik_read_group_id = channel.authentik_read_group_id;
+      }
+      if (channel.authentik_write_group_id != null) {
+        payload.authentik_write_group_id = channel.authentik_write_group_id;
+      }
+      await EventPublisher.publishOperation('remove_team_channel_group', payload, deletedBy, client);
+    }
+
+    // Requirement 7.1/9.1/9.2 (task 7.1): enqueue a CloudTAK_Group
+    // deletion Sync_Operation for the just-deleted Team, inside the
+    // caller's transaction (design.md "Exact enqueue points" #3), so the
+    // sync_operations row commits/rolls back atomically. Guarded by
+    // isCloudTakEnabled() so nothing is enqueued while the integration is
+    // off (Requirement 1.4). `deletedTeamId` is coerced to a number from
+    // the deleted row (falling back to the coerced `teamId` argument) so
+    // the payload's `team_id` satisfies the schema's `number` type even
+    // though the row is already removed by the DELETE above.
+    if (isCloudTakEnabled()) {
+      const deletedTeamId = Number(result.rows[0]?.id ?? teamId);
+      await EventPublisher.publishOperation(
+        'delete_cloudtak_group',
+        { team_id: deletedTeamId },
+        deletedBy,
+        client
+      );
+    }
+
+    return result.rows[0];
+  }
+
+  /**
+   * Shared post-commit step used by BOTH `Team.delete` and
+   * `Team.deleteWithSubtree`: after the deletion has COMMITTED, clears
+   * the cached `tak_callsign`/`tak_color` (and the mirrored Authentik
+   * attributes) of any affected user who is now left with ZERO
+   * team_memberships rows -- see the Dashboard/Enrollment callsign-and-
+   * color divergence bugfix.
+   *
+   * Runs strictly AFTER COMMIT, per this codebase's "no HTTP call inside
+   * a transaction" convention (`TeamTransferService.applyPostCommitEffects`
+   * is the precedent) -- `clearTeamAttributes` calls Authentik.
+   * Individually caught and logged per user, never thrown, so a single
+   * failure never turns an already-committed deletion into a reported
+   * error.
+   *
+   * Deliberately scoped to users left with NO team_memberships row at all
+   * (not just none in the deleted subtree): a user who belonged to two
+   * teams and lost only this one still has a valid callsign/color from
+   * their remaining team, and clearing it here would be wrong.
+   *
+   * Lazy `require`, matching `server/routes/teams.js`'s existing pattern:
+   * `userAttributes.js` itself requires `../models/Team`, so a top-level
+   * require here would be circular.
+   *
+   * @param {number[]} affectedUserIds
+   * @param {number|string} teamId - for log context only.
+   * @returns {Promise<void>}
+   */
+  static async _clearTeamlessUserAttributesPostCommit(affectedUserIds, teamId) {
+    if (!affectedUserIds || affectedUserIds.length === 0) {
+      return;
+    }
+    const UserAttributesService = require('../services/userAttributes');
+    for (const affectedUserId of affectedUserIds) {
+      try {
+        const remaining = await pool.query(
+          'SELECT 1 FROM team_memberships WHERE user_id = $1 LIMIT 1',
+          [affectedUserId]
+        );
+        if (remaining.rows.length === 0) {
+          await UserAttributesService.clearTeamAttributes(affectedUserId);
+        }
+      } catch (postCommitError) {
+        logger.error(
+          { err: postCommitError, teamId, affectedUserId },
+          'Team deletion post-commit: failed to clear team-derived attributes for a now-teamless user'
+        );
+      }
     }
   }
 
@@ -1704,15 +2132,52 @@ class Team {
         
         return channelResult.rows[0];
       } catch (authentikError) {
-        logger.error({ err: authentikError, teamId }, 'Error creating Authentik groups');
-        
-        // Fallback: create channel without Authentik groups
+        // Bugfix (orphaned Authentik team groups): the synchronous
+        // group-create above failed (e.g. an Authentik timeout or rate
+        // limit during a bulk-import burst). Previously this fell back to
+        // inserting the channel row with a NULL `authentik_group_id` and
+        // NOTHING ever repaired it -- so if Authentik had actually created
+        // (or already held) the group, it became an orphan that the team's
+        // eventual deletion could never clean up (deletion only removes
+        // groups whose pk is stored locally). We STILL create the channel
+        // row here so the Team is immediately usable, but we now ALSO
+        // enqueue a `reconcile_team_channel_group` Sync_Operation so the
+        // worker retries (with backoff) until the group is created-or-
+        // reused-by-name and its pk is written back onto this channel row.
+        // This is the codebase's mandated pattern: an Authentik write that
+        // could not complete synchronously must become a retryable queued
+        // operation, never a silently-dropped one.
+        logger.error({ err: authentikError, teamId }, 'Error creating Authentik team group; enqueueing reconcile for retry');
+
         const channelResult = await pool.query(
           'INSERT INTO channels (name, display_name, description, team_id, is_primary) VALUES ($1, $2, $3, $4, true) RETURNING *',
           [channelDbName, channelName, description, teamId]
         );
-        
-        return channelResult.rows[0];
+        const channel = channelResult.rows[0];
+
+        // Enqueue on the default pool (Team.create does not run inside an
+        // explicit transaction -- see the create_cloudtak_group enqueue in
+        // Team.create). A transient enqueue failure must never fail team
+        // creation, so it is logged and swallowed: a later manual reconcile
+        // or the cleanup script remains the backstop.
+        try {
+          await EventPublisher.publishOperation(
+            'reconcile_team_channel_group',
+            {
+              channel_id: channel.id,
+              authentik_group_name: authentikGroupName,
+              description
+            },
+            null
+          );
+        } catch (enqueueError) {
+          logger.error(
+            { err: enqueueError, teamId, channelId: channel.id },
+            'Failed to enqueue reconcile_team_channel_group; channel left without a group id until a manual reconcile'
+          );
+        }
+
+        return channel;
       }
     } catch (error) {
       logger.error({ err: error, teamId }, 'Error creating team channel');
@@ -1728,6 +2193,7 @@ Team.PseudonymousUsernamePolicySubTeamError = PseudonymousUsernamePolicySubTeamE
 Team.PseudonymousUsernamePolicyImmutableError = PseudonymousUsernamePolicyImmutableError;
 Team.OrganisationCallsignPrefixImmutableError = OrganisationCallsignPrefixImmutableError;
 Team.CallsignPrefixConflictError = CallsignPrefixConflictError;
+Team.TeamNameConflictError = TeamNameConflictError;
 Team.ChannelTierAccessSubTeamError = ChannelTierAccessSubTeamError;
 Team.InheritedMembershipPromotionError = InheritedMembershipPromotionError;
 

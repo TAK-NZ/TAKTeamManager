@@ -317,6 +317,48 @@ class AuthentikService {
     const response = await this.circuitBreaker.execute(() => this.client.get(`/core/groups/?name=${encodedName}`));
     return response.data.results[0] || null;
   }
+
+  // List every Authentik group, following Authentik's page-NUMBER
+  // pagination envelope (`response.data.pagination.next` is a page number,
+  // not a URL -- the same shape `authentikSync.js` relies on). Used by the
+  // orphaned-team-group cleanup script (`scripts/cleanup-orphaned-team-groups.js`)
+  // to reconcile Authentik's group list against the local `channels` group
+  // ids. Returns a flat array of `{ pk, name, ... }` group objects.
+  async getAllGroups({ pageSize = 100 } = {}) {
+    const groups = [];
+    let page = 1;
+    let hasMorePages = true;
+    while (hasMorePages) {
+      const response = await this.circuitBreaker.execute(() =>
+        this.client.get(`/core/groups/?page=${page}&page_size=${pageSize}`)
+      );
+      const results = response.data.results || [];
+      groups.push(...results);
+      if (response.data.pagination && response.data.pagination.next) {
+        page = response.data.pagination.next;
+      } else {
+        hasMorePages = false;
+      }
+    }
+    return groups;
+  }
+
+  // Delete an Authentik group by its `pk`. A 404 (group already absent) is
+  // treated as a satisfied delete rather than an error, matching the
+  // Sync_Worker's `removeTeamChannelGroup` idempotent-delete convention.
+  // Any other non-success status propagates as a thrown error.
+  async deleteGroup(groupId) {
+    try {
+      await this.circuitBreaker.execute(() =>
+        this.client.delete(`/core/groups/${encodeURIComponent(groupId)}/`)
+      );
+    } catch (error) {
+      if (error?.response?.status === 404) {
+        return;
+      }
+      throw error;
+    }
+  }
 }
 
 module.exports = new AuthentikService();

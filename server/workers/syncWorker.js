@@ -1095,6 +1095,10 @@ class SyncWorker {
         await this.removeTeamChannelGroup(payload);
         break;
 
+      case 'reconcile_team_channel_group':
+        await this.reconcileTeamChannelGroup(payload);
+        break;
+
       case 'update_channel_group':
         await this.updateChannelGroup(payload);
         break;
@@ -2294,6 +2298,107 @@ class SyncWorker {
         );
       }
     }
+  }
+
+  /**
+   * Bugfix (orphaned Authentik team groups): the retryable reconcile for a
+   * primary team channel whose `authentik_group_id` could not be populated
+   * synchronously at team-creation time (an Authentik timeout/rate-limit
+   * during `Team.createTeamChannel`). Enqueued by that method's fallback
+   * path so a transient failure self-heals instead of leaving a channel
+   * with a NULL group id (and, worse, an orphaned group in Authentik that
+   * the eventual team deletion could never find to remove).
+   *
+   * Idempotent, create-or-reuse-by-name, mirroring `ensureCloudTakGroup`:
+   *   1. Load the channel row. If it is gone (team deleted between enqueue
+   *      and processing), treat as an already-satisfied no-op.
+   *   2. If it ALREADY has an `authentik_group_id`, a prior attempt (or a
+   *      concurrent one) already reconciled it -- no-op.
+   *   3. POST `/core/groups/` to create the group; on any non-2xx,
+   *      GET `?name=` and reuse the exact-name match. Neither succeeding
+   *      classifies off the create status (5xx retryable, 4xx permanent).
+   *   4. UPDATE the channel row's `authentik_group_id` with the resolved
+   *      pk. A concurrent update that already set it is respected via a
+   *      `WHERE authentik_group_id IS NULL` guard, so this never clobbers a
+   *      pk another path wrote.
+   *
+   * @param {{channel_id: number, authentik_group_name: string, description?: string}} payload
+   */
+  async reconcileTeamChannelGroup(payload) {
+    const { channel_id, authentik_group_name, description } = payload;
+
+    // Step 1: load the channel row.
+    const channelResult = await this.pool.query(
+      'SELECT id, authentik_group_id FROM channels WHERE id = $1',
+      [channel_id]
+    );
+    const channel = channelResult.rows[0];
+    if (!channel) {
+      logger.info(
+        { channelId: channel_id },
+        'Channel no longer exists; reconcile_team_channel_group is a no-op'
+      );
+      return;
+    }
+
+    // Step 2: already reconciled -- nothing to do.
+    if (channel.authentik_group_id != null) {
+      logger.debug(
+        { channelId: channel_id, groupId: channel.authentik_group_id },
+        'Team channel already has an Authentik group id; reconcile is a no-op'
+      );
+      return;
+    }
+
+    // Step 3: create-or-reuse the group by name (mirrors
+    // Team.createTeamChannel / ensureCloudTakGroup).
+    let group;
+    const createResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        name: authentik_group_name,
+        attributes: { description: description ?? '' }
+      })
+    });
+
+    if (createResponse.ok) {
+      group = await createResponse.json();
+    } else {
+      const lookupResponse = await fetchWithTimeout(
+        `${process.env.AUTHENTIK_URL}/api/v3/core/groups/?name=${encodeURIComponent(authentik_group_name)}`,
+        { headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` } }
+      );
+      const lookupData = lookupResponse.ok ? await lookupResponse.json() : null;
+      group = lookupData?.results?.find((g) => g.name === authentik_group_name);
+
+      if (!group) {
+        const classification = classifyFailure(createResponse.status);
+        throw new AuthentikApiError(
+          `Failed to create or find team channel Authentik group "${authentik_group_name}": ${createResponse.status} ${createResponse.statusText}`,
+          classification
+        );
+      }
+      logger.info(
+        { channelId: channel_id, authentikGroupName: authentik_group_name, groupId: group.pk },
+        'Reused existing Authentik group while reconciling a team channel'
+      );
+    }
+
+    // Step 4: write the pk back, without clobbering a value another path
+    // may have set concurrently.
+    await this.pool.query(
+      'UPDATE channels SET authentik_group_id = $1 WHERE id = $2 AND authentik_group_id IS NULL',
+      [group.pk, channel_id]
+    );
+
+    logger.info(
+      { channelId: channel_id, groupId: group.pk },
+      'Reconciled team channel Authentik group id'
+    );
   }
 
   /**

@@ -19,6 +19,42 @@
 const MAX_TEAM_DEPTH = 5;
 
 /**
+ * Bugfix (CSV bulk team import mandatory TAK Colour): the fixed set of
+ * 14 TAK Colour names this deployment recognises -- the exact same set
+ * `server/routes/config.js`'s `GET /api/config/color-mappings` reads
+ * from `TAK_COLOR_*` environment variables, `client/src/components/
+ * TeamFormDialog.jsx`'s dropdown offers as `<option>` values, and the
+ * baseline migration's `SEED_ENV_VARS` seeds into `system_config`.
+ * `teams.color` and `user_cache.tak_color` both store one of these
+ * NAMES verbatim (not a hex code -- `'#3B82F6'` is only ever this
+ * column's un-set DEFAULT, never a value any real creation path writes
+ * intentionally), so this is the single place a value is validated
+ * against the canonical set before insertion, used by
+ * `BulkImportService.parseRowColor` (task: CSV mandatory TAK Colour).
+ *
+ * Frozen and exported as an array (insertion order matches
+ * `TeamFormDialog.jsx`'s own dropdown order) so a caller needing an O(1)
+ * membership check can trivially build a `Set` from it without this
+ * module needing to expose two different shapes.
+ */
+const TAK_COLOR_NAMES = Object.freeze([
+  'Yellow',
+  'Cyan',
+  'Green',
+  'Red',
+  'Purple',
+  'Orange',
+  'Blue',
+  'Magenta',
+  'White',
+  'Maroon',
+  'Dark Blue',
+  'Teal',
+  'Dark Green',
+  'Brown'
+]);
+
+/**
  * region-channel-tiers: maps a `region_channels.tier` value ('response' or
  * 'support') to the Authentik group-name prefix used for that tier
  * (`tak_Response...`/`tak_Support...`). 'response' is the ES-only
@@ -110,6 +146,7 @@ const BCH_CHANNEL_CATEGORY_PREFIX = Object.freeze({
 
 module.exports = {
   MAX_TEAM_DEPTH,
+  TAK_COLOR_NAMES,
   REGION_CHANNEL_TIER_PREFIX,
   REGION_CHANNEL_TIER_DESCRIPTION_QUALIFIER,
   BCH_CHANNEL_CATEGORY_PREFIX

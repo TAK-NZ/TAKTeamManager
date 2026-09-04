@@ -303,6 +303,30 @@ module.exports = {
     }
   },
 
+  // Bugfix (orphaned Authentik team groups): enqueued by
+  // `Team.createTeamChannel`'s fallback path when the SYNCHRONOUS Authentik
+  // group-create at team-creation time failed (e.g. a timeout/rate-limit
+  // during a bulk-import burst), so the channel row was inserted with a
+  // NULL `authentik_group_id`. The Sync_Worker handler
+  // `reconcileTeamChannelGroup` create-or-reuses the group by
+  // `authentik_group_name` and writes the resulting pk back onto the
+  // channel row identified by `channel_id`. `channel_id` is the LIVE local
+  // channel id (unlike `remove_team_channel_group`, whose row is already
+  // deleted) so the handler can look it up and guard on its current
+  // `authentik_group_id`. `authentik_group_name` is required (the handler
+  // cannot create/reuse a group without it). `description` is optional --
+  // it is only the group's attribute text; a missing one reconciles to an
+  // empty description rather than failing the operation.
+  reconcile_team_channel_group: {
+    requiredFields: {
+      channel_id: 'number',
+      authentik_group_name: 'string'
+    },
+    optionalFields: {
+      description: 'string'
+    }
+  },
+
   // Bugfix (Channels tab has no edit action, and no way to add/edit a
   // custom channel's Authentik/LDAP description): enqueued by
   // Channel.updateCustomChannel after updating the local `channels` row.

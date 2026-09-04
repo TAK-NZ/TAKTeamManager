@@ -166,6 +166,27 @@ export default function Admin({ user }) {
   const [bulkImportResult, setBulkImportResult] = useState(null)
   const [bulkImportError, setBulkImportError] = useState(null)
   const bulkImportFileInputRef = useRef(null)
+  // Bugfix (no feedback during a large CSV import -- the operator had
+  // no way to tell the browser was still uploading vs. the server was
+  // still processing rows, especially once the file grows past a
+  // handful of rows: a real 82-row team hierarchy took ~30 seconds
+  // server-side with the button just reading "Uploading..." the whole
+  // time). Two distinct phases, tracked separately since they have
+  // genuinely different progress signals available:
+  //   - `bulkImportUploadPercent`: the BROWSER's upload of the file's
+  //     bytes to the server, via axios's own `onUploadProgress` (a real
+  //     byte-count percentage -- see `bulkImportAPI.importTeams`'s own
+  //     doc comment). Reaches 100 almost immediately for a CSV this
+  //     size; the network transfer itself was never the slow part.
+  //   - `bulkImportProcessing`: true for the (much longer) phase AFTER
+  //     the upload completes, while the server parses the CSV and
+  //     creates every row via Team.create -- Requirement 29.6's
+  //     per-row synchronous processing, which has no equivalent
+  //     progress signal today (a single request/response, not a
+  //     stream) -- so this can only be an INDETERMINATE "still
+  //     working" indicator, not a determinate percentage.
+  const [bulkImportUploadPercent, setBulkImportUploadPercent] = useState(0)
+  const [bulkImportProcessing, setBulkImportProcessing] = useState(false)
 
   // --- Settings Export / Import state (admin-settings-management, tasks 8.1/8.2) ---
   // Both controls live in a dedicated "Export / Import" tab. Every call goes
@@ -415,12 +436,27 @@ export default function Admin({ user }) {
       return
     }
     setBulkImporting(true)
+    setBulkImportUploadPercent(0)
+    setBulkImportProcessing(false)
     setBulkImportResult(null)
     setBulkImportError(null)
     try {
       const formData = new FormData()
       formData.append('csv', bulkImportFile)
-      const response = await bulkImportAPI.importTeams(formData)
+      const response = await bulkImportAPI.importTeams(formData, (progressEvent) => {
+        if (!progressEvent.total) {
+          return
+        }
+        const percent = Math.round((progressEvent.loaded / progressEvent.total) * 100)
+        setBulkImportUploadPercent(percent)
+        // Once the browser has finished streaming the file's bytes, the
+        // remaining wait is entirely server-side row processing, which
+        // has no percentage of its own -- switch to the indeterminate
+        // indicator rather than leaving the bar frozen at 100%.
+        if (percent >= 100) {
+          setBulkImportProcessing(true)
+        }
+      })
       setBulkImportResult(response.data)
       setBulkImportFile(null)
       if (bulkImportFileInputRef.current) {
@@ -433,6 +469,8 @@ export default function Admin({ user }) {
       )
     } finally {
       setBulkImporting(false)
+      setBulkImportProcessing(false)
+      setBulkImportUploadPercent(0)
     }
   }
 
@@ -1057,8 +1095,16 @@ export default function Admin({ user }) {
                   disabled={!bulkImportFile || bulkImporting}
                   className="btn-primary flex items-center gap-2 disabled:opacity-50"
                 >
-                  <ArrowUpTrayIcon className="h-4 w-4" />
-                  {bulkImporting ? 'Uploading...' : 'Upload Team CSV'}
+                  {bulkImporting ? (
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current"></div>
+                  ) : (
+                    <ArrowUpTrayIcon className="h-4 w-4" />
+                  )}
+                  {bulkImportProcessing
+                    ? 'Processing...'
+                    : bulkImporting
+                      ? 'Uploading...'
+                      : 'Upload Team CSV'}
                 </button>
                 <a
                   href="/templates/team-import-template.csv"
@@ -1068,6 +1114,44 @@ export default function Admin({ user }) {
                   Download CSV template
                 </a>
               </div>
+
+              {/* Bugfix (no feedback during a large CSV import): a
+                  determinate progress bar for the upload phase (real
+                  byte-count percentage), which SWITCHES to an
+                  indeterminate "still working" bar the moment the
+                  upload itself finishes and server-side row processing
+                  begins -- the phase that actually took ~30 seconds for
+                  an 82-row file, with nothing on screen before this fix.
+                  `role="status"`/`aria-live="polite"` announces the
+                  phase change once rather than on every byte-count tick,
+                  matching this app's established convention (see
+                  AddTeamDeviceDialog.jsx's "Checking callsign suffix…"
+                  indicator) -- a region re-announcing a rapidly-changing
+                  percentage would be unusable noise for a screen-reader
+                  user. */}
+              {bulkImporting && (
+                <div className="mb-4">
+                  <div className="flex items-center justify-between text-xs text-gray-600 dark:text-gray-400 mb-1">
+                    <span>{bulkImportProcessing ? 'Creating teams…' : 'Uploading…'}</span>
+                    {!bulkImportProcessing && <span>{bulkImportUploadPercent}%</span>}
+                  </div>
+                  <div className="w-full h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                    {bulkImportProcessing ? (
+                      <div className="h-full w-1/3 bg-primary-600 rounded-full animate-[bulk-import-indeterminate_1.2s_ease-in-out_infinite]"></div>
+                    ) : (
+                      <div
+                        className="h-full bg-primary-600 rounded-full transition-all"
+                        style={{ width: `${bulkImportUploadPercent}%` }}
+                      ></div>
+                    )}
+                  </div>
+                  <span role="status" aria-live="polite" className="sr-only">
+                    {bulkImportProcessing
+                      ? 'Upload complete. Creating teams, this may take a while for a large file.'
+                      : ''}
+                  </span>
+                </div>
+              )}
 
               {bulkImportError && (
                 <div className="rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-900/30 p-3 mb-4">

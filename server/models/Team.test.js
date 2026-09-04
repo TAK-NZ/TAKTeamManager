@@ -449,6 +449,29 @@ describe('Team.getUserTeams / Team.getAllTeams member_count excludes Team_Owned_
     expect(sql).toContain('tm.inherited_from_team_id IS NULL AND u.is_team_device = true) as device_count');
     expect(params).toEqual([1, 42]);
   });
+
+  // Bugfix (consistent team Display_Name everywhere): getOrganisationTeams
+  // now also computes a `display_name` -- "<Org prefix> - <team name>"
+  // for a Sub_Team, bare name for the Organisation -- using the
+  // Organisation root ($1)'s own prefix/name, so the Users Create-User
+  // picker and Transfer dialog source-team heading (both fed by
+  // GET /teams/my-teams?scope=organisation, which calls this) match what
+  // /request-access shows, instead of falling back to the bare name.
+  it('getOrganisationTeams: computes a display_name from the Organisation ($1) root prefix, bare name for the org row', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+
+    await Team.getOrganisationTeams(1, 42);
+
+    const [sql] = pool.query.mock.calls[0];
+    // Sub_Team branch prefixes the ORG's prefix/name (looked up from the
+    // $1 root row), not the immediate parent's.
+    expect(sql).toContain('WHEN oh.parent_team_id IS NOT NULL THEN');
+    expect(sql).toContain('FROM teams org WHERE org.id = $1');
+    expect(sql).toContain("|| ' - ' || oh.name");
+    // Organisation row shows its bare name.
+    expect(sql).toContain('ELSE oh.name');
+    expect(sql).toContain('as display_name');
+  });
 });
 
 /**
@@ -1118,6 +1141,147 @@ describe('Team.create Max_Team_Depth enforcement (Requirement 2.2/2.3)', () => {
 });
 
 /**
+ * Bugfix (callsign-handling): `Team.create` used to swallow a duplicate
+ * `callsign_prefix` INSERT failure into its generic "new columns don't
+ * exist" fallback, silently creating the team with NO prefix at all
+ * rather than surfacing the conflict to the caller. This asserts the
+ * fix: a `23505` on `idx_teams_callsign_prefix` is translated into
+ * `CallsignPrefixConflictError`, and the degraded fallback INSERT is
+ * never attempted.
+ */
+describe('Team.create callsign_prefix conflict (bugfix: callsign-handling)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.spyOn(Team, 'createTeamChannel').mockResolvedValue({ id: 999 });
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('translates a 23505 on idx_teams_callsign_prefix into CallsignPrefixConflictError, naming the conflicting value', async () => {
+    const conflictError = Object.assign(
+      new Error('duplicate key value violates unique constraint "idx_teams_callsign_prefix"'),
+      { code: '23505', constraint: 'idx_teams_callsign_prefix' }
+    );
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO teams (name, description, callsign_prefix')) {
+        return Promise.reject(conflictError);
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await expect(
+      Team.create({ name: 'LandSAR', parent_team_id: null, callsign_prefix: 'STL' })
+    ).rejects.toThrow(Team.CallsignPrefixConflictError);
+
+    try {
+      await Team.create({ name: 'LandSAR', parent_team_id: null, callsign_prefix: 'STL' });
+    } catch (error) {
+      expect(error.message).toContain('STL');
+    }
+  });
+
+  it('never attempts the degraded fallback INSERT (with no callsign_prefix column) after a conflict', async () => {
+    const conflictError = Object.assign(
+      new Error('duplicate key value violates unique constraint "idx_teams_callsign_prefix"'),
+      { code: '23505', constraint: 'idx_teams_callsign_prefix' }
+    );
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO teams (name, description, callsign_prefix')) {
+        return Promise.reject(conflictError);
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await expect(
+      Team.create({ name: 'LandSAR', parent_team_id: null, callsign_prefix: 'STL' })
+    ).rejects.toThrow(Team.CallsignPrefixConflictError);
+
+    const fallbackInsertCalls = pool.query.mock.calls.filter(
+      ([sql]) => sql.includes('INSERT INTO teams (name, description, parent_team_id, created_by)')
+    );
+    expect(fallbackInsertCalls).toHaveLength(0);
+  });
+
+  it('a non-conflict INSERT failure still falls back to the degraded basic-creation INSERT unchanged', async () => {
+    const unrelatedError = new Error('connection reset');
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO teams (name, description, callsign_prefix')) {
+        return Promise.reject(unrelatedError);
+      }
+      if (typeof sql === 'string' && sql.includes('INSERT INTO teams (name, description, parent_team_id, created_by)')) {
+        return Promise.resolve({ rows: [{ id: 5, name: 'FENZ', parent_team_id: null }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const team = await Team.create({ name: 'FENZ', parent_team_id: null, callsign_prefix: 'FENZ' });
+
+    expect(team).toEqual({ id: 5, name: 'FENZ', parent_team_id: null });
+  });
+});
+
+/**
+ * Bugfix (callsign-handling): the scoped `idx_teams_callsign_prefix`
+ * (Organisation-only, see `1789400000000_scope-callsign-prefix-uniqueness-to-organisations.cjs`)
+ * can now be violated by promoting an existing Sub_Team to an
+ * Organisation (`parent_team_id` going from non-null to `null`) when
+ * that Sub_Team's ALREADY-STORED `callsign_prefix` collides with a
+ * different, existing Organisation's prefix. This is a real Postgres
+ * partial-index behaviour (verified directly against a throwaway
+ * database during development of this fix, not just mocked here): the
+ * index's predicate is evaluated against the row's POST-update values,
+ * so the collision is caught automatically, with no new application-side
+ * check needed. What DOES need covering here is that `Team.update`'s
+ * existing generic `23505`-on-`idx_teams_callsign_prefix` handler
+ * reports the actual conflicting prefix rather than the literal string
+ * "undefined" -- `callsign_prefix` is `undefined` in this exact
+ * scenario (the promotion request never supplies one; the conflict is
+ * against the row's pre-existing stored value), and `existingTeam` is
+ * not guaranteed to have been fetched either, since that fetch is gated
+ * on the Organisation-only fields being supplied, none of which a
+ * pure-reparent request supplies.
+ */
+describe('Team.update Sub_Team-to-Organisation promotion callsign_prefix conflict (bugfix: callsign-handling)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('reports the actual conflicting callsign_prefix, not "undefined", when promoting a Sub_Team whose stored prefix collides with an existing Organisation', async () => {
+    const conflictError = Object.assign(
+      new Error('duplicate key value violates unique constraint "idx_teams_callsign_prefix"'),
+      { code: '23505', constraint: 'idx_teams_callsign_prefix' }
+    );
+
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('UPDATE teams')) {
+        return Promise.reject(conflictError);
+      }
+      if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+        // The promoted Sub_Team's own stored prefix, read fresh since
+        // no Organisation-only field was supplied on this request (so
+        // `existingTeam` was never populated above).
+        return Promise.resolve({ rows: [{ id: 2, parent_team_id: null, callsign_prefix: 'STL' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    // A pure re-parent request: no callsign_prefix supplied at all.
+    await expect(
+      Team.update(2, { parent_team_id: null })
+    ).rejects.toThrow(Team.CallsignPrefixConflictError);
+
+    try {
+      await Team.update(2, { parent_team_id: null });
+    } catch (error) {
+      expect(error.message).toContain('STL');
+      expect(error.message).not.toContain('undefined');
+    }
+  });
+});
+
+/**
  * Unit tests for `Team.create`/`Team.update`'s Organisation-only
  * `color`/`callsign_name_format` inheritance (Requirement 3.2/3.3, task
  * 6.1).
@@ -1267,6 +1431,15 @@ describe('Team.create / Team.update Organisation-only color/callsign_name_format
 
     it('does not look up the existing team at all when neither color nor callsign_name_format is supplied', async () => {
       pool.query.mockImplementation((sql) => {
+        // Org-wide-team-name-uniqueness: a rename now resolves the team's
+        // existing row (findById) to determine its effective org for the
+        // name-uniqueness check. This root team (parent_team_id null)
+        // short-circuits that check (promotion/root path -- the baseline
+        // UNIQUE(name, parent_team_id) constraint covers root-vs-root),
+        // so no ancestor/subtree query runs beyond the findById.
+        if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+          return Promise.resolve({ rows: [{ id: 5, parent_team_id: null, name: 'Old', color: 'Red', callsign_name_format: 'full_name' }] });
+        }
         if (typeof sql === 'string' && sql.includes('UPDATE teams')) {
           return Promise.resolve({ rows: [{ id: 5, name: 'Renamed' }] });
         }
@@ -1275,9 +1448,13 @@ describe('Team.create / Team.update Organisation-only color/callsign_name_format
 
       await Team.update(5, { name: 'Renamed' });
 
-      expect(pool.query).toHaveBeenCalledTimes(1);
-      const [sql] = pool.query.mock.calls[0];
-      expect(sql).toContain('UPDATE teams');
+      // The UPDATE runs; there is no color/callsign_name_format cascade
+      // (neither was supplied). A rename does one findById for the
+      // name-uniqueness check, but no subtree scan for a root team.
+      const updateCall = pool.query.mock.calls.find(([sql]) => typeof sql === 'string' && sql.includes('UPDATE teams'));
+      expect(updateCall).toBeDefined();
+      const subtreeScan = pool.query.mock.calls.find(([sql]) => typeof sql === 'string' && sql.includes('WITH RECURSIVE org_subtree'));
+      expect(subtreeScan).toBeUndefined();
     });
 
     /**
@@ -1454,7 +1631,7 @@ describe('Team.createTeamChannel Authentik group creation/reconciliation', () =>
     );
   });
 
-  it('falls back to a channel with no Authentik group (existing behavior) when the create POST fails AND no matching existing group can be found', async () => {
+  it('creates the channel with no group id AND enqueues reconcile_team_channel_group for retry when the create POST fails AND no matching existing group can be found', async () => {
     pool.query.mockImplementation((sql) => {
       if (sql.includes('WITH RECURSIVE root_team')) {
         return Promise.resolve({ rows: [teamRow] });
@@ -1474,10 +1651,52 @@ describe('Team.createTeamChannel Authentik group creation/reconciliation', () =>
 
     const result = await Team.createTeamChannel(10);
 
-    // Falls all the way through to the outer catch's no-group-id insert.
+    // Still inserts the channel row (so the Team is immediately usable),
+    // via the no-group-id INSERT.
     const insertCalls = pool.query.mock.calls.filter(([sql]) => sql.includes('INSERT INTO channels'));
     expect(insertCalls).toHaveLength(1);
     expect(insertCalls[0][0]).not.toContain('authentik_group_id');
+    expect(result).toEqual({ id: 3, authentik_group_id: null });
+
+    // Bugfix (orphaned Authentik team groups): rather than silently
+    // leaving the channel group-less forever, it enqueues a retryable
+    // reconcile carrying the live channel id + the intended group name,
+    // on the default pool (no transaction client).
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'reconcile_team_channel_group',
+      expect.objectContaining({
+        channel_id: 3,
+        authentik_group_name: 'tak_Teams - FENZ'
+      }),
+      null
+    );
+  });
+
+  it('does not fail team-channel creation when the reconcile enqueue itself throws (logged and swallowed)', async () => {
+    pool.query.mockImplementation((sql) => {
+      if (sql.includes('WITH RECURSIVE root_team')) {
+        return Promise.resolve({ rows: [teamRow] });
+      }
+      if (sql.includes('INSERT INTO channels')) {
+        return Promise.resolve({ rows: [{ id: 3, authentik_group_id: null }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    global.fetch = jest.fn().mockImplementation((url, options) => {
+      if (options?.method === 'POST') {
+        return Promise.resolve({ ok: false, status: 500, text: () => Promise.resolve('Internal error') });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ results: [] }) });
+    });
+
+    EventPublisher.publishOperation.mockRejectedValueOnce
+      ? EventPublisher.publishOperation.mockRejectedValueOnce(new Error('sync_operations insert failed'))
+      : EventPublisher.publishOperation.mockImplementationOnce(() => Promise.reject(new Error('sync_operations insert failed')));
+
+    // The channel row is still returned; the enqueue failure never
+    // propagates out of createTeamChannel.
+    const result = await Team.createTeamChannel(10);
     expect(result).toEqual({ id: 3, authentik_group_id: null });
   });
 
@@ -1676,8 +1895,14 @@ describe('Team.create / Team.update callsign_level_selection (Requirement 5.1/5.
       expect(updateCalls).toHaveLength(0);
     });
 
-    it('leaves callsign_level_selection unchanged (via COALESCE) when omitted from the update, and does not look up the existing team', async () => {
+    it('leaves callsign_level_selection unchanged (via COALESCE) when omitted from the update', async () => {
       pool.query.mockImplementation((sql) => {
+        // Org-wide-team-name-uniqueness: a rename resolves the existing
+        // row for the name-uniqueness check; a root team (parent null)
+        // short-circuits it after the findById.
+        if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+          return Promise.resolve({ rows: [{ id: 1, parent_team_id: null, name: 'Old' }] });
+        }
         if (typeof sql === 'string' && sql.includes('UPDATE teams')) {
           return Promise.resolve({ rows: [{ id: 1, name: 'Renamed' }] });
         }
@@ -1686,12 +1911,13 @@ describe('Team.create / Team.update callsign_level_selection (Requirement 5.1/5.
 
       await Team.update(1, { name: 'Renamed' });
 
-      // No findById lookup when none of color/callsign_name_format/
-      // callsign_level_selection is supplied.
-      expect(pool.query).toHaveBeenCalledTimes(1);
-      const [sql, params] = pool.query.mock.calls[0];
-      expect(sql).toContain('UPDATE teams');
-      expect(params).toContain(undefined);
+      // callsign_level_selection is omitted, so it is passed as
+      // `undefined` to the UPDATE (COALESCE leaves it unchanged), and no
+      // callsign_level_selection validation/lookup happens on its
+      // account.
+      const updateCall = pool.query.mock.calls.find(([sql]) => typeof sql === 'string' && sql.includes('UPDATE teams'));
+      expect(updateCall).toBeDefined();
+      expect(updateCall[1]).toContain(undefined);
     });
   });
 });
@@ -1751,6 +1977,13 @@ describe('Team.create / Team.update pseudonymous_usernames (takserver-enrollment
       pool.query.mockImplementation((sql) => {
         if (typeof sql === 'string' && sql.includes('WITH RECURSIVE ancestors') && sql.includes('MAX(hops_from_target) AS depth')) {
           return Promise.resolve({ rows: [{ depth: 0 }] });
+        }
+        // Org-wide-team-name-uniqueness: the create path checks the name
+        // across the org subtree (via getAncestorChain + org_subtree)
+        // BEFORE reaching the pseudonymous guard. Return no collision so
+        // the flow proceeds to the guard this test is actually exercising.
+        if (typeof sql === 'string' && sql.includes('WITH RECURSIVE org_subtree')) {
+          return Promise.resolve({ rows: [] });
         }
         return Promise.resolve({ rows: [{ id: 1, parent_team_id: null, color: 'Red', callsign_name_format: 'full_name', depth: 0 }] });
       });
@@ -1853,6 +2086,11 @@ describe('Team.create / Team.update pseudonymous_usernames (takserver-enrollment
 
     it('leaves pseudonymous_usernames unchanged (via COALESCE) when omitted from the update, and does not look up the existing team', async () => {
       pool.query.mockImplementation((sql) => {
+        // Org-wide-team-name-uniqueness: a rename resolves the existing
+        // row; a root team (parent null) short-circuits the name check.
+        if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+          return Promise.resolve({ rows: [{ id: 1, parent_team_id: null, name: 'Old' }] });
+        }
         if (typeof sql === 'string' && sql.includes('UPDATE teams')) {
           return Promise.resolve({ rows: [{ id: 1, name: 'Renamed' }] });
         }
@@ -1861,12 +2099,12 @@ describe('Team.create / Team.update pseudonymous_usernames (takserver-enrollment
 
       await Team.update(1, { name: 'Renamed' });
 
-      // No findById lookup when none of color/callsign_name_format/
-      // callsign_level_selection/pseudonymous_usernames is supplied.
-      expect(pool.query).toHaveBeenCalledTimes(1);
-      const [sql, params] = pool.query.mock.calls[0];
-      expect(sql).toContain('UPDATE teams');
-      expect(params).toContain(undefined);
+      // pseudonymous_usernames is omitted, so it reaches the UPDATE as
+      // `undefined` (COALESCE leaves it unchanged) and triggers no
+      // pseudonymous-specific lookup on its own account.
+      const updateCall = pool.query.mock.calls.find(([sql]) => typeof sql === 'string' && sql.includes('UPDATE teams'));
+      expect(updateCall).toBeDefined();
+      expect(updateCall[1]).toContain(undefined);
     });
   });
 });
@@ -1972,6 +2210,11 @@ describe('Team.update callsign_prefix (bugfix: callsign-handling)', () => {
 
   it('leaves callsign_prefix unchanged (via COALESCE) when omitted from the update', async () => {
     pool.query.mockImplementation((sql) => {
+      // Org-wide-team-name-uniqueness: a rename resolves the existing
+      // row; a root team (parent null) short-circuits the name check.
+      if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+        return Promise.resolve({ rows: [{ id: 4, parent_team_id: null, name: 'Old' }] });
+      }
       if (typeof sql === 'string' && sql.includes('UPDATE teams')) {
         return Promise.resolve({ rows: [{ id: 4, name: 'Renamed' }] });
       }
@@ -1980,10 +2223,11 @@ describe('Team.update callsign_prefix (bugfix: callsign-handling)', () => {
 
     await Team.update(4, { name: 'Renamed' });
 
-    expect(pool.query).toHaveBeenCalledTimes(1);
-    const [sql, params] = pool.query.mock.calls[0];
-    expect(sql).toContain('UPDATE teams');
-    expect(params).toContain(undefined);
+    // callsign_prefix is omitted, so it reaches the UPDATE as
+    // `undefined` (COALESCE leaves it unchanged).
+    const updateCall = pool.query.mock.calls.find(([sql]) => typeof sql === 'string' && sql.includes('UPDATE teams'));
+    expect(updateCall).toBeDefined();
+    expect(updateCall[1]).toContain(undefined);
   });
 });
 
@@ -2979,8 +3223,19 @@ describe('Team.delete CloudTAK enqueue (Requirement 7.1/9.2, 1.4)', () => {
     expect(types).toContain('remove_team_channel_group');
     expect(types).toContain('revoke_tak_certificates');
     expect(types.filter((t) => t === 'delete_cloudtak_group')).toHaveLength(1);
-    // The CloudTAK deletion is enqueued last, after the channel/cert ops.
-    expect(types[types.length - 1]).toBe('delete_cloudtak_group');
+    // Ordering (cascade-delete refactor): the per-team routine
+    // (`_deleteSingleTeamInTransaction`, shared with `deleteWithSubtree`)
+    // enqueues the channel-group and CloudTAK-group ops for THIS team;
+    // the caller (`Team.delete`) then enqueues the ONE subtree-wide bulk
+    // `revoke_tak_certificates` afterward. So the per-team channel op
+    // precedes the per-team CloudTAK op, and the subtree-wide cert
+    // revocation is enqueued last of the three.
+    const channelIdx = types.indexOf('remove_team_channel_group');
+    const cloudtakIdx = types.indexOf('delete_cloudtak_group');
+    const revokeIdx = types.indexOf('revoke_tak_certificates');
+    expect(channelIdx).toBeLessThan(cloudtakIdx);
+    expect(cloudtakIdx).toBeLessThan(revokeIdx);
+    expect(types[types.length - 1]).toBe('revoke_tak_certificates');
   });
 
   it('does NOT enqueue delete_cloudtak_group when the flag is off, while the existing channel/cert enqueues still occur (Requirement 1.4)', async () => {
@@ -3008,5 +3263,463 @@ describe('Team.delete CloudTAK enqueue (Requirement 7.1/9.2, 1.4)', () => {
     // The pre-existing enqueues are unaffected by the flag.
     expect(types).toContain('remove_team_channel_group');
     expect(types).toContain('revoke_tak_certificates');
+  });
+});
+
+/**
+ * Unit tests for `Team.getSubtreeMemberDeviceCounts` (cascade-delete
+ * feature): the empty-subtree gate the DELETE /api/teams/:teamId route
+ * consults before allowing a Global_Manager to cascade-delete a team
+ * that has sub-teams. Counts are computed via a single recursive CTE
+ * over the team + every descendant; `member` = a DISTINCT non-device
+ * user with a membership row anywhere in the subtree, `device` = a
+ * DIRECT (inherited_from_team_id IS NULL) team-owned-device membership
+ * row anywhere in the subtree, `subTeam` = descendant teams (excluding
+ * the root itself).
+ */
+describe('Team.getSubtreeMemberDeviceCounts (cascade-delete gate)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    pool.query.mockResolvedValue({ rows: [] });
+  });
+
+  it('returns the parsed member/device/sub-team counts from the single aggregate query', async () => {
+    pool.query.mockResolvedValue({
+      rows: [{ member_count: '5', device_count: '2', sub_team_count: '7' }]
+    });
+
+    const result = await Team.getSubtreeMemberDeviceCounts(3);
+
+    expect(result).toEqual({ memberCount: 5, deviceCount: 2, subTeamCount: 7 });
+    // One query, a recursive CTE over the team + its descendants.
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    const [sql, params] = pool.query.mock.calls[0];
+    expect(sql).toContain('WITH RECURSIVE team_and_subteams');
+    expect(params).toEqual([3]);
+  });
+
+  it('treats a missing/empty result row as all-zero (never NaN)', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+
+    const result = await Team.getSubtreeMemberDeviceCounts(3);
+
+    expect(result).toEqual({ memberCount: 0, deviceCount: 0, subTeamCount: 0 });
+  });
+
+  it('coerces null/absent counts to 0 rather than NaN', async () => {
+    pool.query.mockResolvedValue({
+      rows: [{ member_count: null, device_count: undefined, sub_team_count: '0' }]
+    });
+
+    const result = await Team.getSubtreeMemberDeviceCounts(3);
+
+    expect(result).toEqual({ memberCount: 0, deviceCount: 0, subTeamCount: 0 });
+  });
+
+  it('counts non-device members via is_team_device IS NOT TRUE and devices via direct is_team_device = true (source-contract on the query shape)', async () => {
+    pool.query.mockResolvedValue({
+      rows: [{ member_count: '0', device_count: '0', sub_team_count: '0' }]
+    });
+
+    await Team.getSubtreeMemberDeviceCounts(3);
+
+    const [sql] = pool.query.mock.calls[0];
+    // member_count subquery excludes devices.
+    expect(sql).toMatch(/is_team_device IS NOT TRUE/);
+    // device_count subquery counts DIRECT device memberships only.
+    expect(sql).toMatch(/inherited_from_team_id IS NULL/);
+    expect(sql).toMatch(/is_team_device = true/);
+  });
+
+  it('propagates a query error rather than swallowing it (the route must not proceed to delete on an unknown gate state)', async () => {
+    pool.query.mockRejectedValue(new Error('db down'));
+
+    await expect(Team.getSubtreeMemberDeviceCounts(3)).rejects.toThrow('db down');
+  });
+});
+
+/**
+ * Unit tests for `Team.deleteWithSubtree` (cascade-delete feature): the
+ * whole-subtree deletion the DELETE /api/teams/:teamId route calls once
+ * its empty-subtree gate passes. It must delete DEEPEST-FIRST, run the
+ * SAME per-team cleanup (`_deleteSingleTeamInTransaction`) for EVERY team
+ * in the subtree -- so each descendant's channels and Authentik/CloudTAK
+ * groups get their own Sync_Operations rather than being silently
+ * dropped by the raw parent_team_id FK cascade -- and enqueue exactly
+ * ONE subtree-wide bulk revoke_tak_certificates, all on one client, in
+ * one transaction.
+ */
+describe('Team.deleteWithSubtree (cascade-delete)', () => {
+  let mockClient;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockClient = {
+      query: jest.fn().mockResolvedValue({ rows: [] }),
+      release: jest.fn()
+    };
+    pool.connect.mockResolvedValue(mockClient);
+    EventPublisher.publishOperation.mockResolvedValue('op-id');
+    pool.query.mockResolvedValue({ rows: [] });
+    UserAttributesService.clearTeamAttributes.mockResolvedValue(true);
+  });
+
+  it('deletes every team in the subtree deepest-first, one teams-row DELETE per team, on one client in one transaction', async () => {
+    // Subtree: root 3 (depth 0) -> 4 (depth 1) -> 5 (depth 2).
+    // Returned ORDER BY depth DESC, so [5, 4, 3].
+    mockClient.query.mockImplementation((sql, params) => {
+      if (typeof sql === 'string' && sql.includes('WITH RECURSIVE subtree')) {
+        return Promise.resolve({ rows: [{ id: 5, depth: 2 }, { id: 4, depth: 1 }, { id: 3, depth: 0 }] });
+      }
+      if (typeof sql === 'string' && sql.includes('WITH RECURSIVE team_and_subteams')) {
+        return Promise.resolve({ rows: [] });
+      }
+      if (typeof sql === 'string' && sql.includes('DELETE FROM teams')) {
+        return Promise.resolve({ rows: [{ id: params[0], name: `Team ${params[0]}` }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const result = await Team.deleteWithSubtree(3, 99);
+
+    // Exactly one client/transaction for the whole subtree.
+    expect(pool.connect).toHaveBeenCalledTimes(1);
+    const calls = mockClient.query.mock.calls.map((c) => c);
+    const teamsDeletes = calls.filter(([sql]) => typeof sql === 'string' && sql.includes('DELETE FROM teams'));
+    // One teams-row DELETE per subtree team, deepest-first: 5, then 4, then 3.
+    expect(teamsDeletes.map(([, params]) => params[0])).toEqual([5, 4, 3]);
+
+    const sqls = calls.map(([sql]) => sql);
+    expect(sqls).toContain('BEGIN');
+    expect(sqls).toContain('COMMIT');
+    expect(sqls).not.toContain('ROLLBACK');
+
+    // Returns the ROOT team's deleted row.
+    expect(result).toEqual({ id: 3, name: 'Team 3' });
+    expect(mockClient.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs the per-team channel cleanup for EVERY subtree team, not just the root (so descendant Authentik/CloudTAK groups are not orphaned)', async () => {
+    process.env.CLOUDTAK_ENABLED = 'true';
+    // Each team owns one channel, so we can prove per-team cleanup ran
+    // for all three by counting remove_team_channel_group enqueues.
+    mockClient.query.mockImplementation((sql, params) => {
+      if (typeof sql === 'string' && sql.includes('WITH RECURSIVE subtree')) {
+        return Promise.resolve({ rows: [{ id: 5, depth: 2 }, { id: 4, depth: 1 }, { id: 3, depth: 0 }] });
+      }
+      if (typeof sql === 'string' && sql.includes('WITH RECURSIVE team_and_subteams')) {
+        return Promise.resolve({ rows: [] });
+      }
+      if (typeof sql === 'string' && sql.includes('SELECT id, authentik_group_id')) {
+        // Channel id derived from the team id so each is distinct.
+        return Promise.resolve({ rows: [{ id: 1000 + params[0], authentik_group_id: 2000 + params[0], authentik_read_group_id: null, authentik_write_group_id: null }] });
+      }
+      if (typeof sql === 'string' && sql.includes('DELETE FROM teams')) {
+        return Promise.resolve({ rows: [{ id: params[0] }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await Team.deleteWithSubtree(3, 99);
+
+    const types = EventPublisher.publishOperation.mock.calls.map(([type]) => type);
+    // One channel-group removal per team (3 teams, 1 channel each).
+    expect(types.filter((t) => t === 'remove_team_channel_group')).toHaveLength(3);
+    // One CloudTAK group deletion per team.
+    expect(types.filter((t) => t === 'delete_cloudtak_group')).toHaveLength(3);
+
+    // Every subtree team's channel got its own removal op, keyed by the
+    // per-team channel id (1000 + teamId).
+    const channelOps = EventPublisher.publishOperation.mock.calls.filter(([type]) => type === 'remove_team_channel_group');
+    const channelIds = channelOps.map(([, payload]) => payload.channel_id).sort((a, b) => a - b);
+    expect(channelIds).toEqual([1003, 1004, 1005]);
+  });
+
+  it('enqueues exactly ONE subtree-wide revoke_tak_certificates covering every affected user, not one per team', async () => {
+    mockClient.query.mockImplementation((sql, params) => {
+      if (typeof sql === 'string' && sql.includes('WITH RECURSIVE subtree')) {
+        return Promise.resolve({ rows: [{ id: 5, depth: 1 }, { id: 3, depth: 0 }] });
+      }
+      if (typeof sql === 'string' && sql.includes('WITH RECURSIVE team_and_subteams')) {
+        return Promise.resolve({ rows: [{ id: 11, username: 'alice' }, { id: 12, username: 'bob' }] });
+      }
+      if (typeof sql === 'string' && sql.includes('DELETE FROM teams')) {
+        return Promise.resolve({ rows: [{ id: params[0] }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await Team.deleteWithSubtree(3, 99);
+
+    const revokeCalls = EventPublisher.publishOperation.mock.calls.filter(([type]) => type === 'revoke_tak_certificates');
+    expect(revokeCalls).toHaveLength(1);
+    expect(revokeCalls[0][1]).toEqual({ tak_usernames: ['alice', 'bob'] });
+  });
+
+  it('enqueues NO revoke_tak_certificates for an empty subtree (the gated case)', async () => {
+    mockClient.query.mockImplementation((sql, params) => {
+      if (typeof sql === 'string' && sql.includes('WITH RECURSIVE subtree')) {
+        return Promise.resolve({ rows: [{ id: 5, depth: 1 }, { id: 3, depth: 0 }] });
+      }
+      if (typeof sql === 'string' && sql.includes('WITH RECURSIVE team_and_subteams')) {
+        return Promise.resolve({ rows: [] });
+      }
+      if (typeof sql === 'string' && sql.includes('DELETE FROM teams')) {
+        return Promise.resolve({ rows: [{ id: params[0] }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await Team.deleteWithSubtree(3, 99);
+
+    const types = EventPublisher.publishOperation.mock.calls.map(([type]) => type);
+    expect(types).not.toContain('revoke_tak_certificates');
+  });
+
+  it('rolls back the whole transaction and rethrows when a delete step fails, leaving nothing committed', async () => {
+    mockClient.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('WITH RECURSIVE subtree')) {
+        return Promise.resolve({ rows: [{ id: 5, depth: 1 }, { id: 3, depth: 0 }] });
+      }
+      if (typeof sql === 'string' && sql.includes('WITH RECURSIVE team_and_subteams')) {
+        return Promise.resolve({ rows: [] });
+      }
+      if (typeof sql === 'string' && sql.includes('DELETE FROM teams')) {
+        return Promise.reject(new Error('constraint violation'));
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await expect(Team.deleteWithSubtree(3, 99)).rejects.toThrow('constraint violation');
+
+    const sqls = mockClient.query.mock.calls.map(([sql]) => sql);
+    expect(sqls).toContain('ROLLBACK');
+    expect(sqls).not.toContain('COMMIT');
+    expect(mockClient.release).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * Org-wide-team-name-uniqueness feature: a team's `name` must be unique
+ * across its whole Organisation (the subtree under the root
+ * `parent_team_id IS NULL`), not merely under its immediate parent (all
+ * the baseline `teams_name_parent_team_id_key` DB constraint enforces).
+ * Enforced at the application layer via
+ * `Team.assertNameUniqueInOrganisation`, called from `Team.create`
+ * (Sub_Team path) and `Team.update` (rename + re-parent), throwing the
+ * typed `TeamNameConflictError`. These tests mock `pool.query` directly,
+ * matching this file's convention, keying off the recursive-CTE SQL each
+ * step issues.
+ */
+describe('Team org-wide name uniqueness (Team.assertNameUniqueInOrganisation + create/update)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.spyOn(Team, 'createTeamChannel').mockResolvedValue({ id: 999 });
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  describe('assertNameUniqueInOrganisation (the helper directly)', () => {
+    it('throws TeamNameConflictError when another team in the org subtree already has the name', async () => {
+      pool.query.mockResolvedValue({ rows: [{ id: 77 }] });
+
+      await expect(
+        Team.assertNameUniqueInOrganisation(1, 'Auckland')
+      ).rejects.toThrow(Team.TeamNameConflictError);
+
+      const [sql, params] = pool.query.mock.calls[0];
+      expect(sql).toContain('WITH RECURSIVE org_subtree');
+      // org id, candidate name, excludeTeamId (null here).
+      expect(params).toEqual([1, 'Auckland', null]);
+    });
+
+    it('does NOT throw when no other team in the org subtree has the name', async () => {
+      pool.query.mockResolvedValue({ rows: [] });
+      await expect(Team.assertNameUniqueInOrganisation(1, 'Unique Name')).resolves.toBeUndefined();
+    });
+
+    it('passes excludeTeamId through so a team never conflicts with its own row', async () => {
+      pool.query.mockResolvedValue({ rows: [] });
+      await Team.assertNameUniqueInOrganisation(1, 'Auckland', 42);
+      const [, params] = pool.query.mock.calls[0];
+      expect(params).toEqual([1, 'Auckland', 42]);
+    });
+
+    it('is case-sensitive (matches the baseline UNIQUE constraint) -- the SQL compares name with = , not ILIKE', async () => {
+      pool.query.mockResolvedValue({ rows: [] });
+      await Team.assertNameUniqueInOrganisation(1, 'auckland');
+      const [sql] = pool.query.mock.calls[0];
+      expect(sql).toContain('name = $2');
+      expect(sql).not.toMatch(/ILIKE|LOWER\(/i);
+    });
+  });
+
+  describe('Team.create (Sub_Team) enforces org-wide name uniqueness', () => {
+    // Shared mock: depth query (OK), ancestor chain (root org id 1), and
+    // the org_subtree name check whose result the test varies.
+    function mockCreateWith({ nameConflict }) {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('WITH RECURSIVE ancestors') && sql.includes('MAX(hops_from_target) AS depth')) {
+          return Promise.resolve({ rows: [{ depth: 0 }] });
+        }
+        if (typeof sql === 'string' && sql.includes('WITH RECURSIVE ancestors')) {
+          // getAncestorChain: root-first, so index 0 is the Organisation.
+          return Promise.resolve({ rows: [{ id: 1, parent_team_id: null, color: 'Red', callsign_name_format: 'full_name', depth: 0 }] });
+        }
+        if (typeof sql === 'string' && sql.includes('WITH RECURSIVE org_subtree')) {
+          return Promise.resolve({ rows: nameConflict ? [{ id: 55 }] : [] });
+        }
+        if (typeof sql === 'string' && sql.includes('INSERT INTO teams')) {
+          return Promise.resolve({ rows: [{ id: 10, name: 'Auckland', parent_team_id: 2 }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+    }
+
+    it('throws TeamNameConflictError and never INSERTs when the name is taken elsewhere in the same org', async () => {
+      mockCreateWith({ nameConflict: true });
+
+      await expect(
+        Team.create({ name: 'Auckland', parent_team_id: 2 })
+      ).rejects.toThrow(Team.TeamNameConflictError);
+
+      const insertCalls = pool.query.mock.calls.filter(([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO teams'));
+      expect(insertCalls).toHaveLength(0);
+      expect(Team.createTeamChannel).not.toHaveBeenCalled();
+    });
+
+    it('checks the name against the resolved ORGANISATION root id (from getAncestorChain[0]), not the immediate parent', async () => {
+      mockCreateWith({ nameConflict: false });
+
+      await Team.create({ name: 'Auckland', parent_team_id: 2 });
+
+      const subtreeCall = pool.query.mock.calls.find(([sql]) => typeof sql === 'string' && sql.includes('WITH RECURSIVE org_subtree'));
+      expect(subtreeCall).toBeDefined();
+      // org id 1 (the root), candidate name, no excludeTeamId on create.
+      expect(subtreeCall[1]).toEqual([1, 'Auckland', null]);
+    });
+
+    it('proceeds to INSERT when the name is unique in the org', async () => {
+      mockCreateWith({ nameConflict: false });
+
+      const team = await Team.create({ name: 'Auckland', parent_team_id: 2 });
+
+      expect(team).toEqual(expect.objectContaining({ id: 10 }));
+      const insertCalls = pool.query.mock.calls.filter(([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO teams'));
+      expect(insertCalls).toHaveLength(1);
+    });
+
+    it('does NOT run the org-wide name check for a root Organisation create (parent_team_id null) -- root-vs-root is the DB constraint\'s job', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('INSERT INTO teams')) {
+          return Promise.resolve({ rows: [{ id: 1, name: 'FENZ', parent_team_id: null }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      await Team.create({ name: 'FENZ', parent_team_id: null });
+
+      const subtreeCall = pool.query.mock.calls.find(([sql]) => typeof sql === 'string' && sql.includes('WITH RECURSIVE org_subtree'));
+      expect(subtreeCall).toBeUndefined();
+    });
+  });
+
+  describe('Team.update enforces org-wide name uniqueness on rename and re-parent', () => {
+    it('throws TeamNameConflictError on a RENAME that collides with another team in the same org, without UPDATE', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+          // The team being renamed is a Sub_Team of parent 2.
+          return Promise.resolve({ rows: [{ id: 5, parent_team_id: 2, name: 'Old Name' }] });
+        }
+        if (typeof sql === 'string' && sql.includes('WITH RECURSIVE ancestors')) {
+          // getAncestorChain(2): root org id 1.
+          return Promise.resolve({ rows: [{ id: 1, parent_team_id: null }, { id: 2, parent_team_id: 1 }] });
+        }
+        if (typeof sql === 'string' && sql.includes('WITH RECURSIVE org_subtree')) {
+          return Promise.resolve({ rows: [{ id: 88 }] }); // a collision
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      await expect(
+        Team.update(5, { name: 'Auckland' })
+      ).rejects.toThrow(Team.TeamNameConflictError);
+
+      const updateCalls = pool.query.mock.calls.filter(([sql]) => typeof sql === 'string' && sql.includes('UPDATE teams'));
+      expect(updateCalls).toHaveLength(0);
+    });
+
+    it('excludes the team itself from the rename check (a no-op rename to its own current name never conflicts)', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+          return Promise.resolve({ rows: [{ id: 5, parent_team_id: 2, name: 'Auckland' }] });
+        }
+        if (typeof sql === 'string' && sql.includes('WITH RECURSIVE ancestors')) {
+          return Promise.resolve({ rows: [{ id: 1, parent_team_id: null }, { id: 2, parent_team_id: 1 }] });
+        }
+        if (typeof sql === 'string' && sql.includes('WITH RECURSIVE org_subtree')) {
+          return Promise.resolve({ rows: [] });
+        }
+        if (typeof sql === 'string' && sql.includes('UPDATE teams')) {
+          return Promise.resolve({ rows: [{ id: 5, name: 'Auckland' }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      await Team.update(5, { name: 'Auckland' });
+
+      const subtreeCall = pool.query.mock.calls.find(([sql]) => typeof sql === 'string' && sql.includes('WITH RECURSIVE org_subtree'));
+      // Excludes teamId 5 (org id 1, name 'Auckland', exclude 5).
+      expect(subtreeCall[1]).toEqual([1, 'Auckland', 5]);
+      const updateCalls = pool.query.mock.calls.filter(([sql]) => typeof sql === 'string' && sql.includes('UPDATE teams'));
+      expect(updateCalls).toHaveLength(1);
+    });
+
+    it('throws TeamNameConflictError on a RE-PARENT into an org where the team\'s name already exists', async () => {
+      // Team 5 (name 'Auckland') moving under parent 9, whose org (root
+      // 8) already contains an 'Auckland'.
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+          return Promise.resolve({ rows: [{ id: 5, parent_team_id: 2, name: 'Auckland' }] });
+        }
+        if (typeof sql === 'string' && sql.includes('WITH RECURSIVE ancestors')) {
+          // getAncestorChain(9): new org root id 8.
+          return Promise.resolve({ rows: [{ id: 8, parent_team_id: null }, { id: 9, parent_team_id: 8 }] });
+        }
+        if (typeof sql === 'string' && sql.includes('WITH RECURSIVE org_subtree')) {
+          return Promise.resolve({ rows: [{ id: 88 }] }); // collision in the destination org
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      await expect(
+        Team.update(5, { parent_team_id: 9 })
+      ).rejects.toThrow(Team.TeamNameConflictError);
+
+      // The check resolved the DESTINATION org (root 8), not the current one.
+      const subtreeCall = pool.query.mock.calls.find(([sql]) => typeof sql === 'string' && sql.includes('WITH RECURSIVE org_subtree'));
+      expect(subtreeCall[1]).toEqual([8, 'Auckland', 5]);
+      const updateCalls = pool.query.mock.calls.filter(([sql]) => typeof sql === 'string' && sql.includes('UPDATE teams'));
+      expect(updateCalls).toHaveLength(0);
+    });
+
+    it('does NOT run the org-wide name check when neither name nor parent_team_id is being updated', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+          return Promise.resolve({ rows: [{ id: 5, parent_team_id: 2, name: 'Auckland' }] });
+        }
+        if (typeof sql === 'string' && sql.includes('UPDATE teams')) {
+          return Promise.resolve({ rows: [{ id: 5 }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      await Team.update(5, { visibility: 'private' });
+
+      const subtreeCall = pool.query.mock.calls.find(([sql]) => typeof sql === 'string' && sql.includes('WITH RECURSIVE org_subtree'));
+      expect(subtreeCall).toBeUndefined();
+    });
   });
 });

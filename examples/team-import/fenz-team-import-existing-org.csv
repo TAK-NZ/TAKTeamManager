@@ -1,0 +1,663 @@
+rowId,parentRowRef,parentTeamName,parentTeamId,name,visibility,callsignPrefix,color,canJoin
+r1,,,3,Te Hiku,public,TEHI,,
+d1,r1,,,Northland,public,NORT,,
+,d1,,,Ahipara,public,AHIP,,true
+,d1,,,Broadwood,public,BROA,,true
+,d1,,,Cavalli,public,CAVA,,true
+,d1,,,Hihi,public,HIHI,,true
+,d1,,,Houhora,public,HOUH,,true
+,d1,,,Kaeo,public,KAEO,,true
+,d1,,,Kaitaia,public,KAIT,,true
+,d1,,,Karikari,public,KARI,,true
+,d1,,,Kohukohu,public,KOHU,,true
+,d1,,,Mangonui,public,MANG,,true
+,d1,,,Rangiputa,public,RANG,,true
+,d1,,,Taupo Bay,public,TAUP,,true
+,d1,,,Kaikohe (RFF),public,KAIK,,true
+,d1,,,Kaikohe (VFB),public,KAI,,true
+,d1,,,Kawakawa,public,KAWA,,true
+,d1,,,Kerikeri,public,KERI,,true
+,d1,,,Okaihau,public,OKAI,,true
+,d1,,,Omapere,public,OMAP,,true
+,d1,,,Paihia,public,PAIH,,true
+,d1,,,Rawene,public,RAWE,,true
+,d1,,,Rawhiti,public,RAWH,,true
+,d1,,,Russell,public,RUSS,,true
+,d1,,,Hikurangi,public,HIKU,,true
+,d1,,,Kamo,public,KAMO,,true
+,d1,,,Ngunguru,public,NGUN,,true
+,d1,,,Onerahi,public,ONER,,true
+,d1,,,Portland,public,PORT,,true
+,d1,,,Towai,public,TOWA,,true
+,d1,,,Whananaki,public,WHAN,,true
+,d1,,,Whangarei Heads,public,WHA,,true
+,d1,,,Whangarei Kaipara Operational Support Unit,public,WKOS,,true
+,d1,,,Whangarei,public,WHA2,,true
+,d1,,,Dargaville,public,DARG,,true
+,d1,,,Kaiwaka,public,KAIW,,true
+,d1,,,Mangawhai,public,MAN,,true
+,d1,,,Maungakaramea,public,MAUN,,true
+,d1,,,Maungaturoto,public,MAU,,true
+,d1,,,Paparoa,public,PAPA,,true
+,d1,,,Ruakaka,public,RUAK,,true
+,d1,,,Ruawai,public,RUAW,,true
+,d1,,,Te Kopuru,public,TEKO,,true
+,d1,,,Tinopai,public,TINO,,true
+,d1,,,Waipu,public,WAIP,,true
+d2,r1,,,Waitemata,public,WAIT,,
+,d2,,,Ahuroa,public,AHUR,,true
+,d2,,,Kawau Island,public,KAWA,,true
+,d2,,,Leigh,public,LEIG,,true
+,d2,,,Mahurangi East,public,MAHU,,true
+,d2,,,Matakana,public,MATA,,true
+,d2,,,Puhoi,public,PUHO,,true
+,d2,,,Warkworth,public,WARK,,true
+,d2,,,Wellsford,public,WELL,,true
+,d2,,,Albany,public,ALBA,,true
+,d2,,,East Coast Bays,public,EAST,,true
+,d2,,,Greenhithe,public,GREE,,true
+,d2,,,Manly,public,MANL,,true
+,d2,,,Silverdale,public,SILV,,true
+,d2,,,West Harbour,public,WEST,,true
+,d2,,,Birkenhead,public,BIRK,,true
+,d2,,,Devonport,public,DEVO,,true
+,d2,,,Takapuna,public,TAKA,,true
+,d2,,,Bethells Valley,public,BETH,,true
+,d2,,,Helensville,public,HELE,,true
+,d2,,,Karekare,public,KARE,,true
+,d2,,,Kaukapakapa,public,KAUK,,true
+,d2,,,Kumeu,public,KUME,,true
+,d2,,,Muriwai,public,MURI,,true
+,d2,,,Piha,public,PIHA,,true
+,d2,,,Shelly Beach,public,SHEL,,true
+,d2,,,Waiatarua,public,WAIA,,true
+,d2,,,Waitakere,public,WAIT,,true
+,d2,,,Glen Eden,public,GLEN,,true
+,d2,,,Henderson,public,HEND,,true
+,d2,,,Huia,public,HUIA,,true
+,d2,,,Laingholm,public,LAIN,,true
+,d2,,,Te Atatu,public,TEAT,,true
+,d2,,,Titirangi,public,TITI,,true
+d3,r1,,,Auckland,public,AUCK,,
+,d3,,,Auckland Operational Support,public,AUCK,,true
+,d3,,,Auckland City,public,AUC,,true
+,d3,,,Parnell,public,PARN,,true
+,d3,,,Mount Wellington,public,MOUN,,true
+,d3,,,Remuera,public,REMU,,true
+,d3,,,St Heliers,public,STHE,,true
+,d3,,,Avondale,public,AVON,,true
+,d3,,,Balmoral,public,BALM,,true
+,d3,,,Grey Lynn,public,GREY,,true
+,d3,,,Ellerslie,public,ELLE,,true
+,d3,,,Mount Roskill,public,MOU,,true
+,d3,,,Onehunga,public,ONEH,,true
+d4,r1,,,Counties Manukau,public,COUN,,
+,d4,,,Beachlands,public,BEAC,,true
+,d4,,,Howick,public,HOWI,,true
+,d4,,,Oneroa,public,ONER,,true
+,d4,,,Onetangi,public,ONET,,true
+,d4,,,Otahuhu,public,OTAH,,true
+,d4,,,Clevedon,public,CLEV,,true
+,d4,,,Kawakawa Bay,public,KAWA,,true
+,d4,,,Orere Point,public,ORER,,true
+,d4,,,Otara,public,OTAR,,true
+,d4,,,Kaitoke,public,KAIT,,true
+,d4,,,Mangere,public,MANG,,true
+,d4,,,Okiwi,public,OKIW,,true
+,d4,,,Papatoetoe,public,PAPA,,true
+,d4,,,Tryphena,public,TRYP,,true
+,d4,,,Awhitu,public,AWHI,,true
+,d4,,,Onewhero,public,ONEW,,true
+,d4,,,Patumahoe,public,PATU,,true
+,d4,,,Port Waikato,public,PORT,,true
+,d4,,,Pukekohe,public,PUKE,,true
+,d4,,,Tuakau,public,TUAK,,true
+,d4,,,Waiau Pa,public,WAIA,,true
+,d4,,,Waiuku,public,WAIU,,true
+,d4,,,Hunua,public,HUNU,,true
+,d4,,,Kaiaua,public,KAIA,,true
+,d4,,,Mangatangi,public,MAN,,true
+,d4,,,Manurewa,public,MANU,,true
+,d4,,,Papakura,public,PAP,,true
+,d4,,,Pokeno,public,POKE,,true
+r2,,,3,Ngā Tai ki te Puku,public,NGAT,,
+d5,r2,,,Waikato,public,WAIK,,
+,d5,,,Benneydale,public,BENN,,true
+,d5,,,Kawhia,public,KAWH,,true
+,d5,,,Otorohanga,public,OTOR,,true
+,d5,,,Piopio,public,PIOP,,true
+,d5,,,Pirongia,public,PIRO,,true
+,d5,,,Tainui Mokau,public,TAIN,,true
+,d5,,,Te Awamutu,public,TEAW,,true
+,d5,,,Te Kuiti,public,TEKU,,true
+,d5,,,Cooks Beach,public,COOK,,true
+,d5,,,Hahei,public,HAHE,,true
+,d5,,,Kuaotunu,public,KUAO,,true
+,d5,,,Matarangi,public,MATA,,true
+,d5,,,Onemana-Opoutere,public,ONEM,,true
+,d5,,,Pauanui,public,PAUA,,true
+,d5,,,Tairua,public,TAIR,,true
+,d5,,,Whangamata,public,WHAN,,true
+,d5,,,Whiritoa,public,WHIR,,true
+,d5,,,Whitianga,public,WHIT,,true
+,d5,,,Chartwell,public,CHAR,,true
+,d5,,,Hamilton (Stn),public,HAMI,,true
+,d5,,,Hamilton (VFB),public,HAM,,true
+,d5,,,Te Rapa,public,TERA,,true
+,d5,,,Colville,public,COLV,,true
+,d5,,,Coromandel,public,CORO,,true
+,d5,,,Kennedy Bay,public,KENN,,true
+,d5,,,Manaia Hauraki,public,MANA,,true
+,d5,,,Port Charles,public,PORT,,true
+,d5,,,Puriri,public,PURI,,true
+,d5,,,Tapu,public,TAPU,,true
+,d5,,,Thames,public,THAM,,true
+,d5,,,Whangapoua,public,WHA,,true
+,d5,,,Cambridge,public,CAMB,,true
+,d5,,,Huntly,public,HUNT,,true
+,d5,,,Maramarua,public,MARA,,true
+,d5,,,Ngaruawahia,public,NGAR,,true
+,d5,,,Raglan,public,RAGL,,true
+,d5,,,Te Akau,public,TEAK,,true
+,d5,,,Te Kauwhata,public,TEKA,,true
+,d5,,,Whitikahu,public,WHI,,true
+,d5,,,Matamata,public,MAT,,true
+,d5,,,Morrinsville,public,MORR,,true
+,d5,,,Ngatea,public,NGAT,,true
+,d5,,,Paeroa,public,PAER,,true
+,d5,,,Tahuna,public,TAHU,,true
+,d5,,,Te Aroha,public,TEAR,,true
+,d5,,,Turua,public,TURU,,true
+,d5,,,Waihi,public,WAIH,,true
+d6,r2,,,Bay of Plenty,public,BAYO,,
+,d6,,,Eastern Bay,public,EAST,,true
+,d6,,,Edgecumbe,public,EDGE,,true
+,d6,,,Matata,public,MATA,,true
+,d6,,,Ohope,public,OHOP,,true
+,d6,,,Opotiki,public,OPOT,,true
+,d6,,,Taneatua,public,TANE,,true
+,d6,,,Waihau Bay,public,WAIH,,true
+,d6,,,Waimana,public,WAIM,,true
+,d6,,,Whakatane,public,WHAK,,true
+,d6,,,Greerton,public,GREE,,true
+,d6,,,Mount Maunganui,public,MOUN,,true
+,d6,,,Papamoa,public,PAPA,,true
+,d6,,,Tauranga,public,TAUR,,true
+,d6,,,Te Puke,public,TEPU,,true
+,d6,,,Kaingaroa,public,KAIN,,true
+,d6,,,Kinloch,public,KINL,,true
+,d6,,,Lake Taupo,public,LAKE,,true
+,d6,,,Mangakino,public,MANG,,true
+,d6,,,Minginui,public,MING,,true
+,d6,,,Murupara,public,MURU,,true
+,d6,,,Southern Lakes,public,SOUT,,true
+,d6,,,Taupo,public,TAUP,,true
+,d6,,,Turangi,public,TURA,,true
+,d6,,,Lake Okareka,public,LAK,,true
+,d6,,,Lake Tarawera,public,LT,,true
+,d6,,,Mamaku,public,MAMA,,true
+,d6,,,Ngongotaha,public,NGON,,true
+,d6,,,Okere Falls,public,OKER,,true
+,d6,,,Putaruru,public,PUTA,,true
+,d6,,,Rotorua,public,ROTO,,true
+,d6,,,Tirau,public,TIRA,,true
+,d6,,,Tokoroa,public,TOKO,,true
+,d6,,,Katikati,public,KATI,,true
+,d6,,,Kawerau,public,KAWE,,true
+,d6,,,Maketu,public,MAKE,,true
+,d6,,,Matakana Island,public,MAT,,true
+,d6,,,Mayor View,public,MAYO,,true
+,d6,,,Omokoroa,public,OMOK,,true
+,d6,,,Pukehina,public,PUKE,,true
+,d6,,,Rotoma,public,ROT,,true
+d7,r2,,,Tairawhiti,public,TAIR,,
+,d7,,,Hicks Bay,public,HICK,,true
+,d7,,,Manutuke,public,MANU,,true
+,d7,,,Patutahi,public,PATU,,true
+,d7,,,Ruatoria,public,RUAT,,true
+,d7,,,Te Araroa,public,TEAR,,true
+,d7,,,Te Puia Springs,public,TEPU,,true
+,d7,,,Tikitiki,public,TIKI,,true
+,d7,,,Tokomaru Bay,public,TOKO,,true
+,d7,,,Tolaga Bay,public,TOLA,,true
+,d7,,,Eastland,public,EAST,,true
+,d7,,,Gisborne,public,GISB,,true
+,d7,,,Matawai,public,MATA,,true
+,d7,,,Te Karaka,public,TEKA,,true
+,d7,,,Tiniroto,public,TINI,,true
+,d7,,,Whatatutu,public,WHAT,,true
+r3,,,3,Te Ūpoko,public,TEUP,,
+d8,r3,,,Hawkes Bay,public,HAWK,,
+,d8,,,Matapiro,public,MATA,,true
+,d8,,,Napier Operational Support Unit,public,NAPI,,true
+,d8,,,Napier,public,NAP,,true
+,d8,,,Patoka,public,PATO,,true
+,d8,,,Puketitiri,public,PUKE,,true
+,d8,,,Rissington,public,RISS,,true
+,d8,,,Taradale,public,TARA,,true
+,d8,,,Waiwhare,public,WAIW,,true
+,d8,,,Elsthorpe,public,ELST,,true
+,d8,,,Hastings,public,HAST,,true
+,d8,,,Haumoana,public,HAUM,,true
+,d8,,,Havelock North,public,HAVE,,true
+,d8,,,Hawkes Bay Back Country,public,HAWK,,true
+,d8,,,Heretaunga,public,HERE,,true
+,d8,,,Kereru,public,KERE,,true
+,d8,,,Maraekakaho,public,MARA,,true
+,d8,,,Maraetotara,public,MAR,,true
+,d8,,,Otane,public,OTAN,,true
+,d8,,,Torran,public,TORR,,true
+,d8,,,Waimarama,public,WAIM,,true
+,d8,,,Aramoana,public,ARAM,,true
+,d8,,,Ashley Clinton,public,ASHL,,true
+,d8,,,Flemington,public,FLEM,,true
+,d8,,,Omakere,public,OMAK,,true
+,d8,,,Ongaonga,public,ONGA,,true
+,d8,,,Porangahau,public,PORA,,true
+,d8,,,Takapau,public,TAKA,,true
+,d8,,,Tamatea,public,TAMA,,true
+,d8,,,Tikokino,public,TIKO,,true
+,d8,,,Waipawa,public,WAIP,,true
+,d8,,,Waipukurau,public,WAI,,true
+,d8,,,Wallingford,public,WALL,,true
+,d8,,,Akitio,public,AKIT,,true
+,d8,,,Dannevirke,public,DANN,,true
+,d8,,,Eketahuna,public,EKET,,true
+,d8,,,Herbertville,public,HERB,,true
+,d8,,,Norsewood,public,NORS,,true
+,d8,,,Ormondville,public,ORMO,,true
+,d8,,,Pahiatua,public,PAHI,,true
+,d8,,,Pongaroa,public,PONG,,true
+,d8,,,Te Uri,public,TEUR,,true
+,d8,,,Tiraumea,public,TIRA,,true
+,d8,,,Weber,public,WEBE,,true
+,d8,,,Woodville,public,WOOD,,true
+,d8,,,Bay View,public,BAYV,,true
+,d8,,,Mahia,public,MAHI,,true
+,d8,,,Nuhaka,public,NUHA,,true
+,d8,,,Putorino,public,PUTO,,true
+,d8,,,Ruakituri,public,RUAK,,true
+,d8,,,Te Pohue,public,TEPO,,true
+,d8,,,Tuai,public,TUAI,,true
+,d8,,,Wairoa,public,WAIR,,true
+d9,r3,,,Taranaki,public,TARA,,
+,d9,,,Eltham,public,ELTH,,true
+,d9,,,Hawera,public,HAWE,,true
+,d9,,,Kaponga,public,KAPO,,true
+,d9,,,Kohi,public,KOHI,,true
+,d9,,,Manaia,public,MANA,,true
+,d9,,,Okaiawa,public,OKAI,,true
+,d9,,,Opunake,public,OPUN,,true
+,d9,,,Patea,public,PATE,,true
+,d9,,,Rahotu,public,RAHO,,true
+,d9,,,Stratford,public,STRA,,true
+,d9,,,Toko,public,TOKO,,true
+,d9,,,Waverley,public,WAVE,,true
+,d9,,,Inglewood,public,INGL,,true
+,d9,,,New Plymouth,public,NEWP,,true
+,d9,,,New Plymouth West,public,NEW,,true
+,d9,,,Ngamotu,public,NGAM,,true
+,d9,,,Oakura,public,OAKU,,true
+,d9,,,Okato,public,OKAT,,true
+,d9,,,Urenui,public,UREN,,true
+,d9,,,Waitara,public,WAIT,,true
+d10,r3,,,Manawatu-Whanganui,public,MANA,,
+,d10,,,Apiti,public,APIT,,true
+,d10,,,Ashhurst,public,ASHH,,true
+,d10,,,Bunnythorpe,public,BUNN,,true
+,d10,,,Cheltenham,public,CHEL,,true
+,d10,,,Feilding,public,FEIL,,true
+,d10,,,Halcombe,public,HALC,,true
+,d10,,,Kimbolton,public,KIMB,,true
+,d10,,,Manawatu,public,MANA,,true
+,d10,,,Milson,public,MILS,,true
+,d10,,,Palmerston North (Stn),public,PALM,,true
+,d10,,,Palmerston North (VFB),public,PAL,,true
+,d10,,,Rangiwahia,public,RANG,,true
+,d10,,,Kirikau,public,KIRI,,true
+,d10,,,Manunui,public,MANU,,true
+,d10,,,National Park,public,NATI,,true
+,d10,,,Ohakune,public,OHAK,,true
+,d10,,,Ohura,public,OHUR,,true
+,d10,,,Owhango,public,OWHA,,true
+,d10,,,Raetihi,public,RAET,,true
+,d10,,,Ruapehu,public,RUAP,,true
+,d10,,,Taumarunui,public,TAUM,,true
+,d10,,,Waimarino,public,WAIM,,true
+,d10,,,Whakapapa,public,WHAK,,true
+,d10,,,Foxton Beach,public,FOXT,,true
+,d10,,,Foxton,public,FOX,,true
+,d10,,,Himatangi Beach,public,HIMA,,true
+,d10,,,Horowhenua,public,HORO,,true
+,d10,,,Levin,public,LEVI,,true
+,d10,,,Rongotea,public,RONG,,true
+,d10,,,Shannon,public,SHAN,,true
+,d10,,,Tangimoana,public,TANG,,true
+,d10,,,Tokomaru,public,TOKO,,true
+,d10,,,Waitarere,public,WAIT,,true
+,d10,,,Bulls,public,BULL,,true
+,d10,,,Hunterville,public,HUNT,,true
+,d10,,,Koitiata,public,KOIT,,true
+,d10,,,Mangaweka,public,MANG,,true
+,d10,,,Marton,public,MART,,true
+,d10,,,Rangitikei,public,RAN,,true
+,d10,,,Ratana,public,RATA,,true
+,d10,,,Taihape,public,TAIH,,true
+,d10,,,Whanganui (Stn),public,WHAN,,true
+,d10,,,Whanganui (RFF),public,WHA,,true
+d11,r3,,,Wellington,public,WELL,,
+,d11,,,Johnsonville,public,JOHN,,true
+,d11,,,Newlands,public,NEWL,,true
+,d11,,,Porirua,public,PORI,,true
+,d11,,,Tawa,public,TAWA,,true
+,d11,,,Titahi Bay,public,TITA,,true
+,d11,,,Wellington North,public,WELL,,true
+,d11,,,Brooklyn,public,BROO,,true
+,d11,,,Kilbirnie,public,KILB,,true
+,d11,,,Newtown,public,NEWT,,true
+,d11,,,Remutaka (Stn),public,REMU,,true
+,d11,,,Remutaka (VFB),public,REM,,true
+,d11,,,Silverstream,public,SILV,,true
+,d11,,,Stokes Valley,public,STOK,,true
+,d11,,,Trentham,public,TREN,,true
+,d11,,,Karori,public,KARO,,true
+,d11,,,Thorndon,public,THOR,,true
+,d11,,,Wellington City,public,WEL,,true
+,d11,,,Carterton,public,CART,,true
+,d11,,,Castlepoint,public,CAST,,true
+,d11,,,Chatham Islands,public,CHAT,,true
+,d11,,,Featherston,public,FEAT,,true
+,d11,,,Greytown,public,GREY,,true
+,d11,,,Lake Ferry,public,LAKE,,true
+,d11,,,Martinborough,public,MART,,true
+,d11,,,Masterton,public,MAST,,true
+,d11,,,Mauriceville,public,MAUR,,true
+,d11,,,Ngawi,public,NGAW,,true
+,d11,,,Riversdale Beach,public,RIVE,,true
+,d11,,,Tinui,public,TINU,,true
+,d11,,,Tora,public,TORA,,true
+,d11,,,Wainuioru,public,WAIN,,true
+,d11,,,Avalon,public,AVAL,,true
+,d11,,,Eastbourne,public,EAST,,true
+,d11,,,Hutt City,public,HUTT,,true
+,d11,,,Seaview,public,SEAV,,true
+,d11,,,Wainuiomata Bush,public,WAI,,true
+,d11,,,Wainuiomata,public,WAI2,,true
+,d11,,,Otaki,public,OTAK,,true
+,d11,,,Paekakariki,public,PAEK,,true
+,d11,,,Paraparaumu,public,PARA,,true
+,d11,,,Plimmerton,public,PLIM,,true
+,d11,,,Te Horo,public,TEHO,,true
+,d11,,,Waikanae,public,WAIK,,true
+r4,,,3,Te Ihu,public,TEIH,,
+d12,r4,,,Nelson Marlborough,public,NELS,,
+,d12,,,Awatere,public,AWAT,,true
+,d12,,,Canvastown,public,CANV,,true
+,d12,,,Duncan Bay VRFF,public,DUNC,,true
+,d12,,,Flaxbourne,public,FLAX,,true
+,d12,,,Havelock,public,HAVE,,true
+,d12,,,Kenepuru VRFF,public,KENE,,true
+,d12,,,Lake Rotoiti,public,LAKE,,true
+,d12,,,Linkwater,public,LINK,,true
+,d12,,,Nopera,public,NOPE,,true
+,d12,,,Okiwi Bay,public,OKIW,,true
+,d12,,,Rai Valley,public,RAIV,,true
+,d12,,,Seddon,public,SEDD,,true
+,d12,,,Waitaria/Clova Bay,public,WAIT,,true
+,d12,,,Blenheim (RFF),public,BLEN,,true
+,d12,,,Blenheim (VFB),public,BLE,,true
+,d12,,,Koromiko,public,KORO,,true
+,d12,,,Northbank,public,NORT,,true
+,d12,,,Picton,public,PICT,,true
+,d12,,,Rarangi,public,RARA,,true
+,d12,,,Renwick,public,RENW,,true
+,d12,,,Waihopai,public,WAIH,,true
+,d12,,,Wairau Valley,public,WAIR,,true
+,d12,,,Collingwood,public,COLL,,true
+,d12,,,Kaiteriteri,public,KAIT,,true
+,d12,,,Mapua,public,MAPU,,true
+,d12,,,Marahau,public,MARA,,true
+,d12,,,Motueka,public,MOTU,,true
+,d12,,,Murchison,public,MURC,,true
+,d12,,,Ngatimoti,public,NGAT,,true
+,d12,,,Takaka,public,TAKA,,true
+,d12,,,Tapawera,public,TAPA,,true
+,d12,,,Tasman,public,TASM,,true
+,d12,,,Upper Takaka,public,UPPE,,true
+,d12,,,Wainui Bay,public,WAIN,,true
+,d12,,,Appleby,public,APPL,,true
+,d12,,,Brightwater,public,BRIG,,true
+,d12,,,Hira,public,HIRA,,true
+,d12,,,Nelson,public,NELS,,true
+,d12,,,Richmond,public,RICH,,true
+,d12,,,Stoke,public,STOK,,true
+,d12,,,Upper Moutere,public,UPP,,true
+,d12,,,Wakefield,public,WAKE,,true
+d13,r4,,,West Coast,public,WEST,,
+,d13,,,Brunner,public,BRUN,,true
+,d13,,,Cobden,public,COBD,,true
+,d13,,,Fox Glacier,public,FOXG,,true
+,d13,,,Franz Josef,public,FRAN,,true
+,d13,,,Greymouth,public,GREY,,true
+,d13,,,Haast,public,HAAS,,true
+,d13,,,Hannahs Clearing,public,HANN,,true
+,d13,,,Harihari,public,HARI,,true
+,d13,,,Hokitika,public,HOKI,,true
+,d13,,,Kokatahi & Kowhitirangi,public,KOKA,,true
+,d13,,,Kumara,public,KUMA,,true
+,d13,,,Moana,public,MOAN,,true
+,d13,,,Ross,public,ROSS,,true
+,d13,,,Westport,public,WEST,,true
+,d13,,,Whataroa,public,WHAT,,true
+,d13,,,Blackball,public,BLAC,,true
+,d13,,,Charleston,public,CHAR,,true
+,d13,,,Granity,public,GRAN,,true
+,d13,,,Ikamatua,public,IKAM,,true
+,d13,,,Inangahua,public,INAN,,true
+,d13,,,Karamea,public,KARA,,true
+,d13,,,Little Wanganui,public,LITT,,true
+,d13,,,Ngahere,public,NGAH,,true
+,d13,,,Reefton,public,REEF,,true
+,d13,,,Runanga,public,RUNA,,true
+,d13,,,Seddonville,public,SEDD,,true
+,d13,,,Springs Junction,public,SPRI,,true
+,d13,,,Waimangaroa,public,WAIM,,true
+d14,r4,,,Canterbury,public,CANT,,
+,d14,,,Coalgate,public,COAL,,true
+,d14,,,Darfield South,public,DARF,,true
+,d14,,,Darfield,public,DAR,,true
+,d14,,,Dunsandel,public,DUNS,,true
+,d14,,,Hororata,public,HORO,,true
+,d14,,,Kirwee,public,KIRW,,true
+,d14,,,Leeston,public,LEES,,true
+,d14,,,Lincoln,public,LINC,,true
+,d14,,,Rolleston,public,ROLL,,true
+,d14,,,Southbridge,public,SOUT,,true
+,d14,,,West Melton,public,WEST,,true
+,d14,,,Arthur's Pass,public,ARTH,,true
+,d14,,,Canterbury High Country,public,CANT,,true
+,d14,,,Cust,public,CUST,,true
+,d14,,,Kaiapoi,public,KAIA,,true
+,d14,,,Oxford,public,OXFO,,true
+,d14,,,Rangiora,public,RANG,,true
+,d14,,,Sefton,public,SEFT,,true
+,d14,,,Sheffield,public,SHEF,,true
+,d14,,,Springfield,public,SPRI,,true
+,d14,,,Swannanoa,public,SWAN,,true
+,d14,,,The Pines/Kairaki,public,THEP,,true
+,d14,,,Waikuku Beach,public,WAIK,,true
+,d14,,,Woodend,public,WOOD,,true
+,d14,,,Akaroa,public,AKAR,,true
+,d14,,,Christchurch City,public,CHRI,,true
+,d14,,,Diamond Harbour,public,DIAM,,true
+,d14,,,Duvauchelle,public,DUVA,,true
+,d14,,,Governors Bay Fire Brigade,public,GOVE,,true
+,d14,,,Governors Bay,public,GOV,,true
+,d14,,,Ilam,public,ILAM,,true
+,d14,,,Little River,public,LITT,,true
+,d14,,,Lyttelton,public,LYTT,,true
+,d14,,,Wigram,public,WIGR,,true
+,d14,,,Anzac,public,ANZA,,true
+,d14,,,Redwood,public,REDW,,true
+,d14,,,Spencerville VFB - Natural,public,SPEN,,true
+,d14,,,Spencerville,public,SPE,,true
+,d14,,,Spreydon,public,SPRE,,true
+,d14,,,Sumner,public,SUMN,,true
+,d14,,,Woolston,public,WOOL,,true
+,d14,,,Amberley,public,AMBE,,true
+,d14,,,Amuri / Waiau,public,AMUR,,true
+,d14,,,Cheviot,public,CHEV,,true
+,d14,,,Conway Flat,public,CONW,,true
+,d14,,,Culverden,public,CULV,,true
+,d14,,,Hanmer Springs,public,HANM,,true
+,d14,,,Hanmer,public,HAN,,true
+,d14,,,Hawarden,public,HAWA,,true
+,d14,,,Hurunui,public,HURU,,true
+,d14,,,Kaikoura (RFF),public,KAIK,,true
+,d14,,,Kaikoura (VFB),public,KAI,,true
+,d14,,,Motunau,public,MOTU,,true
+,d14,,,Scargill,public,SCAR,,true
+,d14,,,Waiau,public,WAIA,,true
+,d14,,,Waikari,public,WAI,,true
+,d14,,,Waipara,public,WAIP,,true
+,d14,,,Goose Bay,public,GOOS,,true
+,d14,,,Lyford,public,LYFO,,true
+d15,r4,,,Mid-South Canterbury,public,MIDS,,
+,d15,,,Albury,public,ALBU,,true
+,d15,,,Aoraki/Mount Cook,public,AORA,,true
+,d15,,,Burkes Pass,public,BURK,,true
+,d15,,,Cannington,public,CANN,,true
+,d15,,,Cave,public,CAVE,,true
+,d15,,,Fairlie,public,FAIR,,true
+,d15,,,Hakataramea,public,HAKA,,true
+,d15,,,Twizel (RFF),public,TWIZ,,true
+,d15,,,Twizel (VFB),public,TWI,,true
+,d15,,,Waihaorunga,public,WAIH,,true
+,d15,,,Aorangi,public,AOR,,true
+,d15,,,Glenavy,public,GLEN,,true
+,d15,,,Pleasant Point,public,PLEA,,true
+,d15,,,St Andrews,public,STAN,,true
+,d15,,,Temuka,public,TEMU,,true
+,d15,,,Timaru,public,TIMA,,true
+,d15,,,Waimate,public,WAIM,,true
+,d15,,,Washdyke,public,WASH,,true
+,d15,,,Alford Forest,public,ALFO,,true
+,d15,,,Ashburton (RFF),public,ASHB,,true
+,d15,,,Ashburton (VFB),public,ASH,,true
+,d15,,,Lake Clearwater,public,LAKE,,true
+,d15,,,Lauriston,public,LAUR,,true
+,d15,,,Methven,public,METH,,true
+,d15,,,Mount Somers,public,MOUN,,true
+,d15,,,Pendarves,public,PEND,,true
+,d15,,,Rakaia,public,RAKA,,true
+,d15,,,Upper Rakaia,public,UPPE,,true
+,d15,,,Willowby,public,WILL,,true
+,d15,,,Clandeboye,public,CLAN,,true
+,d15,,,Geraldine,public,GERA,,true
+,d15,,,Hinds,public,HIND,,true
+,d15,,,Lake Tekapo,public,LAK,,true
+,d15,,,Mayfield,public,MAYF,,true
+,d15,,,Peel Forest,public,PEEL,,true
+,d15,,,Rangitata Gorge,public,RANG,,true
+,d15,,,Rangitata,public,RAN,,true
+r5,,,3,Te Kei,public,TEKE,,
+d16,r5,,,Otago,public,OTAG,,
+,d16,,,Alexandra,public,ALEX,,true
+,d16,,,Blackstone,public,BLAC,,true
+,d16,,,Clyde,public,CLYD,,true
+,d16,,,Cromwell,public,CROM,,true
+,d16,,,Dunstan,public,DUNS,,true
+,d16,,,Millers Flat,public,MILL,,true
+,d16,,,Naseby,public,NASE,,true
+,d16,,,Omakau,public,OMAK,,true
+,d16,,,Ranfurly,public,RANF,,true
+,d16,,,Roxburgh,public,ROXB,,true
+,d16,,,Tarras,public,TARR,,true
+,d16,,,Teviot Valley,public,TEVI,,true
+,d16,,,Dunedin City,public,DUNE,,true
+,d16,,,Lookout Point,public,LOOK,,true
+,d16,,,Mosgiel,public,MOSG,,true
+,d16,,,Roslyn,public,ROSL,,true
+,d16,,,St Kilda,public,STKI,,true
+,d16,,,Willowbank,public,WILL,,true
+,d16,,,Arrowtown,public,ARRO,,true
+,d16,,,Frankton,public,FRAN,,true
+,d16,,,Glenorchy,public,GLEN,,true
+,d16,,,Kingston,public,KING,,true
+,d16,,,Lake Hawea,public,LAKE,,true
+,d16,,,Luggate,public,LUGG,,true
+,d16,,,Makarora,public,MAKA,,true
+,d16,,,Queenstown,public,QUEE,,true
+,d16,,,Wakatipu Volunteer Fire Brigade.,public,WAKA,,true
+,d16,,,Wanaka,public,WANA,,true
+,d16,,,Duntroon,public,DUNT,,true
+,d16,,,Hampden,public,HAMP,,true
+,d16,,,Kakanui,public,KAKA,,true
+,d16,,,Kurow,public,KURO,,true
+,d16,,,Oamaru,public,OAMA,,true
+,d16,,,Omarama,public,OMAR,,true
+,d16,,,Otematata,public,OTEM,,true
+,d16,,,Palmerston,public,PALM,,true
+,d16,,,Waitaki,public,WAIT,,true
+,d16,,,Weston,public,WEST,,true
+,d16,,,Brighton,public,BRIG,,true
+,d16,,,Middlemarch,public,MIDD,,true
+,d16,,,Milton,public,MILT,,true
+,d16,,,Outram,public,OUTR,,true
+,d16,,,Port Chalmers,public,PORT,,true
+,d16,,,Portobello,public,POR,,true
+,d16,,,Ravensbourne,public,RAVE,,true
+,d16,,,Waihola,public,WAIH,,true
+,d16,,,Waikouaiti,public,WAIK,,true
+,d16,,,Waitati,public,WAI,,true
+,d16,,,Wakari,public,WAK,,true
+,d16,,,Balclutha,public,BALC,,true
+,d16,,,Clinton,public,CLIN,,true
+,d16,,,Clutha Valley,public,CLUT,,true
+,d16,,,Heriot,public,HERI,,true
+,d16,,,Kaitangata,public,KAIT,,true
+,d16,,,Kaka Point,public,KAK,,true
+,d16,,,Lawrence,public,LAWR,,true
+,d16,,,Owaka,public,OWAK,,true
+,d16,,,Papatowai,public,PAPA,,true
+,d16,,,Tapanui,public,TAPA,,true
+,d16,,,Waitahuna,public,WAI2,,true
+,d16,,,Waiwera South,public,WAIW,,true
+d17,r5,,,Southern,public,SOUT,,
+,d17,,,Athol,public,ATHO,,true
+,d17,,,Balfour,public,BALF,,true
+,d17,,,Garston,public,GARS,,true
+,d17,,,Lumsden,public,LUMS,,true
+,d17,,,Manapouri,public,MANA,,true
+,d17,,,Milford Sound,public,MILF,,true
+,d17,,,Mossburn,public,MOSS,,true
+,d17,,,Riversdale,public,RIVE,,true
+,d17,,,Te Anau,public,TEAN,,true
+,d17,,,Waikaia,public,WAIK,,true
+,d17,,,Blackmount,public,BLAC,,true
+,d17,,,Dipton,public,DIPT,,true
+,d17,,,Drummond,public,DRUM,,true
+,d17,,,Nightcaps,public,NIGH,,true
+,d17,,,Ohai,public,OHAI,,true
+,d17,,,Orepuki,public,OREP,,true
+,d17,,,Otautau,public,OTAU,,true
+,d17,,,Riverton,public,RIV,,true
+,d17,,,Thornbury,public,THOR,,true
+,d17,,,Tuatapere,public,TUAT,,true
+,d17,,,Winton,public,WINT,,true
+,d17,,,Browns,public,BROW,,true
+,d17,,,Edendale,public,EDEN,,true
+,d17,,,Gore,public,GORE,,true
+,d17,,,Hedgehope,public,HEDG,,true
+,d17,,,Mataura,public,MATA,,true
+,d17,,,Pukerau,public,PUKE,,true
+,d17,,,Tokanui,public,TOKA,,true
+,d17,,,Waikaka,public,WAI,,true
+,d17,,,Waikawa / Curio Bay,public,WCB,,true
+,d17,,,Waimahaka,public,WAIM,,true
+,d17,,,Wyndham,public,WYND,,true
+,d17,,,Bluff,public,BLUF,,true
+,d17,,,Invercargill,public,INVE,,true
+,d17,,,Kingswell,public,KING,,true
+,d17,,,Oban,public,OBAN,,true
+,d17,,,Wallacetown,public,WALL,,true

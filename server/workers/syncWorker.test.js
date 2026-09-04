@@ -535,6 +535,11 @@ describe('Property 3: Payload validation failures never schedule a retry', () =>
     resync_org_channel_tier_access: 'resyncOrgChannelTierAccess',
     cleanup_orphaned_authentik_user: 'cleanupOrphanedAuthentikUser',
     remove_team_channel_group: 'removeTeamChannelGroup',
+    // Bugfix (orphaned Authentik team groups): enqueued by
+    // Team.createTeamChannel's fallback when the synchronous group-create
+    // fails; reconciled (create-or-reuse-by-name + write pk back) by the
+    // Sync_Worker.
+    reconcile_team_channel_group: 'reconcileTeamChannelGroup',
     // Bugfix (Channels tab has no edit action, and no way to add/edit a
     // custom channel's Authentik/LDAP description): enqueued by
     // Channel.updateCustomChannel.
@@ -1205,6 +1210,128 @@ describe('SyncWorker Authentik failure classification wiring', () => {
       const [sql, params] = worker.pool.query.mock.calls[0];
       expect(sql).toContain('next_retry_at');
       expect(params[0]).toBe('pending');
+    });
+  });
+
+  /**
+   * Bugfix (orphaned Authentik team groups): `reconcileTeamChannelGroup`
+   * is the retryable repair for a primary team channel whose
+   * `authentik_group_id` could not be populated synchronously at
+   * team-creation time. It create-or-reuses the group by name (mirroring
+   * `ensureCloudTakGroup`) and writes the pk back onto the channel row,
+   * and is idempotent: a channel that is gone, or that already has a
+   * group id, is a no-op success (no fetch).
+   */
+  describe('reconcileTeamChannelGroup', () => {
+    const baseOperation = {
+      id: 'op-reconcile-team-channel-1',
+      operation_type: 'reconcile_team_channel_group',
+      retry_count: 0,
+      max_retries: 48,
+      correlation_id: 'corr-reconcile-team-channel-1',
+      payload: { channel_id: 10, authentik_group_name: 'tak_Teams - LSAR', description: 'desc' }
+    };
+
+    // Route the handler's own SELECT/UPDATE queries to sensible defaults
+    // while letting the terminal markOperationCompleted/markPermanentlyFailed
+    // UPDATE (which contains 'status = ' / 'failure_category') fall through
+    // to a captured result. `channelRow` is what the channel SELECT returns.
+    function mockChannelQueries(channelRow) {
+      worker.pool.query = jest.fn().mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT id, authentik_group_id FROM channels')) {
+          return Promise.resolve({ rows: channelRow ? [channelRow] : [] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+    }
+
+    it('creates a fresh group and writes its pk back onto the channel, then completes', async () => {
+      mockChannelQueries({ id: 10, authentik_group_id: null });
+      global.fetch = jest.fn().mockImplementation((url, options) => {
+        if (options?.method === 'POST') {
+          return Promise.resolve({ ok: true, status: 201, json: () => Promise.resolve({ pk: 'fresh-pk-1' }) });
+        }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ results: [] }) });
+      });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      // POSTed a create for the intended group name.
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/core/groups/'),
+        expect.objectContaining({ method: 'POST' })
+      );
+      // Wrote the pk back onto the channel row (guarded on IS NULL).
+      const updateCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('UPDATE channels SET authentik_group_id')
+      );
+      expect(updateCall).toBeDefined();
+      expect(updateCall[1]).toEqual(['fresh-pk-1', 10]);
+      // Terminal completed.
+      const completedCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('status') && sql.includes('completed')
+      );
+      expect(completedCall).toBeDefined();
+    });
+
+    it('reuses an existing group (looked up by name) when the create POST conflicts, and writes that pk back', async () => {
+      mockChannelQueries({ id: 10, authentik_group_id: null });
+      global.fetch = jest.fn().mockImplementation((url, options) => {
+        if (options?.method === 'POST') {
+          return Promise.resolve({ ok: false, status: 400, statusText: 'Bad Request' });
+        }
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ results: [{ pk: 'existing-pk-9', name: 'tak_Teams - LSAR' }] })
+        });
+      });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      const updateCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('UPDATE channels SET authentik_group_id')
+      );
+      expect(updateCall[1]).toEqual(['existing-pk-9', 10]);
+    });
+
+    it('is a no-op success (no fetch, no update) when the channel already has a group id', async () => {
+      mockChannelQueries({ id: 10, authentik_group_id: 'already-set-pk' });
+      global.fetch = jest.fn();
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      expect(global.fetch).not.toHaveBeenCalled();
+      const updateCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('UPDATE channels SET authentik_group_id')
+      );
+      expect(updateCall).toBeUndefined();
+    });
+
+    it('is a no-op success (no fetch) when the channel no longer exists', async () => {
+      mockChannelQueries(null);
+      global.fetch = jest.fn();
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it('classifies a 5xx create failure (with no existing group to reuse) as retryable', async () => {
+      mockChannelQueries({ id: 10, authentik_group_id: null });
+      global.fetch = jest.fn().mockImplementation((url, options) => {
+        if (options?.method === 'POST') {
+          return Promise.resolve({ ok: false, status: 503, statusText: 'Service Unavailable' });
+        }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ results: [] }) });
+      });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      const retryCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('next_retry_at')
+      );
+      expect(retryCall).toBeDefined();
+      expect(retryCall[1][0]).toBe('pending');
     });
   });
 

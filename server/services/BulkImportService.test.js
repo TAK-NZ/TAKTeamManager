@@ -268,7 +268,7 @@ describe('BulkImportService.importUsers', () => {
  *     OWN per-row failure, not a whole-batch failure
  */
 function csvFromTeamRows(rows) {
-  const header = 'rowId,parentRowRef,name,parentTeamName,parentTeamId,visibility,callsignPrefix';
+  const header = 'rowId,parentRowRef,name,parentTeamName,parentTeamId,visibility,callsignPrefix,color,canJoin';
   const lines = rows.map((r) => [
     r.rowId ?? '',
     r.parentRowRef ?? '',
@@ -276,7 +276,22 @@ function csvFromTeamRows(rows) {
     r.parentTeamName ?? '',
     r.parentTeamId ?? '',
     r.visibility ?? '',
-    r.callsignPrefix ?? ''
+    r.callsignPrefix ?? '',
+    // Bugfix (CSV bulk team import mandatory TAK Colour): every
+    // pre-existing test in this describe block builds a ROOT
+    // Organisation row (no parentTeamName/parentTeamId/parentRowRef),
+    // for which `color` is now a required field -- defaulted here to a
+    // valid `TAK_COLOR_NAMES` value so none of those pre-existing tests
+    // need to individually opt in to a value they were never testing.
+    // Tests specifically covering `color` itself (below) override this
+    // default explicitly, including to `''` to test the missing-value
+    // rejection.
+    r.color ?? 'Red',
+    // `canJoin` is an optional column (default false when blank). Left
+    // blank unless a test opts in, so every pre-existing test keeps its
+    // original meaning (a non-joinable team). Tests covering `canJoin`
+    // itself (below) set it explicitly, including to an invalid value.
+    r.canJoin ?? ''
   ].join(','));
   return [header, ...lines].join('\n');
 }
@@ -638,6 +653,275 @@ describe('BulkImportService.importTeams', () => {
     expect(summary.successCount).toBe(1);
     expect(summary.failureCount).toBe(0);
     expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ callsign_prefix: 'AUS-FIRE' }));
+  });
+
+  /**
+   * Bugfix (CSV bulk team import mandatory TAK Colour): a new
+   * Organisation row (no parentTeamName/parentTeamId/parentRowRef) is
+   * created with `parent_team_id: null`, so `color` is required and
+   * validated against the fixed 14-name `TAK_COLOR_NAMES` set --
+   * closing the bug where `createRowsInOrder` used to hardcode `color:
+   * '#3B82F6'` for every row regardless of what (if anything) the CSV
+   * supplied, meaning no CSV import ever set a real TAK Colour.
+   */
+  it('creates a new Organisation row with the row\'s valid color', async () => {
+    const csv = csvFromTeamRows([{ name: 'FENZ', callsignPrefix: 'FENZ', color: 'Dark Blue' }]);
+    Team.create.mockImplementation((teamData) =>
+      Promise.resolve({ id: 1, name: teamData.name, parent_team_id: teamData.parent_team_id })
+    );
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importTeams(csv, importingUser);
+
+    expect(summary.successCount).toBe(1);
+    expect(summary.failureCount).toBe(0);
+    expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ color: 'Dark Blue' }));
+  });
+
+  it('fails only the row with a missing color when creating a new Organisation, continuing the batch', async () => {
+    const csv = csvFromTeamRows([
+      { name: 'No Color Org', color: '' },
+      { name: 'Fine Org' }
+    ]);
+    Team.create.mockImplementation((teamData) =>
+      Promise.resolve({ id: 9, name: teamData.name, parent_team_id: teamData.parent_team_id })
+    );
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importTeams(csv, importingUser);
+
+    expect(summary.rejected).toBeUndefined();
+    expect(summary.successCount).toBe(1);
+    expect(summary.failureCount).toBe(1);
+    expect(summary.results[0].success).toBe(false);
+    expect(summary.results[0].error).toMatch(/Missing required field: color/);
+    expect(summary.results[1]).toEqual({ row: 2, success: true, teamId: 9 });
+    // The invalid row never reached Team.create.
+    expect(Team.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails only the row with a color that is not one of the 14 canonical TAK Colour names', async () => {
+    const csv = csvFromTeamRows([
+      { name: 'Hex Org', color: '#3B82F6' },
+      { name: 'Fine Org' }
+    ]);
+    Team.create.mockImplementation((teamData) =>
+      Promise.resolve({ id: 9, name: teamData.name, parent_team_id: teamData.parent_team_id })
+    );
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importTeams(csv, importingUser);
+
+    expect(summary.successCount).toBe(1);
+    expect(summary.failureCount).toBe(1);
+    expect(summary.results[0].success).toBe(false);
+    expect(summary.results[0].error).toMatch(/Invalid color: #3B82F6/);
+    expect(Team.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes a Sub_Team row\'s color straight through unvalidated, since Team.create ignores it', async () => {
+    // A Sub_Team's color is silently overridden by Team.create with its
+    // Organisation's current value regardless of what is supplied, so
+    // this deliberately supplies a non-canonical value to prove it is
+    // never rejected at the CSV layer for a non-root row.
+    const csv = csvFromTeamRows([
+      { name: 'Southland District', parentTeamName: 'FENZ', color: 'not-a-real-color' }
+    ]);
+    pool.query.mockImplementation((sql, params) => {
+      if (sql === 'SELECT id FROM teams WHERE name = $1' && params[0] === 'FENZ') {
+        return Promise.resolve({ rows: [{ id: 1 }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    Team.create.mockImplementation((teamData) =>
+      Promise.resolve({ id: 101, name: teamData.name, parent_team_id: teamData.parent_team_id })
+    );
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importTeams(csv, importingUser);
+
+    expect(summary.successCount).toBe(1);
+    expect(summary.failureCount).toBe(0);
+    expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ color: 'not-a-real-color' }));
+  });
+
+  /**
+   * Unit tests for the `canJoin` Team_Import_Row column -- whether the
+   * team/org is flagged Joinable. Optional, default false, accepts only
+   * the literal booleans `true`/`false` (case-insensitively); any other
+   * value fails that row alone. Mirrors the `visibility` column's own
+   * validate-then-throw, per-row-failure behaviour above.
+   */
+  it('creates a Team with can_join: false (the default) when the row omits canJoin', async () => {
+    const csv = csvFromTeamRows([{ name: 'Default CanJoin Org' }]);
+    Team.create.mockImplementation((teamData) =>
+      Promise.resolve({ id: 1, name: teamData.name, parent_team_id: teamData.parent_team_id })
+    );
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importTeams(csv, importingUser);
+
+    expect(summary.successCount).toBe(1);
+    expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ can_join: false }));
+  });
+
+  it('creates a Team with can_join: true when the row sets canJoin to true (case-insensitively)', async () => {
+    const csv = csvFromTeamRows([{ name: 'Joinable Org', canJoin: 'TRUE' }]);
+    Team.create.mockImplementation((teamData) =>
+      Promise.resolve({ id: 1, name: teamData.name, parent_team_id: teamData.parent_team_id })
+    );
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importTeams(csv, importingUser);
+
+    expect(summary.successCount).toBe(1);
+    expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ can_join: true }));
+  });
+
+  it('creates a Team with can_join: false when the row explicitly sets canJoin to false', async () => {
+    const csv = csvFromTeamRows([{ name: 'Explicit Not Joinable Org', canJoin: 'false' }]);
+    Team.create.mockImplementation((teamData) =>
+      Promise.resolve({ id: 1, name: teamData.name, parent_team_id: teamData.parent_team_id })
+    );
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importTeams(csv, importingUser);
+
+    expect(summary.successCount).toBe(1);
+    expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ can_join: false }));
+  });
+
+  it('fails only the row with an invalid canJoin value, continuing the batch', async () => {
+    const csv = csvFromTeamRows([
+      { name: 'Weird Join Org', canJoin: 'yes' },
+      { name: 'Fine Org' }
+    ]);
+    Team.create.mockImplementation((teamData) =>
+      Promise.resolve({ id: 9, name: teamData.name, parent_team_id: teamData.parent_team_id })
+    );
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importTeams(csv, importingUser);
+
+    expect(summary.rejected).toBeUndefined();
+    expect(summary.successCount).toBe(1);
+    expect(summary.failureCount).toBe(1);
+    expect(summary.results[0]).toEqual({
+      row: 1,
+      success: false,
+      error: 'Invalid canJoin: yes (must be true or false)'
+    });
+    expect(summary.results[1]).toEqual({ row: 2, success: true, teamId: 9 });
+    // The invalid row never reached Team.create.
+    expect(Team.create).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * Bugfix (parentRowRef transitive-creation-failure): a row whose
+   * parentRowRef points at a row that fails at `Team.create` TIME
+   * (not a file-level dangling reference or cycle -- both already
+   * covered above) must fail too, rather than being silently created
+   * as a brand new root Organisation. Reproduced directly against a
+   * live database before this fix: `resolveNodeParentTeamId` used to
+   * return `undefined` for such a child, which `Team.create` reads as
+   * `parent_team_id: null`.
+   */
+  it('fails a child row whose parentRowRef points at a row that failed Team.create (e.g. a callsignPrefix conflict), instead of creating it as a new root Organisation', async () => {
+    const csv = csvFromTeamRows([
+      { rowId: 'org1', name: 'Colliding Org', callsignPrefix: 'FENZ' },
+      { rowId: 'org2', name: 'Independent Org', callsignPrefix: 'IND1' },
+      { rowId: 'child1', parentRowRef: 'org1', name: 'Child Of Failed Org' }
+    ]);
+
+    class CallsignPrefixConflictError extends Error {
+      constructor(conflictingValue) {
+        super(`Callsign Prefix "${conflictingValue}" is already in use by another team`);
+        this.name = 'CallsignPrefixConflictError';
+      }
+    }
+
+    Team.create.mockImplementation((teamData) => {
+      if (teamData.name === 'Colliding Org') {
+        return Promise.reject(new CallsignPrefixConflictError('FENZ'));
+      }
+      return Promise.resolve({ id: 42, name: teamData.name, parent_team_id: teamData.parent_team_id });
+    });
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importTeams(csv, importingUser);
+
+    expect(summary.rejected).toBeUndefined();
+    expect(summary.successCount).toBe(1);
+    expect(summary.failureCount).toBe(2);
+
+    expect(summary.results[0]).toEqual({
+      row: 1,
+      success: false,
+      error: 'Callsign Prefix "FENZ" is already in use by another team'
+    });
+    expect(summary.results[1]).toEqual({ row: 2, success: true, teamId: 42 });
+    expect(summary.results[2].success).toBe(false);
+    expect(summary.results[2].error).toMatch(/Parent row failed to create: org1/);
+
+    // Team.create was called exactly twice: once for the colliding org
+    // (which threw) and once for the independent org. The child row
+    // must NEVER reach Team.create at all -- confirming it was not
+    // silently created as a new root Organisation.
+    expect(Team.create).toHaveBeenCalledTimes(2);
+    expect(Team.create).not.toHaveBeenCalledWith(expect.objectContaining({ name: 'Child Of Failed Org' }));
+  });
+
+  // Org-wide-team-name-uniqueness: two rows with the SAME name under
+  // DIFFERENT parents in the SAME org. `Team.create` (real model)
+  // enforces org-wide name uniqueness and throws TeamNameConflictError
+  // for the second one; here `Team.create` is mocked, so this asserts
+  // the SERVICE surfaces that thrown error as the second row's OWN
+  // per-row failure (never a whole-batch rejection), the same per-row
+  // isolation the callsign-conflict case above relies on.
+  it('records a TeamNameConflictError from Team.create as that row\'s own per-row failure, continuing the batch', async () => {
+    const csv = csvFromTeamRows([
+      { rowId: 'org1', name: 'LandSAR', callsignPrefix: 'LSAR' },
+      { rowId: 'regionA', parentRowRef: 'org1', name: 'Region A', callsignPrefix: 'RA' },
+      { rowId: 'regionB', parentRowRef: 'org1', name: 'Region B', callsignPrefix: 'RB' },
+      // Two "Auckland" sub-teams under different parents (Region A and
+      // Region B) but the SAME org -- the second must fail org-wide.
+      { rowId: 'aucklandA', parentRowRef: 'regionA', name: 'Auckland' },
+      { rowId: 'aucklandB', parentRowRef: 'regionB', name: 'Auckland' }
+    ]);
+
+    class TeamNameConflictError extends Error {
+      constructor(conflictingName) {
+        super(`A team named "${conflictingName}" already exists in this Organisation`);
+        this.name = 'TeamNameConflictError';
+      }
+    }
+
+    let seenAuckland = false;
+    let nextId = 100;
+    Team.create.mockImplementation((teamData) => {
+      if (teamData.name === 'Auckland') {
+        if (seenAuckland) {
+          // The real model would throw this once the first 'Auckland'
+          // exists in the org subtree.
+          return Promise.reject(new TeamNameConflictError('Auckland'));
+        }
+        seenAuckland = true;
+      }
+      return Promise.resolve({ id: nextId++, name: teamData.name, parent_team_id: teamData.parent_team_id });
+    });
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importTeams(csv, importingUser);
+
+    expect(summary.rejected).toBeUndefined();
+    // org1, regionA, regionB, and ONE Auckland succeed; the second
+    // Auckland fails on its own, without affecting the rest.
+    expect(summary.successCount).toBe(4);
+    expect(summary.failureCount).toBe(1);
+
+    const failed = summary.results.filter((r) => !r.success);
+    expect(failed).toHaveLength(1);
+    expect(failed[0].error).toBe('A team named "Auckland" already exists in this Organisation');
   });
 });
 

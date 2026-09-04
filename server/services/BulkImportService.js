@@ -4,6 +4,7 @@ const Team = require('../models/Team');
 const UserProvisioningService = require('./UserProvisioningService');
 const authentikService = require('./authentik');
 const { isValidCallsignPrefix } = require('../utils/callsignValidation');
+const { TAK_COLOR_NAMES } = require('../config/constants');
 const logger = require('../config/logger').createLogger('BulkImportService');
 
 /**
@@ -592,6 +593,96 @@ function parseRowCallsignPrefix(row) {
   return value;
 }
 
+/**
+ * Bugfix (CSV bulk team import mandatory TAK Colour): reads a
+ * Team_Import_Row's optional `color` column and validates it against
+ * the fixed `TAK_COLOR_NAMES` set -- the same 14 names `Team.create`
+ * silently defaults to `'#3B82F6'` for when nothing is supplied at all
+ * (a bug this function exists to close: `createRowsInOrder` used to
+ * hardcode `color: '#3B82F6'` for EVERY imported row, meaning no CSV
+ * import ever produced a real TAK Colour). `color` is a
+ * Organisation-only field (Requirement 3.2, `server/models/Team.js`):
+ * a Sub_Team's value is always silently overridden by `Team.create`
+ * with its Organisation's current colour regardless of what is
+ * supplied, so for a Sub_Team row this function passes the raw value
+ * straight through unvalidated -- `Team.create` ignores it either way,
+ * and rejecting an irrelevant value here would only be noise.
+ *
+ * For a new Organisation row (`isRoot`), a `color` value is REQUIRED
+ * (mirroring `TeamFormDialog.jsx`'s own mandatory field for creating an
+ * Organisation through the UI) and must be an exact, case-sensitive
+ * match for one of the 14 canonical names -- an empty value or any
+ * other string fails this row alone, naming the allowed set, matching
+ * `parseRowCallsignPrefix`'s own row-level rejection style.
+ *
+ * @param {Record<string, string>} row
+ * @param {boolean} isRoot - whether this row will be created with
+ *   `parent_team_id: null` (a new Organisation) -- must be resolved by
+ *   the caller (via `resolveNodeParentTeamId`) BEFORE calling this
+ *   function, since the required-vs-ignored behaviour depends on it.
+ * @returns {string|null}
+ * @throws {BulkImportRowError} if `isRoot` and the value is missing or
+ *   not one of `TAK_COLOR_NAMES`.
+ */
+function parseRowColor(row, isRoot) {
+  const value = readOptionalField(row, 'color');
+  if (!isRoot) {
+    // Sub_Team: Team.create silently overrides this with its
+    // Organisation's own colour regardless of what is supplied here --
+    // never validated or required, mirroring Team.create's own
+    // never-reject-only-override convention for this field.
+    return value === '' ? null : value;
+  }
+  if (value === '') {
+    throw new BulkImportRowError(
+      `Missing required field: color (required when creating a new Organisation; must be one of: ${TAK_COLOR_NAMES.join(', ')})`
+    );
+  }
+  if (!TAK_COLOR_NAMES.includes(value)) {
+    throw new BulkImportRowError(
+      `Invalid color: ${value} (must be exactly one of: ${TAK_COLOR_NAMES.join(', ')})`
+    );
+  }
+  return value;
+}
+
+/**
+ * Reads a Team_Import_Row's optional `canJoin` column -- whether the
+ * team/org is flagged Joinable (users may request to join it through the
+ * public interface). Defaults to `false` when omitted/empty, matching
+ * `POST /api/teams`'s own `canJoin || false` default (a team is not
+ * joinable unless explicitly made so).
+ *
+ * Accepts `true`/`false` case-insensitively (and trims surrounding
+ * whitespace via `readOptionalField`), so a spreadsheet exporting
+ * `TRUE`/`True`/`false` all work. Any other non-empty value fails this
+ * row alone (not the whole batch), naming the disallowed value, mirroring
+ * `parseRowVisibility`'s own validate-then-throw pattern. Deliberately
+ * strict (only the two literal booleans) rather than accepting `1`/`0`/
+ * `yes`/`no`, matching the app's own feature-flag-style "true only for
+ * the exact string" caution -- an ambiguous token is rejected so an
+ * operator never silently gets the wrong flag.
+ *
+ * @param {Record<string, string>} row
+ * @returns {boolean}
+ * @throws {BulkImportRowError} if a non-empty, non-`true`/`false` value
+ *   is supplied.
+ */
+function parseRowCanJoin(row) {
+  const value = readOptionalField(row, 'canJoin');
+  if (value === '') {
+    return false;
+  }
+  const lowered = value.toLowerCase();
+  if (lowered === 'true') {
+    return true;
+  }
+  if (lowered === 'false') {
+    return false;
+  }
+  throw new BulkImportRowError(`Invalid canJoin: ${value} (must be true or false)`);
+}
+
 class BulkImportService {
   /**
    * Requirement 29.2-29.4, 29.6 (task 51.1): streams a user-import CSV
@@ -951,6 +1042,22 @@ class BulkImportService {
         const parentTeamId = await BulkImportService.resolveNodeParentTeamId(node, graph);
         const visibility = parseRowVisibility(node.row);
         const callsignPrefix = parseRowCallsignPrefix(node.row);
+        // Bugfix (CSV bulk team import mandatory TAK Colour): this row
+        // is a new Organisation exactly when it will be created with no
+        // parent (`parentTeamId === null`) -- resolved above, AFTER any
+        // parent-resolution failure has already thrown, so `isRoot` is
+        // never computed for a row that is about to fail for an
+        // unrelated reason anyway. `color` used to be hardcoded to
+        // `'#3B82F6'` for every row regardless of level, meaning no CSV
+        // import ever actually set a real TAK Colour -- see
+        // `parseRowColor`'s own doc comment.
+        const isRoot = parentTeamId === null;
+        const color = parseRowColor(node.row, isRoot);
+        // Whether this team/org is flagged Joinable, from its own
+        // `canJoin` column (optional, default false). A validation
+        // failure throws a `BulkImportRowError` caught by this loop's
+        // own try/catch, failing only this row.
+        const canJoin = parseRowCanJoin(node.row);
 
         // Requirement 9.7-9.11: `Team.create` is called exactly as the
         // single-team-creation API would, so Max_Team_Depth and
@@ -965,9 +1072,9 @@ class BulkImportService {
           name,
           description: null,
           callsign_prefix: callsignPrefix,
-          color: '#3B82F6',
+          color,
           visibility,
-          can_join: false,
+          can_join: canJoin,
           parent_team_id: parentTeamId,
           created_by: importingUser?.userId ?? null
         });
@@ -1031,9 +1138,35 @@ class BulkImportService {
   static async resolveNodeParentTeamId(node, graph) {
     if (node.resolvedParentKey !== undefined) {
       // Topological order guarantees the referenced ancestor node was
-      // already processed (and its teamId recorded) earlier in this
-      // same loop.
+      // already processed earlier in this same loop -- but "processed"
+      // does not mean "succeeded". `buildImportGraph`'s own failure
+      // propagation (Requirement 9.12) only knows about problems
+      // visible up front from the file alone (dangling references,
+      // cycles); it cannot know a parent row will fail LATER, at
+      // `Team.create` time (a callsign_prefix conflict, Max_Team_Depth,
+      // any other DB-level rejection) -- so a node whose parent fails
+      // at creation time still reaches this function, with
+      // `parentNode.teamId` left `undefined`.
+      //
+      // Bugfix (parentRowRef transitive-creation-failure): `undefined`
+      // used to be returned here directly, which `Team.create` reads
+      // as `parent_team_id: null` -- silently creating this row as a
+      // BRAND NEW ROOT ORGANISATION instead of failing it, even though
+      // its file-declared parent never actually came into existence.
+      // Reproduced directly against a live database: a row whose
+      // parentRowRef pointed at a row that lost a callsign_prefix
+      // conflict was "successfully" created with no parent at all,
+      // invisible as an error anywhere in the returned results. Thrown
+      // here instead, exactly like every other resolution failure in
+      // this function, so the row is recorded as its own per-row
+      // failure (never a whole-batch rejection) and never silently
+      // promoted to a root Organisation.
       const parentNode = graph.nodes.get(node.resolvedParentKey);
+      if (parentNode.teamId === undefined) {
+        throw new BulkImportRowError(
+          `Parent row failed to create: ${node.resolvedParentKey}`
+        );
+      }
       return parentNode.teamId;
     }
 
@@ -1187,3 +1320,5 @@ module.exports = BulkImportService;
 module.exports.BulkImportRowError = BulkImportRowError;
 module.exports.BulkImportAuthorizationError = BulkImportAuthorizationError;
 module.exports.buildImportGraph = buildImportGraph;
+module.exports.parseRowColor = parseRowColor;
+module.exports.parseRowCanJoin = parseRowCanJoin;

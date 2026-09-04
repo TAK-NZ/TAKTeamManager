@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { PlusIcon, UserGroupIcon, TrashIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, ChevronRightIcon, EyeSlashIcon, ArrowLeftOnRectangleIcon, PencilIcon, QrCodeIcon } from '@heroicons/react/24/outline'
+import { PlusIcon, UserGroupIcon, TrashIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, ChevronRightIcon, EyeSlashIcon, ArrowLeftOnRectangleIcon, PencilIcon, QrCodeIcon, UsersIcon, DevicePhoneMobileIcon, ShieldCheckIcon, BuildingOfficeIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import { teamsAPI, configAPI } from '../services/api'
 import api from '../services/api'
@@ -44,11 +44,58 @@ export function getParentBreadcrumb(team, teams) {
   if (!team || !team.level) {
     return null
   }
-  const parent = teams.find((t) => t.id === team.parent_team_id)
-  if (!parent) {
+  return rootOrgLabel(team, teams)
+}
+
+/**
+ * The label used to prefix a Sub_Team's displayed name (e.g. the "LSAR"
+ * in "LSAR - Auckland"): the ROOT Organisation's `callsign_prefix` (or
+ * its `name` as a fallback), NOT the immediate parent's.
+ *
+ * This mirrors the server's canonical team-display-name rule (see
+ * `SignupFlowService.getAvailableTeams` / `Team.getJoinableTeams`, which
+ * resolve the org via the ancestor chain's root, `parent_team_id IS
+ * NULL`) so `/teams` matches what `/request-access` shows. Using the
+ * IMMEDIATE parent's prefix instead was the bug: a deeply-nested team
+ * like LandSAR > Specialist Teams > Cave Search and Rescue > Auckland
+ * rendered as "CAVE - Auckland" (the immediate parent Cave's prefix)
+ * rather than the correct "LSAR - Auckland" (the root Organisation's).
+ *
+ * Walks `parent_team_id` up through the already-fetched flat `teams`
+ * list to the root. Terminates defensively (returning the deepest
+ * ancestor actually found in the list) if an ancestor is missing -- the
+ * same "parent not in the list" case `buildTeamHierarchy` and
+ * `computeTeamDepth` already tolerate, e.g. a non-admin who only sees
+ * part of the tree. A `seen` set guards against a cyclic
+ * `parent_team_id` chain, matching `isPseudonymousOrganisation`'s own
+ * defensive walk in TeamDetail.jsx.
+ *
+ * @param {{parent_team_id?: number|string|null}} team - a Sub_Team.
+ * @param {Array<{id: number|string, parent_team_id?: number|string|null, callsign_prefix?: string, name?: string}>} teams
+ * @returns {string|null} the root Organisation's label, or null if it
+ *   cannot be resolved at all.
+ */
+export function rootOrgLabel(team, teams) {
+  if (!team) {
     return null
   }
-  return parent.callsign_prefix || parent.name || 'Root'
+  const teamsById = new Map((teams || []).map((t) => [t.id, t]))
+  const seen = new Set([team.id])
+  let current = teamsById.get(team.parent_team_id)
+  let root = current
+  while (current && current.parent_team_id != null && !seen.has(current.id)) {
+    seen.add(current.id)
+    const next = teamsById.get(current.parent_team_id)
+    if (!next) {
+      break
+    }
+    current = next
+    root = current
+  }
+  if (!root) {
+    return null
+  }
+  return root.callsign_prefix || root.name || 'Root'
 }
 
 /**
@@ -105,9 +152,6 @@ function TeamRowActions({ team, isGlobalAdmin, onEdit, onDelete, variant = 'tabl
   const dangerClass = isCard
     ? 'bg-red-50 hover:bg-red-100 text-red-600 dark:bg-red-950/40 dark:hover:bg-red-900/60 dark:text-red-400'
     : 'text-red-600 hover:text-red-500 dark:text-red-400 dark:hover:text-red-300'
-  const dangerDisabledClass = isCard
-    ? 'bg-gray-100 text-gray-400 dark:bg-gray-700 dark:text-gray-600 cursor-not-allowed'
-    : 'text-gray-400 dark:text-gray-600 cursor-not-allowed'
 
   return (
     <div className="flex items-center justify-end space-x-3">
@@ -127,20 +171,18 @@ function TeamRowActions({ team, isGlobalAdmin, onEdit, onDelete, variant = 'tabl
           <PencilIcon className={iconSizeClass} />
         </button>
       )}
-      {isGlobalAdmin && !hasSubTeams && (
+      {/* Cascade-delete feature: a Global_Manager may now delete a team
+          even when it HAS sub-teams -- the whole subtree is removed,
+          gated server-side on the subtree being empty of members and
+          team devices (the confirmation dialog surfaces that gate's
+          refusal inline). The delete button is therefore no longer
+          disabled for a team-with-sub-teams; the title just notes the
+          cascade so the operator knows what they're about to do. */}
+      {isGlobalAdmin && (
         <button
           onClick={() => onDelete(team.id)}
           className={`${boxClass} ${dangerClass}`}
-          title="Delete team"
-        >
-          <TrashIcon className={iconSizeClass} />
-        </button>
-      )}
-      {isGlobalAdmin && hasSubTeams && (
-        <button
-          disabled
-          className={`${boxClass} ${dangerDisabledClass}`}
-          title="Cannot delete team with sub-teams"
+          title={hasSubTeams ? 'Delete team and all its sub-teams' : 'Delete team'}
         >
           <TrashIcon className={iconSizeClass} />
         </button>
@@ -161,6 +203,17 @@ export default function Teams({ user }) {
   const [colorMappings, setColorMappings] = useState({})
   const [deleteTeamId, setDeleteTeamId] = useState(null)
   const [deleting, setDeleting] = useState(false)
+  // Cascade-delete feature: deleting an org/team (including one WITH
+  // sub-teams, now permitted for a Global_Manager) is a PERMANENT
+  // deletion, so it uses this app's type-to-confirm tier -- the operator
+  // must type the target's name exactly before Confirm enables (matching
+  // SuspendAccountDialog / "Permanently Delete User" / "Delete Channel").
+  // `deleteConfirmInput` holds that typed value; `deleteError` surfaces
+  // the server's own refusal (e.g. the 409 empty-subtree gate: "Cannot
+  // delete: this team or its sub-teams still have N members …") inline in
+  // the dialog rather than only as a toast.
+  const [deleteConfirmInput, setDeleteConfirmInput] = useState('')
+  const [deleteError, setDeleteError] = useState(null)
   const [searchTerm, setSearchTerm] = useState('')
   const [sortField, setSortField] = useState('name')
   const [sortDirection, setSortDirection] = useState('asc')
@@ -176,8 +229,26 @@ export default function Teams({ user }) {
   useEffect(() => {
     const fetchData = async () => {
       try {
+        // Bugfix (hierarchy rendered incorrectly after a large CSV
+        // import): GET /teams/my-teams's admin "all teams" branch is
+        // paginated, defaulting to pageSize: 50 (server/middleware/
+        // pagination.js) when no pageSize is supplied at all -- which
+        // this call used to do. `buildTeamHierarchy` below needs EVERY
+        // team in one pass to resolve parent_team_id correctly; once a
+        // database holds more than 50 teams (order is alphabetical by
+        // name), any team sorting past position 50 was silently missing
+        // from this list, and `buildTeamHierarchy` treats a team whose
+        // parent isn't in the fetched set as an orphan ROOT team --
+        // exactly the "Specialist Teams' own sub-teams rendered as if
+        // they were separate top-level orgs" defect this fixes.
+        // `MAX_PAGE_SIZE` (200, server/middleware/pagination.js) is the
+        // server's own hard cap; a database exceeding that would need
+        // real multi-page fetching, which this page does not yet do
+        // (the paginated response's own `pagination.total` would need
+        // to drive that, and there are no more than ~200 teams in any
+        // real deployment considered by this app to date).
         const [teamsResponse, configResponse, publicConfigResponse] = await Promise.all([
-          teamsAPI.getMyTeams(),
+          teamsAPI.getMyTeams({ pageSize: 200 }),
           api.get('/config/color-mappings'),
           configAPI.getPublic()
         ])
@@ -311,17 +382,55 @@ export default function Teams({ user }) {
       <ChevronDownIcon className="h-4 w-4" />
   }
 
+  // Closes the delete dialog and clears its transient state, so a
+  // re-open never starts pre-filled with a stale typed name or a stale
+  // error (matching SuspendAccountDialog's Cancel-clears-the-input
+  // convention).
+  const closeDeleteDialog = () => {
+    setDeleteTeamId(null)
+    setDeleteConfirmInput('')
+    setDeleteError(null)
+  }
+
+  // Computes the set of team ids in a team's subtree (the team plus every
+  // descendant), from the already-fetched flat `teams` list, so a
+  // successful cascade delete removes the WHOLE subtree from local state
+  // rather than leaving orphaned descendant rows on screen until the next
+  // fetch. Iterative breadth-first walk over parent_team_id.
+  const subtreeTeamIds = (rootId) => {
+    const ids = new Set([rootId])
+    let added = true
+    while (added) {
+      added = false
+      for (const t of teams) {
+        if (t.parent_team_id != null && ids.has(t.parent_team_id) && !ids.has(t.id)) {
+          ids.add(t.id)
+          added = true
+        }
+      }
+    }
+    return ids
+  }
+
   const handleDeleteTeam = async () => {
     if (!deleteTeamId) return
-    
+
     setDeleting(true)
+    setDeleteError(null)
     try {
       await teamsAPI.delete(deleteTeamId)
-      setTeams(teams.filter(team => team.id !== deleteTeamId))
-      setDeleteTeamId(null)
+      // Cascade delete removes the team AND all descendants server-side;
+      // mirror that locally so the list doesn't show orphaned children.
+      const removed = subtreeTeamIds(deleteTeamId)
+      setTeams(teams.filter(team => !removed.has(team.id)))
+      closeDeleteDialog()
     } catch (error) {
       console.error('Failed to delete team:', error)
-      toast.error('Failed to delete team: ' + (error.response?.data?.error || error.message))
+      // Surface the server's own message inline in the dialog (e.g. the
+      // 409 empty-subtree gate naming member/device counts), keeping the
+      // dialog open so the operator can read it and act, rather than
+      // dismissing it as a transient toast.
+      setDeleteError(error.response?.data?.error || error.message || 'Failed to delete team')
     } finally {
       setDeleting(false)
     }
@@ -558,12 +667,31 @@ export default function Teams({ user }) {
                         {getSortIcon('callsign_prefix')}
                       </div>
                     </th>
-                    <th 
-                      className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700"
+                    {/* The four count columns (Members, Team Devices,
+                        Team Admins, Sub-teams) use an ICON header rather
+                        than a text label, so each column is only as wide
+                        as an icon + sort chevron -- reclaiming the
+                        horizontal space the uppercase words used to take
+                        (the table no longer needs to overflow-scroll on a
+                        typical desktop). The meaning is NOT carried by
+                        the icon alone (accessibility): each header keeps
+                        an `aria-label` and a native `title` naming the
+                        column, and the icon itself is `aria-hidden`. The
+                        icons match TeamDetail.jsx's own tab iconography
+                        for these exact concepts (UsersIcon / Device-
+                        PhoneMobileIcon / ShieldCheckIcon / Building-
+                        OfficeIcon), so the two surfaces can't drift on
+                        what "members"/"devices"/"admins"/"sub-teams" look
+                        like. `px-3` (was `px-6`) tightens them further.
+                        Sort behaviour is unchanged. */}
+                    <th
+                      className="px-3 py-3 text-left cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700"
                       onClick={() => handleSort('member_count')}
+                      aria-label="Members"
+                      title="Members"
                     >
-                      <div className="flex items-center space-x-1">
-                        <span>Members</span>
+                      <div className="flex items-center space-x-1 text-gray-500 dark:text-gray-400">
+                        <UsersIcon className="h-4 w-4" aria-hidden="true" />
                         {getSortIcon('member_count')}
                       </div>
                     </th>
@@ -573,30 +701,36 @@ export default function Teams({ user }) {
                         is the one count every viewport needs and these two
                         are supporting detail reachable via the row's own
                         "View team details" action regardless of viewport. */}
-                    <th 
-                      className="hidden md:table-cell px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700"
+                    <th
+                      className="hidden md:table-cell px-3 py-3 text-left cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700"
                       onClick={() => handleSort('device_count')}
+                      aria-label="Team Devices"
+                      title="Team Devices"
                     >
-                      <div className="flex items-center space-x-1">
-                        <span>Team Devices</span>
+                      <div className="flex items-center space-x-1 text-gray-500 dark:text-gray-400">
+                        <DevicePhoneMobileIcon className="h-4 w-4" aria-hidden="true" />
                         {getSortIcon('device_count')}
                       </div>
                     </th>
-                    <th 
-                      className="hidden md:table-cell px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700"
+                    <th
+                      className="hidden md:table-cell px-3 py-3 text-left cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700"
                       onClick={() => handleSort('admin_count')}
+                      aria-label="Team Admins"
+                      title="Team Admins"
                     >
-                      <div className="flex items-center space-x-1">
-                        <span>Team Admins</span>
+                      <div className="flex items-center space-x-1 text-gray-500 dark:text-gray-400">
+                        <ShieldCheckIcon className="h-4 w-4" aria-hidden="true" />
                         {getSortIcon('admin_count')}
                       </div>
                     </th>
-                    <th 
-                      className="hidden md:table-cell px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700"
+                    <th
+                      className="hidden md:table-cell px-3 py-3 text-left cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700"
                       onClick={() => handleSort('sub_teams_count')}
+                      aria-label="Sub-teams"
+                      title="Sub-teams"
                     >
-                      <div className="flex items-center space-x-1">
-                        <span>Sub-teams</span>
+                      <div className="flex items-center space-x-1 text-gray-500 dark:text-gray-400">
+                        <BuildingOfficeIcon className="h-4 w-4" aria-hidden="true" />
                         {getSortIcon('sub_teams_count')}
                       </div>
                     </th>
@@ -611,12 +745,29 @@ export default function Teams({ user }) {
                 <tbody className="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
                   {paginatedTeams.map((team) => (
                   <tr key={team.id} className="hover:bg-gray-50 dark:hover:bg-gray-800">
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="relative group flex items-center" style={{ paddingLeft: `${Math.min(team.level, MAX_TABLE_INDENT_LEVELS) * 20}px` }}>
+                    {/* Name cell: shows ONLY the team's own name -- the
+                        parent org/team prefix is deliberately NOT
+                        prepended, because the hierarchy is already
+                        conveyed by the row's indentation and the expand
+                        tree, so `LANDSAR - Local Groups` would be
+                        redundant noise. The full parent context is still
+                        reachable on hover/focus via the `title`
+                        (`Parent > Name`), and via the row's own "View
+                        team details" link. `max-w-0 w-full` on the cell +
+                        `min-w-0` on the inner flex + `truncate` on the
+                        name let the name absorb the width the narrowed
+                        count columns freed up and ellipsize when a single
+                        name is genuinely too long, rather than forcing the
+                        table to overflow-scroll. */}
+                    <td className="px-6 py-4 max-w-0 w-full">
+                      <div
+                        className="relative group flex items-center min-w-0"
+                        style={{ paddingLeft: `${Math.min(team.level, MAX_TABLE_INDENT_LEVELS) * 20}px` }}
+                      >
                         {team.hasChildren ? (
                           <button
                             onClick={() => toggleExpanded(team.id)}
-                            className="mr-2 p-1 hover:bg-gray-200 dark:hover:bg-gray-600 rounded"
+                            className="mr-2 p-1 hover:bg-gray-200 dark:hover:bg-gray-600 rounded flex-shrink-0"
                           >
                             {expandedTeams.has(team.id) ? (
                               <ChevronDownIcon className="h-4 w-4 text-gray-500" />
@@ -625,14 +776,15 @@ export default function Teams({ user }) {
                             )}
                           </button>
                         ) : (
-                          <div className="w-6 mr-2" />
+                          <div className="w-6 mr-2 flex-shrink-0" />
                         )}
-                        <div className="flex items-center space-x-2">
+                        <div className="flex items-center space-x-2 min-w-0">
                           <Link
                             to={`/teams/${team.id}`}
-                            className="text-sm font-medium text-gray-900 dark:text-gray-100 hover:text-primary-600 dark:hover:text-primary-400 cursor-pointer"
+                            className="truncate min-w-0 text-sm font-medium text-gray-900 dark:text-gray-100 hover:text-primary-600 dark:hover:text-primary-400 cursor-pointer"
+                            title={team.level > 0 ? `${rootOrgLabel(team, teams) || 'Root'} > ${team.name}` : team.name}
                           >
-                            {team.level > 0 ? `${teams.find(t => t.id === team.parent_team_id)?.callsign_prefix || teams.find(t => t.id === team.parent_team_id)?.name || 'Root'} - ${team.name}` : team.name}
+                            {team.name}
                           </Link>
                           <TeamStatusIcons team={team} />
                         </div>
@@ -653,22 +805,25 @@ export default function Teams({ user }) {
                     <td className="hidden md:table-cell px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                       {team.callsign_prefix || '-'}
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+                    {/* px-3 (was px-6) to match the narrowed icon headers
+                        above, so these count columns are actually narrower
+                        rather than just having a narrower header label. */}
+                    <td className="px-3 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                       <Link to={`/teams/${team.id}?tab=members`} className="hover:text-primary-600 dark:hover:text-primary-400 hover:underline">
                         {team.member_count || 0}
                       </Link>
                     </td>
-                    <td className="hidden md:table-cell px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+                    <td className="hidden md:table-cell px-3 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                       <Link to={`/teams/${team.id}?tab=devices`} className="hover:text-primary-600 dark:hover:text-primary-400 hover:underline">
                         {team.device_count || 0}
                       </Link>
                     </td>
-                    <td className="hidden md:table-cell px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+                    <td className="hidden md:table-cell px-3 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                       <Link to={`/teams/${team.id}?tab=admins`} className="hover:text-primary-600 dark:hover:text-primary-400 hover:underline">
                         {team.admin_count || 0}
                       </Link>
                     </td>
-                    <td className="hidden md:table-cell px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+                    <td className="hidden md:table-cell px-3 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                       <Link to={`/teams/${team.id}?tab=subteams`} className="hover:text-primary-600 dark:hover:text-primary-400 hover:underline">
                         {team.sub_teams_count || 0}
                       </Link>
@@ -755,36 +910,86 @@ export default function Teams({ user }) {
         isGlobalManager={isGlobalAdmin}
       />
 
-      {/* Delete Confirmation Dialog */}
+      {/* Delete Confirmation Dialog.
+          Cascade-delete feature: PERMANENT deletion of an org/team is on
+          this app's type-to-confirm tier (the operator must type the
+          target's name exactly before Confirm enables), matching
+          SuspendAccountDialog / "Permanently Delete User" / "Delete
+          Channel". This upgrades the previous plain Cancel/Confirm
+          dialog, which was a standing exception to the "every permanent
+          deletion uses type-to-confirm" convention. When the target has
+          sub-teams, the dialog states the whole subtree will be deleted;
+          the server's empty-subtree gate (409 naming member/device
+          counts) is surfaced inline via `deleteError`. */}
       {deleteTeamId && (() => {
-        const deleteLabel = labelFor(teams.find(t => t.id === deleteTeamId))
+        const deleteTeam = teams.find(t => t.id === deleteTeamId)
+        const deleteLabel = labelFor(deleteTeam)
+        const targetName = deleteTeam?.name || ''
+        const subTeamsCount = deleteTeam?.sub_teams_count || 0
+        const hasSubTeams = subTeamsCount > 0
+        const confirmDisabled = deleting || deleteConfirmInput !== targetName
         return (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center sm:p-4 z-50">
           <div
             role="dialog"
             aria-modal="true"
             aria-labelledby="delete-team-title"
-            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full"
+            className="bg-white dark:bg-gray-800 shadow-xl w-full h-full sm:rounded-lg sm:max-w-md sm:w-full sm:h-auto sm:max-h-[90vh] overflow-y-auto"
           >
-            <div className="p-6">
-              <h3 id="delete-team-title" className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
+            <div className="p-6 space-y-4">
+              <h3 id="delete-team-title" className="text-lg font-medium text-gray-900 dark:text-gray-100">
                 Delete {deleteLabel}
               </h3>
-              <p className="text-gray-600 dark:text-gray-400 mb-6">
-                Are you sure you want to delete this {deleteLabel.toLowerCase()}? This action cannot be undone.
+              <p className="text-sm text-gray-600 dark:text-gray-400">
+                Permanently delete <span className="font-medium text-gray-900 dark:text-gray-100">{targetName}</span>?
+                This cannot be undone.
               </p>
-              <div className="flex justify-end space-x-3">
+
+              {hasSubTeams && (
+                <div className="rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/30 p-3">
+                  <p className="text-sm text-amber-800 dark:text-amber-300">
+                    This will also permanently delete all {subTeamsCount} sub-team{subTeamsCount === 1 ? '' : 's'} beneath it.
+                    Deletion is only allowed when no team in this branch has any members or team devices.
+                  </p>
+                </div>
+              )}
+
+              <div>
+                <label htmlFor="delete-team-confirm" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Type "<span className="font-mono font-bold text-gray-900 dark:text-gray-100">{targetName}</span>" to confirm:
+                </label>
+                <input
+                  id="delete-team-confirm"
+                  type="text"
+                  className="input w-full"
+                  value={deleteConfirmInput}
+                  onChange={(e) => setDeleteConfirmInput(e.target.value)}
+                  placeholder={targetName}
+                  autoComplete="off"
+                  disabled={deleting}
+                />
+              </div>
+
+              {deleteError && (
+                <p role="alert" className="text-sm text-red-600 dark:text-red-400">
+                  {deleteError}
+                </p>
+              )}
+
+              <div className="flex justify-end space-x-3 pt-2 border-t border-gray-200 dark:border-gray-700">
                 <button
-                  onClick={() => setDeleteTeamId(null)}
+                  type="button"
+                  onClick={closeDeleteDialog}
                   className="btn-secondary"
                   disabled={deleting}
                 >
                   Cancel
                 </button>
                 <button
+                  type="button"
                   onClick={handleDeleteTeam}
-                  disabled={deleting}
-                  className="btn-danger disabled:opacity-50"
+                  disabled={confirmDisabled}
+                  className="btn-danger disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {deleting ? 'Deleting...' : `Delete ${deleteLabel}`}
                 </button>

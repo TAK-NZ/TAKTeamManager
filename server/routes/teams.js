@@ -293,6 +293,23 @@ router.post('/', authenticateToken, authorize, [
     if (error instanceof Team.PseudonymousUsernamePolicySubTeamError) {
       return res.status(400).json({ error: error.message });
     }
+    // Bugfix (callsign-handling): Team.create now throws this (rather
+    // than silently falling back to creating the team with NO prefix at
+    // all) when the requested callsignPrefix collides with
+    // idx_teams_callsign_prefix's UNIQUE constraint -- mirroring
+    // PUT /:teamId's identical handling of the same error from
+    // Team.update.
+    if (error instanceof Team.CallsignPrefixConflictError) {
+      return res.status(400).json({ error: error.message });
+    }
+    // Org-wide-team-name-uniqueness: Team.create throws this BEFORE any
+    // INSERT when the new Sub_Team's name is already used by another team
+    // in the same Organisation (across the whole subtree, not just the
+    // same immediate parent). A client-correctable 400, mirroring
+    // PUT /:teamId's identical handling.
+    if (error instanceof Team.TeamNameConflictError) {
+      return res.status(400).json({ error: error.message });
+    }
     getLogger().error({ err: error }, 'Team creation error');
     res.status(500).json({ error: 'Failed to create team', details: error.message });
   }
@@ -471,6 +488,13 @@ router.put('/:teamId', authenticateToken, authorize, [
     // callsignPrefix edit collides with idx_teams_callsign_prefix's
     // UNIQUE constraint (another team already holds that prefix).
     if (error instanceof Team.CallsignPrefixConflictError) {
+      return res.status(400).json({ error: error.message });
+    }
+    // Org-wide-team-name-uniqueness: Team.update throws this BEFORE any
+    // UPDATE when a rename OR a re-parent would make this team's name
+    // collide with another team in the same Organisation (across the
+    // whole subtree). A client-correctable 400.
+    if (error instanceof Team.TeamNameConflictError) {
       return res.status(400).json({ error: error.message });
     }
     getLogger().error({ err: error }, 'Failed to update team');
@@ -948,18 +972,54 @@ router.delete('/:teamId', authenticateToken, authorize, async (req, res) => {
       return res.status(404).json({ error: 'Team not found' });
     }
 
-    // Check if team has sub-teams - prevent deletion to maintain hierarchy integrity
-    const subTeams = await Team.getSubTeams(req.params.teamId);
-    if (subTeams.length > 0) {
-      return res.status(400).json({ 
-        error: 'Cannot delete team with sub-teams. Delete sub-teams first to maintain hierarchy integrity.' 
+    // Cascade-delete feature (Global_Manager only -- already enforced by
+    // the 'team:delete:global' Permission_Registry entry / authorize.js
+    // resolver, which has NO Team_Admin fallback): a team WITH sub-teams
+    // may now be deleted, cascading into every descendant -- but ONLY
+    // when the whole subtree is empty of human members and Team_Owned_
+    // Devices. This gate exists because deleting a team detaches (never
+    // deletes) the users/devices in it: a human is left a valid but
+    // teamless account, and a Team_Owned_Device is left an orphaned
+    // device row plus a dangling TAK Server certificate record. Forcing
+    // the operator to empty the subtree first keeps a cascade delete
+    // from silently producing those remnants. The check is authoritative
+    // here on the server; the Client's confirmation dialog only mirrors
+    // it for a better message.
+    //
+    // A single team with no sub-teams still deletes exactly as before
+    // (subTreeCount 0), via the same gated path -- there is no separate
+    // code path for it.
+    const { memberCount, deviceCount, subTeamCount } = await Team.getSubtreeMemberDeviceCounts(req.params.teamId);
+    if (memberCount > 0 || deviceCount > 0) {
+      // Build a human-readable, count-naming refusal. Both counts span
+      // the WHOLE subtree (this team plus every descendant), so the
+      // message says "this team or its sub-teams" only when sub-teams
+      // actually exist.
+      const scope = subTeamCount > 0 ? 'this team or its sub-teams' : 'this team';
+      const parts = [];
+      if (memberCount > 0) {
+        parts.push(`${memberCount} member${memberCount === 1 ? '' : 's'}`);
+      }
+      if (deviceCount > 0) {
+        parts.push(`${deviceCount} team device${deviceCount === 1 ? '' : 's'}`);
+      }
+      return res.status(409).json({
+        error: `Cannot delete: ${scope} still ${(memberCount + deviceCount) === 1 ? 'has' : 'have'} ${parts.join(' and ')}. Remove all members and team devices first.`,
+        memberCount,
+        deviceCount,
+        subTeamCount
       });
     }
 
     // req.user.userId is the local users.id (see server/middleware/auth.js),
-    // which is what Team.delete records as `created_by` on any
+    // which is what the delete records as `created_by` on any
     // remove_team_channel_group Sync_Operations it enqueues.
-    await Team.delete(req.params.teamId, req.user.userId);
+    // `deleteWithSubtree` deletes the team AND every descendant
+    // deepest-first, running the SAME per-team channel/CloudTAK cleanup
+    // for each rather than relying on the raw parent_team_id FK cascade
+    // (which would orphan descendant Authentik/CloudTAK groups). For a
+    // team with no sub-teams it deletes exactly that one team.
+    await Team.deleteWithSubtree(req.params.teamId, req.user.userId);
 
     try {
       await pool.query(

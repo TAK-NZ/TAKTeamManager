@@ -868,7 +868,8 @@ CREATE TABLE public.team_memberships (
     team_id integer,
     role character varying(20) DEFAULT 'member'::character varying,
     created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
-    inherited_from_team_id integer
+    inherited_from_team_id integer,
+    CONSTRAINT team_memberships_admin_not_inherited CHECK ((NOT (((role)::text = 'admin'::text) AND (inherited_from_team_id IS NOT NULL))))
 );
 
 
