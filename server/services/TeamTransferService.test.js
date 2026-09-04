@@ -68,6 +68,7 @@ jest.mock('../config/database', () => ({
 }));
 jest.mock('../models/Team', () => ({
   getAncestorChain: jest.fn(),
+  getDisplayName: jest.fn(),
   isAdmin: jest.fn()
 }));
 jest.mock('./TeamMembershipService', () => ({
@@ -423,6 +424,17 @@ function createTransferHarness(scenario, options = {}) {
   };
 
   Team.getAncestorChain.mockImplementation(async (teamId) => hierarchy.ancestorChainOf(teamId));
+  // Canonical Display_Name, mirroring the real Team.getDisplayName: root
+  // Org prefix (chain[0]) + team name for a Sub_Team, bare name for a root.
+  // The transfer-completed email's team_path now resolves via this.
+  Team.getDisplayName.mockImplementation(async (teamId) => {
+    const chain = hierarchy.ancestorChainOf(teamId);
+    if (!chain || chain.length === 0) return null;
+    const org = chain[0];
+    const team = chain[chain.length - 1];
+    if (chain.length === 1 || !team.parent_team_id) return team.name;
+    return `${org.callsign_prefix || org.name} - ${team.name}`;
+  });
   Team.isAdmin.mockImplementation(async () => false);
 
   TeamMembershipService.addUserToTeam.mockImplementation(

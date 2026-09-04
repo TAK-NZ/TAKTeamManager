@@ -30,6 +30,25 @@ export function shouldShowCallsignSuffixInput(team) {
   return team?.callsignNameFormat === 'user_defined'
 }
 
+// Filters the available teams by a free-text search term, matched
+// case-insensitively (whitespace-trimmed) as a substring against each
+// team's display_name (falling back to name). An empty/whitespace-only
+// term returns every team, so the list is unfiltered until the user
+// starts typing. Exported for direct unit testing.
+export function filterTeamsBySearch(teams, searchTerm) {
+  if (!Array.isArray(teams)) {
+    return []
+  }
+  const term = (searchTerm || '').trim().toLowerCase()
+  if (term === '') {
+    return teams
+  }
+  return teams.filter((team) => {
+    const label = String(team?.display_name || team?.name || '').toLowerCase()
+    return label.includes(term)
+  })
+}
+
 // Steps in the sign-up state machine
 const STEPS = {
   EMAIL: 'email',
@@ -63,7 +82,20 @@ export default function RequestAccess() {
   const [firstName, setFirstName] = useState('')
   const [lastName, setLastName] = useState('')
   const [selectedTeamId, setSelectedTeamId] = useState('')
+  const [teamSearch, setTeamSearch] = useState('') // free-text filter over the team list
   const [codeTeamId, setCodeTeamId] = useState(null) // the team ID the sign-up code maps to
+  // If the current search filters out the team the user had selected,
+  // clear the selection so the dropdown never shows a blank-but-selected
+  // value. Skipped while a sign-up code has locked the team (that branch
+  // doesn't render the search at all).
+  useEffect(() => {
+    if (codeTeamId || !selectedTeamId) return
+    const stillVisible = filterTeamsBySearch(teams, teamSearch)
+      .some((t) => String(t.id) === String(selectedTeamId))
+    if (!stillVisible) {
+      setSelectedTeamId('')
+    }
+  }, [teamSearch, teams, selectedTeamId, codeTeamId])
   const [reason, setReason] = useState('')
   const [tosAgreed, setTosAgreed] = useState(false)
   const [verifiedEmail, setVerifiedEmail] = useState('')
@@ -387,19 +419,44 @@ export default function RequestAccess() {
                   </>
                 ) : (
                   <>
-                    <select
-                      className="input w-full"
-                      value={selectedTeamId}
-                      onChange={(e) => setSelectedTeamId(e.target.value)}
-                      required
-                    >
-                      <option value="">Select a team...</option>
-                      {teams.map((team) => (
-                        <option key={team.id} value={team.id}>
-                          {team.display_name || team.name}
-                        </option>
-                      ))}
-                    </select>
+                    {/* Search box: filters the team list by name as the
+                        user types, so a large organisation (hundreds of
+                        teams) is navigable rather than an unwieldy
+                        scrolling dropdown. */}
+                    <input
+                      type="text"
+                      className="input w-full mb-2"
+                      value={teamSearch}
+                      onChange={(e) => setTeamSearch(e.target.value)}
+                      autoComplete="off"
+                      placeholder="Search teams by name"
+                      aria-label="Search teams by name"
+                    />
+                    {(() => {
+                      const filteredTeams = filterTeamsBySearch(teams, teamSearch)
+                      return (
+                        <>
+                          <select
+                            className="input w-full"
+                            value={selectedTeamId}
+                            onChange={(e) => setSelectedTeamId(e.target.value)}
+                            required
+                          >
+                            <option value="">Select a team...</option>
+                            {filteredTeams.map((team) => (
+                              <option key={team.id} value={team.id}>
+                                {team.display_name || team.name}
+                              </option>
+                            ))}
+                          </select>
+                          {teamSearch.trim() !== '' && filteredTeams.length === 0 && (
+                            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                              No team matches &ldquo;{teamSearch.trim()}&rdquo;.
+                            </p>
+                          )}
+                        </>
+                      )
+                    })()}
                     <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                       Select the team or organisation you would like to request access to.
                     </p>

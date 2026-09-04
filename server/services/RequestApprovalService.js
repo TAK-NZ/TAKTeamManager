@@ -224,18 +224,15 @@ class RequestApprovalService {
       // Send approval email for non-new_account types (they don't have Phase 3)
       if (request.request_type !== 'new_account') {
         try {
+          // Bugfix (email showed the full ancestor-prefix path, e.g.
+          // "FENZ - TEKE - STL - Manapouri", instead of the canonical
+          // Display_Name "FENZ - Manapouri"): use Team.getDisplayName,
+          // the one authoritative <root-org-prefix> - <team-name> rule
+          // shared with every display surface. Falls back to the stored
+          // team_name if resolution fails.
           let teamPath = request.team_name || '';
           try {
-            const ancestorChain = await Team.getAncestorChain(request.target_team_id);
-            if (ancestorChain.length <= 1) {
-              teamPath = ancestorChain[0]?.name || request.team_name || '';
-            } else {
-              const segments = ancestorChain.map((t, i) => {
-                if (i === ancestorChain.length - 1) return t.name;
-                return t.callsign_prefix || t.name;
-              });
-              teamPath = segments.join(' - ');
-            }
+            teamPath = (await Team.getDisplayName(request.target_team_id)) || request.team_name || '';
           } catch {
             // Fall back to team_name
           }
@@ -306,19 +303,12 @@ class RequestApprovalService {
             [newAccountAuthentikUser.pk, username, email, firstName, lastName, attributes?.callsign, attributes?.color, attributes?.role]
           );
 
-          // Send approval email (after commit so callsign_suffix is readable)
+          // Send approval email (after commit so callsign_suffix is
+          // readable). Canonical Display_Name via Team.getDisplayName
+          // ("FENZ - Manapouri"), not the full ancestor-prefix path.
           let teamPath = request.team_name || '';
           try {
-            const ancestorChain = await Team.getAncestorChain(request.target_team_id);
-            if (ancestorChain.length <= 1) {
-              teamPath = ancestorChain[0]?.name || request.team_name || '';
-            } else {
-              const segments = ancestorChain.map((t, i) => {
-                if (i === ancestorChain.length - 1) return t.name;
-                return t.callsign_prefix || t.name;
-              });
-              teamPath = segments.join(' - ');
-            }
+            teamPath = (await Team.getDisplayName(request.target_team_id)) || request.team_name || '';
           } catch {
             // Fall back to team_name
           }
@@ -663,18 +653,11 @@ class RequestApprovalService {
       `, [requestId, adminId, denialReason]);
       
       // Send denial email
+      // Canonical Display_Name via Team.getDisplayName ("FENZ - Manapouri"),
+      // not the full ancestor-prefix path.
       let denialTeamPath = request.team_name || '';
       try {
-        const denialAncestorChain = await Team.getAncestorChain(request.target_team_id);
-        if (denialAncestorChain.length <= 1) {
-          denialTeamPath = denialAncestorChain[0]?.name || request.team_name || '';
-        } else {
-          const segments = denialAncestorChain.map((t, i) => {
-            if (i === denialAncestorChain.length - 1) return t.name;
-            return t.callsign_prefix || t.name;
-          });
-          denialTeamPath = segments.join(' - ');
-        }
+        denialTeamPath = (await Team.getDisplayName(request.target_team_id)) || request.team_name || '';
       } catch {
         // Fall back to just team_name
       }

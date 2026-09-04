@@ -551,6 +551,49 @@ describe('Team.getAncestorChain / Team.getTeamDepth (Requirement 2.1)', () => {
     await expect(Team.getAncestorChain(1)).rejects.toThrow('db unavailable');
   });
 
+  // Canonical Display_Name: <root Org prefix> - <team name> for a Sub_Team,
+  // bare name for a root Organisation. The bug this pins: notification
+  // emails showed the FULL ancestor-prefix path ("FENZ - TEKE - STL -
+  // Manapouri") instead of "FENZ - Manapouri".
+  it('getDisplayName: returns "<root Org prefix> - <team name>" for a deeply nested Sub_Team, not the full ancestor path', async () => {
+    // Root-first chain FENZ(1) -> Te Kei(2,TEKE) -> Southland(3,STL) -> Manapouri(4).
+    pool.query.mockResolvedValue({
+      rows: [
+        { id: 1, parent_team_id: null, name: 'Fire and Emergency New Zealand', callsign_prefix: 'FENZ', depth: 0 },
+        { id: 2, parent_team_id: 1, name: 'Te Kei', callsign_prefix: 'TEKE', depth: 1 },
+        { id: 3, parent_team_id: 2, name: 'Southland', callsign_prefix: 'STL', depth: 2 },
+        { id: 4, parent_team_id: 3, name: 'Manapouri', callsign_prefix: 'MANA', depth: 3 }
+      ]
+    });
+
+    expect(await Team.getDisplayName(4)).toBe('FENZ - Manapouri');
+  });
+
+  it('getDisplayName: returns the bare name for a root Organisation (single-node chain)', async () => {
+    pool.query.mockResolvedValue({
+      rows: [{ id: 1, parent_team_id: null, name: 'Fire and Emergency New Zealand', callsign_prefix: 'FENZ', depth: 0 }]
+    });
+
+    expect(await Team.getDisplayName(1)).toBe('Fire and Emergency New Zealand');
+  });
+
+  it('getDisplayName: falls back to the root Org NAME when it has no callsign_prefix', async () => {
+    pool.query.mockResolvedValue({
+      rows: [
+        { id: 1, parent_team_id: null, name: 'Land Search and Rescue', callsign_prefix: null, depth: 0 },
+        { id: 2, parent_team_id: 1, name: 'Auckland', callsign_prefix: 'AUCK', depth: 1 }
+      ]
+    });
+
+    expect(await Team.getDisplayName(2)).toBe('Land Search and Rescue - Auckland');
+  });
+
+  it('getDisplayName: returns null when the team cannot be resolved (empty chain)', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+
+    expect(await Team.getDisplayName(999)).toBeNull();
+  });
+
   it('getTeamDepth: returns 0 for a root (single-node) team', async () => {
     pool.query.mockResolvedValue({ rows: [{ depth: 0 }] });
 
@@ -1722,6 +1765,48 @@ describe('Team.createTeamChannel Authentik group creation/reconciliation', () =>
     const insertCall = pool.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO channels'));
     expect(insertCall[1][4]).toBe('new-group-pk');
     expect(result).toEqual({ id: 3, authentik_group_id: 'new-group-pk' });
+  });
+
+  // Special-character bugfix (Māori macrons): TAK cannot handle non-ASCII
+  // in an LDAP group name, so the Authentik group name derived from a
+  // macron-bearing team name must be ASCII-normalized -- while the
+  // channel's own display_name keeps the macron for human display.
+  it('ASCII-normalizes the Authentik group name (macron -> base letter) but keeps the display_name macron', async () => {
+    // A Sub_Team named with a macron under FENZ.
+    const macronTeamRow = {
+      id: 20,
+      name: 'Ngā Tai ki te Puku',
+      parent_team_id: 3,
+      root_prefix: 'FENZ',
+      display_name: 'FENZ - Ngā Tai ki te Puku'
+    };
+    pool.query.mockImplementation((sql) => {
+      if (sql.includes('WITH RECURSIVE root_team')) {
+        return Promise.resolve({ rows: [macronTeamRow] });
+      }
+      if (sql.includes('INSERT INTO channels')) {
+        return Promise.resolve({ rows: [{ id: 7, authentik_group_id: 'macron-pk' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    let postedBody = null;
+    global.fetch = jest.fn().mockImplementation((url, options) => {
+      if (options?.method === 'POST') {
+        postedBody = JSON.parse(options.body);
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ pk: 'macron-pk' }) });
+    });
+
+    await Team.createTeamChannel(20);
+
+    // The group name sent to Authentik is macron-free (Nga, not Ngā).
+    expect(postedBody.name).toBe('tak_Teams - FENZ - Nga Tai ki te Puku');
+    expect([...postedBody.name].every((ch) => ch.codePointAt(0) <= 0x7f)).toBe(true);
+
+    // But the channel's display_name (INSERT param index 1) keeps the macron.
+    const insertCall = pool.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO channels'));
+    expect(insertCall[1][1]).toBe('Teams - FENZ - Ngā Tai ki te Puku');
   });
 });
 

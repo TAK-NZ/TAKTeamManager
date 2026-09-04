@@ -176,6 +176,7 @@ describe('authenticateToken (Requirement 13.7 logging)', () => {
   });
 
   it('does not log a failure for a valid token referencing a cached user', async () => {
+    // First pool.query: token-revocation check (not revoked).
     pool.query.mockResolvedValueOnce({ rows: [] });
     authentikSync.getUserFromCache.mockResolvedValueOnce({
       id: 1,
@@ -187,6 +188,10 @@ describe('authenticateToken (Requirement 13.7 logging)', () => {
       is_admin: false,
       groups: []
     });
+    // Second pool.query: resolve the local users.id from authentik_id.
+    // req.user.userId must be the users.id, NOT user_cache.id -- see the
+    // resolveUserFromRequest bugfix.
+    pool.query.mockResolvedValueOnce({ rows: [{ id: 501 }] });
     const app = buildApp(authenticateToken);
     const token = signToken({ username: 'alice', jti: 'jti-4' });
 
@@ -197,6 +202,31 @@ describe('authenticateToken (Requirement 13.7 logging)', () => {
 
     expect(res.status).toBe(200);
     expect(mockWarn).not.toHaveBeenCalled();
+  });
+
+  // Bugfix: req.user.userId is the LOCAL users.id resolved from
+  // authentik_id, not user_cache.id. A cache row with no matching users
+  // row cannot be acted on, so it is treated as not found (401).
+  it('logs reason: "user_not_found" and returns 401 when the cache row has no matching users row', async () => {
+    // Not revoked, then the users.id lookup misses.
+    pool.query.mockResolvedValueOnce({ rows: [] });
+    authentikSync.getUserFromCache.mockResolvedValueOnce({
+      id: 999,
+      authentik_id: 'auth-orphan',
+      username: 'orphan',
+      is_admin: false,
+      groups: []
+    });
+    pool.query.mockResolvedValueOnce({ rows: [] });
+    const app = buildApp(authenticateToken);
+    const token = signToken({ username: 'orphan', jti: 'jti-5' });
+
+    const res = await request(app)
+      .get('/api/protected')
+      .set('X-Forwarded-For', TEST_IP)
+      .set('Cookie', [`tak_session=${token}`]);
+
+    expect(res.status).toBe(401);
   });
 });
 

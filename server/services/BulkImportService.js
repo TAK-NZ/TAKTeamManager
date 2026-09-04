@@ -2,6 +2,7 @@ const { parse } = require('csv-parse');
 const pool = require('../config/database');
 const Team = require('../models/Team');
 const UserProvisioningService = require('./UserProvisioningService');
+const UserAttributesService = require('./userAttributes');
 const authentikService = require('./authentik');
 const { isValidCallsignPrefix } = require('../utils/callsignValidation');
 const { TAK_COLOR_NAMES } = require('../config/constants');
@@ -1281,10 +1282,11 @@ class BulkImportService {
     // THIS row only (Requirement 29.2: one row's failure rolls back
     // only that row's partial writes, never any other row's). ---
     const client = await pool.connect();
+    let result;
     try {
       await client.query('BEGIN');
 
-      const result = await UserProvisioningService.createAndAddUser(client, {
+      result = await UserProvisioningService.createAndAddUser(client, {
         authentikUserId: authentikUser.pk,
         username,
         email,
@@ -1302,7 +1304,6 @@ class BulkImportService {
       });
 
       await client.query('COMMIT');
-      return result;
     } catch (error) {
       await client.query('ROLLBACK');
       logger.error(
@@ -1313,6 +1314,43 @@ class BulkImportService {
     } finally {
       client.release();
     }
+
+    // --- Phase 3 (post-commit): compute the Callsign/Team_Color, push
+    // them to Authentik (takCallsign/takColor), and mirror them into
+    // user_cache -- IDENTICAL to POST /api/users/create-and-add's own
+    // post-commit block (server/routes/users.js). `createAndAddUser`
+    // (shared by both paths) only stores `users.callsign_suffix`; it does
+    // NOT compute/persist the assembled callsign or push it anywhere. So
+    // without this block a bulk-imported user's `user_cache.tak_callsign`
+    // stayed NULL (the Members tab reads exactly that column -> "-") and
+    // their Authentik takCallsign/takColor stayed "" -- while editing the
+    // member later showed the right value because the edit path recomputes
+    // live from the correctly-stored `callsign_suffix`.
+    //
+    // Runs strictly AFTER COMMIT and after `client.release()`, on the
+    // shared `pool`, so no DB transaction is open across the Authentik
+    // HTTP call (this codebase's "no external call inside a transaction"
+    // convention). Best-effort: a failure here NEVER unwinds the
+    // already-committed account (matching the single-user route) -- it is
+    // logged and swallowed so the row still counts as an import success,
+    // and a later member edit / periodic attribute sync can still
+    // reconcile the cache/Authentik copies from the stored callsign_suffix.
+    try {
+      const attributes = await UserAttributesService.generateCallsign(result.localUserId, teamId);
+      const pushAttrs = { ...(attributes || {}), firstName, lastName };
+      await UserAttributesService.updateUserAttributes(authentikUser.pk, pushAttrs);
+      await pool.query(
+        'INSERT INTO user_cache (authentik_id, username, email, first_name, last_name, is_active, tak_callsign, tak_color, tak_role, callsign_suffix) VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8, $9) ON CONFLICT (authentik_id) DO UPDATE SET username = $2, email = $3, first_name = $4, last_name = $5, is_active = true, tak_callsign = $6, tak_color = $7, tak_role = $8, callsign_suffix = $9',
+        [authentikUser.pk, username, email, firstName, lastName, attributes?.callsign, attributes?.color, attributes?.role, resolvedCallsignSuffix]
+      );
+    } catch (attrError) {
+      logger.error(
+        { err: attrError, authentikUserId: authentikUser.pk, teamId, localUserId: result.localUserId },
+        'CSV-imported user created, but post-commit callsign/color sync (Authentik + user_cache) failed; row still counts as imported'
+      );
+    }
+
+    return result;
   }
 }
 

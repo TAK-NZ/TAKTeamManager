@@ -46,6 +46,10 @@ jest.mock('./TeamTransferService', () => ({
 
 jest.mock('../models/Team', () => ({
   getAncestorChain: jest.fn(),
+  // Email teamPath now resolves the canonical Display_Name via this
+  // (root Org prefix + team name), replacing an inline ancestor-prefix
+  // path build.
+  getDisplayName: jest.fn(),
   getFullMemberList: jest.fn()
 }));
 

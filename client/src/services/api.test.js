@@ -165,3 +165,82 @@ describe('communicationsAPI / settingsAPI wrappers', () => {
     expect(instance.post).toHaveBeenCalledWith('/settings/import', payload);
   });
 });
+
+// --- teamsAPI.getAllMyTeams: follows server pagination across all pages ---
+//
+// Bugfix (overview tree rendered flat + Display_Name used the wrong
+// immediate-parent prefix): the admin "all teams" branch of
+// GET /teams/my-teams is hard-capped at 200 rows/page. Any consumer that
+// rebuilds the hierarchy client-side needs EVERY team, so getAllMyTeams
+// loops over pagination.total. These assert the loop math and the
+// non-paginated (regular-user) short-circuit, mocking only the axios
+// instance (network boundary), matching the suite's convention above.
+describe('teamsAPI.getAllMyTeams', () => {
+  let instance;
+  let teamsAPI;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    instance = {
+      get: vi.fn(),
+      post: vi.fn(() => Promise.resolve({ data: {} })),
+      put: vi.fn(() => Promise.resolve({ data: {} })),
+      delete: vi.fn(() => Promise.resolve({ data: {} })),
+      patch: vi.fn(() => Promise.resolve({ data: {} })),
+      interceptors: { response: { use: vi.fn() } },
+    };
+    vi.doMock('axios', () => ({
+      default: { create: vi.fn(() => instance) },
+    }));
+    const mod = await import('./api.js');
+    teamsAPI = mod.teamsAPI;
+  });
+
+  afterEach(() => {
+    vi.doUnmock('axios');
+    vi.resetModules();
+  });
+
+  const teamRows = (n, startId) =>
+    Array.from({ length: n }, (_, i) => ({ id: startId + i, name: `t${startId + i}` }));
+
+  it('returns page 1 alone when the total fits within one page (no extra requests)', async () => {
+    instance.get.mockResolvedValueOnce({ data: { teams: teamRows(50, 1), pagination: { page: 1, pageSize: 200, total: 50 } } });
+
+    const teams = await teamsAPI.getAllMyTeams();
+
+    expect(teams).toHaveLength(50);
+    expect(instance.get).toHaveBeenCalledTimes(1);
+    expect(instance.get).toHaveBeenCalledWith('/teams/my-teams', { params: { page: 1, pageSize: 200 } });
+  });
+
+  it('loops every page when total exceeds one page, concatenating all rows in order', async () => {
+    // total 663 -> 4 pages (200,200,200,63), mirroring the real FENZ tree.
+    instance.get
+      .mockResolvedValueOnce({ data: { teams: teamRows(200, 1), pagination: { page: 1, pageSize: 200, total: 663 } } })
+      .mockResolvedValueOnce({ data: { teams: teamRows(200, 201), pagination: { page: 2, pageSize: 200, total: 663 } } })
+      .mockResolvedValueOnce({ data: { teams: teamRows(200, 401), pagination: { page: 3, pageSize: 200, total: 663 } } })
+      .mockResolvedValueOnce({ data: { teams: teamRows(63, 601), pagination: { page: 4, pageSize: 200, total: 663 } } });
+
+    const teams = await teamsAPI.getAllMyTeams();
+
+    expect(teams).toHaveLength(663);
+    expect(instance.get).toHaveBeenCalledTimes(4);
+    // Requested pages 2,3,4 explicitly after page 1.
+    expect(instance.get).toHaveBeenCalledWith('/teams/my-teams', { params: { page: 2, pageSize: 200 } });
+    expect(instance.get).toHaveBeenCalledWith('/teams/my-teams', { params: { page: 4, pageSize: 200 } });
+    // Every id present, no gaps/dupes.
+    expect(new Set(teams.map((t) => t.id)).size).toBe(663);
+    expect(teams[0].id).toBe(1);
+    expect(teams[662].id).toBe(663);
+  });
+
+  it('returns the single unpaginated response as-is for the regular-user branch (no pagination field)', async () => {
+    instance.get.mockResolvedValueOnce({ data: { teams: teamRows(12, 1) } });
+
+    const teams = await teamsAPI.getAllMyTeams();
+
+    expect(teams).toHaveLength(12);
+    expect(instance.get).toHaveBeenCalledTimes(1);
+  });
+});

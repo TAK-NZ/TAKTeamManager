@@ -1574,6 +1574,29 @@ describe('SyncWorker Authentik failure classification wiring', () => {
       expect(readCallBody.name).toBe('tak_BCH - Test Channel_READ');
     });
 
+    // Special-character bugfix (Māori macrons): TAK cannot handle non-ASCII
+    // in an LDAP group name, so a macron channel name is ASCII-normalized
+    // into both group names.
+    it('ASCII-normalizes a macron channel name into both group names', async () => {
+      let call = 0;
+      global.fetch = jest.fn().mockImplementation(() => {
+        call++;
+        return Promise.resolve({ ok: true, status: 201, json: () => Promise.resolve({ pk: `grp-${call}` }) });
+      });
+
+      await worker.executeOperationSafely({
+        ...baseOperation,
+        payload: { ...baseOperation.payload, channel_name: 'Ngā Region', category: 'BCH' }
+      });
+
+      const readCallBody = JSON.parse(global.fetch.mock.calls[0][1].body);
+      const writeCallBody = JSON.parse(global.fetch.mock.calls[1][1].body);
+      expect(readCallBody.name).toBe('tak_BCH - Nga Region_READ');
+      expect(writeCallBody.name).toBe('tak_BCH - Nga Region');
+      expect([...readCallBody.name].every((ch) => ch.codePointAt(0) <= 0x7f)).toBe(true);
+      expect([...writeCallBody.name].every((ch) => ch.codePointAt(0) <= 0x7f)).toBe(true);
+    });
+
     // bch-channel-category: an invalid/missing category is a permanent
     // failure (a caller bug -- GlobalChannelService always supplies a
     // validated category), never a silent fall-back.
@@ -2303,6 +2326,25 @@ describe('SyncWorker Authentik failure classification wiring', () => {
       const [, options] = global.fetch.mock.calls[0];
       const body = JSON.parse(options.body);
       expect(body.name).toBe('tak_Response - Auckland');
+    });
+
+    // Special-character bugfix (Māori macrons): a macron region name is
+    // ASCII-normalized into the group name TAK consumes.
+    it('ASCII-normalizes a macron region name in the group name', async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 201,
+        json: () => Promise.resolve({ pk: 'grp-macron' })
+      });
+
+      await worker.executeOperationSafely({
+        ...baseOperation,
+        payload: { ...baseOperation.payload, channel_name: 'Whakatāne' }
+      });
+
+      const body = JSON.parse(global.fetch.mock.calls[0][1].body);
+      expect(body.name).toBe('tak_Response - Whakatane');
+      expect([...body.name].every((ch) => ch.codePointAt(0) <= 0x7f)).toBe(true);
     });
 
     it("names the created group with the tier's prefix (tak_Support for tier 'support')", async () => {

@@ -13,6 +13,8 @@
  * task) adds a sibling static method, `computeDefaultCallsignSuffix`, to
  * this same class.
  */
+const { stripDiacritics } = require('../utils/asciiNormalize');
+
 class CallsignService {
   /**
    * Requirement 8 Criteria 1-5: assembles a generated callsign from up to
@@ -86,9 +88,10 @@ class CallsignService {
    *   `default:` fallback that this function replaces.
    *
    * Before the character-class sanitization below, the format-specific
-   * string is first run through diacritic stripping (Unicode NFD
-   * decomposition + removal of combining marks in the U+0300-U+036F
-   * range): a name like "Kōkako" must sanitize to "Kokako", not
+   * string is first run through diacritic stripping (the shared
+   * `stripDiacritics` helper -- Unicode NFD decomposition + removal of
+   * combining marks in the U+0300-U+036F range): a name like "Kōkako"
+   * must sanitize to "Kokako", not
    * "K-kako". Without this step every accented/macroned/umlauted letter
    * (macrons in Māori names being the concrete case that surfaced this)
    * falls outside `[A-Za-z0-9.-]` and is replaced by a literal `-`,
@@ -140,7 +143,12 @@ class CallsignService {
         break;
     }
 
-    const deaccented = rawSuffix.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    // Diacritic stripping shared with LDAP group-name normalization (see
+    // server/utils/asciiNormalize.js's `stripDiacritics`). After stripping,
+    // this callsign-suffix policy additionally replaces every remaining
+    // non-`[A-Za-z0-9.-]` character with a single `-` (Requirement 11.7),
+    // preserving the `.` that `first_initial_dot_last` synthesizes.
+    const deaccented = stripDiacritics(rawSuffix);
 
     return deaccented.replace(/[^A-Za-z0-9.-]/g, '-');
   }

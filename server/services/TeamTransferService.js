@@ -753,10 +753,11 @@ class TeamTransferService {
         );
       } else {
         try {
-          const destinationChain = await Team.getAncestorChain(destinationTeamId);
-          const teamPath = destinationChain
-            .map((team, index) => (index === destinationChain.length - 1 ? team.name : team.callsign_prefix || team.name))
-            .join(' - ');
+          // Canonical Display_Name ("FENZ - Manapouri"): the root
+          // Organisation's prefix + the destination team's own name, via
+          // Team.getDisplayName -- NOT the full ancestor-prefix path this
+          // used to build ("FENZ - TEKE - STL - Manapouri").
+          const teamPath = (await Team.getDisplayName(destinationTeamId)) || '';
 
           await emailService.sendEmail(user.email, 'team_transfer_completed', {
             first_name: user.first_name || '',

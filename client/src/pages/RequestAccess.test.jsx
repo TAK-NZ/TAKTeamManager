@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { shouldShowCallsignSuffixInput, isValidCodeFormat } from './RequestAccess.jsx';
+import { shouldShowCallsignSuffixInput, isValidCodeFormat, filterTeamsBySearch } from './RequestAccess.jsx';
 
 // Validates: Requirements 11.9, 11.10
 //
@@ -88,5 +88,49 @@ describe('shouldShowCallsignSuffixInput helper (Task 12.2 extended)', () => {
   it('returns false for other formats', () => {
     expect(shouldShowCallsignSuffixInput({ callsignNameFormat: 'full_name' })).toBe(false);
     expect(shouldShowCallsignSuffixInput({ callsignNameFormat: 'first_initial_last' })).toBe(false);
+  });
+});
+
+// Team-name search for /request-access team selection: filters the
+// available teams by a free-text term, matched case-insensitively as a
+// substring against display_name (falling back to name).
+describe('filterTeamsBySearch', () => {
+  const teams = [
+    { id: 1, display_name: 'FENZ - Manapouri', name: 'Manapouri' },
+    { id: 2, display_name: 'FENZ - Auckland', name: 'Auckland' },
+    { id: 3, name: 'Land Search and Rescue' } // no display_name -> falls back to name
+  ];
+
+  it('returns every team unchanged for an empty/whitespace-only term', () => {
+    expect(filterTeamsBySearch(teams, '')).toEqual(teams);
+    expect(filterTeamsBySearch(teams, '   ')).toEqual(teams);
+    expect(filterTeamsBySearch(teams, null)).toEqual(teams);
+    expect(filterTeamsBySearch(teams, undefined)).toEqual(teams);
+  });
+
+  it('matches display_name case-insensitively as a substring', () => {
+    expect(filterTeamsBySearch(teams, 'manapouri').map((t) => t.id)).toEqual([1]);
+    expect(filterTeamsBySearch(teams, 'AUCKLAND').map((t) => t.id)).toEqual([2]);
+  });
+
+  it('matches a shared segment across multiple teams', () => {
+    expect(filterTeamsBySearch(teams, 'FENZ').map((t) => t.id)).toEqual([1, 2]);
+  });
+
+  it('falls back to name when a team has no display_name', () => {
+    expect(filterTeamsBySearch(teams, 'rescue').map((t) => t.id)).toEqual([3]);
+  });
+
+  it('trims the term before matching', () => {
+    expect(filterTeamsBySearch(teams, '  auckland  ').map((t) => t.id)).toEqual([2]);
+  });
+
+  it('returns an empty array when nothing matches', () => {
+    expect(filterTeamsBySearch(teams, 'zzz')).toEqual([]);
+  });
+
+  it('returns an empty array for a non-array input rather than throwing', () => {
+    expect(filterTeamsBySearch(undefined, 'x')).toEqual([]);
+    expect(filterTeamsBySearch(null, 'x')).toEqual([]);
   });
 });

@@ -15,6 +15,13 @@ const { buildRegionSeedWorkItems } = require('../config/regions');
 // three can never disagree on the naming convention, since none of them
 // builds or validates a username with its own inline logic.
 const { buildDefaultServiceAccountUsername, isValidServiceAccountUsername } = require('../utils/serviceAccountUsername');
+// Special-character bugfix (Māori macrons): the `target_group_pattern`
+// values below MUST equal, character-for-character, the Authentik group
+// names the Sync_Worker creates (createBchChannelGroups /
+// createRegionChannelGroup), or the LDAP group-membership rule stops
+// matching its group. The worker ASCII-normalizes the channel name, so
+// these patterns normalize it identically via the SAME helper.
+const { toAsciiIdentifier } = require('../utils/asciiNormalize');
 
 // Frozen allow-list mapping a channelType to its backing table name.
 // Used to guard against SQL identifier interpolation from caller-controlled
@@ -119,9 +126,9 @@ class GlobalChannelService {
       `, [
         `${categoryPrefix} ${channelData.name} Read Access`,
         channelId,
-        `tak_${categoryPrefix}${separator}${channelData.name}_READ`,
+        `tak_${categoryPrefix}${separator}${toAsciiIdentifier(channelData.name)}_READ`,
         `${categoryPrefix} ${channelData.name} Write Access`,
-        `tak_${categoryPrefix}${separator}${channelData.name}`
+        `tak_${categoryPrefix}${separator}${toAsciiIdentifier(channelData.name)}`
       ]);
       
       await client.query('COMMIT');
@@ -196,7 +203,7 @@ class GlobalChannelService {
       `, [
         `Region ${channelData.name} Read-Write Access`,
         channelId,
-        `tak_${tierPrefix}${separator}${channelData.name}`
+        `tak_${tierPrefix}${separator}${toAsciiIdentifier(channelData.name)}`
       ]);
       
       await client.query('COMMIT');

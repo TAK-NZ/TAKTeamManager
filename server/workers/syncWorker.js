@@ -63,6 +63,14 @@ const logger = require('../config/logger').createLogger('syncWorker');
 // through `fetchWithTimeout`, which attaches a bounded `AbortSignal` so a
 // hung Authentik connection can never stall a queued operation forever.
 const { fetchWithTimeout } = require('../utils/fetchWithTimeout');
+
+// Special-character bugfix (Māori macrons): TAK Server cannot handle
+// non-ASCII characters in an LDAP group name, so every `tak_...` group
+// name this worker builds from a (human) channel name is ASCII-normalized
+// -- in lockstep with GlobalChannelService's matching target_group_pattern
+// rules, which must produce the IDENTICAL string or the LDAP rule stops
+// matching the created group.
+const { toAsciiIdentifier } = require('../utils/asciiNormalize');
 // Requirement 25 (task 47.1): the Retention_Cleanup_Job, running on its
 // own scheduled interval (default 24h) inside the Sync_Worker process,
 // started/stopped alongside the poll loop, health server, and expiry
@@ -1486,9 +1494,14 @@ class SyncWorker {
 
     const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
     // Create read and write groups using tak_<category> format
-    // (tak_BCH.../tak_XtraTools...).
-    const readGroupName = `tak_${categoryPrefix}${separator}${channel_name}_READ`;
-    const writeGroupName = `tak_${categoryPrefix}${separator}${channel_name}`;
+    // (tak_BCH.../tak_XtraTools...). The channel name is ASCII-normalized
+    // (see the toAsciiIdentifier import) so a non-ASCII channel name never
+    // reaches TAK; this must match GlobalChannelService's
+    // target_group_pattern for the same channel, which normalizes
+    // identically.
+    const asciiChannelName = toAsciiIdentifier(channel_name);
+    const readGroupName = `tak_${categoryPrefix}${separator}${asciiChannelName}_READ`;
+    const writeGroupName = `tak_${categoryPrefix}${separator}${asciiChannelName}`;
 
     // Bugfix: `description` was previously never set on creation (the
     // enqueue payload never carried it) -- a freshly created channel's
@@ -1930,7 +1943,11 @@ class SyncWorker {
     }
 
     const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
-    const groupName = `tak_${tierPrefix}${separator}${channel_name}`;
+    // ASCII-normalized channel name (see the toAsciiIdentifier import) so a
+    // non-ASCII region name never reaches TAK; must match
+    // GlobalChannelService's region target_group_pattern, which normalizes
+    // identically.
+    const groupName = `tak_${tierPrefix}${separator}${toAsciiIdentifier(channel_name)}`;
     
     logger.debug({ region_channel_id, groupName, tier }, 'Creating region channel group');
     
@@ -2007,11 +2024,14 @@ class SyncWorker {
     const { read_group_id, write_group_id } = channelResult.rows[0];
     
     const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
+    // ASCII-normalized so a rename never PATCHes a non-ASCII group name
+    // onto the group -- matches createBchChannelGroups' own normalization.
+    const asciiChannelName = toAsciiIdentifier(channel_name);
     
     // Update read group
     if (read_group_id) {
       const readRequestBody = {
-        name: `tak_${categoryPrefix}${separator}${channel_name}_READ`,
+        name: `tak_${categoryPrefix}${separator}${asciiChannelName}_READ`,
         attributes: { channel_type: 'bch', category, permission: 'read', description }
       };
       
@@ -2037,7 +2057,7 @@ class SyncWorker {
     // Update write group
     if (write_group_id) {
       const writeRequestBody = {
-        name: `tak_${categoryPrefix}${separator}${channel_name}`,
+        name: `tak_${categoryPrefix}${separator}${asciiChannelName}`,
         attributes: { channel_type: 'bch', category, permission: 'write', description }
       };
       
@@ -2101,7 +2121,8 @@ class SyncWorker {
     const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
     const authentikDescription = `${description} (Bi-directional location sharing)`;
     const requestBody = {
-      name: `tak_${tierPrefix}${separator}${channel_name}`,
+      // ASCII-normalized, matching createRegionChannelGroup.
+      name: `tak_${tierPrefix}${separator}${toAsciiIdentifier(channel_name)}`,
       attributes: { 
         channel_type: 'region',
         description: authentikDescription

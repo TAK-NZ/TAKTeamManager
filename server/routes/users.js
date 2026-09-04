@@ -1359,17 +1359,14 @@ router.post('/create-and-add', authenticateToken, authorize, [
   let welcomeEmailSent = true;
   try {
     const emailService = new EmailService();
-    // Build team display path
+    // Build team display path. Canonical Display_Name via
+    // Team.getDisplayName ("FENZ - Manapouri" = root Org prefix + team
+    // name). This replaces an inline path build that read the ancestor
+    // chain in the WRONG order (getAncestorChain is root-first, so the
+    // old `ancestors[length-1]` was the leaf team, not the root org).
     let teamPath = '';
     try {
-      const ancestors = await Team.getAncestorChain(teamId);
-      if (ancestors.length > 0) {
-        const root = ancestors[ancestors.length - 1];
-        const leafTeam = ancestors[0];
-        teamPath = ancestors.length > 1
-          ? `${root.callsign_prefix || root.name} - ${leafTeam.name}`
-          : (leafTeam.callsign_prefix || leafTeam.name);
-      }
+      teamPath = (await Team.getDisplayName(teamId)) || '';
     } catch {
       // fallback
       const teamResult = await pool.query('SELECT name FROM teams WHERE id = $1', [teamId]);
@@ -2272,17 +2269,13 @@ async function sendWelcomeEmailToUser(userId, teamId, actingUserId) {
   }
   const user = userResult.rows[0];
 
+  // Canonical Display_Name via Team.getDisplayName ("FENZ - Manapouri").
+  // Replaces an inline path build that read the ancestor chain in the
+  // wrong order (see the matching fix in the create-and-add handler above).
   let teamPath = '';
   if (teamId) {
     try {
-      const ancestors = await Team.getAncestorChain(teamId);
-      if (ancestors.length > 0) {
-        const root = ancestors[ancestors.length - 1];
-        const team = ancestors[0];
-        teamPath = ancestors.length > 1
-          ? `${root.callsign_prefix || root.name} - ${team.name}`
-          : (team.callsign_prefix || team.name);
-      }
+      teamPath = (await Team.getDisplayName(teamId)) || '';
     } catch {
       const teamResult = await pool.query('SELECT name FROM teams WHERE id = $1', [teamId]);
       if (teamResult.rows.length > 0) teamPath = teamResult.rows[0].name;

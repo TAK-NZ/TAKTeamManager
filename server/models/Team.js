@@ -4,6 +4,7 @@ const EventPublisher = require('../services/EventPublisher');
 const { isCloudTakEnabled } = require('../config/cloudtak');
 const { MAX_TEAM_DEPTH } = require('../config/constants');
 const { fetchWithTimeout } = require('../utils/fetchWithTimeout');
+const { toAsciiIdentifier } = require('../utils/asciiNormalize');
 
 /**
  * Requirement 2.2-2.3 (task 5.1): thrown by `Team.create` when the
@@ -597,6 +598,47 @@ class Team {
       logger.error({ err: error, teamId }, 'Error fetching ancestor chain');
       throw error;
     }
+  }
+
+  /**
+   * The canonical Team Display_Name: `<Organisation prefix> - <team name>`
+   * for a Sub_Team, or the bare `name` for an Organisation (root) team.
+   *
+   * This is the SAME rule the SQL `display_name` columns already encode
+   * (`getOrganisationTeams`, `getJoinableTeams`, `GET /api/users`'
+   * `team_name`, `SignupFlowService`): the prefix segment is the ROOT
+   * Organisation's `callsign_prefix` (falling back to its `name`), NOT the
+   * concatenation of every ancestor's prefix. So a deeply nested team
+   * FENZ > Te Kei (TEKE) > Southland (STL) > Manapouri renders as
+   * "FENZ - Manapouri", never "FENZ - TEKE - STL - Manapouri".
+   *
+   * Provided as a reusable method (rather than re-deriving the path inline)
+   * so the notification emails -- which previously built a full
+   * ancestor-prefix path by hand and got this wrong -- share one
+   * authoritative implementation with the display surfaces.
+   *
+   * Resolves the chain via `getAncestorChain` (ROOT-FIRST, per its
+   * contract): index 0 is the Organisation, the last row is `teamId`
+   * itself. Returns `null` if the team can't be resolved, so a caller can
+   * fall back to whatever name it already has.
+   *
+   * @param {number|string} teamId
+   * @returns {Promise<string|null>} the Display_Name, or null if not found.
+   */
+  static async getDisplayName(teamId) {
+    const chain = await this.getAncestorChain(teamId);
+    if (!chain || chain.length === 0) {
+      return null;
+    }
+    const organisation = chain[0];
+    const team = chain[chain.length - 1];
+    // Organisation (root) team: bare name, no prefix. A single-element
+    // chain means teamId IS the Organisation.
+    if (chain.length === 1 || !team.parent_team_id) {
+      return team.name;
+    }
+    const orgLabel = organisation.callsign_prefix || organisation.name || '';
+    return `${orgLabel} - ${team.name}`;
   }
 
   /**
@@ -2074,8 +2116,20 @@ class Team {
       
       const description = `Users from ${team.display_name} (Location sharing enabled)`;
       
-      // Create groups in Authentik with tak_ prefix
-      const authentikGroupName = `tak_${channelName}`;
+      // Create groups in Authentik with tak_ prefix.
+      //
+      // Special-character bugfix (Māori macrons): TAK Server cannot handle
+      // non-ASCII characters in an LDAP group name, so the Authentik group
+      // name derived from the (human, macron-bearing) team name is
+      // ASCII-normalized -- "Teams - FENZ - Ngā Tai ki te Puku" becomes
+      // "tak_Teams - FENZ - Nga Tai ki te Puku". `toAsciiIdentifier`
+      // strips diacritics to their base letter and drops any remaining
+      // non-ASCII glyph, while preserving the spaces/`-`/separators the
+      // group name legitimately uses. `channelName` itself is left intact
+      // and stored as the channel's `display_name` below, so the
+      // human-facing name keeps its macrons -- only the identifier that
+      // reaches TAK is normalized.
+      const authentikGroupName = `tak_${toAsciiIdentifier(channelName)}`;
       const channelDbName = channelName.toLowerCase().replace(/[^a-z0-9-]/g, '-');
       
       try {

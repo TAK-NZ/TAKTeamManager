@@ -27,6 +27,10 @@ jest.mock('../models/Team', () => ({
 jest.mock('./authentik', () => ({
   createUser: jest.fn()
 }));
+jest.mock('./userAttributes', () => ({
+  generateCallsign: jest.fn(),
+  updateUserAttributes: jest.fn()
+}));
 jest.mock('./UserProvisioningService', () => {
   class CallsignSuffixRequiredError extends Error {
     constructor(message = "A callsign suffix is required for this Organisation's user_defined callsign format") {
@@ -67,6 +71,7 @@ jest.mock('../config/logger', () => ({
 const pool = require('../config/database');
 const Team = require('../models/Team');
 const authentikService = require('./authentik');
+const UserAttributesService = require('./userAttributes');
 const UserProvisioningService = require('./UserProvisioningService');
 const BulkImportService = require('./BulkImportService');
 const { buildImportGraph } = BulkImportService;
@@ -88,7 +93,13 @@ describe('BulkImportService.importUsers', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     pool.connect.mockImplementation(() => Promise.resolve(buildMockClient()));
+    pool.query.mockResolvedValue({ rows: [] });
     authentikService.createUser.mockResolvedValue({ pk: 1000 });
+    // Post-commit Phase 3 (callsign compute + Authentik push + user_cache
+    // mirror) -- mocked so the importUsers batch tests don't hit real
+    // Authentik/DB; asserted directly in its own describe block below.
+    UserAttributesService.generateCallsign.mockResolvedValue({ callsign: 'FENZ-CS', color: 'Red', role: 'Team Member' });
+    UserAttributesService.updateUserAttributes.mockResolvedValue(true);
     UserProvisioningService.createAndAddUser.mockResolvedValue({ localUserId: 42, queuedGroups: 1 });
     UserProvisioningService.resolveNewUserIdentity.mockImplementation((client, { requestedUsername }) =>
       Promise.resolve({
@@ -1892,7 +1903,10 @@ describe('BulkImportService.importUserRow identity resolution (takserver-enrollm
   beforeEach(() => {
     jest.clearAllMocks();
     pool.connect.mockImplementation(() => Promise.resolve(buildMockClient()));
+    pool.query.mockResolvedValue({ rows: [] });
     authentikService.createUser.mockResolvedValue({ pk: 1000 });
+    UserAttributesService.generateCallsign.mockResolvedValue({ callsign: 'FENZ-CS', color: 'Red', role: 'Team Member' });
+    UserAttributesService.updateUserAttributes.mockResolvedValue(true);
     UserProvisioningService.createAndAddUser.mockResolvedValue({ localUserId: 42, queuedGroups: 1 });
     Team.isAdmin.mockResolvedValue(true);
   });
@@ -1941,6 +1955,70 @@ describe('BulkImportService.importUserRow identity resolution (takserver-enrollm
       expect.anything(),
       expect.objectContaining({ username: 'jdoe@example.com', callsign_suffix: 'J.Doe' })
     );
+  });
+
+  // Bugfix (bulk-imported users showed callsign "-" in the Members tab and
+  // empty takCallsign/takColor in Authentik): importUserRow now runs the
+  // same post-commit Phase 3 the single-user create-and-add route runs --
+  // compute the callsign, PATCH Authentik, and mirror into user_cache.
+  // `createAndAddUser` (shared by both paths) only stores callsign_suffix.
+  it('after commit, computes the callsign, pushes it to Authentik, and mirrors it into user_cache (Phase 3)', async () => {
+    UserProvisioningService.resolveNewUserIdentity.mockResolvedValue({
+      username: 'jdoe@example.com',
+      callsignSuffix: 'J.Doe',
+      pseudonymous: false,
+      claimId: null
+    });
+    UserProvisioningService.createAndAddUser.mockResolvedValue({ localUserId: 777, queuedGroups: 1 });
+    authentikService.createUser.mockResolvedValue({ pk: 'authentik-pk-777' });
+    UserAttributesService.generateCallsign.mockResolvedValue({ callsign: 'FENZ-J.Doe', color: 'Red', role: 'Team Member' });
+
+    const csv = csvFromRows([
+      { email: 'jdoe@example.com', firstName: 'John', lastName: 'Doe', teamId: '5' }
+    ]);
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importUsers(csv, importingUser);
+
+    expect(summary.results[0].success).toBe(true);
+
+    // Callsign computed from the just-created local user + target team.
+    expect(UserAttributesService.generateCallsign).toHaveBeenCalledWith(777, 5);
+    // Pushed to Authentik under the created user's pk, carrying callsign/color.
+    expect(UserAttributesService.updateUserAttributes).toHaveBeenCalledWith(
+      'authentik-pk-777',
+      expect.objectContaining({ callsign: 'FENZ-J.Doe', color: 'Red', firstName: 'John', lastName: 'Doe' })
+    );
+    // Mirrored into user_cache with the computed tak_callsign/tak_color.
+    const cacheCall = pool.query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO user_cache')
+    );
+    expect(cacheCall).toBeDefined();
+    // params: authentik_id, username, email, first, last, [is_active literal], tak_callsign, tak_color, tak_role, callsign_suffix
+    expect(cacheCall[1]).toEqual([
+      'authentik-pk-777', 'jdoe@example.com', 'jdoe@example.com', 'John', 'Doe',
+      'FENZ-J.Doe', 'Red', 'Team Member', 'J.Doe'
+    ]);
+  });
+
+  it('still counts the row as imported when the post-commit callsign/Authentik sync fails (best-effort, non-rollback)', async () => {
+    UserProvisioningService.resolveNewUserIdentity.mockResolvedValue({
+      username: 'jdoe@example.com',
+      callsignSuffix: 'J.Doe',
+      pseudonymous: false,
+      claimId: null
+    });
+    // Phase 3 Authentik push throws -- must NOT fail the already-created row.
+    UserAttributesService.updateUserAttributes.mockRejectedValue(new Error('Authentik unreachable'));
+
+    const csv = csvFromRows([
+      { email: 'jdoe@example.com', firstName: 'John', lastName: 'Doe', teamId: '5' }
+    ]);
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importUsers(csv, importingUser);
+
+    expect(summary.successCount).toBe(1);
+    expect(summary.failureCount).toBe(0);
+    expect(summary.results[0].success).toBe(true);
   });
 
   it('passes undefined requestedCallsignSuffix when the CSV column is omitted/empty', async () => {
@@ -2115,7 +2193,10 @@ describe('BulkImportService defaultTeamId fallback', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     pool.connect.mockImplementation(() => Promise.resolve(buildMockClient()));
+    pool.query.mockResolvedValue({ rows: [] });
     authentikService.createUser.mockResolvedValue({ pk: 1000 });
+    UserAttributesService.generateCallsign.mockResolvedValue({ callsign: 'FENZ-CS', color: 'Red', role: 'Team Member' });
+    UserAttributesService.updateUserAttributes.mockResolvedValue(true);
     UserProvisioningService.createAndAddUser.mockResolvedValue({ localUserId: 42, queuedGroups: 1 });
     UserProvisioningService.resolveNewUserIdentity.mockImplementation((client, { requestedUsername }) =>
       Promise.resolve({ username: requestedUsername, callsignSuffix: null, pseudonymous: false, claimId: null })
@@ -2163,7 +2244,10 @@ describe('BulkImportService.importUsers rowNumbers filtering', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     pool.connect.mockImplementation(() => Promise.resolve(buildMockClient()));
+    pool.query.mockResolvedValue({ rows: [] });
     authentikService.createUser.mockResolvedValue({ pk: 1000 });
+    UserAttributesService.generateCallsign.mockResolvedValue({ callsign: 'FENZ-CS', color: 'Red', role: 'Team Member' });
+    UserAttributesService.updateUserAttributes.mockResolvedValue(true);
     UserProvisioningService.createAndAddUser.mockResolvedValue({ localUserId: 42, queuedGroups: 1 });
     UserProvisioningService.resolveNewUserIdentity.mockImplementation((client, { requestedUsername }) =>
       Promise.resolve({ username: requestedUsername, callsignSuffix: null, pseudonymous: false, claimId: null })

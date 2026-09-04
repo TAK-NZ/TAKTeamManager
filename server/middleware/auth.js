@@ -92,10 +92,34 @@ async function resolveUserFromRequest(req) {
       return { user: null, reason: 'user_not_found' };
     }
 
+    // Bugfix (regular user saw no teams + a spurious "Team_Owned_Device
+    // cannot self-enroll" error): `req.user.userId` is contractually the
+    // LOCAL `users.id` (every consumer -- Team.isAdmin, the
+    // team_memberships.user_id FK, User.findById, resolveOwnOrganisationTeams,
+    // the enrollment self-preview -- keys on it). It used to be sourced
+    // from `user_cache.id`, which is that cache table's OWN independent
+    // serial, NOT `users.id`. The two coincided for early rows but have
+    // since diverged, so a user whose cache.id != users.id had every
+    // users.id-keyed lookup miss: team_memberships came back empty (=> "No
+    // teams yet") and User.findById resolved a DIFFERENT row -- sometimes a
+    // Team_Owned_Device -- producing the self-enroll rejection. Resolve the
+    // real users.id here via the shared authentik_user_id key.
+    const usersRow = await pool.query(
+      'SELECT id FROM users WHERE authentik_user_id::text = $1::text',
+      [String(cachedUser.authentik_id)]
+    );
+    if (usersRow.rows.length === 0) {
+      // A cache row with no matching users row: the account cannot be
+      // acted on (no team memberships, no enrollment) -- treat as not
+      // found rather than handing out a wrong/absent userId.
+      return { user: null, reason: 'user_not_found' };
+    }
+    const localUserId = usersRow.rows[0].id;
+
     return {
       user: {
         id: cachedUser.authentik_id,
-        userId: cachedUser.id,
+        userId: localUserId,
         username: cachedUser.username,
         email: cachedUser.email,
         first_name: cachedUser.first_name,
