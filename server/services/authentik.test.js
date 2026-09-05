@@ -265,3 +265,66 @@ describe('AuthentikService.createUser', () => {
     });
   });
 });
+
+/**
+ * Bugfix: `getUsers` must send a stable `ordering=pk` query param on
+ * every request -- Authentik's default ordering for `/core/users/` is
+ * alphabetical by username, which is NOT stable across a page boundary
+ * while accounts are concurrently created/renamed (e.g. a bulk CSV
+ * import racing against a `GET /api/users` request). Without a stable
+ * sort key a user can be silently skipped or duplicated between two
+ * page fetches. Confirmed live against a real Authentik instance: the
+ * default ordering visibly changed page 1's contents between two
+ * requests made seconds apart during an active import.
+ */
+describe('AuthentikService.getUsers', () => {
+  let mockClient;
+  let authentikService;
+
+  beforeEach(() => {
+    jest.resetModules();
+    jest.clearAllMocks();
+    mockClient = {
+      post: jest.fn(),
+      get: jest.fn(),
+      delete: jest.fn()
+    };
+    const axios = require('axios');
+    axios.create = jest.fn(() => mockClient);
+    authentikService = require('./authentik');
+  });
+
+  it('includes ordering=pk on the unpaginated (no page/pageSize) call', async () => {
+    mockClient.get.mockResolvedValue({ data: { results: [] } });
+
+    await authentikService.getUsers();
+
+    expect(mockClient.get).toHaveBeenCalledWith('/core/users/?type=internal&ordering=pk');
+  });
+
+  it('includes ordering=pk alongside page/page_size on the paginated call', async () => {
+    mockClient.get.mockResolvedValue({ data: { results: [], pagination: { count: 0 } } });
+
+    await authentikService.getUsers({ page: 2, pageSize: 25 });
+
+    expect(mockClient.get).toHaveBeenCalledWith('/core/users/?type=internal&ordering=pk&page=2&page_size=25');
+  });
+
+  it('still returns the full result array unchanged on the unpaginated call', async () => {
+    const results = [{ pk: 1, username: 'alice' }, { pk: 2, username: 'bob' }];
+    mockClient.get.mockResolvedValue({ data: { results } });
+
+    const returned = await authentikService.getUsers();
+
+    expect(returned).toEqual(results);
+  });
+
+  it('still returns {results, count} unchanged on the paginated call', async () => {
+    const results = [{ pk: 1, username: 'alice' }];
+    mockClient.get.mockResolvedValue({ data: { results, pagination: { count: 42 } } });
+
+    const returned = await authentikService.getUsers({ page: 1, pageSize: 50 });
+
+    expect(returned).toEqual({ results, count: 42 });
+  });
+});

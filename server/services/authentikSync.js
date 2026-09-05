@@ -57,9 +57,30 @@ class AuthentikSyncService {
       // attempt to hit the "not found in cache" path indefinitely -- not
       // just a delay until the next sync, since that next sync had the
       // exact same bug.
+      //
+      // Bugfix (mass false-positive orphaning during a concurrent bulk
+      // import): `GET /core/users/` defaults to ordering ALPHABETICALLY
+      // BY USERNAME, with no stable secondary key. While a large CSV
+      // import is inserting thousands of new Authentik accounts
+      // concurrently with a periodic sync run, every new username
+      // shifts the alphabetical position of every user sorted after it
+      // -- so a user can shift from a not-yet-fetched page to an
+      // already-fetched one (or vice versa) BETWEEN two page requests of
+      // the SAME pagination loop, and be silently skipped entirely. This
+      // loop's `allUsers` result is then incomplete but looks complete
+      // (`hasMorePages` correctly went false), so
+      // `reconcileOrphanedAccounts` -- which trusts a non-empty result
+      // as a COMPLETE one -- wrongly marked every skipped real user
+      // `'orphaned'` and enqueued a certificate revoke against them.
+      // Confirmed live: of 100 accounts orphaned during one FENZ import,
+      // all 100 still existed in Authentik. `ordering=pk` sorts by the
+      // one field that is immutable once assigned and unaffected by
+      // concurrent inserts of OTHER users, so a user already returned on
+      // an earlier page can never later reappear on, or be skipped from,
+      // a later page because same-run inserts changed its sort key.
       while (hasMorePages) {
         const response = await axios.get(
-          `${process.env.AUTHENTIK_URL}/api/v3/core/users/?page=${currentPage}`,
+          `${process.env.AUTHENTIK_URL}/api/v3/core/users/?ordering=pk&page=${currentPage}`,
           {
             headers: { Authorization: `Bearer ${process.env.AUTHENTIK_API_TOKEN}` },
             timeout: 30000
@@ -154,13 +175,20 @@ class AuthentikSyncService {
   // Throws if any page of the pagination loop fails, so a partial
   // `allGroups` list is never returned to the caller and never used to
   // build a groupMap for processBatch.
+  //
+  // Bugfix: same stable-ordering fix as the user-list loop above --
+  // Authentik's default group ordering is by name, which is not immune
+  // to a group being created/renamed concurrently with this fetch (e.g.
+  // a CloudTAK agency-group sync running alongside a bulk team import).
+  // `ordering=num_pk` (the group's own stable integer key, distinct from
+  // its UUID `pk`) is unaffected by concurrent name changes/inserts.
   async fetchGroupMap() {
     let allGroups = [];
     let currentPage = 1;
     let hasMorePages = true;
 
     while (hasMorePages) {
-      const groupsResponse = await axios.get(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/?page=${currentPage}`, {
+      const groupsResponse = await axios.get(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/?ordering=num_pk&page=${currentPage}`, {
         headers: { Authorization: `Bearer ${process.env.AUTHENTIK_API_TOKEN}` },
         timeout: 30000
       });
@@ -733,6 +761,49 @@ class AuthentikSyncService {
                   'External_Unlock Detection: failed to reflect a detected Authentik-side account unlock; will retry on the next sync'
                 );
               }
+            }
+
+            // Bugfix (mass false-positive account deactivation via a
+            // false orphaning): this push-to-Authentik block used to run
+            // unconditionally on `account_status`, treating
+            // `local.is_active` as authoritative and PATCHing Authentik
+            // to match it whenever they differ. That is correct for
+            // `'active'`/`'suspended'` rows, but actively harmful for an
+            // `'orphaned'` one: `reconcileOrphanedAccounts` sets
+            // `is_active = false` the moment it believes an Authentik
+            // identity is gone, but an `'orphaned'` row's `is_active` is a
+            // SIDE EFFECT of that belief, not a deliberate, confirmed
+            // lock -- and that belief can be wrong (confirmed live: a
+            // pagination race during a concurrent bulk import falsely
+            // orphaned ~180 real, still-existing accounts in one
+            // incident). Before this fix, the very next sync run after a
+            // false orphan would see `user.is_active` (true, since the
+            // Authentik account never actually went away) disagree with
+            // `localIsActive` (false, from the orphaning) and PATCH
+            // Authentik's `is_active` to `false` -- turning a false LOCAL
+            // belief into a REAL deactivation of a live account, which is
+            // a strictly worse outcome than the original false orphan and
+            // is not self-healing: Account_Reclaim is the only path back
+            // out of `'orphaned'`, but nothing before this fix ever
+            // reversed the Authentik-side deactivation this block caused
+            // along the way, so even a manual local restore (setting
+            // `account_status` back to `'active'`) left Authentik and the
+            // local row disagreeing until an operator also manually
+            // PATCHed Authentik -- and if that PATCH is missed, the NEXT
+            // sync's External_Lock Detection (correctly, by its own
+            // logic) treats the still-stale Authentik `is_active: false`
+            // as a fresh external lock and suspends the account all over
+            // again.
+            //
+            // The fix: skip this entire diff-and-PATCH block for an
+            // `'orphaned'` row. This mirrors the External_Lock/
+            // External_Unlock branches just above, which already
+            // deliberately leave `'orphaned'` rows alone for the same
+            // reason (see their own comments) -- Account_Reclaim owns
+            // recovering an orphaned identity, not the routine per-sync
+            // attribute push.
+            if (local.account_status === 'orphaned') {
+              return;
             }
 
             // Current Authentik values (from the user object we already fetched)

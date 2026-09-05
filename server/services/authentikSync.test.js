@@ -135,6 +135,70 @@ describe('AuthentikSyncService.syncUsers', () => {
     expect(userListCalls).toHaveLength(1);
   });
 
+  /**
+   * Bugfix (mass false-positive orphaning during a concurrent bulk
+   * import): Authentik's `/core/users/` defaults to ordering
+   * ALPHABETICALLY BY USERNAME with no stable secondary key. While a
+   * large CSV import inserts thousands of new accounts concurrently
+   * with a periodic sync run, a user can shift between pages mid-fetch
+   * and be silently skipped -- the resulting incomplete-but-
+   * looks-complete `allUsers` set then feeds `reconcileOrphanedAccounts`,
+   * which wrongly marks every skipped REAL user `'orphaned'` and
+   * enqueues a certificate revoke against them. Confirmed live: of 100
+   * accounts orphaned during one FENZ CSV import, all 100 still existed
+   * in Authentik. `ordering=pk` (immutable once assigned, unaffected by
+   * concurrent inserts of OTHER users) fixes this. This test pins the
+   * query param is actually sent on every page request, not just the
+   * first.
+   */
+  it('requests the user list with a stable ordering=pk param, on every page, so concurrent inserts cannot shift a user across a page boundary mid-fetch', async () => {
+    const page1Users = [{ pk: 1, username: 'page1-user', email: 'page1@example.com', groups: [] }];
+    const page2Users = [{ pk: 2, username: 'page2-user', email: 'page2@example.com', groups: [] }];
+
+    db.query.mockResolvedValue({ rows: [] });
+    axios.get.mockImplementation((url) => {
+      if (url.includes('/api/v3/core/groups/')) {
+        return Promise.resolve({ data: { results: [], pagination: {} } });
+      }
+      if (url.includes('page=2')) {
+        return Promise.resolve({ data: { results: page2Users, pagination: { next: null } } });
+      }
+      return Promise.resolve({ data: { results: page1Users, pagination: { next: 2 } } });
+    });
+
+    await authentikSync.syncUsers();
+
+    const userListCalls = axios.get.mock.calls.filter(([url]) => url.includes('/api/v3/core/users/'));
+    expect(userListCalls).toHaveLength(2);
+    for (const [url] of userListCalls) {
+      expect(url).toContain('ordering=pk');
+    }
+  });
+
+  it('requests the group list with a stable ordering=num_pk param, so a concurrently created/renamed group cannot be skipped mid-fetch', async () => {
+    const page1Groups = [{ pk: 'g1', name: 'GroupOne' }];
+    const page2Groups = [{ pk: 'g2', name: 'GroupTwo' }];
+
+    db.query.mockResolvedValue({ rows: [] });
+    axios.get.mockImplementation((url) => {
+      if (url.includes('/api/v3/core/groups/')) {
+        if (url.includes('page=2')) {
+          return Promise.resolve({ data: { results: page2Groups, pagination: { next: null } } });
+        }
+        return Promise.resolve({ data: { results: page1Groups, pagination: { next: 2 } } });
+      }
+      return Promise.resolve({ data: { results: [], pagination: {} } });
+    });
+
+    await authentikSync.syncUsers();
+
+    const groupListCalls = axios.get.mock.calls.filter(([url]) => url.includes('/api/v3/core/groups/'));
+    expect(groupListCalls.length).toBeGreaterThanOrEqual(2);
+    for (const [url] of groupListCalls) {
+      expect(url).toContain('ordering=num_pk');
+    }
+  });
+
   it('fetches the Authentik group list exactly once per run, even across multiple batches of users', async () => {
     // batchSize inside syncUsers is 50, so 120 users forces 3 processBatch calls
     // within a single syncUsers() run.
@@ -1421,6 +1485,53 @@ describe('AuthentikSyncService.syncSingleUser push-to-Authentik guard is keyed o
 
     expect(localSelect).toBeUndefined();
     expect(cacheSelect).toBeUndefined();
+  });
+
+  // Bugfix regression test (mass false-positive account deactivation via a
+  // false orphaning, confirmed live during the 2026-09-05 FENZ bulk-import
+  // incident): before this fix, the diff-and-PATCH block ran unconditionally
+  // for any row with a resolved `localUserId`, including an `'orphaned'`
+  // one. An orphaned row's `is_active` is a SIDE EFFECT of
+  // `reconcileOrphanedAccounts`'s belief that the Authentik identity is
+  // gone -- when that belief is wrong (as in the live incident: a
+  // pagination race falsely orphaned ~180 real, still-existing accounts),
+  // the very next sync saw Authentik's real `is_active: true` disagree with
+  // the falsely-orphaned local row's `is_active: false`, and PATCHed
+  // Authentik's `is_active` to `false` -- turning a false LOCAL belief into
+  // a REAL deactivation of a live account. This test's `localRow` is
+  // deliberately constructed so that, absent the `account_status ===
+  // 'orphaned'` guard, `isActiveChanged` would be true (local false vs.
+  // Authentik true) and a PATCH would fire -- proving the guard is what
+  // prevents it, not an incidental absence of any other diff.
+  it('never PATCHes Authentik for an orphaned row, even when local is_active disagrees with Authentik (bugfix: false-orphan deactivation)', async () => {
+    const user = {
+      pk: 'user-orphaned-is-active-mismatch',
+      username: 'nora',
+      email: 'nora@example.com',
+      name: 'Nora Local',
+      groups: [],
+      is_active: true, // Authentik: the account is genuinely still active
+      attributes: { first_name: 'Nora', last_name: 'Local', takCallsign: '', takColor: '', takRole: 'Team Member' }
+    };
+
+    db.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO users')) {
+        return Promise.resolve({ rows: [{ id: 77, is_team_device: false }] });
+      }
+      if (typeof sql === 'string' && sql.includes('SELECT first_name, last_name, tak_role, is_active, account_status FROM users')) {
+        // Local: falsely orphaned, is_active=false -- disagrees with
+        // Authentik's is_active: true above.
+        return Promise.resolve({ rows: [{ first_name: 'Nora', last_name: 'Local', tak_role: 'Team Member', is_active: false, account_status: 'orphaned' }] });
+      }
+      if (typeof sql === 'string' && sql.includes('SELECT tak_callsign, tak_color FROM user_cache')) {
+        return Promise.resolve({ rows: [{ tak_callsign: '', tak_color: '' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await authentikSync.processBatch([user], {});
+
+    expect(axios.patch).not.toHaveBeenCalled();
   });
 });
 

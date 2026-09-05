@@ -257,16 +257,26 @@ class AuthentikService {
   // where `count` is Authentik's total-matching-record count (for the
   // `type=internal` filter) taken from its pagination envelope, so the
   // caller can report a `total` independent of the current page.
+  //
+  // Bugfix: `ordering=pk` on both branches -- Authentik's default
+  // ordering for `/core/users/` is alphabetical by username, which is
+  // NOT stable across a page boundary while accounts are being
+  // concurrently created/renamed elsewhere (e.g. a bulk CSV import
+  // racing against a request to this same endpoint). Without a stable
+  // sort key, a user can shift position between the time page N and
+  // page N+1 are fetched and be silently duplicated or skipped. `pk` is
+  // immutable once assigned, so this call always sees a consistent
+  // ordering regardless of concurrent writes elsewhere.
   async getUsers({ page, pageSize } = {}) {
     if (page === undefined && pageSize === undefined) {
-      const response = await this.circuitBreaker.execute(() => this.client.get('/core/users/?type=internal'));
+      const response = await this.circuitBreaker.execute(() => this.client.get('/core/users/?type=internal&ordering=pk'));
       return response.data.results;
     }
 
     const resolvedPage = page || 1;
     const resolvedPageSize = pageSize || 50;
     const response = await this.circuitBreaker.execute(() =>
-      this.client.get(`/core/users/?type=internal&page=${resolvedPage}&page_size=${resolvedPageSize}`)
+      this.client.get(`/core/users/?type=internal&ordering=pk&page=${resolvedPage}&page_size=${resolvedPageSize}`)
     );
     return {
       results: response.data.results,
