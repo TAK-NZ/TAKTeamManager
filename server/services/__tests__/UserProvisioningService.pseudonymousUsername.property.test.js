@@ -78,6 +78,7 @@ const {
   IDENTIFIER_TYPE_MARKERS
 } = require('../../utils/managedIdentifier');
 const { MAX_TEAM_DEPTH } = require('../../config/constants');
+const { AMBIGUITY_FREE_ALPHABET } = require('../../utils/identifierAlphabet');
 
 // A fixed, always-non-blank Callsign_Suffix. Callsign_Default_Suppression
 // (Property 8) is a different property; keeping this fixed and non-blank
@@ -93,9 +94,22 @@ const FIXED_CALLSIGN_SUFFIX = 'FixedSuffix123';
 
 const ALPHANUMERIC = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 const alphanumericCharArb = fc.constantFrom(...ALPHANUMERIC.split(''));
+// A valid Organisation_Prefix has no segment shaped like a Managed_Identifier
+// marker+body suffix (one of the markers `D`/`U` followed by exactly 7
+// Identifier_Alphabet characters) -- `isValidCallsignPrefix` rejects that
+// shape (the right-anchored parse in `managedIdentifier.js` would otherwise
+// be ambiguous), so `resolveNewUserIdentity`'s pseudonymous/mint branch
+// correctly throws `OrganisationPrefixMissingError` on such an input. This
+// generator has only ONE segment (no `-`), so filtering is a single
+// whole-string match rather than a per-segment split. Mirrors the identical
+// fix already applied to `managedIdentifier.property.test.js` (commit
+// acf01ea) for the same bug class -- CI seed -988409850 hit the
+// counterexample 'DAAAAAAA' here.
+const MARKER_BODY_SEGMENT_RE = new RegExp(`^[DU][${AMBIGUITY_FREE_ALPHABET}]{7}$`);
 const organisationPrefixArb = fc
   .array(alphanumericCharArb, { minLength: 1, maxLength: 10 })
-  .map((chars) => chars.join(''));
+  .map((chars) => chars.join(''))
+  .filter((prefix) => !MARKER_BODY_SEGMENT_RE.test(prefix));
 
 // ---------------------------------------------------------------------------
 // Ancestor_Chain generator, parameterised by depth. Root at index 0 carries
