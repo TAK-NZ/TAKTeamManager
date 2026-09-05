@@ -936,6 +936,29 @@ describe('GET /api/users pagination (Requirement 11.4)', () => {
     expect(res.status).toBe(200);
     expect(authentikService.getUsers).toHaveBeenCalledWith({ page: 1, pageSize: 50 });
   });
+
+  // Pagination follow-up: server-side search, forwarded verbatim to
+  // authentikService.getUsers (which is what actually talks to Authentik's
+  // own `search` query param -- see that service's own tests).
+  it('passes a supplied search term through to authentikService.getUsers alongside page/pageSize', async () => {
+    authentikService.getUsers.mockResolvedValue({ results: [], count: 0 });
+    pool.query.mockResolvedValue({ rows: [] });
+
+    const res = await request(app).get('/api/users').query({ page: 1, pageSize: 50, search: 'reynolds' });
+
+    expect(res.status).toBe(200);
+    expect(authentikService.getUsers).toHaveBeenCalledWith({ page: 1, pageSize: 50, search: 'reynolds' });
+  });
+
+  it('omits search from the getUsers call when no search query param is supplied', async () => {
+    authentikService.getUsers.mockResolvedValue({ results: [], count: 0 });
+    pool.query.mockResolvedValue({ rows: [] });
+
+    await request(app).get('/api/users');
+
+    const [callArgs] = authentikService.getUsers.mock.calls[0];
+    expect(callArgs.search).toBeUndefined();
+  });
 });
 
 /**

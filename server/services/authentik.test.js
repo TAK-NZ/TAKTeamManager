@@ -299,7 +299,7 @@ describe('AuthentikService.getUsers', () => {
 
     await authentikService.getUsers();
 
-    expect(mockClient.get).toHaveBeenCalledWith('/core/users/?type=internal&ordering=pk');
+    expect(mockClient.get).toHaveBeenCalledWith('/core/users/', { params: { type: 'internal', ordering: 'pk' } });
   });
 
   it('includes ordering=pk alongside page/page_size on the paginated call', async () => {
@@ -307,7 +307,9 @@ describe('AuthentikService.getUsers', () => {
 
     await authentikService.getUsers({ page: 2, pageSize: 25 });
 
-    expect(mockClient.get).toHaveBeenCalledWith('/core/users/?type=internal&ordering=pk&page=2&page_size=25');
+    expect(mockClient.get).toHaveBeenCalledWith('/core/users/', {
+      params: { type: 'internal', ordering: 'pk', page: 2, page_size: 25 }
+    });
   });
 
   it('still returns the full result array unchanged on the unpaginated call', async () => {
@@ -326,5 +328,46 @@ describe('AuthentikService.getUsers', () => {
     const returned = await authentikService.getUsers({ page: 1, pageSize: 50 });
 
     expect(returned).toEqual({ results, count: 42 });
+  });
+
+  // Requirement: server-side search for the paginated /users list.
+  // Confirmed live against account.test.tak.nz that Authentik's
+  // `search` param matches a substring across username/name/email.
+  it('includes a supplied search term as the search param on the paginated call', async () => {
+    mockClient.get.mockResolvedValue({ data: { results: [], pagination: { count: 0 } } });
+
+    await authentikService.getUsers({ page: 1, pageSize: 50, search: 'reynolds' });
+
+    expect(mockClient.get).toHaveBeenCalledWith('/core/users/', {
+      params: { type: 'internal', ordering: 'pk', page: 1, page_size: 50, search: 'reynolds' }
+    });
+  });
+
+  it('includes a supplied search term as the search param on the unpaginated call', async () => {
+    mockClient.get.mockResolvedValue({ data: { results: [] } });
+
+    await authentikService.getUsers({ search: 'reynolds' });
+
+    expect(mockClient.get).toHaveBeenCalledWith('/core/users/', {
+      params: { type: 'internal', ordering: 'pk', search: 'reynolds' }
+    });
+  });
+
+  it('omits the search param entirely when no search term is supplied (not even an empty string)', async () => {
+    mockClient.get.mockResolvedValue({ data: { results: [], pagination: { count: 0 } } });
+
+    await authentikService.getUsers({ page: 1, pageSize: 50 });
+
+    const [, options] = mockClient.get.mock.calls[0];
+    expect(options.params).not.toHaveProperty('search');
+  });
+
+  it('omits the search param when an empty string is supplied (falsy, treated as no search)', async () => {
+    mockClient.get.mockResolvedValue({ data: { results: [], pagination: { count: 0 } } });
+
+    await authentikService.getUsers({ page: 1, pageSize: 50, search: '' });
+
+    const [, options] = mockClient.get.mock.calls[0];
+    expect(options.params).not.toHaveProperty('search');
   });
 });

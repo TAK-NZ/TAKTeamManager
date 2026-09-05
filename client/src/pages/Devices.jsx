@@ -53,7 +53,10 @@ import { describeAccountStatusBadge } from '../utils/accountStatusBadge'
 export default function Devices({ user }) {
   const [searchQuery, setSearchQuery] = useState('')
   const [devices, setDevices] = useState([])
-  const [pagination, setPagination] = useState({ page: 1, pageSize: 50, total: 0 })
+  // pageSize is 20 -- the CLIENT's own chosen default, distinct from the
+  // server's own `paginationParams` default of 50 (which still applies to
+  // any caller that omits pageSize entirely).
+  const [pagination, setPagination] = useState({ page: 1, pageSize: 20, total: 0 })
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
@@ -92,7 +95,7 @@ export default function Devices({ user }) {
         search: searchQuery || undefined
       })
       setDevices(response.data?.devices || [])
-      setPagination(response.data?.pagination || { page: 1, pageSize: 50, total: 0 })
+      setPagination(response.data?.pagination || { page: 1, pageSize: 20, total: 0 })
       setError(null)
     } catch (err) {
       console.error('Failed to fetch devices:', err)

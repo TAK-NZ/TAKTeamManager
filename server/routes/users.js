@@ -166,7 +166,16 @@ router.get('/count', authenticateToken, authorize, async (req, res) => {
 router.get('/', authenticateToken, authorize, paginationParams, async (req, res) => {
   try {
     const { page, pageSize } = req.pagination;
-    const { results: authentikUsers, count: totalUsers } = await authentikService.getUsers({ page, pageSize });
+    // Pagination follow-up: `search` narrows the list server-side via
+    // Authentik's own `search` query param (confirmed live: matches a
+    // substring across username/name/email), the same
+    // `req.query.search`-straight-through shape `GET /api/devices`
+    // already uses. No validation/sanitization here -- it is forwarded
+    // as an opaque search TERM, never interpolated into SQL or a URL by
+    // hand (see `AuthentikService.getUsers`'s own doc comment on why it
+    // uses axios's `params` object instead of string interpolation).
+    const { search } = req.query;
+    const { results: authentikUsers, count: totalUsers } = await authentikService.getUsers({ page, pageSize, search });
 
     const authentikUserIds = authentikUsers.map((user) => user.pk);
 

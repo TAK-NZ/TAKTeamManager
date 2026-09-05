@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { PlusIcon, MagnifyingGlassIcon, XMarkIcon, ChevronUpIcon, ChevronDownIcon, ArrowUpTrayIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import { usersAPI, teamsAPI, configAPI } from '../services/api'
@@ -54,6 +54,15 @@ import { isValidNewUserEmail, extractCallsignSuffixServerError } from '../utils/
 export default function Users({ user }) {
   const [searchQuery, setSearchQuery] = useState('')
   const [users, setUsers] = useState([])
+  // Pagination follow-up: mirrors Devices.jsx's own pagination state
+  // shape/effect/footer exactly. GET /api/users' list was previously
+  // fetched unbounded-looking but actually server-defaulted to page=1/
+  // pageSize=50 -- this made the page silently show only the first 50
+  // users with no indication more existed, and no way to reach them.
+  // pageSize is 20 here (the CLIENT's own chosen default -- the server's
+  // own `paginationParams` default of 50 is unrelated and still applies
+  // to any caller that omits pageSize entirely).
+  const [pagination, setPagination] = useState({ page: 1, pageSize: 20, total: 0 })
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   // Requirement 6.4 (device-management task 15.4): the row whose "Devices"
@@ -124,21 +133,36 @@ export default function Users({ user }) {
   const [sortField, setSortField] = useState('name')
   const [sortDirection, setSortDirection] = useState('asc')
 
-  const fetchUsers = async () => {
+  // Pagination follow-up: mirrors Devices.jsx's own fetchDevices exactly --
+  // a useCallback depending on [pagination.page, pagination.pageSize,
+  // searchQuery], echoing the server's returned pagination object back
+  // into state (page/pageSize/total), rather than trusting the locally
+  // held page/pageSize as still current. `search` narrows server-side via
+  // Authentik's own search param (GET /api/users' doc comment), so the
+  // client no longer filters `name`/`email`/`username` in memory -- see
+  // `sortedUsers` below, which now only sorts, never filters.
+  const fetchUsers = useCallback(async () => {
+    setLoading(true)
     try {
-      const response = await usersAPI.getAll()
-      setUsers(response.data.users || response.data || [])
+      const response = await usersAPI.getAll({
+        page: pagination.page,
+        pageSize: pagination.pageSize,
+        search: searchQuery || undefined
+      })
+      setUsers(response.data?.users || response.data || [])
+      setPagination((prev) => response.data?.pagination || prev)
+      setError(null)
     } catch (error) {
       console.error('Failed to fetch users:', error)
       setError(`Failed to load users: ${error.message}`)
     } finally {
       setLoading(false)
     }
-  }
+  }, [pagination.page, pagination.pageSize, searchQuery])
 
   useEffect(() => {
     fetchUsers()
-  }, [])
+  }, [fetchUsers])
 
   // Requirement 13.5 (mirrors TeamDetail.jsx): the 8 predefined TAK_Role
   // values, sourced from GET /api/config/public's `takRoleValues` field so
@@ -159,19 +183,12 @@ export default function Users({ user }) {
     }
   }, [])
 
-  // Performance-hardening: memoized against [users, searchQuery] so an
-  // unrelated re-render (e.g. opening an edit row, a dialog, or updating
-  // takRoleValues) does not re-filter the entire fetched user list from
-  // scratch. Bounded by the server's own pagination page size in
-  // practice, but recomputing on every render was still pure waste.
-  const filteredUsers = useMemo(() => (
-    users.filter(user =>
-      user.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      user.email?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      user.username?.toLowerCase().includes(searchQuery.toLowerCase())
-    )
-  ), [users, searchQuery])
-
+  // Pagination follow-up: search is now server-side (GET /api/users'
+  // `search` param, forwarded to Authentik -- see fetchUsers above), so
+  // `users` is already the correctly-filtered current page and needs no
+  // further client-side filtering. Only sorting remains a client-side
+  // concern, exactly like Devices.jsx's own `sortedDevices`.
+  //
   // `name` sorts case-insensitively as a string, matching
   // TeamDetail.jsx's own `filterAndSort`. `last_login` sorts as a
   // timestamp: an absent/unparseable value (`Date.parse` -> `NaN`) is
@@ -181,12 +198,13 @@ export default function Users({ user }) {
   // neighbours -- this way "Never" rows sort first ascending, last
   // descending, consistent with them being the oldest activity.
   //
-  // Performance-hardening: memoized against
-  // [filteredUsers, sortField, sortDirection] for the same reason as
-  // filteredUsers above.
+  // Performance-hardening: memoized against [users, sortField,
+  // sortDirection] so an unrelated re-render (e.g. opening an edit row,
+  // a dialog, or updating takRoleValues) does not re-sort the fetched
+  // page from scratch.
   const sortedUsers = useMemo(() => (
     sortField
-      ? [...filteredUsers].sort((a, b) => {
+      ? [...users].sort((a, b) => {
           let aValue
           let bValue
           if (sortField === 'last_login') {
@@ -204,8 +222,8 @@ export default function Users({ user }) {
           }
           return aValue > bValue ? -1 : aValue < bValue ? 1 : 0
         })
-      : filteredUsers
-  ), [filteredUsers, sortField, sortDirection])
+      : users
+  ), [users, sortField, sortDirection])
 
   const handleSort = (field) => {
     setSortDirection(sortField === field && sortDirection === 'asc' ? 'desc' : 'asc')
@@ -469,7 +487,10 @@ export default function Users({ user }) {
         />
       )}
 
-      {/* Search */}
+      {/* Search -- now server-side (mirrors Devices.jsx's own search
+          input): changing the term resets to page 1, since a filtered
+          result set has its own page count, and staying on the
+          previously-viewed page could point past the end of it. */}
       <div className="card">
         <div className="relative">
           <MagnifyingGlassIcon className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
@@ -478,7 +499,10 @@ export default function Users({ user }) {
             placeholder="Search users by name, email, or username..."
             className="input pl-10"
             value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
+            onChange={(e) => {
+              setSearchQuery(e.target.value)
+              setPagination((prev) => ({ ...prev, page: 1 }))
+            }}
           />
         </div>
       </div>
@@ -824,6 +848,38 @@ export default function Users({ user }) {
             </table>
           </div>
           </>
+        )}
+
+        {/* Pagination follow-up: Previous/Page-N-of-M/Next footer,
+            mirroring Devices.jsx's/AuditLogs.jsx's own convention exactly. */}
+        {!loading && !error && sortedUsers.length > 0 && (
+          <div className="mt-6 flex flex-wrap items-center justify-between gap-2">
+            <div className="text-sm text-gray-500 dark:text-gray-400">
+              Showing {(pagination.page - 1) * pagination.pageSize + 1} to{' '}
+              {Math.min(pagination.page * pagination.pageSize, pagination.total)} of {pagination.total} users
+            </div>
+            <div className="flex items-center space-x-2">
+              <button
+                type="button"
+                onClick={() => setPagination((prev) => ({ ...prev, page: prev.page - 1 }))}
+                disabled={pagination.page === 1}
+                className="px-3 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Previous
+              </button>
+              <span className="text-sm text-gray-500 dark:text-gray-400">
+                Page {pagination.page} of {Math.max(1, Math.ceil(pagination.total / (pagination.pageSize || 1)))}
+              </span>
+              <button
+                type="button"
+                onClick={() => setPagination((prev) => ({ ...prev, page: prev.page + 1 }))}
+                disabled={pagination.page === Math.max(1, Math.ceil(pagination.total / (pagination.pageSize || 1)))}
+                className="px-3 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Next
+              </button>
+            </div>
+          </div>
         )}
       </div>
 

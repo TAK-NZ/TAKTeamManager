@@ -1268,3 +1268,166 @@ describe('Users "Create User" dialog (Users-page-action-parity)', () => {
     expect(container.querySelector('[role="dialog"][aria-labelledby="create-user-title"]')).not.toBeNull()
   })
 })
+
+// ══════════════════════════════════════════════════════════════════════════
+// Pagination follow-up: GET /api/users' list was previously fetched with
+// no page/pageSize/search sent at all (the server silently defaulted to
+// page=1/pageSize=50), so a deployment with more than 50 users had no way
+// to reach anyone past the first page and no indication more existed.
+// This adds a Previous/Page-N-of-M/Next footer (mirroring Devices.jsx's
+// own) and forwards the search box server-side via Authentik's own
+// `search` param, replacing the previous client-side name/email/username
+// filter. The CLIENT's own chosen pageSize is 20 (distinct from the
+// server's own unrelated default of 50 for a caller that omits it
+// entirely) -- every fixture below echoes pageSize: 20 back from the
+// mocked server response so it matches what the client actually
+// requested; a mismatched echo would make fetchUsers's own
+// pagination.pageSize dependency refire an extra, unintended fetch.
+// ══════════════════════════════════════════════════════════════════════════
+describe('Users pagination and server-side search (pagination follow-up)', () => {
+  let container
+  let root
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    vi.clearAllMocks()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false })
+    configAPI.getPublic.mockResolvedValue({ data: {} })
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    vi.restoreAllMocks()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  const mount = async () => {
+    root = createRoot(container)
+    await act(async () => {
+      root.render(<Users />)
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+  }
+
+  it('requests page 1 / pageSize 20 with no search on first load', async () => {
+    usersAPI.getAll.mockResolvedValue({ data: { users: [], pagination: { page: 1, pageSize: 20, total: 0 } } })
+
+    await mount()
+
+    expect(usersAPI.getAll).toHaveBeenCalledWith({ page: 1, pageSize: 20, search: undefined })
+  })
+
+  it('renders the Previous/Page-N-of-M/Next footer using the server-echoed pagination object', async () => {
+    usersAPI.getAll.mockResolvedValue({
+      data: {
+        users: [userRow()],
+        pagination: { page: 2, pageSize: 20, total: 120 }
+      }
+    })
+
+    await mount()
+
+    expect(container.textContent).toContain('Showing 21 to 40 of 120 users')
+    expect(container.textContent).toContain('Page 2 of 6')
+  })
+
+  it('does not render the pagination footer when there are no rows', async () => {
+    usersAPI.getAll.mockResolvedValue({ data: { users: [], pagination: { page: 1, pageSize: 20, total: 0 } } })
+
+    await mount()
+
+    expect(container.textContent).not.toContain('Page 1 of')
+  })
+
+  it('disables Previous on page 1 and Next on the last page', async () => {
+    usersAPI.getAll.mockResolvedValue({
+      data: { users: [userRow()], pagination: { page: 1, pageSize: 20, total: 10 } }
+    })
+
+    await mount()
+
+    const buttons = Array.from(container.querySelectorAll('button')).filter((b) =>
+      b.textContent === 'Previous' || b.textContent === 'Next'
+    )
+    const previous = buttons.find((b) => b.textContent === 'Previous')
+    const next = buttons.find((b) => b.textContent === 'Next')
+
+    expect(previous.disabled).toBe(true)
+    expect(next.disabled).toBe(true) // total 10 <= pageSize 20, only one page
+  })
+
+  it('clicking Next requests page 2 with the same pageSize', async () => {
+    usersAPI.getAll.mockResolvedValueOnce({
+      data: { users: [userRow()], pagination: { page: 1, pageSize: 20, total: 120 } }
+    })
+
+    await mount()
+
+    usersAPI.getAll.mockResolvedValueOnce({
+      data: { users: [userRow()], pagination: { page: 2, pageSize: 20, total: 120 } }
+    })
+
+    const next = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Next')
+    await act(async () => {
+      next.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(usersAPI.getAll).toHaveBeenLastCalledWith({ page: 2, pageSize: 20, search: undefined })
+    expect(container.textContent).toContain('Page 2 of 6')
+  })
+
+  it('typing in the search box forwards the term server-side and resets to page 1', async () => {
+    usersAPI.getAll.mockResolvedValueOnce({
+      data: { users: [userRow()], pagination: { page: 2, pageSize: 20, total: 120 } }
+    })
+
+    await mount()
+
+    usersAPI.getAll.mockResolvedValueOnce({
+      data: { users: [userRow({ name: 'Rachel Reynolds' })], pagination: { page: 1, pageSize: 20, total: 1 } }
+    })
+
+    const searchInput = container.querySelector('input[placeholder^="Search users"]')
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+    await act(async () => {
+      setter.call(searchInput, 'reynolds')
+      searchInput.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(usersAPI.getAll).toHaveBeenLastCalledWith({ page: 1, pageSize: 20, search: 'reynolds' })
+  })
+
+  it('does not client-side filter -- a row not matching a stale in-memory filter still renders once the server returns it', async () => {
+    // Regression guard for the removed client-side filteredUsers logic:
+    // the server is now the ONLY filter. A row whose name/email/username
+    // would not have matched the OLD in-memory searchQuery must still
+    // render, because search narrowing is entirely server-side now.
+    usersAPI.getAll.mockResolvedValue({
+      data: {
+        users: [userRow({ name: 'Zeta Nomatch', email: 'zeta@nomatch.test', username: 'zeta' })],
+        pagination: { page: 1, pageSize: 20, total: 1 }
+      }
+    })
+
+    await mount()
+
+    expect(container.textContent).toContain('Zeta Nomatch')
+  })
+})

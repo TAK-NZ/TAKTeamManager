@@ -267,16 +267,39 @@ class AuthentikService {
   // page N+1 are fetched and be silently duplicated or skipped. `pk` is
   // immutable once assigned, so this call always sees a consistent
   // ordering regardless of concurrent writes elsewhere.
-  async getUsers({ page, pageSize } = {}) {
+  // `search` (Requirement: server-side search for the paginated /users
+  // list, needed once the list is bounded to a page instead of fetched in
+  // full): Authentik's `GET /core/users/` accepts a `search` query param
+  // that matches a substring against username/name/email server-side
+  // (confirmed live against account.test.tak.nz -- `search=reynolds`
+  // returned both `rachel.reynolds@tak.nz` and `rose.reynolds@tak.nz`).
+  // Passed via axios's `params` object, not string-interpolated into the
+  // URL, so it is correctly percent-encoded regardless of content (a
+  // space, `&`, or non-ASCII character in a search term must not corrupt
+  // the query string or be interpreted as an extra parameter). Absent
+  // entirely (not even an empty string) when no search term is supplied,
+  // matching how `page`/`page_size` are already omitted from the
+  // unpaginated branch below.
+  async getUsers({ page, pageSize, search } = {}) {
     if (page === undefined && pageSize === undefined) {
-      const response = await this.circuitBreaker.execute(() => this.client.get('/core/users/?type=internal&ordering=pk'));
+      const response = await this.circuitBreaker.execute(() =>
+        this.client.get('/core/users/', { params: { type: 'internal', ordering: 'pk', ...(search ? { search } : {}) } })
+      );
       return response.data.results;
     }
 
     const resolvedPage = page || 1;
     const resolvedPageSize = pageSize || 50;
     const response = await this.circuitBreaker.execute(() =>
-      this.client.get(`/core/users/?type=internal&ordering=pk&page=${resolvedPage}&page_size=${resolvedPageSize}`)
+      this.client.get('/core/users/', {
+        params: {
+          type: 'internal',
+          ordering: 'pk',
+          page: resolvedPage,
+          page_size: resolvedPageSize,
+          ...(search ? { search } : {})
+        }
+      })
     );
     return {
       results: response.data.results,

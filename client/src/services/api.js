@@ -273,7 +273,12 @@ export const bulkImportAPI = {
 };
 
 export const usersAPI = {
-  getAll: () => api.get('/users'),
+  // Pagination follow-up: accepts { page, pageSize, search }, mirroring
+  // `devicesAPI.getAll`'s own shape -- `stripEmptyParams` drops an absent
+  // page/pageSize/search rather than sending it as a literal empty
+  // string/undefined, so a caller that omits all three still gets the
+  // server's own page-1/pageSize-50/no-search defaults.
+  getAll: (params = {}) => api.get('/users', { params: stripEmptyParams(params) }),
   // Bugfix (Admin page's inaccurate "Total Users" stat): an exact,
   // unpaginated count excluding ignored-prefix accounts and Team_Owned_Devices.
   getCount: () => api.get('/users/count'),

@@ -86,7 +86,7 @@ describe('Devices page', () => {
     globalThis.IS_REACT_ACT_ENVIRONMENT = false
   })
 
-  const mountWith = async (devices, pagination = { page: 1, pageSize: 50, total: devices.length }) => {
+  const mountWith = async (devices, pagination = { page: 1, pageSize: 20, total: devices.length }) => {
     devicesAPI.getAll.mockResolvedValue({ data: { devices, pagination } })
     root = createRoot(container)
     await act(async () => {
@@ -154,7 +154,7 @@ describe('Devices page', () => {
     expect(container.textContent).toContain('Loading devices...')
 
     await act(async () => {
-      resolveFetch({ data: { devices: [deviceRow()], pagination: { page: 1, pageSize: 50, total: 1 } } })
+      resolveFetch({ data: { devices: [deviceRow()], pagination: { page: 1, pageSize: 20, total: 1 } } })
       await Promise.resolve()
     })
 
@@ -191,7 +191,7 @@ describe('Devices page', () => {
     expect(input).not.toBeNull()
 
     devicesAPI.getAll.mockResolvedValue({
-      data: { devices: [deviceRow({ deviceUserId: 11, username: 'AUK-D0000BB', deviceLabel: 'Spare Tablet' })], pagination: { page: 1, pageSize: 50, total: 1 } }
+      data: { devices: [deviceRow({ deviceUserId: 11, username: 'AUK-D0000BB', deviceLabel: 'Spare Tablet' })], pagination: { page: 1, pageSize: 20, total: 1 } }
     })
 
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
@@ -358,7 +358,7 @@ describe('Devices page', () => {
 
   describe('pagination', () => {
     it('shows the Showing X to Y of Z summary and disables Previous on page 1', async () => {
-      await mountWith([deviceRow()], { page: 1, pageSize: 50, total: 1 })
+      await mountWith([deviceRow()], { page: 1, pageSize: 20, total: 1 })
 
       expect(container.textContent).toContain('Showing 1 to 1 of 1 devices')
       const prevButton = [...container.querySelectorAll('button')].find((b) => b.textContent === 'Previous')
