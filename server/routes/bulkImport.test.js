@@ -135,6 +135,23 @@ describe('POST /api/bulk-import/users', () => {
 
     expect(res.status).toBe(500);
   });
+
+  // Bugfix (row-count cap): distinct from the generic 500 above -- a
+  // whole-batch row-count rejection is a client-correctable 400, naming
+  // the service's own message, not a masked "Failed to process user CSV
+  // import" string.
+  it('maps a BulkImportRowLimitExceededError thrown by the service to 400 with the service\'s own message', async () => {
+    const limitError = new Error('This CSV contains 501 rows, which exceeds the 500-row limit for the web upload. Use scripts/bulk-import-users.js for a larger import.');
+    limitError.name = 'BulkImportRowLimitExceededError';
+    BulkImportService.importUsers.mockRejectedValue(limitError);
+
+    const res = await request(app)
+      .post('/api/bulk-import/users')
+      .attach('csv', Buffer.from('email,firstName,lastName,teamId\n'), { filename: 'users.csv', contentType: 'text/csv' });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: limitError.message });
+  });
 });
 
 describe('POST /api/bulk-import/users/preview', () => {

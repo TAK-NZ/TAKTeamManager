@@ -50,6 +50,46 @@ class BulkImportAuthorizationError extends Error {
 }
 
 /**
+ * `POST /api/bulk-import/users`' own row-count cap (the web-UI upload
+ * path only -- `scripts/bulk-import-users.js` calls `importUserRow`
+ * directly, in-process, with bounded concurrency, and is not subject to
+ * this limit at all). `importUsers` is entirely single-row-at-a-time,
+ * with every row paying for at least two sequential Authentik HTTP
+ * round-trips (Phase 1's `createUser`, and Phase 3's `updateUserAttributes`,
+ * which itself is a GET-then-PATCH) plus several sequential DB round
+ * trips -- there is no concurrency across rows at all in this path. That
+ * makes it fundamentally unsuited to a request/response HTTP call at any
+ * real scale: confirmed live, a 15,000-row FENZ import through this exact
+ * path took long enough that an operator reasonably assumed something
+ * was hung, and a request held open that long risks a proxy/load-balancer
+ * timeout aborting it mid-batch with an unknown number of rows actually
+ * committed. `MAX_USER_IMPORT_ROWS` bounds a single web-UI upload to a
+ * size that completes in a bounded, predictable time; a genuinely large
+ * import belongs in `scripts/bulk-import-users.js` instead, which runs
+ * outside the request/response cycle with bounded per-row concurrency
+ * (mirroring `authentikSync.js`'s own `p-limit` pattern) specifically so
+ * it does not pay this path's fully-serial cost.
+ */
+const MAX_USER_IMPORT_ROWS = 500;
+
+/**
+ * Thrown by `importUsers` to reject an ENTIRE batch upfront, before any
+ * row is processed, when the CSV contains more than `MAX_USER_IMPORT_ROWS`
+ * data rows. Mirrors `BulkImportAuthorizationError`'s own
+ * "whole-batch rejection, not a per-row `BulkImportRowError`" shape --
+ * `results` is never partially populated for this failure, since no row
+ * from an over-limit file is ever processed at all.
+ */
+class BulkImportRowLimitExceededError extends Error {
+  constructor(rowCount, maxRows = MAX_USER_IMPORT_ROWS) {
+    super(`This CSV contains ${rowCount} rows, which exceeds the ${maxRows}-row limit for the web upload. Use scripts/bulk-import-users.js for a larger import.`);
+    this.name = 'BulkImportRowLimitExceededError';
+    this.rowCount = rowCount;
+    this.maxRows = maxRows;
+  }
+}
+
+/**
  * Reads a row field, trimmed, treating `undefined`/`null` the same as an
  * empty string. Used throughout `buildImportGraph` (task 17.1) for the
  * optional `rowId`/`parentRowRef`/`parentTeamName`/`parentTeamId`
@@ -779,9 +819,26 @@ class BulkImportService {
     let rowNumber = 0;
     const allowedRowNumbers = rowNumbers ? new Set(rowNumbers.map(Number)) : null;
 
+    // Bugfix (row-count cap): parse the WHOLE file up front (mirroring
+    // `previewUsers`/`importTeams`'s own "buffer every row before doing
+    // any work" shape) so the cap can be checked against the actual
+    // number of rows this call would process -- `allowedRowNumbers.size`
+    // when a preview-then-confirm commit narrows to a specific subset,
+    // or the file's total row count otherwise -- BEFORE any Authentik
+    // call or DB write for row 1, not discovered midway through a
+    // partially-completed batch.
+    const parsedRows = [];
     const parser = parse(csvBuffer, { columns: true, trim: true, skip_empty_lines: true });
-
     for await (const row of parser) {
+      parsedRows.push(row);
+    }
+
+    const rowsToProcess = allowedRowNumbers ? allowedRowNumbers.size : parsedRows.length;
+    if (rowsToProcess > MAX_USER_IMPORT_ROWS) {
+      throw new BulkImportRowLimitExceededError(rowsToProcess);
+    }
+
+    for (const row of parsedRows) {
       rowNumber++;
       if (allowedRowNumbers && !allowedRowNumbers.has(rowNumber)) {
         continue;
@@ -1489,6 +1546,8 @@ class BulkImportService {
 module.exports = BulkImportService;
 module.exports.BulkImportRowError = BulkImportRowError;
 module.exports.BulkImportAuthorizationError = BulkImportAuthorizationError;
+module.exports.BulkImportRowLimitExceededError = BulkImportRowLimitExceededError;
+module.exports.MAX_USER_IMPORT_ROWS = MAX_USER_IMPORT_ROWS;
 module.exports.buildImportGraph = buildImportGraph;
 module.exports.parseRowColor = parseRowColor;
 module.exports.parseRowCanJoin = parseRowCanJoin;

@@ -204,6 +204,14 @@ router.post('/users', authenticateToken, authorize, handleUpload(csvUpload.singl
 
     res.status(200).json(result);
   } catch (error) {
+    // Bugfix (row-count cap): a whole-batch rejection, distinct from a
+    // per-row `results` entry -- mirrors the `BulkImportAuthorizationError`
+    // -> 403 mapping just below for `POST /teams`, at 400 instead since
+    // this is a client-correctable "your file is too big for this
+    // endpoint" rejection, not an authorization failure.
+    if (error.name === 'BulkImportRowLimitExceededError') {
+      return res.status(400).json({ error: error.message });
+    }
     getLogger().error({ err: error }, 'Failed to process user CSV import');
     res.status(500).json({ error: 'Failed to process user CSV import' });
   }

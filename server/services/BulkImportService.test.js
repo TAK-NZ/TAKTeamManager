@@ -82,7 +82,7 @@ const UserProvisioningService = require('./UserProvisioningService');
 const EventPublisher = require('./EventPublisher');
 const { fetchWithTimeout } = require('../utils/fetchWithTimeout');
 const BulkImportService = require('./BulkImportService');
-const { buildImportGraph, parseRowCountryCode } = BulkImportService;
+const { buildImportGraph, parseRowCountryCode, MAX_USER_IMPORT_ROWS } = BulkImportService;
 
 function buildMockClient() {
   return {
@@ -2544,6 +2544,85 @@ describe('BulkImportService.importUsers rowNumbers filtering', () => {
     const summary = await BulkImportService.importUsers(csv, importingUser);
 
     expect(summary.successCount).toBe(2);
+  });
+});
+
+// Bugfix (row-count cap): `POST /api/bulk-import/users`' single-row-at-a-
+// time, fully-serial per-row cost (at least two sequential Authentik HTTP
+// round-trips plus several sequential DB round trips, with NO concurrency
+// across rows) makes it unsuited to any real scale over an HTTP
+// request/response cycle. `importUsers` now rejects the WHOLE batch,
+// before processing any row, when the row count it would actually
+// process exceeds `MAX_USER_IMPORT_ROWS` -- mirroring
+// `BulkImportAuthorizationError`'s own "reject up front, no partial
+// `results`" shape, not a per-row `BulkImportRowError`.
+describe('BulkImportService.importUsers row-count cap (bugfix)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    pool.connect.mockImplementation(() => Promise.resolve(buildMockClient()));
+    pool.query.mockResolvedValue({ rows: [] });
+    authentikService.createUser.mockResolvedValue({ pk: 1000 });
+    UserAttributesService.generateCallsign.mockResolvedValue({ callsign: 'FENZ-CS', color: 'Red', role: 'Team Member' });
+    UserAttributesService.updateUserAttributes.mockResolvedValue(true);
+    UserProvisioningService.createAndAddUser.mockResolvedValue({ localUserId: 42, queuedGroups: 1 });
+    UserProvisioningService.resolveNewUserIdentity.mockImplementation((client, { requestedUsername }) =>
+      Promise.resolve({ username: requestedUsername, callsignSuffix: null, pseudonymous: false, claimId: null })
+    );
+    Team.isAdmin.mockResolvedValue(true);
+  });
+
+  function csvWithNRows(n) {
+    return csvFromRows(
+      Array.from({ length: n }, (_, i) => ({
+        email: `user${i}@example.com`,
+        firstName: 'User',
+        lastName: String(i),
+        teamId: '5'
+      }))
+    );
+  }
+
+  it('rejects a file with more rows than the cap, before processing any row at all', async () => {
+    const csv = csvWithNRows(MAX_USER_IMPORT_ROWS + 1);
+    const importingUser = { userId: 1, is_global_manager: true };
+
+    await expect(BulkImportService.importUsers(csv, importingUser)).rejects.toMatchObject({
+      name: 'BulkImportRowLimitExceededError',
+      rowCount: MAX_USER_IMPORT_ROWS + 1,
+      maxRows: MAX_USER_IMPORT_ROWS
+    });
+    expect(authentikService.createUser).not.toHaveBeenCalled();
+    expect(pool.connect).not.toHaveBeenCalled();
+  });
+
+  it('processes a file with exactly the cap\'s number of rows (the boundary is inclusive)', async () => {
+    const csv = csvWithNRows(MAX_USER_IMPORT_ROWS);
+    const importingUser = { userId: 1, is_global_manager: true };
+
+    const summary = await BulkImportService.importUsers(csv, importingUser);
+
+    expect(summary.successCount).toBe(MAX_USER_IMPORT_ROWS);
+  });
+
+  it('checks the cap against the NARROWED rowNumbers subset, not the full file, for a preview-then-confirm commit', async () => {
+    // The full file is over the cap, but the caller is only committing
+    // 2 previously-previewed rows -- that narrowed commit must not be
+    // rejected by a limit meant to bound a single call's total work.
+    const csv = csvWithNRows(MAX_USER_IMPORT_ROWS + 50);
+    const importingUser = { userId: 1, is_global_manager: true };
+
+    const summary = await BulkImportService.importUsers(csv, importingUser, { rowNumbers: [1, 2] });
+
+    expect(summary.successCount).toBe(2);
+  });
+
+  it('names the actual row count and the limit in the rejection message', async () => {
+    const csv = csvWithNRows(MAX_USER_IMPORT_ROWS + 1);
+    const importingUser = { userId: 1, is_global_manager: true };
+
+    await expect(BulkImportService.importUsers(csv, importingUser)).rejects.toThrow(
+      `${MAX_USER_IMPORT_ROWS + 1} rows, which exceeds the ${MAX_USER_IMPORT_ROWS}-row limit`
+    );
   });
 });
 
