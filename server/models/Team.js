@@ -5,6 +5,7 @@ const { isCloudTakEnabled } = require('../config/cloudtak');
 const { MAX_TEAM_DEPTH } = require('../config/constants');
 const { fetchWithTimeout } = require('../utils/fetchWithTimeout');
 const { toAsciiIdentifier } = require('../utils/asciiNormalize');
+const { isValidCountryCode, normaliseCountryCode } = require('../utils/isoCountry');
 
 /**
  * Requirement 2.2-2.3 (task 5.1): thrown by `Team.create` when the
@@ -188,6 +189,57 @@ class OrganisationCallsignPrefixImmutableError extends Error {
 }
 
 /**
+ * Foreign_Partner Organisation country prefix feature: thrown by
+ * `Team.create`/`Team.update` when a `country_code` is supplied on a
+ * Sub_Team (`parent_team_id` present). Country is an Organisation-only
+ * field, exactly like `pseudonymous_usernames`/`callsign_level_selection`.
+ */
+class CountryCodeSubTeamError extends Error {
+  constructor(message = 'countryCode can only be set on an Organisation') {
+    super(message);
+    this.name = 'CountryCodeSubTeamError';
+  }
+}
+
+/**
+ * Foreign_Partner Organisation country prefix feature: thrown by
+ * `Team.create`/`Team.update` when a supplied `country_code` is a non-empty
+ * value that is not a known ISO 3166-1 alpha-3 code (per the vendored
+ * dataset behind `isoCountry.isValidCountryCode`). Distinct from the
+ * immutability error below: this is a bad VALUE (mapped to a 400), not a
+ * disallowed CHANGE.
+ */
+class CountryCodeInvalidError extends Error {
+  constructor(value) {
+    super(`Country code "${value}" is not a valid ISO 3166-1 alpha-3 code`);
+    this.name = 'CountryCodeInvalidError';
+    this.conflictingValue = value;
+  }
+}
+
+/**
+ * Foreign_Partner Organisation country prefix feature: thrown by
+ * `Team.update` when a request attempts to CHANGE an existing
+ * Organisation's `country_code` (including setting one where there was
+ * none, or clearing one that was set). Mirrors
+ * `OrganisationCallsignPrefixImmutableError` exactly: the country code is
+ * composed into the Organisation's effective callsign prefix, so every
+ * Managed_Identifier and callsign already minted under it embeds it --
+ * changing it would orphan those identifiers from their Organisation. A
+ * no-op resubmission of the CURRENT value is accepted (normalised to a
+ * no-op before the UPDATE); any real change throws this. Only ever fires
+ * on an Organisation (a Sub_Team never carries a country_code at all).
+ */
+class OrganisationCountryCodeImmutableError extends Error {
+  constructor(
+    message = "An Organisation's Country cannot be changed after creation: it is composed into the Organisation's callsign prefix, so every device and user identifier already minted under it is derived from it. It must be set correctly when the Organisation is first created."
+  ) {
+    super(message);
+    this.name = 'OrganisationCountryCodeImmutableError';
+  }
+}
+
+/**
  * Bugfix (callsign-handling): thrown by `Team.create`/`Team.update` when
  * a `callsign_prefix` value collides with `idx_teams_callsign_prefix`.
  *
@@ -276,6 +328,25 @@ class Team {
     // group-membership reconciliation, never an identifier/certificate
     // consequence, so neither carries an immutability guard.
     let { response_channel_access, support_channel_access } = teamData;
+    // Foreign_Partner Organisation country prefix feature: `country_code`
+    // is an Organisation-only field, mirroring `pseudonymous_usernames`'s
+    // tri-state shape -- declared with `let` because it is validated and
+    // normalised to upper-case alpha-3 (root team) or forced to `null`
+    // (Sub_Team) below, before ever reaching the INSERT. NULL means a
+    // domestic (NZ) Organisation.
+    let { country_code } = teamData;
+    // Callsign Team-segment separator toggle: `callsign_team_hyphenated`
+    // is an Organisation-only field, mirroring `pseudonymous_usernames`'s
+    // tri-state shape exactly -- declared with `let` because it is
+    // defaulted to `false` (root team) or forced to `null` (Sub_Team)
+    // below, before ever reaching the INSERT. It is NEVER read off a
+    // Sub_Team's own row (`computeCallsignAttributes`/
+    // `DeviceEnrollmentService` only ever read it from
+    // `ancestorChain[0]`, the Organisation), so unlike `color`/
+    // `callsign_name_format` it needs no inheritance-copy or
+    // cascade-to-descendants -- a Sub_Team's own stored value is simply
+    // always NULL and never consulted.
+    let { callsign_team_hyphenated } = teamData;
 
     // Requirement 2.2/2.3: compute the Team_Depth this Sub_Team would
     // occupy (the parent's Team_Depth plus one), or 0 for a root
@@ -417,10 +488,54 @@ class Team {
         : Boolean(support_channel_access);
     }
 
+    // Foreign_Partner Organisation country prefix feature: `country_code`
+    // is only ever stored on an Organisation row (`parent_team_id IS
+    // NULL`). A Sub_Team's value is always NULL, and a Sub_Team creation
+    // request that supplies one is a typed rejection, exactly as
+    // `pseudonymous_usernames`/`callsign_level_selection` already behave.
+    // For an Organisation, a non-empty value must be a known ISO 3166-1
+    // alpha-3 code and is normalised to upper-case; an empty/absent value
+    // is a domestic Organisation (NULL). Deliberately OUTSIDE the
+    // try/catch below, for the same reason as every other Organisation-only
+    // guard: a typed rejection must propagate to the caller, never be
+    // swallowed by the fallback-to-basic-creation catch.
+    if (parent_team_id) {
+      if (country_code !== undefined && country_code !== null && country_code !== '') {
+        throw new CountryCodeSubTeamError();
+      }
+      country_code = null;
+    } else {
+      if (!isValidCountryCode(country_code)) {
+        throw new CountryCodeInvalidError(country_code);
+      }
+      country_code = normaliseCountryCode(country_code);
+    }
+
+    // Callsign Team-segment separator toggle: only ever stored on an
+    // Organisation row (`parent_team_id IS NULL`) -- a Sub_Team's value
+    // is always `NULL`, and a Sub_Team creation request that supplies
+    // one is a typed rejection, exactly as `pseudonymous_usernames`
+    // already behaves. Deliberately OUTSIDE the try/catch below, for the
+    // same reason as every other Organisation-only guard above.
+    if (parent_team_id) {
+      if (callsign_team_hyphenated !== undefined && callsign_team_hyphenated !== null) {
+        throw new ChannelTierAccessSubTeamError('callsignTeamHyphenated');
+      }
+      callsign_team_hyphenated = null;
+    } else {
+      // Organisation (root team): default to `false` when omitted --
+      // the migration deliberately carries no column default, so the
+      // application supplies one here, mirroring
+      // response_channel_access's own defaulting.
+      callsign_team_hyphenated = callsign_team_hyphenated === undefined || callsign_team_hyphenated === null
+        ? false
+        : Boolean(callsign_team_hyphenated);
+    }
+
     try {
       const result = await pool.query(
-        'INSERT INTO teams (name, description, callsign_prefix, color, visibility, can_join, parent_team_id, created_by, callsign_name_format, callsign_level_selection, pseudonymous_usernames, response_channel_access, support_channel_access) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *',
-        [name, description, callsign_prefix, color, visibility, can_join, parent_team_id, created_by, callsign_name_format, callsign_level_selection, pseudonymous_usernames, response_channel_access, support_channel_access]
+        'INSERT INTO teams (name, description, callsign_prefix, color, visibility, can_join, parent_team_id, created_by, callsign_name_format, callsign_level_selection, pseudonymous_usernames, response_channel_access, support_channel_access, country_code, callsign_team_hyphenated) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING *',
+        [name, description, callsign_prefix, color, visibility, can_join, parent_team_id, created_by, callsign_name_format, callsign_level_selection, pseudonymous_usernames, response_channel_access, support_channel_access, country_code, callsign_team_hyphenated]
       );
       
       const team = result.rows[0];
@@ -578,18 +693,21 @@ class Team {
           SELECT id, parent_team_id, name, callsign_prefix, color,
                  callsign_name_format, visibility, callsign_level_selection,
                  pseudonymous_usernames, response_channel_access, support_channel_access,
+                 country_code, callsign_team_hyphenated,
                  0 AS hops_from_target
           FROM teams WHERE id = $1
           UNION ALL
           SELECT t.id, t.parent_team_id, t.name, t.callsign_prefix, t.color,
                  t.callsign_name_format, t.visibility, t.callsign_level_selection,
                  t.pseudonymous_usernames, t.response_channel_access, t.support_channel_access,
+                 t.country_code, t.callsign_team_hyphenated,
                  a.hops_from_target + 1
           FROM teams t JOIN ancestors a ON t.id = a.parent_team_id
         )
         SELECT id, parent_team_id, name, callsign_prefix, color,
                callsign_name_format, visibility, callsign_level_selection,
                pseudonymous_usernames, response_channel_access, support_channel_access,
+               country_code, callsign_team_hyphenated,
                (SELECT MAX(hops_from_target) FROM ancestors) - hops_from_target AS depth
         FROM ancestors ORDER BY depth ASC
       `, [teamId]);
@@ -1210,6 +1328,21 @@ class Team {
     // reconciliation via the Sync_Worker, never an identifier/certificate
     // consequence.
     let { response_channel_access, support_channel_access } = updateData;
+    // Foreign_Partner Organisation country prefix feature: `country_code`
+    // is WRITE-ONCE on an Organisation -- exactly the same shape as
+    // `callsign_prefix` above. A no-op resubmission of the current value
+    // is accepted (normalised to `undefined` below so COALESCE leaves the
+    // column untouched); any real change throws
+    // `OrganisationCountryCodeImmutableError`. A Sub_Team never carries
+    // one, so a value supplied on a Sub_Team update is a typed rejection.
+    let { country_code } = updateData;
+    // Callsign Team-segment separator toggle: rejected/ignored on a
+    // Sub_Team exactly like response_channel_access/support_channel_access
+    // below -- but UNLIKE country_code/callsign_prefix, freely APPLIED on
+    // an existing Organisation with no immutability guard: it only
+    // changes how the callsign is DISPLAYED going forward, never a
+    // Managed_Identifier already minted.
+    let { callsign_team_hyphenated } = updateData;
 
     // Requirement 3.3/5.6/7.2: determine whether `teamId` is a Sub_Team (a
     // non-null `parent_team_id`) BEFORE building the UPDATE, so the
@@ -1232,7 +1365,9 @@ class Team {
       pseudonymous_usernames !== undefined ||
       callsign_prefix !== undefined ||
       response_channel_access !== undefined ||
-      support_channel_access !== undefined
+      support_channel_access !== undefined ||
+      country_code !== undefined ||
+      callsign_team_hyphenated !== undefined
     ) {
       existingTeam = await this.findById(teamId);
     }
@@ -1264,6 +1399,17 @@ class Team {
       }
       if (support_channel_access !== undefined) {
         throw new ChannelTierAccessSubTeamError('supportChannelAccess');
+      }
+      // Foreign_Partner country prefix: a country_code supplied on a
+      // Sub_Team update is a typed rejection, mirroring the guards above.
+      if (country_code !== undefined) {
+        throw new CountryCodeSubTeamError();
+      }
+      // Callsign Team-segment separator toggle: a value supplied on a
+      // Sub_Team update is a typed rejection, mirroring the guards above
+      // (never silently ignored, unlike color/callsign_name_format).
+      if (callsign_team_hyphenated !== undefined) {
+        throw new ChannelTierAccessSubTeamError('callsignTeamHyphenated');
       }
     } else if (callsign_level_selection !== undefined && callsign_level_selection !== null) {
       // Organisation: validate every element is an integer in
@@ -1326,6 +1472,14 @@ class Team {
     if (support_channel_access !== undefined) {
       support_channel_access = support_channel_access === null ? undefined : Boolean(support_channel_access);
     }
+    // Callsign Team-segment separator toggle: freely mutable on an
+    // existing Organisation, exactly like response_channel_access/
+    // support_channel_access above -- same `null` -> `undefined`
+    // normalisation so COALESCE never re-introduces the Sub_Team-only
+    // NULL state on an Organisation row.
+    if (callsign_team_hyphenated !== undefined) {
+      callsign_team_hyphenated = callsign_team_hyphenated === null ? undefined : Boolean(callsign_team_hyphenated);
+    }
 
     // Bugfix (callsign-handling): an Organisation's `callsign_prefix` is
     // its Organisation_Prefix -- immutable after creation, because every
@@ -1352,6 +1506,37 @@ class Team {
       // A no-op resubmission: nothing to change, so the UPDATE's own
       // COALESCE below simply leaves the column untouched.
       callsign_prefix = undefined;
+    }
+
+    // Foreign_Partner Organisation country prefix: `country_code` is
+    // WRITE-ONCE on an existing Organisation, mirroring `callsign_prefix`
+    // immediately above -- it is composed into the callsign, so changing
+    // it (including setting one where there was none, or clearing one)
+    // would orphan every identifier already minted. A no-op resubmission
+    // of the current value is accepted (normalised to `undefined` so
+    // COALESCE leaves the column untouched); any real change throws.
+    // Comparison is on the NORMALISED (upper-case alpha-3, or null)
+    // submitted value vs the stored value, so a case-only difference
+    // ('fji' vs stored 'FJI') is correctly treated as a no-op, not a
+    // change. A Sub_Team never reaches here (it was rejected above).
+    if (
+      existingTeam &&
+      existingTeam.parent_team_id === null &&
+      country_code !== undefined
+    ) {
+      // A non-empty submitted value must be a real ISO code before we can
+      // even compare it -- an invalid value is a 400 (bad value), distinct
+      // from the immutability rejection.
+      if (country_code !== null && country_code !== '' && !isValidCountryCode(country_code)) {
+        throw new CountryCodeInvalidError(country_code);
+      }
+      const storedCountry = existingTeam.country_code || null;
+      const submittedCountry = normaliseCountryCode(country_code);
+      if (submittedCountry !== storedCountry) {
+        throw new OrganisationCountryCodeImmutableError();
+      }
+      // No-op resubmission: leave the column untouched via COALESCE.
+      country_code = undefined;
     }
 
     // Org-wide-team-name-uniqueness feature: enforce that the team's
@@ -1404,8 +1589,8 @@ class Team {
 
     try {
       const result = await pool.query(
-        'UPDATE teams SET name = COALESCE($1, name), description = COALESCE($2, description), visibility = COALESCE($3, visibility), can_join = COALESCE($4, can_join), parent_team_id = $5, callsign_name_format = COALESCE($6, callsign_name_format), color = COALESCE($8, color), callsign_level_selection = COALESCE($9, callsign_level_selection), pseudonymous_usernames = COALESCE($10, pseudonymous_usernames), callsign_prefix = COALESCE($11, callsign_prefix), response_channel_access = COALESCE($12, response_channel_access), support_channel_access = COALESCE($13, support_channel_access), updated_at = CURRENT_TIMESTAMP WHERE id = $7 RETURNING *',
-        [name, description, visibility, can_join, parent_team_id, callsign_name_format, teamId, color, callsign_level_selection, pseudonymous_usernames, callsign_prefix, response_channel_access, support_channel_access]
+        'UPDATE teams SET name = COALESCE($1, name), description = COALESCE($2, description), visibility = COALESCE($3, visibility), can_join = COALESCE($4, can_join), parent_team_id = $5, callsign_name_format = COALESCE($6, callsign_name_format), color = COALESCE($8, color), callsign_level_selection = COALESCE($9, callsign_level_selection), pseudonymous_usernames = COALESCE($10, pseudonymous_usernames), callsign_prefix = COALESCE($11, callsign_prefix), response_channel_access = COALESCE($12, response_channel_access), support_channel_access = COALESCE($13, support_channel_access), country_code = COALESCE($14, country_code), callsign_team_hyphenated = COALESCE($15, callsign_team_hyphenated), updated_at = CURRENT_TIMESTAMP WHERE id = $7 RETURNING *',
+        [name, description, visibility, can_join, parent_team_id, callsign_name_format, teamId, color, callsign_level_selection, pseudonymous_usernames, callsign_prefix, response_channel_access, support_channel_access, country_code, callsign_team_hyphenated]
       );
       const updatedTeam = result.rows[0];
 
@@ -2248,6 +2433,9 @@ Team.PseudonymousUsernamePolicyImmutableError = PseudonymousUsernamePolicyImmuta
 Team.OrganisationCallsignPrefixImmutableError = OrganisationCallsignPrefixImmutableError;
 Team.CallsignPrefixConflictError = CallsignPrefixConflictError;
 Team.TeamNameConflictError = TeamNameConflictError;
+Team.CountryCodeSubTeamError = CountryCodeSubTeamError;
+Team.CountryCodeInvalidError = CountryCodeInvalidError;
+Team.OrganisationCountryCodeImmutableError = OrganisationCountryCodeImmutableError;
 Team.ChannelTierAccessSubTeamError = ChannelTierAccessSubTeamError;
 Team.InheritedMembershipPromotionError = InheritedMembershipPromotionError;
 

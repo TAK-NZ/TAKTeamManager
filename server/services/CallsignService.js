@@ -23,12 +23,20 @@ class CallsignService {
    *
    * - The Organisation segment is `organisationPrefix` (Requirement 8.2)
    *   -- always included, unconditionally, whenever non-empty.
-   * - The Team segment is the concatenation, WITH NO SEPARATOR, of every
-   *   entry in `teamSegmentPrefixes` (Requirement 8.3). The caller is
-   *   responsible for having already filtered/ordered that array to
-   *   ascending Team_Depth positions present in the Organisation's
-   *   Callsign_Level_Selection; this function only concatenates the
-   *   entries it is given.
+   * - The Team segment is the concatenation of every entry in
+   *   `teamSegmentPrefixes` (Requirement 8.3), joined by
+   *   `teamSegmentSeparator` (default `''`, i.e. NO separator -- the
+   *   original, unconditional rule). Passing `'-'` instead joins each
+   *   present level with a single hyphen (the Callsign_Team_Hyphenated
+   *   toggle, Organisation-only). The caller is responsible for having
+   *   already filtered/ordered `teamSegmentPrefixes` to ascending
+   *   Team_Depth positions present in the Organisation's
+   *   Callsign_Level_Selection, with every entry already non-empty
+   *   (`userAttributes.js`'s `!!team.callsign_prefix` filter runs before
+   *   this is ever called) -- this function only joins the entries it is
+   *   given, so an unselected/absent intermediate level is simply never
+   *   present in the array, never an empty-string placeholder that could
+   *   produce a doubled separator.
    * - The Name segment is `nameSegment` (Requirement 8.4) -- used
    *   unconditionally, exactly as supplied by the caller.
    *
@@ -44,16 +52,22 @@ class CallsignService {
    * @param {Array<string>|null|undefined} params.teamSegmentPrefixes -
    *   the non-empty `callsign_prefix` values at Team_Depth >= 1, already
    *   filtered to the Callsign_Level_Selection and ordered ascending by
-   *   Team_Depth; joined here with no separator to form the Team
-   *   segment.
+   *   Team_Depth; joined here (by `teamSegmentSeparator`) to form the
+   *   Team segment.
    * @param {string|null|undefined} params.nameSegment - the Name
    *   segment (a user's stored `callsign_suffix`).
+   * @param {string} [params.teamSegmentSeparator=''] - the separator
+   *   placed between each pair of PRESENT `teamSegmentPrefixes` entries.
+   *   `''` (the default) reproduces the original no-separator
+   *   concatenation; `'-'` hyphenates. Since `teamSegmentPrefixes` never
+   *   contains an empty entry, this can never itself produce a leading,
+   *   trailing, or doubled separator.
    * @returns {string} the assembled callsign.
    */
-  static assembleCallsign({ organisationPrefix, teamSegmentPrefixes, nameSegment }) {
+  static assembleCallsign({ organisationPrefix, teamSegmentPrefixes, nameSegment, teamSegmentSeparator = '' }) {
     const organisationSegment = organisationPrefix || '';
     const teamSegment = Array.isArray(teamSegmentPrefixes)
-      ? teamSegmentPrefixes.join('')
+      ? teamSegmentPrefixes.join(teamSegmentSeparator)
       : '';
     const nameSegmentValue = nameSegment || '';
 

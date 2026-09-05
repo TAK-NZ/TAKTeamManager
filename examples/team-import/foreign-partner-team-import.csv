@@ -1,0 +1,8 @@
+rowId,parentRowRef,parentTeamName,parentTeamId,name,visibility,callsignPrefix,color,canJoin,countryCode
+org1,,,,National Fire Authority of Fiji,public,FIRE,Red,true,FJI
+d1,org1,,,Central Division,public,CENT,,,
+,d1,,,Suva,public,SUVA,,true,
+,d1,,,Nausori,public,NAUS,,true,
+d2,org1,,,Western Division,public,WEST,,,
+,d2,,,Lautoka,public,LAUT,,true,
+,d2,,,Nadi,public,NADI,,true,

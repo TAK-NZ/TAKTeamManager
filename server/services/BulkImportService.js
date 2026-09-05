@@ -5,6 +5,7 @@ const UserProvisioningService = require('./UserProvisioningService');
 const UserAttributesService = require('./userAttributes');
 const authentikService = require('./authentik');
 const { isValidCallsignPrefix } = require('../utils/callsignValidation');
+const { isValidCountryCode } = require('../utils/isoCountry');
 const { TAK_COLOR_NAMES } = require('../config/constants');
 const logger = require('../config/logger').createLogger('BulkImportService');
 
@@ -595,6 +596,53 @@ function parseRowCallsignPrefix(row) {
 }
 
 /**
+ * Foreign_Partner Organisation country prefix feature: reads a
+ * Team_Import_Row's optional `countryCode` column -- the ISO 3166-1 alpha-3
+ * code of a foreign partner nation (e.g. `AUS`, `FJI`), composed into the
+ * Organisation's callsign prefix.
+ *
+ * `country_code` is an Organisation-only field (`server/models/Team.js`):
+ * `Team.create` rejects it on a Sub_Team outright. So, mirroring
+ * `parseRowColor`'s own `isRoot` handling, this is only meaningful on a
+ * root row -- for a Sub_Team row it returns `null` unconditionally
+ * (ignoring any supplied value) rather than validating an irrelevant one,
+ * so a stray `countryCode` on a Sub_Team row never fails the import.
+ *
+ * For a new Organisation row (`isRoot`), an empty/omitted value is a
+ * domestic (NZ) Organisation (`null`); a non-empty value must be a known
+ * ISO 3166-1 alpha-3 code or this row alone fails, naming the disallowed
+ * value, matching `parseRowCallsignPrefix`'s row-level rejection style.
+ * The value is passed through as-supplied (case preserved); `Team.create`
+ * normalises it to upper-case alpha-3.
+ *
+ * @param {Record<string, string>} row
+ * @param {boolean} isRoot - whether this row will be created with
+ *   `parent_team_id: null` (a new Organisation), resolved by the caller
+ *   BEFORE calling this function, exactly as `parseRowColor` requires.
+ * @returns {string|null}
+ * @throws {BulkImportRowError} if `isRoot` and the value is a non-empty,
+ *   non-ISO-alpha-3 string.
+ */
+function parseRowCountryCode(row, isRoot) {
+  const value = readOptionalField(row, 'countryCode');
+  if (!isRoot) {
+    // Sub_Team: country_code is Organisation-only and Team.create rejects
+    // it on a Sub_Team; ignore any supplied value here rather than
+    // validating an irrelevant one (mirrors parseRowColor's Sub_Team pass).
+    return null;
+  }
+  if (value === '') {
+    return null;
+  }
+  if (!isValidCountryCode(value)) {
+    throw new BulkImportRowError(
+      `Invalid countryCode: ${value} (must be an ISO 3166-1 alpha-3 country code, e.g. AUS, FJI)`
+    );
+  }
+  return value;
+}
+
+/**
  * Bugfix (CSV bulk team import mandatory TAK Colour): reads a
  * Team_Import_Row's optional `color` column and validates it against
  * the fixed `TAK_COLOR_NAMES` set -- the same 14 names `Team.create`
@@ -1054,6 +1102,10 @@ class BulkImportService {
         // `parseRowColor`'s own doc comment.
         const isRoot = parentTeamId === null;
         const color = parseRowColor(node.row, isRoot);
+        // Foreign_Partner country prefix: optional ISO 3166-1 alpha-3 code,
+        // Organisation-only (null for a Sub_Team row, per parseRowCountryCode's
+        // isRoot handling). An invalid code on an Org row fails this row alone.
+        const countryCode = parseRowCountryCode(node.row, isRoot);
         // Whether this team/org is flagged Joinable, from its own
         // `canJoin` column (optional, default false). A validation
         // failure throws a `BulkImportRowError` caught by this loop's
@@ -1077,7 +1129,8 @@ class BulkImportService {
           visibility,
           can_join: canJoin,
           parent_team_id: parentTeamId,
-          created_by: importingUser?.userId ?? null
+          created_by: importingUser?.userId ?? null,
+          country_code: countryCode
         });
 
         // Record the created team's id back onto this node so any
@@ -1360,3 +1413,4 @@ module.exports.BulkImportAuthorizationError = BulkImportAuthorizationError;
 module.exports.buildImportGraph = buildImportGraph;
 module.exports.parseRowColor = parseRowColor;
 module.exports.parseRowCanJoin = parseRowCanJoin;
+module.exports.parseRowCountryCode = parseRowCountryCode;

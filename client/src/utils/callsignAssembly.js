@@ -17,11 +17,15 @@
  * @param {string|null|undefined} params.organisationPrefix
  * @param {Array<string>|null|undefined} params.teamSegmentPrefixes
  * @param {string|null|undefined} params.nameSegment
+ * @param {string} [params.teamSegmentSeparator=''] - Callsign
+ *   Team-segment separator toggle mirror: `''` (default) reproduces the
+ *   original no-separator concatenation; `'-'` hyphenates each PRESENT
+ *   level, mirroring `CallsignService.assembleCallsign`'s own param.
  * @returns {string}
  */
-export function assembleCallsignPreview({ organisationPrefix, teamSegmentPrefixes, nameSegment }) {
+export function assembleCallsignPreview({ organisationPrefix, teamSegmentPrefixes, nameSegment, teamSegmentSeparator = '' }) {
   const organisationSegment = organisationPrefix || ''
-  const teamSegment = Array.isArray(teamSegmentPrefixes) ? teamSegmentPrefixes.join('') : ''
+  const teamSegment = Array.isArray(teamSegmentPrefixes) ? teamSegmentPrefixes.join(teamSegmentSeparator) : ''
   const nameSegmentValue = nameSegment || ''
 
   return [organisationSegment, teamSegment, nameSegmentValue]
@@ -77,14 +81,19 @@ export function resolveAncestorChain(team, allTeams) {
  * the server's fallback for any chain shallower than MAX_TEAM_DEPTH (the
  * only case a Team's own Ancestor_Chain can ever present).
  *
+ * Also resolves the Callsign Team-segment separator toggle
+ * (`callsign_team_hyphenated`) off the same Organisation row, so a
+ * caller can pass it straight through to `assembleCallsignPreview`
+ * without a second lookup.
+ *
  * @param {{id: number|string, parent_team_id?: number|string|null}|null|undefined} team
  * @param {Array<object>} allTeams
- * @returns {{organisationPrefix: string|null, teamSegmentPrefixes: Array<string>}}
+ * @returns {{organisationPrefix: string|null, teamSegmentPrefixes: Array<string>, teamSegmentSeparator: string}}
  */
 export function resolveCallsignSegments(team, allTeams) {
   const chain = resolveAncestorChain(team, allTeams)
   if (chain.length === 0) {
-    return { organisationPrefix: null, teamSegmentPrefixes: [] }
+    return { organisationPrefix: null, teamSegmentPrefixes: [], teamSegmentSeparator: '' }
   }
   const organisation = chain[0]
   const callsignLevelSelection = Array.isArray(organisation.callsign_level_selection)
@@ -100,5 +109,9 @@ export function resolveCallsignSegments(team, allTeams) {
     })
     .map((t) => t.callsign_prefix)
 
-  return { organisationPrefix: organisation.callsign_prefix || null, teamSegmentPrefixes }
+  return {
+    organisationPrefix: organisation.callsign_prefix || null,
+    teamSegmentPrefixes,
+    teamSegmentSeparator: organisation.callsign_team_hyphenated ? '-' : ''
+  }
 }

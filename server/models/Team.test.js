@@ -551,6 +551,24 @@ describe('Team.getAncestorChain / Team.getTeamDepth (Requirement 2.1)', () => {
     await expect(Team.getAncestorChain(1)).rejects.toThrow('db unavailable');
   });
 
+  // Callsign Team-segment separator toggle: callsign_team_hyphenated must
+  // be selected in all THREE column lists (anchor CTE, recursive CTE,
+  // final SELECT) -- a structural guard against a future edit adding it
+  // to only one or two of the three, which would silently make
+  // userAttributes.js/DeviceEnrollmentService.js always read `undefined`
+  // off ancestorChain[0] instead of the real stored value.
+  it('getAncestorChain: selects callsign_team_hyphenated in every one of the query\'s 3 column lists', async () => {
+    pool.query.mockResolvedValue({
+      rows: [{ id: 1, parent_team_id: null, name: 'FENZ', callsign_team_hyphenated: true, depth: 0 }]
+    });
+
+    await Team.getAncestorChain(1);
+
+    const [sql] = pool.query.mock.calls[0];
+    const occurrences = sql.split('callsign_team_hyphenated').length - 1;
+    expect(occurrences).toBe(3);
+  });
+
   // Canonical Display_Name: <root Org prefix> - <team name> for a Sub_Team,
   // bare name for a root Organisation. The bug this pins: notification
   // emails showed the FULL ancestor-prefix path ("FENZ - TEKE - STL -
@@ -2313,6 +2331,459 @@ describe('Team.update callsign_prefix (bugfix: callsign-handling)', () => {
     const updateCall = pool.query.mock.calls.find(([sql]) => typeof sql === 'string' && sql.includes('UPDATE teams'));
     expect(updateCall).toBeDefined();
     expect(updateCall[1]).toContain(undefined);
+  });
+});
+
+/**
+ * Unit tests for `Team.create`/`Team.update`'s `country_code`
+ * accept/reject/immutability behaviour (Foreign_Partner Organisation
+ * country prefix feature).
+ *
+ * `country_code` is Organisation-only (a Sub_Team creation/update request
+ * supplying one is a typed rejection, mirroring `pseudonymous_usernames`)
+ * and, on an existing Organisation, WRITE-ONCE: a resubmission of the
+ * current (normalised) value is accepted as a no-op, and any actual
+ * change is rejected with `OrganisationCountryCodeImmutableError`,
+ * mirroring `callsign_prefix`'s own immutability shape exactly. An
+ * unknown ISO 3166-1 alpha-3 code is rejected with `CountryCodeInvalidError`
+ * on both create and update, regardless of Organisation/Sub_Team.
+ */
+describe('Team.create / Team.update country_code (Foreign_Partner Organisation country prefix feature)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.spyOn(Team, 'createTeamChannel').mockResolvedValue({ id: 999 });
+  });
+
+  afterEach(() => {
+    Team.createTeamChannel.mockRestore();
+  });
+
+  describe('Team.create', () => {
+    it('stores null country_code when omitted on Organisation creation (domestic)', async () => {
+      pool.query.mockResolvedValue({
+        rows: [{ id: 1, name: 'FENZ', parent_team_id: null, country_code: null }]
+      });
+
+      const team = await Team.create({ name: 'FENZ', parent_team_id: null, callsign_prefix: 'FENZ' });
+
+      const insertCall = pool.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO teams'));
+      expect(insertCall).toBeDefined();
+      const [, params] = insertCall;
+      expect(params).toEqual(expect.arrayContaining([null]));
+      expect(team.country_code).toBeNull();
+    });
+
+    it('normalises and stores an upper-case alpha-3 code when a valid country_code is supplied on Organisation creation', async () => {
+      pool.query.mockResolvedValue({
+        rows: [{ id: 1, name: 'Fiji Fire', parent_team_id: null, country_code: 'FJI' }]
+      });
+
+      const team = await Team.create({
+        name: 'Fiji Fire',
+        parent_team_id: null,
+        callsign_prefix: 'FIRE',
+        country_code: 'fji'
+      });
+
+      const insertCall = pool.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO teams'));
+      const [, params] = insertCall;
+      // Normalised to upper-case before the INSERT, regardless of the
+      // case the caller supplied.
+      expect(params).toEqual(expect.arrayContaining(['FJI']));
+      expect(team.country_code).toBe('FJI');
+    });
+
+    it('throws CountryCodeInvalidError for an unknown code on Organisation creation, without inserting', async () => {
+      await expect(
+        Team.create({ name: 'Bad Org', parent_team_id: null, callsign_prefix: 'BAD', country_code: 'ZZZ' })
+      ).rejects.toThrow(Team.CountryCodeInvalidError);
+
+      const insertCalls = pool.query.mock.calls.filter(([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO teams'));
+      expect(insertCalls).toHaveLength(0);
+      expect(Team.createTeamChannel).not.toHaveBeenCalled();
+    });
+
+    it('throws CountryCodeSubTeamError when country_code is supplied on Sub_Team creation, without inserting', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('WITH RECURSIVE ancestors') && sql.includes('MAX(hops_from_target) AS depth')) {
+          return Promise.resolve({ rows: [{ depth: 0 }] });
+        }
+        if (typeof sql === 'string' && sql.includes('WITH RECURSIVE org_subtree')) {
+          return Promise.resolve({ rows: [] });
+        }
+        return Promise.resolve({ rows: [{ id: 1, parent_team_id: null, color: 'Red', callsign_name_format: 'full_name', depth: 0 }] });
+      });
+
+      await expect(
+        Team.create({ name: 'Station 40', parent_team_id: 1, country_code: 'AUS' })
+      ).rejects.toThrow(Team.CountryCodeSubTeamError);
+
+      const insertCalls = pool.query.mock.calls.filter(([sql]) => sql.includes('INSERT INTO teams'));
+      expect(insertCalls).toHaveLength(0);
+      expect(Team.createTeamChannel).not.toHaveBeenCalled();
+    });
+
+    it('succeeds with null country_code when Sub_Team creation omits it', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('WITH RECURSIVE ancestors') && sql.includes('MAX(hops_from_target) AS depth')) {
+          return Promise.resolve({ rows: [{ depth: 0 }] });
+        }
+        if (typeof sql === 'string' && sql.includes('WITH RECURSIVE ancestors')) {
+          return Promise.resolve({
+            rows: [{ id: 1, parent_team_id: null, color: 'Red', callsign_name_format: 'full_name', depth: 0 }]
+          });
+        }
+        if (typeof sql === 'string' && sql.includes('INSERT INTO teams')) {
+          return Promise.resolve({ rows: [{ id: 10, name: 'Station 40', parent_team_id: 1, country_code: null }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      const team = await Team.create({ name: 'Station 40', parent_team_id: 1 });
+
+      const insertCall = pool.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO teams'));
+      const [, params] = insertCall;
+      expect(params).toEqual(expect.arrayContaining([null]));
+      expect(team.country_code).toBeNull();
+    });
+  });
+
+  describe('Team.update', () => {
+    it('accepts a resubmission of the current value on an existing Organisation as a no-op', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+          return Promise.resolve({ rows: [{ id: 3, parent_team_id: null, country_code: 'FJI' }] });
+        }
+        if (typeof sql === 'string' && sql.includes('UPDATE teams')) {
+          return Promise.resolve({ rows: [{ id: 3, country_code: 'FJI' }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      const updated = await Team.update(3, { country_code: 'FJI' });
+
+      const updateCall = pool.query.mock.calls.find(([sql]) => sql.includes('UPDATE teams'));
+      const [, params] = updateCall;
+      expect(params).toContain(undefined);
+      expect(updated.country_code).toBe('FJI');
+    });
+
+    it('accepts a case-only resubmission of the current value as a no-op (normalised comparison)', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+          return Promise.resolve({ rows: [{ id: 3, parent_team_id: null, country_code: 'FJI' }] });
+        }
+        if (typeof sql === 'string' && sql.includes('UPDATE teams')) {
+          return Promise.resolve({ rows: [{ id: 3, country_code: 'FJI' }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      await Team.update(3, { country_code: 'fji' });
+
+      const updateCall = pool.query.mock.calls.find(([sql]) => sql.includes('UPDATE teams'));
+      const [, params] = updateCall;
+      expect(params).toContain(undefined);
+    });
+
+    it('throws OrganisationCountryCodeImmutableError when changing an existing Organisation\'s country_code, without updating', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+          return Promise.resolve({ rows: [{ id: 3, parent_team_id: null, country_code: 'FJI' }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      await expect(
+        Team.update(3, { country_code: 'AUS' })
+      ).rejects.toThrow(Team.OrganisationCountryCodeImmutableError);
+
+      const updateCalls = pool.query.mock.calls.filter(([sql]) => sql.includes('UPDATE teams'));
+      expect(updateCalls).toHaveLength(0);
+    });
+
+    it('throws OrganisationCountryCodeImmutableError when setting a country_code where the Organisation previously had none', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+          return Promise.resolve({ rows: [{ id: 3, parent_team_id: null, country_code: null }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      await expect(
+        Team.update(3, { country_code: 'AUS' })
+      ).rejects.toThrow(Team.OrganisationCountryCodeImmutableError);
+    });
+
+    it('throws OrganisationCountryCodeImmutableError when clearing an existing Organisation\'s country_code', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+          return Promise.resolve({ rows: [{ id: 3, parent_team_id: null, country_code: 'FJI' }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      await expect(
+        Team.update(3, { country_code: null })
+      ).rejects.toThrow(Team.OrganisationCountryCodeImmutableError);
+    });
+
+    it('throws CountryCodeInvalidError for an unknown code on an existing Organisation, without updating', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+          return Promise.resolve({ rows: [{ id: 3, parent_team_id: null, country_code: null }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      await expect(
+        Team.update(3, { country_code: 'ZZZ' })
+      ).rejects.toThrow(Team.CountryCodeInvalidError);
+
+      const updateCalls = pool.query.mock.calls.filter(([sql]) => sql.includes('UPDATE teams'));
+      expect(updateCalls).toHaveLength(0);
+    });
+
+    it('throws CountryCodeSubTeamError when country_code is supplied on a Sub_Team update, without updating', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+          return Promise.resolve({ rows: [{ id: 4, parent_team_id: 3, country_code: null }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      await expect(
+        Team.update(4, { country_code: 'AUS' })
+      ).rejects.toThrow(Team.CountryCodeSubTeamError);
+
+      const updateCalls = pool.query.mock.calls.filter(([sql]) => sql.includes('UPDATE teams'));
+      expect(updateCalls).toHaveLength(0);
+    });
+
+    it('leaves country_code unchanged (via COALESCE) when omitted from the update', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+          return Promise.resolve({ rows: [{ id: 4, parent_team_id: null, name: 'Old' }] });
+        }
+        if (typeof sql === 'string' && sql.includes('UPDATE teams')) {
+          return Promise.resolve({ rows: [{ id: 4, name: 'Renamed' }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      await Team.update(4, { name: 'Renamed' });
+
+      const updateCall = pool.query.mock.calls.find(([sql]) => typeof sql === 'string' && sql.includes('UPDATE teams'));
+      expect(updateCall).toBeDefined();
+      expect(updateCall[1]).toContain(undefined);
+    });
+  });
+});
+
+/**
+ * Unit tests for `Team.create`/`Team.update` accept/reject/freely-mutable
+ * behaviour of `callsign_team_hyphenated` (Callsign Team-segment
+ * separator toggle).
+ *
+ * `callsign_team_hyphenated` is Organisation-only (a Sub_Team creation/
+ * update request supplying one is a typed rejection, mirroring
+ * `pseudonymous_usernames`/`country_code`) but, UNLIKE `country_code`/
+ * `callsign_prefix`, is FREELY mutable on an existing Organisation at any
+ * time -- there is no immutability guard, mirroring
+ * `response_channel_access`/`support_channel_access`'s own shape exactly.
+ */
+describe('Team.create / Team.update callsign_team_hyphenated (Callsign Team-segment separator toggle)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.spyOn(Team, 'createTeamChannel').mockResolvedValue({ id: 999 });
+  });
+
+  afterEach(() => {
+    Team.createTeamChannel.mockRestore();
+  });
+
+  describe('Team.create', () => {
+    it('defaults to false when omitted on Organisation creation', async () => {
+      pool.query.mockResolvedValue({
+        rows: [{ id: 1, name: 'FENZ', parent_team_id: null, callsign_team_hyphenated: false }]
+      });
+
+      const team = await Team.create({ name: 'FENZ', parent_team_id: null, callsign_prefix: 'FENZ' });
+
+      const insertCall = pool.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO teams'));
+      expect(insertCall).toBeDefined();
+      const [, params] = insertCall;
+      expect(params).toEqual(expect.arrayContaining([false]));
+      expect(team.callsign_team_hyphenated).toBe(false);
+    });
+
+    it('stores true when explicitly supplied on Organisation creation', async () => {
+      pool.query.mockResolvedValue({
+        rows: [{ id: 1, name: 'FENZ', parent_team_id: null, callsign_team_hyphenated: true }]
+      });
+
+      const team = await Team.create({
+        name: 'FENZ',
+        parent_team_id: null,
+        callsign_prefix: 'FENZ',
+        callsign_team_hyphenated: true
+      });
+
+      const insertCall = pool.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO teams'));
+      const [, params] = insertCall;
+      expect(params).toEqual(expect.arrayContaining([true]));
+      expect(team.callsign_team_hyphenated).toBe(true);
+    });
+
+    it('coerces a truthy-but-non-boolean supplied value to a real boolean', async () => {
+      pool.query.mockResolvedValue({
+        rows: [{ id: 1, name: 'FENZ', parent_team_id: null, callsign_team_hyphenated: true }]
+      });
+
+      await Team.create({
+        name: 'FENZ',
+        parent_team_id: null,
+        callsign_prefix: 'FENZ',
+        callsign_team_hyphenated: 'true'
+      });
+
+      const insertCall = pool.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO teams'));
+      const [, params] = insertCall;
+      expect(params).toEqual(expect.arrayContaining([true]));
+    });
+
+    it('throws ChannelTierAccessSubTeamError when callsign_team_hyphenated is supplied on Sub_Team creation, without inserting', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('WITH RECURSIVE ancestors') && sql.includes('MAX(hops_from_target) AS depth')) {
+          return Promise.resolve({ rows: [{ depth: 0 }] });
+        }
+        if (typeof sql === 'string' && sql.includes('WITH RECURSIVE org_subtree')) {
+          return Promise.resolve({ rows: [] });
+        }
+        return Promise.resolve({ rows: [{ id: 1, parent_team_id: null, color: 'Red', callsign_name_format: 'full_name', depth: 0 }] });
+      });
+
+      await expect(
+        Team.create({ name: 'Station 40', parent_team_id: 1, callsign_team_hyphenated: true })
+      ).rejects.toThrow(Team.ChannelTierAccessSubTeamError);
+
+      const insertCalls = pool.query.mock.calls.filter(([sql]) => sql.includes('INSERT INTO teams'));
+      expect(insertCalls).toHaveLength(0);
+      expect(Team.createTeamChannel).not.toHaveBeenCalled();
+    });
+
+    it('succeeds with null callsign_team_hyphenated when Sub_Team creation omits it', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('WITH RECURSIVE ancestors') && sql.includes('MAX(hops_from_target) AS depth')) {
+          return Promise.resolve({ rows: [{ depth: 0 }] });
+        }
+        if (typeof sql === 'string' && sql.includes('WITH RECURSIVE ancestors')) {
+          return Promise.resolve({
+            rows: [{ id: 1, parent_team_id: null, color: 'Red', callsign_name_format: 'full_name', depth: 0 }]
+          });
+        }
+        if (typeof sql === 'string' && sql.includes('INSERT INTO teams')) {
+          return Promise.resolve({ rows: [{ id: 10, name: 'Station 40', parent_team_id: 1, callsign_team_hyphenated: null }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      const team = await Team.create({ name: 'Station 40', parent_team_id: 1 });
+
+      const insertCall = pool.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO teams'));
+      const [, params] = insertCall;
+      expect(params).toEqual(expect.arrayContaining([null]));
+      expect(team.callsign_team_hyphenated).toBeNull();
+    });
+  });
+
+  describe('Team.update', () => {
+    it('applies a changed value on an existing Organisation with NO immutability guard (unlike country_code/callsign_prefix)', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+          return Promise.resolve({ rows: [{ id: 3, parent_team_id: null, callsign_team_hyphenated: false }] });
+        }
+        if (typeof sql === 'string' && sql.includes('UPDATE teams')) {
+          return Promise.resolve({ rows: [{ id: 3, callsign_team_hyphenated: true }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      const updated = await Team.update(3, { callsign_team_hyphenated: true });
+
+      const updateCall = pool.query.mock.calls.find(([sql]) => sql.includes('UPDATE teams'));
+      const [, params] = updateCall;
+      expect(params).toEqual(expect.arrayContaining([true]));
+      expect(updated.callsign_team_hyphenated).toBe(true);
+    });
+
+    it('applies false over a previously-true value with no rejection', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+          return Promise.resolve({ rows: [{ id: 3, parent_team_id: null, callsign_team_hyphenated: true }] });
+        }
+        if (typeof sql === 'string' && sql.includes('UPDATE teams')) {
+          return Promise.resolve({ rows: [{ id: 3, callsign_team_hyphenated: false }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      const updated = await Team.update(3, { callsign_team_hyphenated: false });
+
+      expect(updated.callsign_team_hyphenated).toBe(false);
+    });
+
+    it('treats a supplied null the same as undefined -- COALESCE leaves the stored value untouched, never re-introducing NULL on an Organisation row', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+          return Promise.resolve({ rows: [{ id: 3, parent_team_id: null, callsign_team_hyphenated: true }] });
+        }
+        if (typeof sql === 'string' && sql.includes('UPDATE teams')) {
+          return Promise.resolve({ rows: [{ id: 3, callsign_team_hyphenated: true }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      await Team.update(3, { callsign_team_hyphenated: null });
+
+      const updateCall = pool.query.mock.calls.find(([sql]) => sql.includes('UPDATE teams'));
+      const [, params] = updateCall;
+      expect(params).toContain(undefined);
+    });
+
+    it('throws ChannelTierAccessSubTeamError when callsign_team_hyphenated is supplied on a Sub_Team update, without updating', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+          return Promise.resolve({ rows: [{ id: 4, parent_team_id: 3, callsign_team_hyphenated: null }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      await expect(
+        Team.update(4, { callsign_team_hyphenated: true })
+      ).rejects.toThrow(Team.ChannelTierAccessSubTeamError);
+
+      const updateCalls = pool.query.mock.calls.filter(([sql]) => sql.includes('UPDATE teams'));
+      expect(updateCalls).toHaveLength(0);
+    });
+
+    it('leaves callsign_team_hyphenated unchanged (via COALESCE) when omitted from the update', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+          return Promise.resolve({ rows: [{ id: 4, parent_team_id: null, name: 'Old' }] });
+        }
+        if (typeof sql === 'string' && sql.includes('UPDATE teams')) {
+          return Promise.resolve({ rows: [{ id: 4, name: 'Renamed' }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      await Team.update(4, { name: 'Renamed' });
+
+      const updateCall = pool.query.mock.calls.find(([sql]) => typeof sql === 'string' && sql.includes('UPDATE teams'));
+      expect(updateCall).toBeDefined();
+      expect(updateCall[1]).toContain(undefined);
+    });
   });
 });
 

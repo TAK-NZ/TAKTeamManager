@@ -8,6 +8,7 @@ import OrgDomainManager from './OrgDomainManager'
 import ChannelAccessManager from './ChannelAccessManager'
 import InfoTooltip from './InfoTooltip'
 import { tabAria } from './Tabs'
+import { getCountry, filterCountries } from '../utils/isoCountry'
 
 // Requirement 3.10 (task 32.6): mirrors
 // server/utils/callsignValidation.js's `isValidCallsignPrefix` character
@@ -88,6 +89,16 @@ export function buildTeamSubmitPayload(formData) {
   const payload = { ...formData }
   delete payload.callsignLevelSelection
   delete payload.pseudonymousUsernames
+  // Foreign_Partner Organisation country prefix feature: countryCode is
+  // Organisation-only (mirroring callsignLevelSelection/pseudonymousUsernames
+  // immediately above) -- the server rejects it outright on a Sub_Team, so
+  // it is dropped from a Sub_Team's payload rather than sent as an
+  // always-empty placeholder.
+  delete payload.countryCode
+  // Callsign Team-segment separator toggle: Organisation-only, mirroring
+  // countryCode immediately above -- the server rejects it outright on a
+  // Sub_Team.
+  delete payload.callsignTeamHyphenated
   return payload
 }
 
@@ -185,7 +196,20 @@ const EMPTY_FORM_DATA = {
   // mirroring callsignLevelSelection's own EMPTY_FORM_DATA default --
   // false until an operator opts in at Organisation-creation time. Never
   // rendered or submitted for a Sub_Team.
-  pseudonymousUsernames: false
+  pseudonymousUsernames: false,
+  // Foreign_Partner Organisation country prefix feature: '' is the
+  // default -- no country selected, i.e. a domestic (New Zealand)
+  // Organisation. Organisation-only, mirroring pseudonymousUsernames'
+  // own default; never rendered or submitted for a Sub_Team
+  // (buildTeamSubmitPayload drops it).
+  countryCode: '',
+  // Callsign Team-segment separator toggle: `false` is the default --
+  // the pre-existing no-separator concatenation (e.g. Level 1 `NSW` +
+  // Level 2 `SYD` -> `NSWSYD`), unchanged for every Organisation that
+  // does not opt in. Organisation-only, mirroring countryCode's own
+  // default; never rendered or submitted for a Sub_Team
+  // (buildTeamSubmitPayload drops it).
+  callsignTeamHyphenated: false
 }
 
 /**
@@ -290,6 +314,11 @@ export default function TeamFormDialog({
   // every toggle renders with no parenthetical (Requirement 5.11) via the
   // empty-Map default here.
   const [callsignLevelOptions, setCallsignLevelOptions] = useState(new Map())
+  // Foreign_Partner Organisation country prefix feature: free-text filter
+  // for the country picker's option list, the same "find a team by typing
+  // its name" search affordance TransferMemberDialog/RequestAccess already
+  // use for a long list. Local UI state only -- never submitted.
+  const [countrySearch, setCountrySearch] = useState('')
 
   // Requirement 5.3: the Client-side default for a brand-new
   // Organisation's Callsign_Level_Selection is every Team_Depth position
@@ -324,8 +353,18 @@ export default function TeamFormDialog({
         // Sub_Team (never rendered there), the stored boolean on an
         // Organisation. Normalised with `Boolean(...)` since the server
         // may return `null`/`undefined` rather than `false`.
-        pseudonymousUsernames: team.parent_team_id ? false : Boolean(team.pseudonymous_usernames)
+        pseudonymousUsernames: team.parent_team_id ? false : Boolean(team.pseudonymous_usernames),
+        // Foreign_Partner Organisation country prefix feature: NULL on a
+        // Sub_Team (never rendered there) or a domestic Organisation --
+        // both normalise to '' (no country selected).
+        countryCode: team.parent_team_id ? '' : (team.country_code || ''),
+        // Callsign Team-segment separator toggle: NULL on a Sub_Team
+        // (never rendered there), the stored boolean on an Organisation.
+        // Normalised with `Boolean(...)` since the server may return
+        // `null`/`undefined` rather than `false`.
+        callsignTeamHyphenated: team.parent_team_id ? false : Boolean(team.callsign_team_hyphenated)
       })
+      setCountrySearch('')
 
       // Requirement 5.8-5.11 (task 32.4): only fetch Sub_Team
       // callsign-prefix options when editing an EXISTING Organisation (no
@@ -349,6 +388,7 @@ export default function TeamFormDialog({
         callsignLevelSelection: defaultCallsignLevelSelection()
       })
       setCallsignLevelOptions(new Map())
+      setCountrySearch('')
     }
 
     // Bugfix (#13): always reopen on the Team Settings tab, regardless
@@ -359,6 +399,23 @@ export default function TeamFormDialog({
     setActiveFormTab('settings')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, mode, team])
+
+  // Foreign_Partner Organisation country prefix feature: if the operator
+  // has a country selected and then types a search that hides it, clear
+  // the selection so the <select> never shows a blank-but-selected value
+  // (a browser renders a selected <option> that isn't in the list as
+  // empty) -- the exact same safety net TransferMemberDialog's own
+  // destination-team search applies.
+  useEffect(() => {
+    if (!formData.countryCode) {
+      return
+    }
+    const stillVisible = filterCountries(countrySearch).some((c) => c.alpha3 === formData.countryCode)
+    if (!stillVisible) {
+      setFormData((prev) => ({ ...prev, countryCode: '' }))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [countrySearch])
 
   if (!isOpen) {
     return null
@@ -374,6 +431,14 @@ export default function TeamFormDialog({
   // editable on both create AND edit; there was previously no supported
   // way to correct one after creation at all.
   const prefixLocked = !!editingTeam && !formData.parentTeamId
+
+  // Foreign_Partner Organisation country prefix feature: locked under the
+  // SAME condition as the Prefix field above -- mirroring the server's
+  // `Team.update` `OrganisationCountryCodeImmutableError` guard exactly.
+  // It is composed as the leading segment of the callsign prefix, so it
+  // carries the identical "every identifier already minted under it"
+  // immutability rationale.
+  const countryLocked = !!editingTeam && !formData.parentTeamId
 
   const handleSubmit = async (e) => {
     e.preventDefault()
@@ -558,11 +623,114 @@ export default function TeamFormDialog({
                 )}
               </div>
 
+              {/* Foreign_Partner Organisation country prefix feature:
+                  Organisation-only, mirroring pseudonymousUsernames'/
+                  callsignLevelSelection's own "never rendered for a
+                  Sub_Team" treatment elsewhere in this form -- not merely
+                  disabled, absent entirely, since a Sub_Team can never
+                  carry one. Placed immediately before Prefix: the country
+                  is composed as the LEADING segment of the effective
+                  callsign prefix (e.g. country FJI + prefix FIRE ->
+                  FJI-FIRE), so it reads as "what comes before the
+                  prefix". */}
+              {!formData.parentTeamId && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Country
+                    {/* Bugfix: this field is rendered ONLY inside the
+                        Organisation-only `!formData.parentTeamId`
+                        fragment (a Sub_Team never carries a country at
+                        all), so "cannot be changed after creation" is a
+                        FIXED fact about it whenever it exists on screen --
+                        `locked` must be unconditionally `true`, matching
+                        TAK Colour's own unconditional `locked={true}`
+                        below, never keyed to `countryLocked` (which is
+                        `false` while CREATING, the same drift that
+                        previously showed pseudonymousUsernames' padlock as
+                        green/open while creating a field that can never
+                        change once the Organisation exists).
+                        `countryLocked` itself is untouched -- it still
+                        correctly governs whether THIS INPUT is currently
+                        editable (free during creation, read-only once the
+                        Organisation exists), a separate question from
+                        what the padlock icon states. */}
+                    <FieldLockIndicator
+                      locked={true}
+                      lockedReason="An Organisation's Country cannot be changed after creation: it is composed into the callsign prefix, so every device and user identifier already minted under it is derived from it"
+                    />
+                    <InfoTooltip text="Select a foreign partner nation to prefix every callsign minted under this Organisation with its ISO 3166-1 country code, e.g. FJI-FIRE-Joe Bloggs. Leave as Domestic (New Zealand) for the default, unprefixed callsign. Permanent once this Organisation is created." />
+                  </label>
+                  {countryLocked ? (
+                    <div className="input w-full bg-gray-100 dark:bg-gray-600 text-gray-500 flex items-center">
+                      {formData.countryCode && getCountry(formData.countryCode) ? (
+                        <>
+                          <span className={`fi fi-${getCountry(formData.countryCode).alpha2} mr-2`} aria-hidden="true"></span>
+                          {getCountry(formData.countryCode).name} ({getCountry(formData.countryCode).alpha3})
+                        </>
+                      ) : (
+                        'Domestic (New Zealand)'
+                      )}
+                    </div>
+                  ) : (
+                    <>
+                      <input
+                        type="text"
+                        value={countrySearch}
+                        onChange={(e) => setCountrySearch(e.target.value)}
+                        autoComplete="off"
+                        className="input w-full mb-2"
+                        placeholder="Search countries by name or code"
+                        aria-label="Search countries by name or code"
+                        aria-controls="team-country-select"
+                      />
+                      <select
+                        id="team-country-select"
+                        value={formData.countryCode || ''}
+                        onChange={(e) => setFormData({ ...formData, countryCode: e.target.value })}
+                        className="input w-full"
+                      >
+                        <option value="">Domestic (New Zealand) -- no country prefix</option>
+                        {filterCountries(countrySearch).map((country) => (
+                          <option key={country.alpha3} value={country.alpha3}>
+                            {country.name} ({country.alpha3})
+                          </option>
+                        ))}
+                      </select>
+                      {countrySearch.trim() !== '' && filterCountries(countrySearch).length === 0 && (
+                        <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                          No country matches &ldquo;{countrySearch.trim()}&rdquo;.
+                        </p>
+                      )}
+                      {formData.countryCode && getCountry(formData.countryCode) && (
+                        <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 flex items-center">
+                          <span className={`fi fi-${getCountry(formData.countryCode).alpha2} mr-1.5`} aria-hidden="true"></span>
+                          Callsigns will be prefixed {getCountry(formData.countryCode).alpha3}-{formData.callsignPrefix || '<prefix>'}-...
+                        </p>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                   Prefix{!formData.parentTeamId && ' *'}
+                  {/* Bugfix: for an ORGANISATION (no parentTeamId), the
+                      padlock must state the fixed fact that this field can
+                      never be changed once the Organisation exists --
+                      unconditionally `locked={true}`, matching Country's
+                      own unconditional icon immediately above, never
+                      keyed to `prefixLocked` (which is `false` while
+                      CREATING, the drift that previously showed a green
+                      open lock beside a field that can never change once
+                      created). `prefixLocked` itself is untouched -- it
+                      still correctly governs whether THIS INPUT is
+                      currently editable, a separate question from what
+                      the padlock states. A Sub_Team's Prefix genuinely can
+                      be corrected at any time, so it keeps the
+                      conditional (green-capable) icon. */}
                   <FieldLockIndicator
-                    locked={prefixLocked}
+                    locked={formData.parentTeamId ? prefixLocked : true}
                     lockedReason="An Organisation's Prefix cannot be changed after creation: every device and user identifier already minted under it is derived from this value"
                     editableReason="A Sub-team's Prefix may be corrected at any time -- it participates only in Callsign generation, never in a device/user identifier"
                   />
@@ -715,6 +883,47 @@ export default function TeamFormDialog({
                       Currently selected: {formData.callsignLevelSelection.slice().sort((a, b) => a - b).map(d => `Level ${d}`).join(', ')}
                     </p>
                   )}
+                </div>
+              )}
+
+              {/* Callsign Team-segment separator toggle: Organisation-only
+                  (rendered only inside this same `!formData.parentTeamId`
+                  fragment, never for a Sub_Team), controlling how the
+                  Team segment above (the concatenation of every selected
+                  level's callsign_prefix) is JOINED -- with no separator
+                  (the default, e.g. `NSWSYD`) or with a hyphen between
+                  each PRESENT level (e.g. `NSW-SYD`, never a doubled `-`
+                  when an intermediate level is unselected or absent).
+                  Freely editable at any time, unlike Country/Prefix --
+                  it only changes how the callsign is DISPLAYED, never a
+                  Managed_Identifier already minted. Whole-row <label>
+                  for a real mobile tap target, matching the
+                  "Allow join requests"/pseudonymousUsernames checkbox
+                  rows' own convention. */}
+              {!formData.parentTeamId && (
+                <div>
+                  <label
+                    htmlFor="callsignTeamHyphenated"
+                    className="flex items-start -m-2 p-2 rounded-lg cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50"
+                  >
+                    <input
+                      type="checkbox"
+                      id="callsignTeamHyphenated"
+                      checked={formData.callsignTeamHyphenated}
+                      onChange={(e) => setFormData({ ...formData, callsignTeamHyphenated: e.target.checked })}
+                      className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded mt-1"
+                    />
+                    <span className="ml-3 text-sm font-medium text-gray-700 dark:text-gray-300">
+                      Hyphenate Team-Depth levels in generated callsigns
+                      <span onClick={(e) => e.stopPropagation()} className="inline-flex">
+                        <FieldLockIndicator
+                          locked={false}
+                          editableReason="Editable at any time, before or after creation"
+                        />
+                        <InfoTooltip text={`Joins each selected Team-Depth level with a hyphen (e.g. NSW-SYD) instead of the default no-separator concatenation (e.g. NSWSYD). Only changes how the callsign is displayed -- never a device or user identifier already minted.`} />
+                      </span>
+                    </span>
+                  </label>
                 </div>
               )}
 

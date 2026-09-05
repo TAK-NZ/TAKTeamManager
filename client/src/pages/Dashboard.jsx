@@ -15,6 +15,7 @@ import { IconFiretruck, IconBackhoe, IconTool } from '@tabler/icons-react'
 import { teamsAPI, requestsAPI, configAPI, usersAPI, channelsAPI, deviceManagementAPI, adminAPI, devicesAPI } from '../services/api'
 import { buildFolderTree } from '../utils/channelTree'
 import { getTakColorHex } from '../utils/takColors'
+import { getCountry } from '../utils/isoCountry'
 import RevokeDeviceDialog from '../components/RevokeDeviceDialog'
 import DeviceListRow, { DeviceListHeader, DeviceListCard } from '../components/DeviceListRow'
 import { EXPIRY_STATES, classifyExpiry, getExpiryWarningDays } from '../utils/expiryWarning'
@@ -763,6 +764,31 @@ export default function Dashboard({ user }) {
                   (see the product rule on the None sentinel). */}
               <dd className="text-sm text-gray-900 dark:text-gray-100">{userTeam?.organisation_name || 'None'}</dd>
             </div>
+            {/* My Country: a Foreign_Partner Organisation's ISO 3166-1
+                country (server/routes/users.js's `rt.country_code`, alpha-3).
+                A domestic (NZ) Organisation carries no country_code, and a
+                teamless user has no org at all -- the whole row is omitted
+                for both (rather than rendering the 'None' sentinel), since
+                a domestic org's country is simply not a meaningful fact to
+                show every user. The flag glyph is DECORATIVE (aria-hidden);
+                the country name and alpha-3 code carry the state in TEXT,
+                so a colour/flag never stands alone (the accessibility
+                rule). */}
+            {(() => {
+              const country = getCountry(userTeam?.organisation_country_code)
+              if (!country) {
+                return null
+              }
+              return (
+                <div>
+                  <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">My Country</dt>
+                  <dd className="flex items-center text-sm text-gray-900 dark:text-gray-100">
+                    <span className={`fi fi-${country.alpha2} mr-2`} aria-hidden="true"></span>
+                    {country.name} ({country.alpha3})
+                  </dd>
+                </div>
+              )
+            })()}
             <div>
               <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">My Team</dt>
               <dd className="flex items-center text-sm text-gray-900 dark:text-gray-100">

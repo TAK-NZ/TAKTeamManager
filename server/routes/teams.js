@@ -8,6 +8,7 @@ const Team = require('../models/Team');
 const User = require('../models/User');
 const pool = require('../config/database');
 const { isValidCallsignPrefix, isValidCallsignSuffix } = require('../utils/callsignValidation');
+const { isValidCountryCode } = require('../utils/isoCountry');
 const { TAK_ROLE_VALUES } = require('./settings');
 const { checkCallsignSuffixUniqueness, CallsignSuffixConflictError } = require('../services/CallsignSuffixUniquenessService');
 const TeamVisibilityService = require('../services/TeamVisibilityService');
@@ -158,6 +159,14 @@ router.post('/', authenticateToken, authorize, [
   body('description').optional().trim(),
   body('callsignPrefix').optional().trim().custom(value => isValidCallsignPrefix(value))
     .withMessage('callsignPrefix may only contain letters and digits, optionally split into segments with a single hyphen (e.g. AUS-FIRE)'),
+  // Foreign_Partner Organisation country prefix: an optional ISO 3166-1
+  // alpha-3 country code. Basic request-shape validation only (a known
+  // alpha-3 code, or empty/absent) -- the Organisation-only rule and the
+  // write-once immutability rule are enforced by `Team.create`/`Team.update`
+  // and mapped to their specific 400 messages in this route's catch block,
+  // mirroring how callsignLevelSelection/pseudonymousUsernames are handled.
+  body('countryCode').optional({ nullable: true }).trim().custom(value => isValidCountryCode(value))
+    .withMessage('countryCode must be a valid ISO 3166-1 alpha-3 country code (e.g. AUS, FJI)'),
   body('color').optional().trim(),
   body('visibility').optional().isIn(['public', 'private']),
   body('canJoin').optional().isBoolean(),
@@ -184,7 +193,13 @@ router.post('/', authenticateToken, authorize, [
   // Sub_Team-rejection rule is enforced by `Team.create` itself (task
   // 5.4) and mapped to its specific 400 message in this route's catch
   // block below, mirroring callsignLevelSelection's own pattern exactly.
-  body('pseudonymousUsernames').optional().isBoolean()
+  body('pseudonymousUsernames').optional().isBoolean(),
+  // Callsign Team-segment separator toggle: basic request-shape
+  // validation only -- the Organisation-only rejection rule is enforced
+  // by `Team.create` itself and mapped to its specific 400 message in
+  // this route's catch block below, mirroring pseudonymousUsernames'
+  // own pattern exactly.
+  body('callsignTeamHyphenated').optional().isBoolean()
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -192,7 +207,7 @@ router.post('/', authenticateToken, authorize, [
   }
 
   try {
-    let { name, description, callsignPrefix, color, visibility, canJoin, parentTeamId, callsignNameFormat, callsignLevelSelection, pseudonymousUsernames } = req.body;
+    let { name, description, callsignPrefix, color, visibility, canJoin, parentTeamId, callsignNameFormat, callsignLevelSelection, pseudonymousUsernames, countryCode, callsignTeamHyphenated } = req.body;
 
     // Authorization (root team requires Global_Manager, sub-team requires
     // Global_Manager or parent-team admin) is enforced centrally by
@@ -253,7 +268,16 @@ router.post('/', authenticateToken, authorize, [
       created_by: null, // Skip created_by for now since user ID is string
       callsign_name_format: !parentTeamId ? callsignNameFormat : null,
       callsign_level_selection: callsignLevelSelection,
-      pseudonymous_usernames: pseudonymousUsernames
+      pseudonymous_usernames: pseudonymousUsernames,
+      // Foreign_Partner country prefix: Organisation-only, mirroring
+      // callsign_name_format's own `!parentTeamId ? ... : null` wiring.
+      // Team.create additionally validates/normalises it and rejects a
+      // country_code on a Sub_Team, but nulling it here keeps this route
+      // consistent with how it already treats Organisation-only fields.
+      country_code: !parentTeamId ? countryCode : null,
+      // Callsign Team-segment separator toggle: Organisation-only,
+      // mirroring country_code's own `!parentTeamId ? ... : null` wiring.
+      callsign_team_hyphenated: !parentTeamId ? callsignTeamHyphenated : null
     });
 
     // Skip adding creator as admin for now since user ID is string
@@ -310,6 +334,23 @@ router.post('/', authenticateToken, authorize, [
     if (error instanceof Team.TeamNameConflictError) {
       return res.status(400).json({ error: error.message });
     }
+    // Foreign_Partner country prefix: Team.create throws these BEFORE any
+    // INSERT -- an unknown ISO alpha-3 code (CountryCodeInvalidError) or a
+    // country_code supplied on a Sub_Team (CountryCodeSubTeamError). Both
+    // are client-correctable 400s, mirroring the callsign guards above.
+    if (
+      error instanceof Team.CountryCodeInvalidError ||
+      error instanceof Team.CountryCodeSubTeamError
+    ) {
+      return res.status(400).json({ error: error.message });
+    }
+    // Callsign Team-segment separator toggle: Team.create throws this
+    // BEFORE any INSERT when callsignTeamHyphenated is supplied on a
+    // Sub_Team creation request, mirroring pseudonymousUsernames'/
+    // countryCode's own Sub_Team-rejection handling above.
+    if (error instanceof Team.ChannelTierAccessSubTeamError) {
+      return res.status(400).json({ error: error.message });
+    }
     getLogger().error({ err: error }, 'Team creation error');
     res.status(500).json({ error: 'Failed to create team', details: error.message });
   }
@@ -321,6 +362,13 @@ router.put('/:teamId', authenticateToken, authorize, [
   body('description').optional().trim(),
   body('callsignPrefix').optional().trim().custom(value => isValidCallsignPrefix(value))
     .withMessage('callsignPrefix may only contain letters and digits, optionally split into segments with a single hyphen (e.g. AUS-FIRE)'),
+  // Foreign_Partner country prefix: same request-shape validation as the
+  // POST route. Whether a supplied value is actually accepted (only as a
+  // no-op resubmission on an existing Organisation -- it is write-once) is
+  // enforced by `Team.update` and mapped to its 400 in this route's catch
+  // block, mirroring callsignPrefix's own immutability handling.
+  body('countryCode').optional({ nullable: true }).trim().custom(value => isValidCountryCode(value))
+    .withMessage('countryCode must be a valid ISO 3166-1 alpha-3 country code (e.g. AUS, FJI)'),
   body('color').optional().trim(),
   body('visibility').optional().isIn(['public', 'private']),
   body('canJoin').optional().isBoolean(),
@@ -339,7 +387,14 @@ router.put('/:teamId', authenticateToken, authorize, [
   // actually accepted (never, on an existing Organisation) is enforced
   // by `Team.update` itself and mapped to its specific 400 message in
   // this route's catch block below.
-  body('pseudonymousUsernames').optional().isBoolean()
+  body('pseudonymousUsernames').optional().isBoolean(),
+  // Callsign Team-segment separator toggle: basic request-shape
+  // validation only -- the Organisation-only rejection rule is enforced
+  // by `Team.update` itself and mapped to its specific 400 message in
+  // this route's catch block below. Unlike pseudonymousUsernames, a
+  // changed value on an existing Organisation is simply APPLIED, no
+  // immutability guard.
+  body('callsignTeamHyphenated').optional().isBoolean()
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -356,7 +411,7 @@ router.put('/:teamId', authenticateToken, authorize, [
       return res.status(404).json({ error: 'Team not found' });
     }
 
-    const { name, description, callsignPrefix, color, visibility, canJoin, parentTeamId, callsignNameFormat, callsignLevelSelection, pseudonymousUsernames } = req.body;
+    const { name, description, callsignPrefix, color, visibility, canJoin, parentTeamId, callsignNameFormat, callsignLevelSelection, pseudonymousUsernames, countryCode, callsignTeamHyphenated } = req.body;
 
     // takserver-enrollment Requirement 2.2/2.4: an Organisation's
     // callsign_prefix must remain non-empty across an edit -- checked
@@ -402,7 +457,18 @@ router.put('/:teamId', authenticateToken, authorize, [
       callsign_name_format: callsignNameFormat,
       callsign_level_selection: callsignLevelSelection,
       pseudonymous_usernames: pseudonymousUsernames,
-      callsign_prefix: callsignPrefix
+      callsign_prefix: callsignPrefix,
+      // Foreign_Partner country prefix: passed straight through. Team.update
+      // enforces write-once on an existing Organisation (a no-op resubmission
+      // of the current value is accepted; any change throws
+      // OrganisationCountryCodeImmutableError) and rejects a country_code on
+      // a Sub_Team -- mirroring callsign_prefix's own immutability handling.
+      country_code: countryCode,
+      // Callsign Team-segment separator toggle: passed straight through.
+      // Team.update rejects it on a Sub_Team, but freely APPLIES a
+      // changed value on an existing Organisation -- no immutability
+      // guard, unlike callsign_prefix/country_code above.
+      callsign_team_hyphenated: callsignTeamHyphenated
     });
 
     // When canJoin is explicitly set to false, revoke any existing
@@ -431,11 +497,17 @@ router.put('/:teamId', authenticateToken, authorize, [
     // an unchanged prefix regenerates the same values, so no extra guard
     // is needed to distinguish "changed" from "resubmitted unchanged"
     // here the way `Team.update` itself must.
+    // Callsign Team-segment separator toggle: a callsignTeamHyphenated
+    // change must also trigger regeneration -- it changes how every
+    // member's assembled callsign is joined, exactly as a
+    // Callsign_Level_Selection or Callsign_Name_Format change already
+    // does.
     const UserAttributesService = require('../services/userAttributes');
     if (
       callsignNameFormat !== undefined ||
       callsignLevelSelection !== undefined ||
-      callsignPrefix !== undefined
+      callsignPrefix !== undefined ||
+      callsignTeamHyphenated !== undefined
     ) {
       await UserAttributesService.updateTeamUserAttributes(req.params.teamId);
     }
@@ -495,6 +567,27 @@ router.put('/:teamId', authenticateToken, authorize, [
     // collide with another team in the same Organisation (across the
     // whole subtree). A client-correctable 400.
     if (error instanceof Team.TeamNameConflictError) {
+      return res.status(400).json({ error: error.message });
+    }
+    // Foreign_Partner country prefix: Team.update throws these BEFORE any
+    // UPDATE -- an attempt to CHANGE an existing Organisation's country_code
+    // (OrganisationCountryCodeImmutableError, write-once), an unknown ISO
+    // code (CountryCodeInvalidError), or a country_code supplied on a
+    // Sub_Team (CountryCodeSubTeamError). All client-correctable 400s,
+    // mirroring the callsignPrefix immutability/conflict handling above.
+    if (
+      error instanceof Team.OrganisationCountryCodeImmutableError ||
+      error instanceof Team.CountryCodeInvalidError ||
+      error instanceof Team.CountryCodeSubTeamError
+    ) {
+      return res.status(400).json({ error: error.message });
+    }
+    // Callsign Team-segment separator toggle: Team.update throws this
+    // BEFORE any UPDATE is attempted when callsignTeamHyphenated is
+    // supplied on a Sub_Team update request, mirroring
+    // pseudonymousUsernames'/countryCode's own Sub_Team-rejection
+    // handling above.
+    if (error instanceof Team.ChannelTierAccessSubTeamError) {
       return res.status(400).json({ error: error.message });
     }
     getLogger().error({ err: error }, 'Failed to update team');

@@ -1968,3 +1968,108 @@ describe('Dashboard TAK Profile "My Organisation\'s Function" row -- no swatch f
     expect(swatch.style.backgroundColor).not.toBe('')
   })
 })
+
+/**
+ * Foreign_Partner Organisation country prefix: the TAK Profile card's "My
+ * Country" row. Source: `server/routes/users.js`'s `/me` route exposes the
+ * root Organisation's `country_code` as `organisation_country_code` on each
+ * entry in `teams`; Dashboard.jsx reads `userTeam?.organisation_country_code`
+ * and resolves it via `getCountry` (client/src/utils/isoCountry.js). A
+ * domestic (NZ, no country_code) Organisation and a teamless user both omit
+ * the row entirely -- a domestic org's country is not a fact worth showing
+ * every user, so this is NOT an instance of the None-sentinel rule (that
+ * rule is for state that must render, just never as blank). The flag glyph
+ * is decorative (aria-hidden); name + alpha-3 code carry the state in text
+ * (accessibility rule: never colour/icon alone).
+ */
+describe('Dashboard TAK Profile "My Country" row (Foreign_Partner Organisation country prefix)', () => {
+  let container
+  let root
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    vi.clearAllMocks()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    container = document.createElement('div')
+    document.body.appendChild(container)
+
+    channelsAPI.getDescriptions.mockResolvedValue({ data: { channels: [] } })
+    requestsAPI.getPending.mockResolvedValue({ data: { requests: [] } })
+    configAPI.getColorMappings.mockResolvedValue({ data: { colorMappings: {}, roleDescriptions: {} } })
+    configAPI.getPublic.mockResolvedValue({ data: {} })
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false })
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    vi.restoreAllMocks()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  // The TAK Profile card only renders at all when takRole/takColor/
+  // takCallsign is truthy (see the card's own gate above), so every case
+  // below carries a takCallsign to keep the card mounted regardless of
+  // which country/team fixture is under test.
+  const mountWithTeam = async (team) => {
+    usersAPI.getMe.mockResolvedValue({
+      data: {
+        user: { ...USER, groups: [], takCallsign: 'FENZ-J.Doe' },
+        teams: team ? [team] : []
+      }
+    })
+    root = createRoot(container)
+    await act(async () => {
+      root.render(
+        <MemoryRouter>
+          <Dashboard user={USER} />
+        </MemoryRouter>
+      )
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+  }
+
+  const countryRow = () =>
+    Array.from(container.querySelectorAll('dt')).find((dt) => dt.textContent.trim() === 'My Country')?.closest('div')
+
+  it('renders no "My Country" row at all for a domestic (NZ) Organisation with no country_code', async () => {
+    await mountWithTeam({ organisation_name: 'FENZ', organisation_country_code: null, display_name: 'Alpha' })
+
+    expect(countryRow()).toBeUndefined()
+  })
+
+  it('renders no "My Country" row at all for a teamless user (no org at all)', async () => {
+    await mountWithTeam(null)
+
+    expect(countryRow()).toBeUndefined()
+  })
+
+  it('renders flag + name + alpha-3 code for a Foreign_Partner Organisation', async () => {
+    await mountWithTeam({ organisation_name: 'National Fire Authority of Fiji', organisation_country_code: 'FJI', display_name: 'Suva' })
+
+    const row = countryRow()
+    expect(row).toBeTruthy()
+    expect(row.querySelector('dd').textContent.trim()).toBe('Fiji (FJI)')
+
+    // The flag glyph is decorative -- aria-hidden -- so the accessible name
+    // comes entirely from the text asserted above, not from the glyph.
+    const flag = row.querySelector('span[aria-hidden="true"]')
+    expect(flag).not.toBeNull()
+    expect(flag.className).toContain('fi')
+    expect(flag.className).toContain('fi-fj')
+  })
+
+  it('is case-insensitive resolving a lower-cased stored country_code', async () => {
+    await mountWithTeam({ organisation_name: 'Aussie Org', organisation_country_code: 'aus', display_name: 'Sydney' })
+
+    const row = countryRow()
+    expect(row.querySelector('dd').textContent.trim()).toBe('Australia (AUS)')
+  })
+})

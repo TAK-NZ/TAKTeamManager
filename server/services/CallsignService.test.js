@@ -132,6 +132,89 @@ describe('CallsignService.assembleCallsign', () => {
   });
 });
 
+/**
+ * Callsign Team-segment separator toggle: `teamSegmentSeparator` controls
+ * how `teamSegmentPrefixes` entries are joined to form the Team segment.
+ * Default (`''`, omitted) reproduces the original no-separator rule
+ * exactly (pinned by the describe block above, which never passes this
+ * param). `'-'` hyphenates each PRESENT level -- the caller
+ * (`userAttributes.js`) never supplies an empty-string entry in
+ * `teamSegmentPrefixes` (its own `!!team.callsign_prefix` filter runs
+ * first), so this can never itself produce a leading/trailing/doubled
+ * separator even when an intermediate Team-Depth level is unselected or
+ * absent from the hierarchy -- that level is simply never present in the
+ * array passed in.
+ */
+describe('CallsignService.assembleCallsign teamSegmentSeparator (Callsign Team-segment separator toggle)', () => {
+  it("defaults to '' (no separator) when omitted, matching the pre-existing rule exactly", () => {
+    const result = CallsignService.assembleCallsign({
+      organisationPrefix: 'FENZ',
+      teamSegmentPrefixes: ['NSW', 'SYD']
+    });
+
+    expect(result).toBe('FENZ-NSWSYD');
+  });
+
+  it("hyphenates every PRESENT level when teamSegmentSeparator is '-'", () => {
+    const result = CallsignService.assembleCallsign({
+      organisationPrefix: 'FENZ',
+      teamSegmentPrefixes: ['NSW', 'SYD'],
+      nameSegment: 'J.Bloggs',
+      teamSegmentSeparator: '-'
+    });
+
+    expect(result).toBe('FENZ-NSW-SYD-J.Bloggs');
+  });
+
+  // The exact scenario named in the bug report: Level 1 and Level 3 set,
+  // Level 2 NOT set -- teamSegmentPrefixes therefore contains only the
+  // TWO present levels (['NSW', 'SYD']), never a placeholder for the
+  // missing Level 2, so hyphenation joins them with exactly ONE '-',
+  // never 'NSW--SYD'.
+  it('never produces a doubled hyphen when an intermediate level is absent from teamSegmentPrefixes (Level 1 + Level 3 set, Level 2 not)', () => {
+    const result = CallsignService.assembleCallsign({
+      organisationPrefix: 'AUS-FIRE',
+      teamSegmentPrefixes: ['NSW', 'SYD'],
+      nameSegment: 'J.Bloggs',
+      teamSegmentSeparator: '-'
+    });
+
+    expect(result).toBe('AUS-FIRE-NSW-SYD-J.Bloggs');
+    expect(result).not.toContain('--');
+  });
+
+  it('hyphenates a single present level with no separator needed (nothing to join)', () => {
+    const result = CallsignService.assembleCallsign({
+      organisationPrefix: 'FENZ',
+      teamSegmentPrefixes: ['NSW'],
+      teamSegmentSeparator: '-'
+    });
+
+    expect(result).toBe('FENZ-NSW');
+  });
+
+  it('produces an empty Team segment (and no doubled/leading/trailing hyphen) when teamSegmentPrefixes is empty, regardless of teamSegmentSeparator', () => {
+    const result = CallsignService.assembleCallsign({
+      organisationPrefix: 'FENZ',
+      teamSegmentPrefixes: [],
+      nameSegment: 'J.Bloggs',
+      teamSegmentSeparator: '-'
+    });
+
+    expect(result).toBe('FENZ-J.Bloggs');
+  });
+
+  it('treats an empty-string teamSegmentSeparator explicitly the same as omitting it', () => {
+    const result = CallsignService.assembleCallsign({
+      organisationPrefix: 'FENZ',
+      teamSegmentPrefixes: ['NSW', 'SYD'],
+      teamSegmentSeparator: ''
+    });
+
+    expect(result).toBe('FENZ-NSWSYD');
+  });
+});
+
 describe('CallsignService.computeDefaultCallsignSuffix', () => {
   it('computes a full_name suffix as "First Last" sanitized', () => {
     const result = CallsignService.computeDefaultCallsignSuffix('John', 'Doe', 'full_name');
@@ -309,6 +392,71 @@ describe('Property 12: Callsign segment assembly preserves segment identity and 
 
       // Splitting at the known "-" boundaries yields back exactly the
       // original non-empty segments, unchanged, in order.
+      const splitPieces = result.split('-');
+      expect(splitPieces.every((piece) => piece !== '')).toBe(true);
+      expect(splitPieces).toEqual(nonEmptySegments);
+    }
+  );
+});
+
+/**
+ * Callsign Team-segment separator toggle: the SAME Property 12 guarantee
+ * (no leading/trailing/doubled separator; splitting at "-" boundaries
+ * yields back exactly the original non-empty segments) must continue to
+ * hold when `teamSegmentSeparator: '-'` is supplied -- the toggle must
+ * never let an absent/unselected intermediate Team-Depth level (never
+ * present as an empty-string entry in `teamSegmentPrefixes`, per the
+ * caller's own `!!team.callsign_prefix` filter) produce a doubled
+ * hyphen, regardless of how many levels are present or how the other two
+ * segments are populated.
+ */
+describe('Property 12 (extended): teamSegmentSeparator hyphenation never produces a leading/trailing/doubled separator', () => {
+  const ALPHANUMERIC_CHARS =
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+
+  const alphanumericArb = fc
+    .array(fc.constantFrom(...ALPHANUMERIC_CHARS), { minLength: 0, maxLength: 10 })
+    .map((chars) => chars.join(''));
+
+  const orgPrefixArb = alphanumericArb;
+  const nameSegmentArb = alphanumericArb;
+  const nonEmptyAlphanumericArb = fc
+    .array(fc.constantFrom(...ALPHANUMERIC_CHARS), { minLength: 1, maxLength: 10 })
+    .map((chars) => chars.join(''));
+  const teamPrefixListArb = fc.array(nonEmptyAlphanumericArb, {
+    minLength: 0,
+    maxLength: 5
+  });
+
+  test.prop([orgPrefixArb, teamPrefixListArb, nameSegmentArb], { numRuns: 100 })(
+    "assembleCallsign with teamSegmentSeparator: '-' never produces a leading/trailing/doubled separator, and yields back the original non-empty segments when split at the '-' boundaries",
+    (organisationPrefix, teamSegmentPrefixes, nameSegment) => {
+      const result = CallsignService.assembleCallsign({
+        organisationPrefix,
+        teamSegmentPrefixes,
+        nameSegment,
+        teamSegmentSeparator: '-'
+      });
+
+      // With hyphenation, the Team segment ITSELF is now `-`-joined, so
+      // the reference expectation must split its own segments out too --
+      // unlike the no-separator case, `teamSegmentPrefixes` entries are
+      // each their own top-level "-"-delimited piece of the result.
+      const nonEmptySegments = [
+        organisationPrefix,
+        ...teamSegmentPrefixes,
+        nameSegment
+      ].filter((segment) => segment !== '');
+
+      if (nonEmptySegments.length === 0) {
+        expect(result).toBe('');
+        return;
+      }
+
+      expect(result.startsWith('-')).toBe(false);
+      expect(result.endsWith('-')).toBe(false);
+      expect(result.includes('--')).toBe(false);
+
       const splitPieces = result.split('-');
       expect(splitPieces.every((piece) => piece !== '')).toBe(true);
       expect(splitPieces).toEqual(nonEmptySegments);

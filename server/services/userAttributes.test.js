@@ -53,7 +53,15 @@ function organisationRow({
   name = 'FENZ',
   callsignPrefix = 'FENZ',
   color = '#3B82F6',
-  callsignLevelSelection = null
+  callsignLevelSelection = null,
+  // Foreign_Partner Organisation country prefix feature: null (the
+  // default) is a domestic (NZ) Organisation, matching every existing
+  // caller of this helper unchanged.
+  countryCode = null,
+  // Callsign Team-segment separator toggle: false (the default) is the
+  // pre-existing no-separator concatenation, matching every existing
+  // caller of this helper unchanged.
+  callsignTeamHyphenated = false
 } = {}) {
   return {
     id,
@@ -64,6 +72,8 @@ function organisationRow({
     callsign_name_format: 'full_name',
     visibility: 'public',
     callsign_level_selection: callsignLevelSelection,
+    country_code: countryCode,
+    callsign_team_hyphenated: callsignTeamHyphenated,
     depth: 0
   };
 }
@@ -161,6 +171,158 @@ describe('UserAttributesService.computeCallsignAttributes - Organisation-only us
     const result = await UserAttributesService.computeCallsignAttributes(42, 1);
 
     expect(result.callsign).toBe('FENZ');
+  });
+});
+
+/**
+ * Foreign_Partner Organisation country prefix feature: when the
+ * Organisation carries a `country_code` (ISO 3166-1 alpha-3), it is
+ * composed as the LEADING segment of the effective Organisation prefix
+ * fed into `CallsignService.assembleCallsign` -- 'FJI' + prefix 'FIRE'
+ * -> Organisation segment 'FJI-FIRE'. A domestic Organisation
+ * (country_code null, every other test in this file) is unaffected.
+ */
+describe('UserAttributesService.computeCallsignAttributes - Foreign_Partner Organisation country prefix composition', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('composes country_code as the leading segment ahead of callsign_prefix', async () => {
+    mockUserLookup('J.Bloggs');
+    Team.getAncestorChain.mockResolvedValue([
+      organisationRow({ callsignPrefix: 'FIRE', countryCode: 'FJI' })
+    ]);
+
+    const result = await UserAttributesService.computeCallsignAttributes(42, 1);
+
+    expect(result.callsign).toBe('FJI-FIRE-J.Bloggs');
+  });
+
+  it('still composes the country ahead of any selected Sub_Team segments', async () => {
+    mockUserLookup('J.Bloggs');
+    Team.getAncestorChain.mockResolvedValue([
+      organisationRow({ callsignPrefix: 'FIRE', countryCode: 'FJI' }),
+      teamRow({ id: 2, parentTeamId: 1, name: 'Central', callsignPrefix: 'CENT', depth: 1 })
+    ]);
+
+    const result = await UserAttributesService.computeCallsignAttributes(42, 2);
+
+    expect(result.callsign).toBe('FJI-FIRE-CENT-J.Bloggs');
+  });
+
+  it('is unaffected for a domestic Organisation (country_code null) -- unchanged from every pre-existing case', async () => {
+    mockUserLookup('J.Doe');
+    Team.getAncestorChain.mockResolvedValue([
+      organisationRow({ callsignPrefix: 'FENZ', countryCode: null })
+    ]);
+
+    const result = await UserAttributesService.computeCallsignAttributes(42, 1);
+
+    expect(result.callsign).toBe('FENZ-J.Doe');
+  });
+
+  it('falls back to just the country when the Organisation has a country but no callsign_prefix', async () => {
+    mockUserLookup('J.Doe');
+    Team.getAncestorChain.mockResolvedValue([
+      organisationRow({ callsignPrefix: null, countryCode: 'AUS' })
+    ]);
+
+    const result = await UserAttributesService.computeCallsignAttributes(42, 1);
+
+    expect(result.callsign).toBe('AUS-J.Doe');
+  });
+});
+
+/**
+ * Callsign Team-segment separator toggle: an Organisation may opt into
+ * hyphenating its Team segment (`callsign_team_hyphenated`) so
+ * generated callsigns join each selected/present Team-Depth level with a
+ * `-` instead of the pre-existing no-separator concatenation. `null`/
+ * `false` (every Organisation that has not opted in -- every OTHER test
+ * in this file) reproduces the original behaviour exactly.
+ */
+describe('UserAttributesService.computeCallsignAttributes - Callsign Team-segment separator toggle', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  function orgWithTwoLevels(callsignTeamHyphenated) {
+    return [
+      organisationRow({ callsignPrefix: 'AUS-FIRE', callsignTeamHyphenated }),
+      teamRow({ id: 2, parentTeamId: 1, name: 'New South Wales', callsignPrefix: 'NSW', depth: 1 }),
+      teamRow({ id: 3, parentTeamId: 2, name: 'Sydney', callsignPrefix: 'SYD', depth: 2 })
+    ];
+  }
+
+  it('hyphenates the Team segment when callsign_team_hyphenated is true', async () => {
+    mockUserLookup('J.Bloggs');
+    Team.getAncestorChain.mockResolvedValue(orgWithTwoLevels(true));
+
+    const result = await UserAttributesService.computeCallsignAttributes(42, 3);
+
+    expect(result.callsign).toBe('AUS-FIRE-NSW-SYD-J.Bloggs');
+  });
+
+  it('concatenates with no separator when callsign_team_hyphenated is false (unchanged from every pre-existing case)', async () => {
+    mockUserLookup('J.Bloggs');
+    Team.getAncestorChain.mockResolvedValue(orgWithTwoLevels(false));
+
+    const result = await UserAttributesService.computeCallsignAttributes(42, 3);
+
+    expect(result.callsign).toBe('AUS-FIRE-NSWSYD-J.Bloggs');
+  });
+
+  it('treats a null callsign_team_hyphenated (a Sub_Team\'s own stored value, never actually read) the same as false', async () => {
+    mockUserLookup('J.Bloggs');
+    Team.getAncestorChain.mockResolvedValue(orgWithTwoLevels(null));
+
+    const result = await UserAttributesService.computeCallsignAttributes(42, 3);
+
+    expect(result.callsign).toBe('AUS-FIRE-NSWSYD-J.Bloggs');
+  });
+
+  // The exact scenario named in the bug report: Level 1 and Level 3 set,
+  // Level 2 NOT selected -- the resulting callsign must join the two
+  // PRESENT levels with exactly one hyphen, never a doubled 'NSW--SYD'.
+  it('hyphenates only the present/selected levels with no doubled hyphen when an intermediate level is unselected (Level 1 + Level 3, Level 2 skipped)', async () => {
+    mockUserLookup('J.Bloggs');
+    Team.getAncestorChain.mockResolvedValue([
+      organisationRow({ callsignPrefix: 'AUS-FIRE', callsignTeamHyphenated: true, callsignLevelSelection: [1, 3] }),
+      teamRow({ id: 2, parentTeamId: 1, name: 'New South Wales', callsignPrefix: 'NSW', depth: 1 }),
+      teamRow({ id: 3, parentTeamId: 2, name: 'Unselected Region', callsignPrefix: 'UNS', depth: 2 }),
+      teamRow({ id: 4, parentTeamId: 3, name: 'Sydney', callsignPrefix: 'SYD', depth: 3 })
+    ]);
+
+    const result = await UserAttributesService.computeCallsignAttributes(42, 4);
+
+    expect(result.callsign).toBe('AUS-FIRE-NSW-SYD-J.Bloggs');
+    expect(result.callsign).not.toContain('--');
+  });
+
+  it('hyphenates only the present levels with no doubled hyphen when an intermediate level is absent from a shallower chain', async () => {
+    mockUserLookup('J.Bloggs');
+    Team.getAncestorChain.mockResolvedValue([
+      organisationRow({ callsignPrefix: 'AUS-FIRE', callsignTeamHyphenated: true, callsignLevelSelection: [1, 2, 3] }),
+      teamRow({ id: 2, parentTeamId: 1, name: 'New South Wales', callsignPrefix: 'NSW', depth: 1 })
+      // Depths 2/3 are selected but absent from this shorter chain.
+    ]);
+
+    const result = await UserAttributesService.computeCallsignAttributes(42, 2);
+
+    expect(result.callsign).toBe('AUS-FIRE-NSW-J.Bloggs');
+    expect(result.callsign).not.toContain('--');
+  });
+
+  it('still composes country_code ahead of the hyphenated Team segment', async () => {
+    mockUserLookup('J.Bloggs');
+    Team.getAncestorChain.mockResolvedValue([
+      organisationRow({ callsignPrefix: 'FIRE', countryCode: 'AUS', callsignTeamHyphenated: true }),
+      teamRow({ id: 2, parentTeamId: 1, name: 'New South Wales', callsignPrefix: 'NSW', depth: 1 })
+    ]);
+
+    const result = await UserAttributesService.computeCallsignAttributes(42, 2);
+
+    expect(result.callsign).toBe('AUS-FIRE-NSW-J.Bloggs');
   });
 });
 

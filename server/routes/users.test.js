@@ -30,6 +30,13 @@ jest.mock('../services/authentik', () => ({
   getUsers: jest.fn()
 }));
 
+// GET /me additionally calls User.getChannelMemberships(req.user.userId).
+// No other describe block in this file calls into the User model, so this
+// mock is safe to add file-wide.
+jest.mock('../models/User', () => ({
+  getChannelMemberships: jest.fn()
+}));
+
 // Users-page-action-parity: `mockAuthUser` is a mutable box the mock factory
 // below reads on every request, so a describe block that needs a
 // non-Global_Manager caller (to exercise the new `can_manage` field's
@@ -53,6 +60,7 @@ const express = require('express');
 const request = require('supertest');
 const pool = require('../config/database');
 const authentikService = require('../services/authentik');
+const User = require('../models/User');
 const usersRouter = require('./users');
 
 function buildApp() {
@@ -1012,5 +1020,80 @@ describe('GET /api/users/count (bugfix: exact Total Users stat)', () => {
 
     expect(res.status).toBe(500);
     expect(res.body).toEqual({ error: 'Failed to get user count' });
+  });
+});
+
+/**
+ * Foreign_Partner Organisation country prefix feature: `GET /api/users/me`
+ * must surface the caller's Organisation `country_code` (aliased
+ * `organisation_country_code`) alongside the pre-existing
+ * `organisation_name` -- the Dashboard's "My Country" cell reads it off
+ * this response's `teams[0]`. Verified for both an org-member (whose own
+ * team IS the Organisation) and a sub-team-member (whose team's ROOT is
+ * the Organisation), and confirmed absent (null) for a domestic
+ * Organisation.
+ */
+describe('GET /api/users/me organisation_country_code exposure (Foreign_Partner Organisation country prefix feature)', () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    app = buildApp();
+    User.getChannelMemberships.mockResolvedValue([]);
+  });
+
+  it('surfaces organisation_country_code for a member of a Foreign_Partner Organisation', async () => {
+    pool.query.mockResolvedValueOnce({
+      rows: [{
+        id: 5,
+        name: 'Central Division',
+        parent_team_id: 1,
+        visibility: 'public',
+        organisation_name: 'Fiji Fire',
+        organisation_country_code: 'FJI',
+        display_name: 'FIRE - Central Division'
+      }]
+    });
+
+    const res = await request(app).get('/api/users/me');
+
+    expect(res.status).toBe(200);
+    expect(res.body.teams).toHaveLength(1);
+    expect(res.body.teams[0].organisation_country_code).toBe('FJI');
+    expect(res.body.teams[0].organisation_name).toBe('Fiji Fire');
+
+    // The query selects the aliased column, not the raw one -- proves the
+    // SQL change is actually present rather than the test accidentally
+    // passing on a stale mock.
+    const [sql] = pool.query.mock.calls[0];
+    expect(sql).toContain('rt.country_code AS organisation_country_code');
+  });
+
+  it('reports organisation_country_code: null for a member of a domestic (New Zealand) Organisation', async () => {
+    pool.query.mockResolvedValueOnce({
+      rows: [{
+        id: 1,
+        name: 'FENZ',
+        parent_team_id: null,
+        visibility: 'public',
+        organisation_name: 'FENZ',
+        organisation_country_code: null,
+        display_name: 'FENZ'
+      }]
+    });
+
+    const res = await request(app).get('/api/users/me');
+
+    expect(res.status).toBe(200);
+    expect(res.body.teams[0].organisation_country_code).toBeNull();
+  });
+
+  it('reports an empty teams array (no organisation_country_code to read) for a teamless user', async () => {
+    pool.query.mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app).get('/api/users/me');
+
+    expect(res.status).toBe(200);
+    expect(res.body.teams).toEqual([]);
   });
 });

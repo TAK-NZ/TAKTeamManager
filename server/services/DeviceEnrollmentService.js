@@ -630,6 +630,9 @@ class DeviceEnrollmentService {
           !!t.callsign_prefix
       )
       .map((t) => t.callsign_prefix);
+    // Callsign Team-segment separator toggle: see userAttributes.js's
+    // identical read of this Organisation-only flag.
+    const teamSegmentSeparator = organisation?.callsign_team_hyphenated ? '-' : '';
 
     const devices = result.rows.map((row) => ({
       deviceUserId: row.device_user_id,
@@ -641,7 +644,8 @@ class DeviceEnrollmentService {
         ? CallsignService.assembleCallsign({
             organisationPrefix: organisation.callsign_prefix,
             teamSegmentPrefixes,
-            nameSegment: row.callsign_suffix
+            nameSegment: row.callsign_suffix,
+            teamSegmentSeparator
           })
         : null,
       teamId,
@@ -854,6 +858,9 @@ class DeviceEnrollmentService {
             !!t.callsign_prefix
         )
         .map((t) => t.callsign_prefix);
+      // Callsign Team-segment separator toggle: see userAttributes.js's
+      // identical read of this Organisation-only flag.
+      const teamSegmentSeparator = organisation?.callsign_team_hyphenated ? '-' : '';
 
       return {
         deviceUserId: row.device_user_id,
@@ -865,7 +872,8 @@ class DeviceEnrollmentService {
           ? CallsignService.assembleCallsign({
               organisationPrefix: organisation.callsign_prefix,
               teamSegmentPrefixes,
-              nameSegment: row.callsign_suffix
+              nameSegment: row.callsign_suffix,
+              teamSegmentSeparator
             })
           : null,
         teamId: row.team_id,
@@ -992,6 +1000,9 @@ class DeviceEnrollmentService {
           !!t.callsign_prefix
       )
       .map((t) => t.callsign_prefix);
+    // Callsign Team-segment separator toggle: see userAttributes.js's
+    // identical read of this Organisation-only flag.
+    const teamSegmentSeparator = organisation?.callsign_team_hyphenated ? '-' : '';
 
     return {
       deviceUserId,
@@ -1003,7 +1014,8 @@ class DeviceEnrollmentService {
         ? CallsignService.assembleCallsign({
             organisationPrefix: organisation.callsign_prefix,
             teamSegmentPrefixes,
-            nameSegment: updatedUser.callsign_suffix
+            nameSegment: updatedUser.callsign_suffix,
+            teamSegmentSeparator
           })
         : null,
       teamId

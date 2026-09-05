@@ -74,7 +74,7 @@ const authentikService = require('./authentik');
 const UserAttributesService = require('./userAttributes');
 const UserProvisioningService = require('./UserProvisioningService');
 const BulkImportService = require('./BulkImportService');
-const { buildImportGraph } = BulkImportService;
+const { buildImportGraph, parseRowCountryCode } = BulkImportService;
 
 function buildMockClient() {
   return {
@@ -279,7 +279,7 @@ describe('BulkImportService.importUsers', () => {
  *     OWN per-row failure, not a whole-batch failure
  */
 function csvFromTeamRows(rows) {
-  const header = 'rowId,parentRowRef,name,parentTeamName,parentTeamId,visibility,callsignPrefix,color,canJoin';
+  const header = 'rowId,parentRowRef,name,parentTeamName,parentTeamId,visibility,callsignPrefix,color,canJoin,countryCode';
   const lines = rows.map((r) => [
     r.rowId ?? '',
     r.parentRowRef ?? '',
@@ -302,10 +302,46 @@ function csvFromTeamRows(rows) {
     // blank unless a test opts in, so every pre-existing test keeps its
     // original meaning (a non-joinable team). Tests covering `canJoin`
     // itself (below) set it explicitly, including to an invalid value.
-    r.canJoin ?? ''
+    r.canJoin ?? '',
+    // Foreign_Partner Organisation country prefix feature: optional,
+    // Organisation-only. Left blank unless a test opts in, so every
+    // pre-existing test keeps importing a domestic (no-country)
+    // Organisation, exactly as before this column was added.
+    r.countryCode ?? ''
   ].join(','));
   return [header, ...lines].join('\n');
 }
+
+/**
+ * Direct unit tests for the exported `parseRowCountryCode(row, isRoot)`
+ * (Foreign_Partner Organisation country prefix feature), mirroring this
+ * file's own convention of exercising a parser through the full CSV
+ * import flow above PLUS testing it directly here, matching how
+ * `buildImportGraph` gets both treatments.
+ */
+describe('parseRowCountryCode', () => {
+  it('returns null for an Organisation row (isRoot) with an empty/omitted countryCode', () => {
+    expect(parseRowCountryCode({ countryCode: '' }, true)).toBeNull();
+    expect(parseRowCountryCode({}, true)).toBeNull();
+  });
+
+  it('passes through a valid ISO 3166-1 alpha-3 code for an Organisation row', () => {
+    expect(parseRowCountryCode({ countryCode: 'FJI' }, true)).toBe('FJI');
+  });
+
+  it('throws BulkImportRowError for an unknown code on an Organisation row', () => {
+    expect(() => parseRowCountryCode({ countryCode: 'ZZZ' }, true)).toThrow(
+      BulkImportService.BulkImportRowError
+    );
+    expect(() => parseRowCountryCode({ countryCode: 'ZZZ' }, true)).toThrow(/Invalid countryCode: ZZZ/);
+  });
+
+  it('returns null unconditionally for a Sub_Team row (not isRoot), ignoring any supplied value', () => {
+    expect(parseRowCountryCode({ countryCode: 'AUS' }, false)).toBeNull();
+    expect(parseRowCountryCode({ countryCode: 'ZZZ' }, false)).toBeNull();
+    expect(parseRowCountryCode({}, false)).toBeNull();
+  });
+});
 
 describe('BulkImportService.importTeams', () => {
   beforeEach(() => {
@@ -754,6 +790,90 @@ describe('BulkImportService.importTeams', () => {
     expect(summary.successCount).toBe(1);
     expect(summary.failureCount).toBe(0);
     expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ color: 'not-a-real-color' }));
+  });
+
+  /**
+   * Unit tests for the `countryCode` Team_Import_Row column (Foreign_Partner
+   * Organisation country prefix feature). Optional, Organisation-only
+   * (null unconditionally for a Sub_Team row, mirroring `color`'s own
+   * Sub_Team pass-through -- but here the value is IGNORED rather than
+   * passed through, since `Team.create` rejects a country_code on a
+   * Sub_Team outright). An invalid ISO 3166-1 alpha-3 code on an
+   * Organisation row fails that row alone, mirroring `color`'s own
+   * validate-then-throw, per-row-failure behaviour above.
+   */
+  it('creates a new Organisation row with the row\'s valid countryCode', async () => {
+    const csv = csvFromTeamRows([{ name: 'Fiji Fire', callsignPrefix: 'FIRE', countryCode: 'FJI' }]);
+    Team.create.mockImplementation((teamData) =>
+      Promise.resolve({ id: 1, name: teamData.name, parent_team_id: teamData.parent_team_id })
+    );
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importTeams(csv, importingUser);
+
+    expect(summary.successCount).toBe(1);
+    expect(summary.failureCount).toBe(0);
+    expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ country_code: 'FJI' }));
+  });
+
+  it('creates a new Organisation row with country_code: null when countryCode is omitted (domestic)', async () => {
+    const csv = csvFromTeamRows([{ name: 'Domestic Org' }]);
+    Team.create.mockImplementation((teamData) =>
+      Promise.resolve({ id: 1, name: teamData.name, parent_team_id: teamData.parent_team_id })
+    );
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importTeams(csv, importingUser);
+
+    expect(summary.successCount).toBe(1);
+    expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ country_code: null }));
+  });
+
+  it('fails only the row with an unknown countryCode when creating a new Organisation, continuing the batch', async () => {
+    const csv = csvFromTeamRows([
+      { name: 'Bad Country Org', countryCode: 'ZZZ' },
+      { name: 'Fine Org' }
+    ]);
+    Team.create.mockImplementation((teamData) =>
+      Promise.resolve({ id: 9, name: teamData.name, parent_team_id: teamData.parent_team_id })
+    );
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importTeams(csv, importingUser);
+
+    expect(summary.successCount).toBe(1);
+    expect(summary.failureCount).toBe(1);
+    expect(summary.results[0].success).toBe(false);
+    expect(summary.results[0].error).toMatch(/Invalid countryCode: ZZZ/);
+    expect(summary.results[1]).toEqual({ row: 2, success: true, teamId: 9 });
+    // The invalid row never reached Team.create.
+    expect(Team.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores a countryCode supplied on a Sub_Team row, creating it with country_code: null (never rejected)', async () => {
+    // Unlike color (silently overridden but still passed through
+    // unvalidated), country_code is Organisation-only and Team.create
+    // rejects it outright on a Sub_Team -- so a stray value on a Sub_Team
+    // row must never reach Team.create at all.
+    const csv = csvFromTeamRows([
+      { name: 'Southland District', parentTeamName: 'FENZ', countryCode: 'AUS' }
+    ]);
+    pool.query.mockImplementation((sql, params) => {
+      if (sql === 'SELECT id FROM teams WHERE name = $1' && params[0] === 'FENZ') {
+        return Promise.resolve({ rows: [{ id: 1 }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    Team.create.mockImplementation((teamData) =>
+      Promise.resolve({ id: 101, name: teamData.name, parent_team_id: teamData.parent_team_id })
+    );
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importTeams(csv, importingUser);
+
+    expect(summary.successCount).toBe(1);
+    expect(summary.failureCount).toBe(0);
+    expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ country_code: null }));
   });
 
   /**

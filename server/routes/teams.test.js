@@ -40,7 +40,10 @@ jest.mock('../models/Team', () => {
     ChannelTierAccessSubTeamError,
     OrganisationCallsignPrefixImmutableError,
     CallsignPrefixConflictError,
-    TeamNameConflictError
+    TeamNameConflictError,
+    CountryCodeSubTeamError,
+    CountryCodeInvalidError,
+    OrganisationCountryCodeImmutableError
   } = jest.requireActual('../models/Team');
   return {
     getAllTeams: jest.fn(),
@@ -68,7 +71,10 @@ jest.mock('../models/Team', () => {
     ChannelTierAccessSubTeamError,
     OrganisationCallsignPrefixImmutableError,
     CallsignPrefixConflictError,
-    TeamNameConflictError
+    TeamNameConflictError,
+    CountryCodeSubTeamError,
+    CountryCodeInvalidError,
+    OrganisationCountryCodeImmutableError
   };
 });
 
@@ -1165,6 +1171,155 @@ describe('callsignLevelSelection validation (Requirements 5.1, 5.2, 5.6)', () =>
 
       expect(res.status).toBe(200);
       expect(UserAttributesService.updateTeamUserAttributes).not.toHaveBeenCalled();
+    });
+
+    // Callsign Team-segment separator toggle: a callsignTeamHyphenated
+    // change must also trigger the same regeneration, since it changes
+    // how every member's assembled callsign is JOINED going forward.
+    it('calls UserAttributesService.updateTeamUserAttributes when callsignTeamHyphenated changes', async () => {
+      Team.update.mockResolvedValue({ id: 42, callsign_team_hyphenated: true });
+
+      const res = await request(app)
+        .put('/api/teams/42')
+        .send({ callsignTeamHyphenated: true });
+
+      expect(res.status).toBe(200);
+      expect(UserAttributesService.updateTeamUserAttributes).toHaveBeenCalledWith('42');
+    });
+  });
+});
+
+/**
+ * Unit tests for `callsignTeamHyphenated` handling on `POST /api/teams`
+ * and `PUT /api/teams/:teamId` (Callsign Team-segment separator toggle).
+ *
+ * `callsignTeamHyphenated` is Organisation-only (a Sub_Team creation/
+ * update request supplying one is a typed rejection, mirroring
+ * `pseudonymousUsernames`) but UNLIKE `pseudonymousUsernames`, is freely
+ * mutable on an existing Organisation at any time -- a changed value is
+ * simply APPLIED, never rejected as an immutability violation.
+ */
+describe('callsignTeamHyphenated validation (Callsign Team-segment separator toggle)', () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockIsAdmin = true;
+    app = buildApp();
+  });
+
+  describe('POST /api/teams', () => {
+    it('rejects a non-boolean callsignTeamHyphenated with 400 before calling Team.create', async () => {
+      const res = await request(app)
+        .post('/api/teams')
+        .send({ name: 'FENZ', callsignPrefix: 'FENZ', callsignTeamHyphenated: 'not-a-boolean' });
+
+      expect(res.status).toBe(400);
+      expect(Team.create).not.toHaveBeenCalled();
+    });
+
+    it('responds 400 with the Sub_Team message when Team.create throws ChannelTierAccessSubTeamError for callsignTeamHyphenated', async () => {
+      Team.findById.mockResolvedValue({ id: 42, color: 'Blue', parent_team_id: null });
+      Team.create.mockRejectedValue(new Team.ChannelTierAccessSubTeamError('callsignTeamHyphenated'));
+
+      const res = await request(app)
+        .post('/api/teams')
+        .send({ name: 'Sub Team', parentTeamId: 42, callsignTeamHyphenated: true });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('callsignTeamHyphenated can only be set on an Organisation');
+      expect(res.body.team).toBeUndefined();
+    });
+
+    it('passes a supplied callsignTeamHyphenated through to Team.create as callsign_team_hyphenated (Organisation)', async () => {
+      Team.create.mockResolvedValue({ id: 1, name: 'FENZ', callsign_team_hyphenated: true });
+
+      const res = await request(app)
+        .post('/api/teams')
+        .send({ name: 'FENZ', callsignPrefix: 'FENZ', callsignTeamHyphenated: true });
+
+      expect(res.status).toBe(201);
+      expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ callsign_team_hyphenated: true }));
+    });
+
+    it('nulls callsign_team_hyphenated when a Sub_Team creation request supplies one, mirroring countryCode\'s own defensive wiring', async () => {
+      Team.findById.mockResolvedValue({ id: 42, color: 'Blue', parent_team_id: null });
+      Team.create.mockResolvedValue({ id: 2, name: 'Sub Team', parent_team_id: 42, callsign_team_hyphenated: null });
+
+      const res = await request(app)
+        .post('/api/teams')
+        .send({ name: 'Sub Team', parentTeamId: 42, callsignTeamHyphenated: true });
+
+      expect(res.status).toBe(201);
+      expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ callsign_team_hyphenated: null }));
+    });
+
+    it('passes undefined through to Team.create when omitted, so Team.create supplies the false default', async () => {
+      Team.create.mockResolvedValue({ id: 1, name: 'FENZ', callsign_team_hyphenated: false });
+
+      const res = await request(app)
+        .post('/api/teams')
+        .send({ name: 'FENZ', callsignPrefix: 'FENZ' });
+
+      expect(res.status).toBe(201);
+      expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ callsign_team_hyphenated: undefined }));
+    });
+  });
+
+  describe('PUT /api/teams/:teamId', () => {
+    beforeEach(() => {
+      Team.findById.mockResolvedValue({ id: 42, color: 'Blue', parent_team_id: null, callsign_team_hyphenated: false });
+    });
+
+    it('rejects a non-boolean callsignTeamHyphenated with 400 before calling Team.update', async () => {
+      const res = await request(app)
+        .put('/api/teams/42')
+        .send({ callsignTeamHyphenated: 'not-a-boolean' });
+
+      expect(res.status).toBe(400);
+      expect(Team.update).not.toHaveBeenCalled();
+    });
+
+    it('responds 400 with the Sub_Team message when Team.update throws ChannelTierAccessSubTeamError for callsignTeamHyphenated', async () => {
+      Team.update.mockRejectedValue(new Team.ChannelTierAccessSubTeamError('callsignTeamHyphenated'));
+
+      const res = await request(app)
+        .put('/api/teams/42')
+        .send({ callsignTeamHyphenated: true });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('callsignTeamHyphenated can only be set on an Organisation');
+      expect(res.body.team).toBeUndefined();
+    });
+
+    it('passes a supplied callsignTeamHyphenated through to Team.update as callsign_team_hyphenated', async () => {
+      Team.update.mockResolvedValue({ id: 42, callsign_team_hyphenated: true });
+
+      const res = await request(app)
+        .put('/api/teams/42')
+        .send({ callsignTeamHyphenated: true });
+
+      expect(res.status).toBe(200);
+      expect(Team.update).toHaveBeenCalledWith('42', expect.objectContaining({ callsign_team_hyphenated: true }));
+    });
+
+    // UNLIKE pseudonymousUsernames, a CHANGED value on an existing
+    // Organisation is simply applied -- no immutability rejection at
+    // all, so this asserts the 200 path for a value that DIFFERS from
+    // the currently-stored one (false -> true above already covers
+    // this implicitly, but this test states it explicitly against a
+    // Team.findById mock carrying the OPPOSITE stored value).
+    it('applies a changed value on an existing Organisation with no immutability rejection (unlike pseudonymousUsernames)', async () => {
+      Team.findById.mockResolvedValue({ id: 42, color: 'Blue', parent_team_id: null, callsign_team_hyphenated: false });
+      Team.update.mockResolvedValue({ id: 42, callsign_team_hyphenated: true });
+
+      const res = await request(app)
+        .put('/api/teams/42')
+        .send({ callsignTeamHyphenated: true });
+
+      expect(res.status).toBe(200);
+      expect(res.body.team.callsign_team_hyphenated).toBe(true);
+      expect(res.body.error).toBeUndefined();
     });
   });
 });

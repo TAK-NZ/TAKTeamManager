@@ -102,10 +102,33 @@ class UserAttributesService {
         )
         .map((team) => team.callsign_prefix);
 
+      // Foreign_Partner Organisation country prefix feature: when the
+      // Organisation carries a `country_code` (ISO 3166-1 alpha-3, e.g.
+      // 'FJI'), it is composed as the LEADING segment of the effective
+      // Organisation prefix -- 'FJI' + prefix 'FIRE' -> 'FJI-FIRE'. A
+      // domestic Organisation (country_code null) is unchanged: the
+      // effective prefix is just its own callsign_prefix. Both `country_code`
+      // and `callsign_prefix` are already validated/normalised on the
+      // `teams` row; either could in principle be absent, so this joins only
+      // the non-empty parts with `-` (mirroring assembleCallsign's own
+      // empty-segment handling) rather than emitting a stray leading/trailing
+      // separator.
+      const organisationPrefix = [organisation.country_code, organisation.callsign_prefix]
+        .filter((segment) => !!segment && String(segment).trim() !== '')
+        .join('-');
+
+      // Callsign Team-segment separator toggle: an Organisation may opt
+      // into hyphenating its Team segment (`NSW-SYD` instead of the
+      // default `NSWSYD`) via `callsign_team_hyphenated`. `null`/`false`
+      // (every Organisation that has not opted in) reproduces the
+      // original no-separator concatenation exactly.
+      const teamSegmentSeparator = organisation.callsign_team_hyphenated ? '-' : '';
+
       const callsign = CallsignService.assembleCallsign({
-        organisationPrefix: organisation.callsign_prefix,
+        organisationPrefix,
         teamSegmentPrefixes,
-        nameSegment: callsignSuffix
+        nameSegment: callsignSuffix,
+        teamSegmentSeparator
       });
 
       return {

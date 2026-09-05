@@ -41,6 +41,34 @@ describe('buildTeamSubmitPayload (bug #10: Sub_Team edit-with-no-changes regress
     expect(wire).not.toHaveProperty('pseudonymousUsernames')
   })
 
+  // Foreign_Partner Organisation country prefix feature: countryCode is
+  // Organisation-only, mirroring callsignLevelSelection/pseudonymousUsernames
+  // immediately above -- the server rejects it outright on a Sub_Team.
+  it('omits countryCode entirely for a Sub_Team, rather than sending an empty string', () => {
+    const formData = { parentTeamId: 42, callsignLevelSelection: [], pseudonymousUsernames: false, countryCode: '' }
+    const payload = buildTeamSubmitPayload(formData)
+    expect(payload).not.toHaveProperty('countryCode')
+  })
+
+  it('keeps countryCode for an Organisation (no parentTeamId)', () => {
+    const formData = { parentTeamId: null, callsignLevelSelection: [1, 2], pseudonymousUsernames: true, countryCode: 'FJI', name: 'Fiji Fire' }
+    expect(buildTeamSubmitPayload(formData)).toEqual(formData)
+  })
+
+  // Callsign Team-segment separator toggle: callsignTeamHyphenated is
+  // Organisation-only, mirroring countryCode immediately above -- the
+  // server rejects it outright on a Sub_Team.
+  it('omits callsignTeamHyphenated entirely for a Sub_Team, rather than sending false', () => {
+    const formData = { parentTeamId: 42, callsignLevelSelection: [], pseudonymousUsernames: false, callsignTeamHyphenated: false }
+    const payload = buildTeamSubmitPayload(formData)
+    expect(payload).not.toHaveProperty('callsignTeamHyphenated')
+  })
+
+  it('keeps callsignTeamHyphenated for an Organisation (no parentTeamId)', () => {
+    const formData = { parentTeamId: null, callsignLevelSelection: [1, 2], pseudonymousUsernames: true, callsignTeamHyphenated: true, name: 'FENZ' }
+    expect(buildTeamSubmitPayload(formData)).toEqual(formData)
+  })
+
   it('does not mutate the original formData object', () => {
     const formData = { parentTeamId: 42, callsignLevelSelection: [], pseudonymousUsernames: false }
     buildTeamSubmitPayload(formData)
@@ -332,6 +360,191 @@ describe('TeamFormDialog — default callsignNameFormat for a new Organisation (
     const emptyFormDataBlock = dialogSource.slice(emptyFormDataIndex, emptyFormDataEnd)
     expect(emptyFormDataBlock).toContain("callsignNameFormat: 'first_initial_dot_last'")
     expect(emptyFormDataBlock).not.toContain("callsignNameFormat: 'full_name'")
+  })
+})
+
+// Foreign_Partner Organisation country prefix feature: an Organisation may
+// carry an ISO 3166-1 alpha-3 country code, composed as the leading
+// segment of the callsign prefix. Default is no country (domestic New
+// Zealand); write-once after creation, mirroring the Prefix field's own
+// immutability exactly. Source-contract checks, matching this file's
+// established convention.
+describe('TeamFormDialog — Foreign_Partner Organisation country prefix (Country field)', () => {
+  it("EMPTY_FORM_DATA defaults countryCode to '' (domestic, no country)", () => {
+    const emptyFormDataIndex = dialogSource.indexOf('const EMPTY_FORM_DATA = {')
+    expect(emptyFormDataIndex).toBeGreaterThan(-1)
+    const emptyFormDataEnd = dialogSource.indexOf('\n}', emptyFormDataIndex)
+    const emptyFormDataBlock = dialogSource.slice(emptyFormDataIndex, emptyFormDataEnd)
+    expect(emptyFormDataBlock).toContain("countryCode: ''")
+  })
+
+  it('seeds countryCode from team.country_code on edit, and forces it to \'\' for a Sub_Team', () => {
+    expect(dialogSource).toContain("countryCode: team.parent_team_id ? '' : (team.country_code || '')")
+  })
+
+  it('defines countryLocked with the SAME condition as prefixLocked (write-once after Organisation creation)', () => {
+    const prefixLockedIndex = dialogSource.indexOf('const prefixLocked = ')
+    const countryLockedIndex = dialogSource.indexOf('const countryLocked = ')
+    expect(prefixLockedIndex).toBeGreaterThan(-1)
+    expect(countryLockedIndex).toBeGreaterThan(-1)
+    expect(dialogSource).toContain('const prefixLocked = !!editingTeam && !formData.parentTeamId')
+    expect(dialogSource).toContain('const countryLocked = !!editingTeam && !formData.parentTeamId')
+  })
+
+  it('renders the Country field only inside the Organisation-only (!formData.parentTeamId) fragment, never for a Sub_Team', () => {
+    const countryLockedIndex = dialogSource.indexOf('const countryLocked = ')
+    const countryFieldGateIndex = dialogSource.indexOf('{!formData.parentTeamId && (', countryLockedIndex)
+    expect(countryFieldGateIndex).toBeGreaterThan(countryLockedIndex)
+    // The gate immediately precedes the Country label, not some unrelated
+    // Organisation-only fragment further down the file.
+    const nextCountryLabelIndex = dialogSource.indexOf('Country', countryFieldGateIndex)
+    const nextFieldLockIndicatorIndex = dialogSource.indexOf('FieldLockIndicator', countryFieldGateIndex)
+    expect(nextCountryLabelIndex).toBeGreaterThan(countryFieldGateIndex)
+    expect(nextFieldLockIndicatorIndex).toBeGreaterThan(nextCountryLabelIndex)
+  })
+
+  // Bugfix: Country and Prefix are Organisation-only fields that can
+  // NEVER be changed once the Organisation exists (unlike a Sub_Team's
+  // Prefix, which genuinely stays editable) -- the padlock ICON beside
+  // each must therefore state that fixed fact unconditionally, the same
+  // convention `pseudonymousUsernames` above already follows with
+  // `locked={true}`. Passing `countryLocked`/`prefixLocked` straight
+  // through was wrong: both are `false` while CREATING a brand-new
+  // Organisation, which rendered a GREEN OPEN padlock directly beside
+  // text stating the value is permanent once created -- the exact drift
+  // already fixed for pseudonymousUsernames above. Confirmed by walking
+  // FORWARD from each field's own label text to the first
+  // FieldLockIndicator after it, matching that existing test's technique.
+  it("Country's FieldLockIndicator is locked unconditionally (locked={true}), never keyed to countryLocked", () => {
+    const countryLockedDefIndex = dialogSource.indexOf('const countryLocked = ')
+    const countryLabelIndex = dialogSource.indexOf('Country', countryLockedDefIndex)
+    expect(countryLabelIndex).toBeGreaterThan(countryLockedDefIndex)
+    const nearbyBlock = dialogSource.slice(countryLabelIndex, countryLabelIndex + 2000)
+    const fieldLockIndicatorIndex = nearbyBlock.indexOf('<FieldLockIndicator')
+    expect(fieldLockIndicatorIndex).toBeGreaterThan(-1)
+    const indicatorBlock = nearbyBlock.slice(fieldLockIndicatorIndex, fieldLockIndicatorIndex + 200)
+    expect(indicatorBlock).toContain('locked={true}')
+    expect(indicatorBlock).not.toContain('locked={countryLocked}')
+  })
+
+  it("an Organisation's Prefix FieldLockIndicator is locked unconditionally (locked={true}); a Sub_Team's stays keyed to prefixLocked", () => {
+    const prefixLabelIndex = dialogSource.indexOf("Prefix{!formData.parentTeamId && ' *'}")
+    expect(prefixLabelIndex).toBeGreaterThan(-1)
+    const nearbyBlock = dialogSource.slice(prefixLabelIndex, prefixLabelIndex + 1200)
+    const fieldLockIndicatorIndex = nearbyBlock.indexOf('<FieldLockIndicator')
+    expect(fieldLockIndicatorIndex).toBeGreaterThan(-1)
+    const indicatorBlock = nearbyBlock.slice(fieldLockIndicatorIndex, fieldLockIndicatorIndex + 200)
+    // An Organisation always shows the RED closed lock; a Sub_Team keeps
+    // the genuinely-conditional (green-capable) icon.
+    expect(indicatorBlock).toContain('locked={formData.parentTeamId ? prefixLocked : true}')
+    expect(indicatorBlock).not.toContain('locked={prefixLocked}\n')
+  })
+
+  it('the Country field sits before the Prefix field (country is the leading callsign segment)', () => {
+    const countryFieldIndex = dialogSource.indexOf('Country')
+    const prefixFieldIndex = dialogSource.indexOf("Prefix{!formData.parentTeamId && ' *'}")
+    expect(countryFieldIndex).toBeGreaterThan(-1)
+    expect(prefixFieldIndex).toBeGreaterThan(-1)
+    expect(countryFieldIndex).toBeLessThan(prefixFieldIndex)
+  })
+
+  it('locked-state renders a read-only div (disabled inputs), unlocked-state renders a search input plus a <select>', () => {
+    const countryLockedIndex = dialogSource.indexOf('const countryLocked = ')
+    const countryFieldGateIndex = dialogSource.indexOf('{!formData.parentTeamId && (', countryLockedIndex)
+    const parentFieldIndex = dialogSource.indexOf('Parent Team', countryFieldGateIndex)
+    const countryFieldBlock = dialogSource.slice(countryFieldGateIndex, parentFieldIndex)
+
+    expect(countryFieldBlock).toContain('countryLocked ? (')
+    expect(countryFieldBlock).toContain("id=\"team-country-select\"")
+    expect(countryFieldBlock).toContain('value={countrySearch}')
+    expect(countryFieldBlock).toContain('Domestic (New Zealand)')
+  })
+
+  it('imports getCountry and filterCountries from utils/isoCountry', () => {
+    expect(dialogSource).toContain("import { getCountry, filterCountries } from '../utils/isoCountry'")
+  })
+
+  it('clears the country selection if a search narrows the list to exclude the currently-selected country (mirrors TransferMemberDialog\'s destination-search safety net)', () => {
+    expect(dialogSource).toContain('filterCountries(countrySearch).some((c) => c.alpha3 === formData.countryCode)')
+    expect(dialogSource).toContain("setFormData((prev) => ({ ...prev, countryCode: '' }))")
+  })
+})
+
+// Callsign Team-segment separator toggle: an Organisation may opt into
+// hyphenating its Team segment (each selected/present Team-Depth level
+// joined with a '-' instead of the pre-existing no-separator
+// concatenation). Organisation-only, defaulting to false (unchanged
+// behaviour); freely editable at any time (unlike Country/Prefix), so
+// its FieldLockIndicator is unconditionally `locked={false}`, matching
+// Callsign Level Selection's own unconditional icon immediately above
+// it. Source-contract checks, matching this file's established
+// convention.
+describe('TeamFormDialog — Callsign Team-segment separator toggle (callsignTeamHyphenated)', () => {
+  it("EMPTY_FORM_DATA defaults callsignTeamHyphenated to false (no separator, unchanged behaviour)", () => {
+    const emptyFormDataIndex = dialogSource.indexOf('const EMPTY_FORM_DATA = {')
+    expect(emptyFormDataIndex).toBeGreaterThan(-1)
+    const emptyFormDataEnd = dialogSource.indexOf('\n}', emptyFormDataIndex)
+    const emptyFormDataBlock = dialogSource.slice(emptyFormDataIndex, emptyFormDataEnd)
+    expect(emptyFormDataBlock).toContain('callsignTeamHyphenated: false')
+  })
+
+  it('seeds callsignTeamHyphenated from team.callsign_team_hyphenated on edit, and forces it to false for a Sub_Team', () => {
+    expect(dialogSource).toContain('callsignTeamHyphenated: team.parent_team_id ? false : Boolean(team.callsign_team_hyphenated)')
+  })
+
+  it('renders the toggle only inside the Organisation-only (!formData.parentTeamId) fragment, never for a Sub_Team', () => {
+    const controlIndex = dialogSource.indexOf('id="callsignTeamHyphenated"')
+    expect(controlIndex).toBeGreaterThan(-1)
+    // Walk backward from the control to the nearest preceding
+    // Organisation-only gate, and confirm it is the one that actually
+    // wraps this control (no unrelated `{!formData.parentTeamId && (`
+    // gate sits between the two).
+    const precedingSource = dialogSource.slice(0, controlIndex)
+    const lastGateIndex = precedingSource.lastIndexOf('{!formData.parentTeamId && (')
+    expect(lastGateIndex).toBeGreaterThan(-1)
+    const gateToControl = dialogSource.slice(lastGateIndex, controlIndex)
+    // No closing of that fragment (`)}` at the same nesting level) before
+    // reaching the control -- a loose but effective proxy given this
+    // file's existing structural-check conventions (exact JSX AST
+    // parsing is not done anywhere else in this file either).
+    expect(gateToControl).not.toContain('\n              )}\n')
+  })
+
+  it('sits inside the Callsign Structure section, after Callsign Level Selection and before Callsign Name Format', () => {
+    const levelSelectionIndex = dialogSource.indexOf('Callsign Level Selection')
+    const toggleIndex = dialogSource.indexOf('id="callsignTeamHyphenated"')
+    const nameFormatIndex = dialogSource.indexOf('Callsign Name Format')
+    expect(levelSelectionIndex).toBeGreaterThan(-1)
+    expect(toggleIndex).toBeGreaterThan(-1)
+    expect(nameFormatIndex).toBeGreaterThan(-1)
+    expect(toggleIndex).toBeGreaterThan(levelSelectionIndex)
+    expect(toggleIndex).toBeLessThan(nameFormatIndex)
+  })
+
+  // The padlock ICON must state a fixed fact: this field is freely
+  // editable at any time (unlike Country/Prefix, which are permanent
+  // once an Organisation exists) -- unconditionally `locked={false}`,
+  // never keyed to editingTeam/countryLocked/prefixLocked.
+  it('is unlocked unconditionally (locked={false}), on its FieldLockIndicator', () => {
+    const controlIndex = dialogSource.indexOf('id="callsignTeamHyphenated"')
+    const nearbyBlock = dialogSource.slice(controlIndex, controlIndex + 800)
+    const fieldLockIndicatorIndex = nearbyBlock.indexOf('<FieldLockIndicator')
+    expect(fieldLockIndicatorIndex).toBeGreaterThan(-1)
+    const indicatorBlock = nearbyBlock.slice(fieldLockIndicatorIndex, fieldLockIndicatorIndex + 200)
+    expect(indicatorBlock).toContain('locked={false}')
+  })
+
+  it('is a whole-row clickable <label>, mirroring the pseudonymousUsernames/canJoin checkbox row convention', () => {
+    const labelIndex = dialogSource.indexOf('htmlFor="callsignTeamHyphenated"')
+    expect(labelIndex).toBeGreaterThan(-1)
+    const precedingBlock = dialogSource.slice(Math.max(0, labelIndex - 50), labelIndex)
+    expect(precedingBlock).toContain('<label')
+    const followingBlock = dialogSource.slice(labelIndex, labelIndex + 200)
+    expect(followingBlock).toContain('cursor-pointer')
+  })
+
+  it('buildTeamSubmitPayload drops callsignTeamHyphenated for a Sub_Team (already covered directly in the buildTeamSubmitPayload describe block above, restated here as a source-contract cross-check)', () => {
+    expect(dialogSource).toContain('delete payload.callsignTeamHyphenated')
   })
 })
 

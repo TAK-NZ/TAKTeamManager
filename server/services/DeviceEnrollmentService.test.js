@@ -1125,6 +1125,43 @@ describe('DeviceEnrollmentService.listTeamDevices', () => {
       // is omitted entirely.
       expect(result.devices[0].callsign).toBe('AUK-Tanker1');
     });
+
+    // Callsign Team-segment separator toggle: an Organisation may opt
+    // into hyphenating its Team segment via `callsign_team_hyphenated`,
+    // read off ancestorChain[0] identically to how userAttributes.js
+    // reads it for a human member's callsign.
+    it('hyphenates the Team segment when the Organisation\'s callsign_team_hyphenated is true', async () => {
+      Team.isAdmin.mockResolvedValue(true);
+      Team.getAncestorChain.mockResolvedValue([
+        { id: 1, parent_team_id: null, callsign_prefix: 'AUK', callsign_level_selection: null, callsign_team_hyphenated: true, depth: 0 },
+        { id: 5, parent_team_id: 1, callsign_prefix: 'STL', callsign_level_selection: null, depth: 1 }
+      ]);
+      mockDevicesQuery([
+        { device_user_id: 42, username: 'AUK-D7K3QMX', device_label: 'Engine 4', callsign_suffix: 'Tanker1', tak_role: 'Team Member', created_at: '2024-01-01T00:00:00.000Z', live_certificate_count: 0 }
+      ]);
+
+      const result = await DeviceEnrollmentService.listTeamDevices(5, { userId: 1, is_global_manager: false });
+
+      expect(result.devices[0].callsign).toBe('AUK-STL-Tanker1');
+    });
+
+    it('never produces a doubled hyphen when an intermediate level is unselected, even when hyphenated', async () => {
+      Team.isAdmin.mockResolvedValue(true);
+      Team.getAncestorChain.mockResolvedValue([
+        { id: 1, parent_team_id: null, callsign_prefix: 'AUK', callsign_level_selection: [1, 3], callsign_team_hyphenated: true, depth: 0 },
+        { id: 5, parent_team_id: 1, callsign_prefix: 'NSW', callsign_level_selection: null, depth: 1 },
+        { id: 6, parent_team_id: 5, callsign_prefix: 'UNS', callsign_level_selection: null, depth: 2 },
+        { id: 7, parent_team_id: 6, callsign_prefix: 'SYD', callsign_level_selection: null, depth: 3 }
+      ]);
+      mockDevicesQuery([
+        { device_user_id: 42, username: 'AUK-D7K3QMX', device_label: null, callsign_suffix: 'Tanker1', tak_role: 'Team Member', created_at: '2024-01-01T00:00:00.000Z', live_certificate_count: 0 }
+      ]);
+
+      const result = await DeviceEnrollmentService.listTeamDevices(7, { userId: 1, is_global_manager: false });
+
+      expect(result.devices[0].callsign).toBe('AUK-NSW-SYD-Tanker1');
+      expect(result.devices[0].callsign).not.toContain('--');
+    });
   });
 });
 

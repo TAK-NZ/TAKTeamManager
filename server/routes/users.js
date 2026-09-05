@@ -478,6 +478,7 @@ router.get('/me', authenticateToken, authorize, async (req, res) => {
     // Get user's direct team membership only (exclude inherited)
     const teamResult = await pool.query(`
       SELECT t.id, t.name, t.parent_team_id, t.visibility, rt.name AS organisation_name,
+             rt.country_code AS organisation_country_code,
              CASE 
                WHEN t.parent_team_id IS NOT NULL THEN 
                  COALESCE(rt.callsign_prefix, rt.name, '') || ' - ' || t.name

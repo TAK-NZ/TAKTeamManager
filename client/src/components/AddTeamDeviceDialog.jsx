@@ -139,11 +139,12 @@ export default function AddTeamDeviceDialog({ teamId, team, allTeams, onClose, o
   const [checkingSuffix, setCheckingSuffix] = useState(false)
   const [creating, setCreating] = useState(false)
 
-  const { organisationPrefix, teamSegmentPrefixes } = resolveCallsignSegments(team, allTeams)
+  const { organisationPrefix, teamSegmentPrefixes, teamSegmentSeparator } = resolveCallsignSegments(team, allTeams)
   const callsignPreview = assembleCallsignPreview({
     organisationPrefix,
     teamSegmentPrefixes,
-    nameSegment: callsignSuffix.trim()
+    nameSegment: callsignSuffix.trim(),
+    teamSegmentSeparator
   })
 
   const handleSuffixBlur = async () => {
