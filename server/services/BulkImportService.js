@@ -4,6 +4,8 @@ const Team = require('../models/Team');
 const UserProvisioningService = require('./UserProvisioningService');
 const UserAttributesService = require('./userAttributes');
 const authentikService = require('./authentik');
+const EventPublisher = require('./EventPublisher');
+const { fetchWithTimeout } = require('../utils/fetchWithTimeout');
 const { isValidCallsignPrefix } = require('../utils/callsignValidation');
 const { isValidCountryCode } = require('../utils/isoCountry');
 const { TAK_COLOR_NAMES } = require('../config/constants');
@@ -1363,6 +1365,83 @@ class BulkImportService {
         { err: error, authentikUserId: authentikUser.pk, teamId },
         'Failed to provision CSV-imported user locally after Authentik user creation; row rolled back'
       );
+
+      // Bugfix (Account_Reclaim/orphaned-user-with-no-team-assignment
+      // incident): every local write attempted above has just been
+      // rolled back, so `authentikUser.pk` -- created in Phase 1, before
+      // this transaction ever opened -- is now an ORPHANED Authentik
+      // account: it exists in Authentik with no corresponding local
+      // `users` row, `team_memberships`, or `channel_memberships`.
+      // Before this fix, nothing here ever cleaned that up: the row was
+      // simply recorded as a failed import (Requirement 29.4's per-row
+      // isolation still held -- other rows were unaffected -- but THIS
+      // row's Authentik account was silently leaked). On a LATER,
+      // separate import attempt of the same CSV, `createUser` for the
+      // same email then failed with Authentik's own "This field must be
+      // unique" (the account already existed), so the row failed again
+      // -- but the periodic Authentik sync had, in the meantime, already
+      // discovered the orphaned account and bootstrapped a bare local
+      // `users`/`user_cache` row for it via its own upsert (seeding only
+      // identity fields), leaving a real Authentik user visible in
+      // `/users` with no team, no `audit_logs` row, and no memory of
+      // ever having been imported. Confirmed live: exactly this sequence
+      // produced two such users (christine.long@tak.nz,
+      // jerry.pedersen@tak.nz) from one large FENZ CSV import run.
+      //
+      // The fix: mirror `POST /api/users/create-and-add`'s own
+      // compensating-action shape (`server/routes/users.js`) exactly --
+      // attempt a SYNCHRONOUS delete of the just-created Authentik user
+      // first, and only if that delete attempt itself fails, fall back
+      // to enqueueing a `cleanup_orphaned_authentik_user` Sync_Operation
+      // for the Sync_Worker to retry asynchronously. Either outcome --
+      // and the rare case where even the enqueue fails -- is logged via
+      // the same `{authentikUserId, failedStep, compensationOutcome}`
+      // shape that route already uses, so an operator diagnosing a
+      // future failed row can tell at a glance whether the orphan was
+      // actually cleaned up.
+      const failedStep = 'local_transaction';
+      let compensationOutcome;
+      try {
+        const deleteResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUser.pk}/`, {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
+        });
+
+        if (deleteResponse.ok || deleteResponse.status === 404) {
+          compensationOutcome = 'deleted_synchronously';
+        } else {
+          // Not a re-throw of the outer catch's local-provisioning
+          // failure -- this is a new, unrelated error describing the
+          // Authentik delete's own HTTP response.
+          // eslint-disable-next-line preserve-caught-error
+          throw new Error(`Authentik delete responded with status ${deleteResponse.status}`);
+        }
+      } catch (deleteError) {
+        logger.error(
+          { err: deleteError, authentikUserId: authentikUser.pk },
+          'Synchronous compensating Authentik user delete failed; falling back to a queued cleanup operation'
+        );
+        try {
+          await EventPublisher.publishOperation(
+            'cleanup_orphaned_authentik_user',
+            { authentik_user_id: authentikUser.pk },
+            importingUser?.userId ?? null
+          );
+          compensationOutcome = 'cleanup_operation_queued';
+        } catch (enqueueError) {
+          logger.error(
+            { err: enqueueError, authentikUserId: authentikUser.pk },
+            'Failed to enqueue cleanup_orphaned_authentik_user compensating operation'
+          );
+          compensationOutcome = 'compensation_failed';
+        }
+      }
+
+      logger.error(
+        { authentikUserId: authentikUser.pk, failedStep, compensationOutcome },
+        'Orphaned Authentik user compensating action outcome'
+      );
+
       throw error;
     } finally {
       client.release();

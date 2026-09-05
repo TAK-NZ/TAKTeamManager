@@ -46,6 +46,12 @@ jest.mock('./UserProvisioningService', () => {
     CallsignSuffixRequiredError
   };
 });
+jest.mock('./EventPublisher', () => ({
+  publishOperation: jest.fn()
+}));
+jest.mock('../utils/fetchWithTimeout', () => ({
+  fetchWithTimeout: jest.fn()
+}));
 jest.mock('./ManagedIdentifierService', () => {
   class OrganisationPrefixMissingError extends Error {
     constructor(organisationId) {
@@ -73,6 +79,8 @@ const Team = require('../models/Team');
 const authentikService = require('./authentik');
 const UserAttributesService = require('./userAttributes');
 const UserProvisioningService = require('./UserProvisioningService');
+const EventPublisher = require('./EventPublisher');
+const { fetchWithTimeout } = require('../utils/fetchWithTimeout');
 const BulkImportService = require('./BulkImportService');
 const { buildImportGraph, parseRowCountryCode } = BulkImportService;
 
@@ -238,6 +246,12 @@ describe('BulkImportService.importUsers', () => {
       .mockRejectedValueOnce(new Error('constraint violation'))
       .mockResolvedValueOnce({ localUserId: 601, queuedGroups: 1 });
 
+    // Bugfix regression test's own compensating-delete path is exercised
+    // here too (every rolled-back row now attempts it) -- mocked to
+    // succeed synchronously so this test's own assertions stay scoped to
+    // the rollback/release behaviour it was written for.
+    fetchWithTimeout.mockResolvedValue({ ok: true, status: 200 });
+
     const importingUser = { userId: 1, is_global_manager: true };
     const summary = await BulkImportService.importUsers(csv, importingUser);
 
@@ -255,6 +269,131 @@ describe('BulkImportService.importUsers', () => {
     expect(succeedingClient.query).toHaveBeenCalledWith('COMMIT');
     expect(succeedingClient.query).not.toHaveBeenCalledWith('ROLLBACK');
     expect(succeedingClient.release).toHaveBeenCalledTimes(1);
+  });
+
+  // Bugfix regression tests (Account_Reclaim/orphaned-user-with-no-team-
+  // assignment incident): before this fix, a rolled-back row's ALREADY-
+  // CREATED Authentik account (from Phase 1, before the transaction ever
+  // opened) was never cleaned up at all -- silently leaking an orphaned
+  // Authentik identity with no local trace. Mirrors
+  // `POST /api/users/create-and-add`'s own compensating-action shape
+  // (`server/routes/users.js`) exactly: attempt a synchronous DELETE
+  // first, falling back to a queued `cleanup_orphaned_authentik_user`
+  // Sync_Operation only if that delete itself fails.
+  describe('compensating Authentik user delete on local-transaction failure (bugfix)', () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
+      UserProvisioningService.resolveNewUserIdentity.mockResolvedValue({
+        username: 'alice@example.com',
+        callsignSuffix: 'A.Smith',
+        claimId: undefined
+      });
+      authentikService.createUser.mockResolvedValue({ pk: 'authentik-pk-1' });
+    });
+
+    it('deletes the orphaned Authentik user synchronously when the local transaction fails', async () => {
+      const csv = csvFromRows([
+        { email: 'alice@example.com', firstName: 'Alice', lastName: 'Smith', teamId: '5' }
+      ]);
+      const client = buildMockClient();
+      pool.connect.mockResolvedValueOnce(client);
+      UserProvisioningService.createAndAddUser.mockRejectedValueOnce(new Error('constraint violation'));
+      fetchWithTimeout.mockResolvedValueOnce({ ok: true, status: 200 });
+
+      const importingUser = { userId: 1, is_global_manager: true };
+      const summary = await BulkImportService.importUsers(csv, importingUser);
+
+      expect(summary.failureCount).toBe(1);
+      expect(fetchWithTimeout).toHaveBeenCalledWith(
+        expect.stringContaining('/core/users/authentik-pk-1/'),
+        expect.objectContaining({ method: 'DELETE' })
+      );
+      expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+      expect(mockLoggerInstance.error).toHaveBeenCalledWith(
+        expect.objectContaining({ authentikUserId: 'authentik-pk-1', compensationOutcome: 'deleted_synchronously' }),
+        'Orphaned Authentik user compensating action outcome'
+      );
+    });
+
+    it('treats a 404 delete response as already-gone, still deleted_synchronously', async () => {
+      const csv = csvFromRows([
+        { email: 'alice@example.com', firstName: 'Alice', lastName: 'Smith', teamId: '5' }
+      ]);
+      const client = buildMockClient();
+      pool.connect.mockResolvedValueOnce(client);
+      UserProvisioningService.createAndAddUser.mockRejectedValueOnce(new Error('constraint violation'));
+      fetchWithTimeout.mockResolvedValueOnce({ ok: false, status: 404 });
+
+      const importingUser = { userId: 1, is_global_manager: true };
+      await BulkImportService.importUsers(csv, importingUser);
+
+      expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+      expect(mockLoggerInstance.error).toHaveBeenCalledWith(
+        expect.objectContaining({ compensationOutcome: 'deleted_synchronously' }),
+        'Orphaned Authentik user compensating action outcome'
+      );
+    });
+
+    it('falls back to a queued cleanup_orphaned_authentik_user operation when the synchronous delete fails', async () => {
+      const csv = csvFromRows([
+        { email: 'alice@example.com', firstName: 'Alice', lastName: 'Smith', teamId: '5' }
+      ]);
+      const client = buildMockClient();
+      pool.connect.mockResolvedValueOnce(client);
+      UserProvisioningService.createAndAddUser.mockRejectedValueOnce(new Error('constraint violation'));
+      fetchWithTimeout.mockResolvedValueOnce({ ok: false, status: 500 });
+      EventPublisher.publishOperation.mockResolvedValueOnce(undefined);
+
+      const importingUser = { userId: 9, is_global_manager: true };
+      await BulkImportService.importUsers(csv, importingUser);
+
+      expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+        'cleanup_orphaned_authentik_user',
+        { authentik_user_id: 'authentik-pk-1' },
+        9
+      );
+      expect(mockLoggerInstance.error).toHaveBeenCalledWith(
+        expect.objectContaining({ compensationOutcome: 'cleanup_operation_queued' }),
+        'Orphaned Authentik user compensating action outcome'
+      );
+    });
+
+    it('logs compensation_failed, without throwing, when both the delete and the enqueue fail', async () => {
+      const csv = csvFromRows([
+        { email: 'alice@example.com', firstName: 'Alice', lastName: 'Smith', teamId: '5' }
+      ]);
+      const client = buildMockClient();
+      pool.connect.mockResolvedValueOnce(client);
+      UserProvisioningService.createAndAddUser.mockRejectedValueOnce(new Error('constraint violation'));
+      fetchWithTimeout.mockRejectedValueOnce(new Error('network error'));
+      EventPublisher.publishOperation.mockRejectedValueOnce(new Error('queue unavailable'));
+
+      const importingUser = { userId: 1, is_global_manager: true };
+      const summary = await BulkImportService.importUsers(csv, importingUser);
+
+      // The row itself is still recorded as a failure, not an uncaught
+      // exception that would abort the whole batch (Requirement 29.4).
+      expect(summary.failureCount).toBe(1);
+      expect(mockLoggerInstance.error).toHaveBeenCalledWith(
+        expect.objectContaining({ compensationOutcome: 'compensation_failed' }),
+        'Orphaned Authentik user compensating action outcome'
+      );
+    });
+
+    it('still records the row\'s own error message, not the compensating action\'s outcome, as the row failure', async () => {
+      const csv = csvFromRows([
+        { email: 'alice@example.com', firstName: 'Alice', lastName: 'Smith', teamId: '5' }
+      ]);
+      const client = buildMockClient();
+      pool.connect.mockResolvedValueOnce(client);
+      UserProvisioningService.createAndAddUser.mockRejectedValueOnce(new Error('constraint violation'));
+      fetchWithTimeout.mockResolvedValueOnce({ ok: true, status: 200 });
+
+      const importingUser = { userId: 1, is_global_manager: true };
+      const summary = await BulkImportService.importUsers(csv, importingUser);
+
+      expect(summary.results[0]).toEqual({ row: 1, success: false, error: 'constraint violation' });
+    });
   });
 });
 
