@@ -2,6 +2,11 @@ const axios = require('axios');
 const logger = require('../config/logger').createLogger('AuthentikService');
 const { DEFAULT_FETCH_TIMEOUT_MS } = require('../utils/fetchWithTimeout');
 const { CircuitBreaker } = require('../utils/circuitBreaker');
+// Authentik scaling (Phase 1): the shared cross-process rate limiter. Every
+// call this service makes is composed as rate-limit -> circuit breaker ->
+// HTTP via `_authentikCall` below, so the main server's Authentik load and
+// the Sync_Worker's load draw from the SAME token budget.
+const authentikRequest = require('./authentikRequest');
 
 class AuthentikService {
   constructor() {
@@ -83,6 +88,30 @@ class AuthentikService {
       : null;
   }
 
+  /**
+   * Authentik scaling (Phase 1): the single composition point for every
+   * Authentik call this service makes. Acquires a rate-limit token for the
+   * given lane FIRST (outside the breaker, so a token-starvation wait never
+   * trips it), THEN runs the call through the shared circuit breaker.
+   *
+   * `kind` selects the token lane:
+   *   - 'read'           GET calls
+   *   - 'write'          normal mutations (create/set/add/remove)
+   *   - 'write_priority' urgent mutations (delete), matching the
+   *                      write_priority queue-claim priority for deletes
+   *
+   * When the limiter flag is off, `authentikRequest.run` is a transparent
+   * pass-through, so this is exactly the previous `circuitBreaker.execute`
+   * behaviour plus an inert wrapper.
+   *
+   * @param {'read'|'write'|'write_priority'} kind
+   * @param {() => Promise<*>} fn
+   * @returns {Promise<*>}
+   */
+  _authentikCall(kind, fn) {
+    return authentikRequest.run({ kind }, () => this.circuitBreaker.execute(fn));
+  }
+
   // Create a user. Defaults to `type: 'internal'` (a human-representing
   // account) for every EXISTING caller (`routes/users.js`,
   // `RequestApprovalService.js`, `BulkImportService.js`), none of which
@@ -108,7 +137,7 @@ class AuthentikService {
   // `type: 'internal'` in Authentik until/unless a separate backfill
   // migrates it.
   async createUser(userData) {
-    const response = await this.circuitBreaker.execute(() =>
+    const response = await this._authentikCall('write', () =>
       this.client.post('/core/users/', {
         username: userData.username,
         name: userData.name,
@@ -122,7 +151,7 @@ class AuthentikService {
 
   // Set user password
   async setUserPassword(userId, password) {
-    await this.circuitBreaker.execute(() =>
+    await this._authentikCall('write', () =>
       this.client.post(`/core/users/${userId}/set_password/`, {
         password: password
       })
@@ -192,7 +221,7 @@ class AuthentikService {
 
     const expires = new Date(Date.now() + expiresInMinutes * 60 * 1000).toISOString();
 
-    const createResponse = await this.circuitBreaker.execute(() =>
+    const createResponse = await this._authentikCall('write', () =>
       this.enrollmentClient.post('/core/tokens/', {
         identifier,
         intent: 'app_password',
@@ -204,12 +233,12 @@ class AuthentikService {
 
     let keyResponse;
     try {
-      keyResponse = await this.circuitBreaker.execute(() =>
+      keyResponse = await this._authentikCall('read', () =>
         this.enrollmentClient.get(`/core/tokens/${encodeURIComponent(identifier)}/view_key/`)
       );
     } catch (keyFetchError) {
       try {
-        await this.circuitBreaker.execute(() =>
+        await this._authentikCall('write', () =>
           this.enrollmentClient.delete(`/core/tokens/${encodeURIComponent(identifier)}/`)
         );
       } catch (deleteError) {
@@ -282,7 +311,7 @@ class AuthentikService {
   // unpaginated branch below.
   async getUsers({ page, pageSize, search } = {}) {
     if (page === undefined && pageSize === undefined) {
-      const response = await this.circuitBreaker.execute(() =>
+      const response = await this._authentikCall('read', () =>
         this.client.get('/core/users/', { params: { type: 'internal', ordering: 'pk', ...(search ? { search } : {}) } })
       );
       return response.data.results;
@@ -290,7 +319,7 @@ class AuthentikService {
 
     const resolvedPage = page || 1;
     const resolvedPageSize = pageSize || 50;
-    const response = await this.circuitBreaker.execute(() =>
+    const response = await this._authentikCall('read', () =>
       this.client.get('/core/users/', {
         params: {
           type: 'internal',
@@ -309,13 +338,13 @@ class AuthentikService {
 
   // Get user by username
   async getUserByUsername(username) {
-    const response = await this.circuitBreaker.execute(() => this.client.get(`/core/users/?username=${username}`));
+    const response = await this._authentikCall('read', () => this.client.get(`/core/users/?username=${username}`));
     return response.data.results[0] || null;
   }
 
   // Create LDAP group for channel
   async createGroup(groupData) {
-    const response = await this.circuitBreaker.execute(() =>
+    const response = await this._authentikCall('write', () =>
       this.client.post('/core/groups/', {
         name: groupData.name,
         attributes: {
@@ -328,7 +357,7 @@ class AuthentikService {
 
   // Add user to group
   async addUserToGroup(groupId, userId) {
-    await this.circuitBreaker.execute(() =>
+    await this._authentikCall('write', () =>
       this.client.post(`/core/groups/${groupId}/add_user/`, {
         pk: userId
       })
@@ -337,7 +366,7 @@ class AuthentikService {
 
   // Remove user from group
   async removeUserFromGroup(groupId, userId) {
-    await this.circuitBreaker.execute(() =>
+    await this._authentikCall('write', () =>
       this.client.post(`/core/groups/${groupId}/remove_user/`, {
         pk: userId
       })
@@ -347,7 +376,7 @@ class AuthentikService {
   // Get group by name
   async getGroupByName(name) {
     const encodedName = encodeURIComponent(name);
-    const response = await this.circuitBreaker.execute(() => this.client.get(`/core/groups/?name=${encodedName}`));
+    const response = await this._authentikCall('read', () => this.client.get(`/core/groups/?name=${encodedName}`));
     return response.data.results[0] || null;
   }
 
@@ -362,7 +391,7 @@ class AuthentikService {
     let page = 1;
     let hasMorePages = true;
     while (hasMorePages) {
-      const response = await this.circuitBreaker.execute(() =>
+      const response = await this._authentikCall('read', () =>
         this.client.get(`/core/groups/?page=${page}&page_size=${pageSize}`)
       );
       const results = response.data.results || [];
@@ -382,7 +411,7 @@ class AuthentikService {
   // Any other non-success status propagates as a thrown error.
   async deleteGroup(groupId) {
     try {
-      await this.circuitBreaker.execute(() =>
+      await this._authentikCall('write_priority', () =>
         this.client.delete(`/core/groups/${encodeURIComponent(groupId)}/`)
       );
     } catch (error) {

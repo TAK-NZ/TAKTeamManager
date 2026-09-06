@@ -462,5 +462,35 @@ module.exports = {
     requiredFields: {
       team_id: 'number'
     }
+  },
+
+  // Authentik scaling, Phase 2: the group-authoritative reconcile. Computes
+  // an owned group's COMPLETE desired member set from the local DB and
+  // writes it with a single full-replace group PATCH (see
+  // server/services/OwnedGroupReconciler.js and
+  // .kiro/steering/authentik-scaling.md). The Sync_Worker handler
+  // `reconcileOwnedGroup` dispatches on `group_kind`:
+  //   - 'team_channel' -> requires `channel_id` (a channels.id)
+  //   - 'bch_read' / 'bch_write' -> requires `bch_channel_id`
+  //   - 'region' -> requires `region_channel_id`
+  //   - 'cloudtak' -> requires `team_id`
+  // The per-kind id field cannot be expressed as a single `requiredFields`
+  // entry (each kind carries a DIFFERENT id), so `group_kind` is the one
+  // unconditionally-required field and the four id fields are declared
+  // optional here; the handler enforces that the id matching the kind is
+  // present (a missing one is a permanent payload defect, not a retry).
+  // `dry_run_note` is a free-form optional string some enqueue sites may
+  // attach for traceability; it never affects behaviour.
+  reconcile_owned_group: {
+    requiredFields: {
+      group_kind: 'string'
+    },
+    optionalFields: {
+      channel_id: 'number',
+      bch_channel_id: 'number',
+      region_channel_id: 'number',
+      team_id: 'number',
+      bulk_operation_id: 'number'
+    }
   }
 };

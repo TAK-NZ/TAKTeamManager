@@ -3,7 +3,25 @@ const logger = require('../config/logger').createLogger('userAttributes');
 const Team = require('../models/Team');
 const CallsignService = require('./CallsignService');
 const { MAX_TEAM_DEPTH } = require('../config/constants');
-const { fetchWithTimeout } = require('../utils/fetchWithTimeout');
+const { fetchWithTimeout: rawFetchWithTimeout } = require('../utils/fetchWithTimeout');
+// Authentik scaling (Phase 1): this service's attribute GET/PATCH pairs are
+// Authentik calls too, so route them through the SHARED rate limiter. Same
+// lane-by-method inference and same module-local `fetchWithTimeout` wrapper
+// shape as the Sync_Worker uses (GET -> read, PATCH/other -> write), so the
+// call sites below are unchanged. Pass-through when the limiter flag is off.
+const authentikRequest = require('./authentikRequest');
+
+function laneForMethod(method) {
+  const upper = (method || 'GET').toUpperCase();
+  if (upper === 'GET') return 'read';
+  if (upper === 'DELETE') return 'write_priority';
+  return 'write';
+}
+
+function fetchWithTimeout(url, options = {}, timeoutMs) {
+  const kind = laneForMethod(options.method);
+  return authentikRequest.run({ kind }, () => rawFetchWithTimeout(url, options, timeoutMs));
+}
 
 class UserAttributesService {
   static splitFullName(fullName) {

@@ -2,6 +2,12 @@ const pool = require('../config/database');
 const EventPublisher = require('./EventPublisher');
 const { checkCallsignSuffixUniqueness } = require('./CallsignSuffixUniquenessService');
 const { isCloudTakEnabled } = require('../config/cloudtak');
+// Authentik scaling (Phase 3): when BULK_GROUP_RECONCILE_ENABLED is on, the
+// per-user team-channel add/remove fan-out below is replaced by one
+// group-authoritative reconcile_owned_group op per AFFECTED channel. When
+// off, the old per-user path runs unchanged.
+const { isBulkGroupReconcileEnabled } = require('../config/bulkGroupReconcile');
+const { enqueueTeamChannelReconcile } = require('./OwnedGroupReconcileEnqueuer');
 
 class TeamMembershipService {
   /**
@@ -116,6 +122,15 @@ class TeamMembershipService {
       // strictly from channel_memberships, so without this insert a user
       // added via this method would show up in team_memberships but the
       // team's channel would still show 0 members.
+      // Authentik scaling (Phase 3): with the reconciler enabled, enqueue
+      // ONE reconcile_owned_group per affected team-channel (the target
+      // team + each ancestor) instead of a per-user add_user_to_group. The
+      // reconcile recomputes the whole group's membership from the DB, so
+      // it subsumes this user's add (and self-heals any drift). When the
+      // flag is off, the original per-user add path runs unchanged. The
+      // local channel_memberships write happens either way -- the team
+      // detail page's member count reads it directly.
+      const reconcileEnabled = isBulkGroupReconcileEnabled();
       let groupsQueued = 0;
       for (const channel of teamChannels.rows) {
         await client.query(
@@ -123,7 +138,14 @@ class TeamMembershipService {
           [channel.id, userId, 'read_write']
         );
 
-        if (channel.authentik_group_id) {
+        if (reconcileEnabled) {
+          // Enqueue regardless of authentik_group_id: the reconcile handler
+          // treats a not-yet-created group id as a retryable defer, so a
+          // channel whose group creation hasn't completed is reconciled once
+          // it has, rather than being silently skipped here.
+          await enqueueTeamChannelReconcile(channel.id, createdBy, client);
+          groupsQueued++;
+        } else if (channel.authentik_group_id) {
           await EventPublisher.publishOperation('add_user_to_group', {
             target_user_id: userId,
             target_group_id: channel.authentik_group_id
@@ -132,7 +154,12 @@ class TeamMembershipService {
         }
       }
       
-      // Also ensure user is assigned to all global channels
+      // Global channels: KEEP the per-user reconcile even when the group
+      // reconciler is enabled. A single user's add changes only THIS user's
+      // global-channel membership; the group-authoritative bulk reconcile
+      // (and the periodic sweep) own the group axis and would re-PATCH every
+      // member of every global group on every single add. The cheap, correct
+      // per-user op is right here; the sweep converges any drift.
       await EventPublisher.publishOperation('assign_user_to_global_channels', {
         target_user_id: userId
       }, createdBy, client);
@@ -183,9 +210,14 @@ class TeamMembershipService {
         await client.query('BEGIN');
       }
       
-      // Get current team channels before removal
+      // Get current team channels before removal. Authentik scaling
+      // (Phase 3): `c.id` is now selected too, so the reconcile path can
+      // enqueue a reconcile_owned_group{team_channel} keyed by channel id.
+      // The `authentik_group_id IS NOT NULL` filter is kept: a channel with
+      // no group has nothing to remove from (old path) and nothing whose
+      // membership changed (reconcile path) -- either way there is no work.
       const currentChannels = await client.query(`
-        SELECT c.authentik_group_id 
+        SELECT c.id, c.authentik_group_id 
         FROM team_memberships tm
         JOIN channels c ON tm.team_id = c.team_id AND c.is_primary = true
         WHERE tm.user_id = $1 AND c.authentik_group_id IS NOT NULL
@@ -217,12 +249,21 @@ class TeamMembershipService {
         [userId]
       );
       
-      // Queue removal operations for team channels
+      // Team channels: with the reconciler enabled, enqueue one
+      // reconcile_owned_group{team_channel} per affected channel (the
+      // removal is subsumed by recomputing the group's full membership,
+      // which no longer includes this now-removed user). When off, the
+      // original per-user remove_user_from_group runs unchanged.
+      const reconcileEnabled = isBulkGroupReconcileEnabled();
       for (const channel of currentChannels.rows) {
-        await EventPublisher.publishOperation('remove_user_from_group', {
-          target_user_id: userId,
-          target_group_id: channel.authentik_group_id
-        }, createdBy, client);
+        if (reconcileEnabled) {
+          await enqueueTeamChannelReconcile(channel.id, createdBy, client);
+        } else {
+          await EventPublisher.publishOperation('remove_user_from_group', {
+            target_user_id: userId,
+            target_group_id: channel.authentik_group_id
+          }, createdBy, client);
+        }
       }
       
       // If user has no teams left, remove from all global channels too.
@@ -230,6 +271,19 @@ class TeamMembershipService {
       // write_group_id); region channels are a SINGLE Authentik group per
       // channel (only a group_id column -- no read/write pair, confirmed
       // against the baseline schema and live Authentik groups).
+      //
+      // Authentik scaling (Phase 3): this block is DELIBERATELY LEFT as a
+      // per-user removal even when the group reconciler is enabled. It is
+      // bounded to the single user who just became teamless, and it must
+      // remove them PROMPTLY. Crucially, a group-authoritative reconcile
+      // could NOT do this job for BCH read groups: their desired set is
+      // "every active user", and a teamless user is still active, so a
+      // reconcile would keep them in BCH read. This targeted removal is
+      // therefore the ONLY thing that revokes a teamless user's global
+      // access, and it must run regardless of the flag. (This preserves the
+      // exact pre-existing behaviour, including that it is more aggressive
+      // than the per-user assign_user_to_global_channels reconcile, which
+      // never removes anyone from BCH read -- an intentional no-change.)
       if (remainingTeams.rows[0].count === 0) {
         // Get all global channel group IDs
         const globalChannels = await client.query(`

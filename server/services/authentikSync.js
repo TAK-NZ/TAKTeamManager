@@ -5,6 +5,13 @@ const { createLogger } = require('../config/logger');
 const { normaliseAuthentikEmail } = require('../utils/authentikEmail');
 const { isIgnoredAuthentikUsername } = require('../config/authentikSyncIgnore');
 const EventPublisher = require('./EventPublisher');
+// Authentik scaling (Phase 1): the periodic reconciliation sweep is another
+// Authentik load source (a full paginated user + group fetch every cycle,
+// plus a per-user attribute PATCH on drift). Route its calls through the
+// SHARED rate limiter so they draw from the same read/write token budget as
+// the request path and the Sync_Worker, rather than a third independent
+// stream. Pass-through when the limiter flag is off.
+const authentikRequest = require('./authentikRequest');
 
 const logger = createLogger('authentikSync');
 
@@ -79,13 +86,13 @@ class AuthentikSyncService {
       // an earlier page can never later reappear on, or be skipped from,
       // a later page because same-run inserts changed its sort key.
       while (hasMorePages) {
-        const response = await axios.get(
+        const response = await authentikRequest.run({ kind: 'read' }, () => axios.get(
           `${process.env.AUTHENTIK_URL}/api/v3/core/users/?ordering=pk&page=${currentPage}`,
           {
             headers: { Authorization: `Bearer ${process.env.AUTHENTIK_API_TOKEN}` },
             timeout: 30000
           }
-        );
+        ));
 
         allUsers = allUsers.concat(response.data.results);
 
@@ -188,10 +195,10 @@ class AuthentikSyncService {
     let hasMorePages = true;
 
     while (hasMorePages) {
-      const groupsResponse = await axios.get(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/?ordering=num_pk&page=${currentPage}`, {
+      const groupsResponse = await authentikRequest.run({ kind: 'read' }, () => axios.get(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/?ordering=num_pk&page=${currentPage}`, {
         headers: { Authorization: `Bearer ${process.env.AUTHENTIK_API_TOKEN}` },
         timeout: 30000
-      });
+      }));
 
       allGroups = allGroups.concat(groupsResponse.data.results);
 
@@ -846,7 +853,7 @@ class AuthentikSyncService {
                 attributes: mergedAttributes
               };
 
-              const patchResponse = await axios.patch(
+              const patchResponse = await authentikRequest.run({ kind: 'write' }, () => axios.patch(
                 `${process.env.AUTHENTIK_URL}/api/v3/core/users/${user.pk}/`,
                 patchPayload,
                 {
@@ -856,7 +863,7 @@ class AuthentikSyncService {
                   },
                   timeout: 10000
                 }
-              );
+              ));
 
               if (patchResponse.status >= 200 && patchResponse.status < 300) {
                 logger.debug({ username: user.username }, 'Pushed local attributes to Authentik');

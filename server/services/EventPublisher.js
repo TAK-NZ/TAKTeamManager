@@ -1,13 +1,18 @@
 const pool = require('../config/database');
 const { getCorrelationId } = require('../middleware/requestContext');
+// Authentik scaling (Phase 1): derives the sync_operations.priority for an
+// operation type so urgent mutations (delete/suspend/revoke/cleanup) are
+// claimed ahead of a bulk backlog. A caller may still override with an
+// explicit `priority` argument; otherwise this map decides.
+const { priorityForOperationType } = require('../config/syncOperationPriority');
 
 // Performance-hardening: the maximum number of sync_operations rows
 // `publishOperationsBatch` inserts in a single multi-row INSERT statement.
-// Each row binds 6 parameters (see `publishOperation`'s own column list),
-// and Postgres's protocol caps a single statement at 65535 bound
-// parameters -- 1000 rows * 6 params = 6000, comfortably under that limit
-// with room to spare, while still cutting a 50,000-row enqueue from 50,000
-// individual round trips down to 50.
+// Each row binds 7 parameters (see `publishOperation`'s own column list --
+// including the Phase-1 `priority` column), and Postgres's protocol caps a
+// single statement at 65535 bound parameters -- 1000 rows * 7 params =
+// 7000, comfortably under that limit with room to spare, while still
+// cutting a 50,000-row enqueue from 50,000 individual round trips down to 50.
 const BATCH_INSERT_CHUNK_SIZE = 1000;
 
 class EventPublisher {
@@ -39,16 +44,22 @@ class EventPublisher {
    * @param {number|null} [createdBy]
    * @param {import('pg').PoolClient|null} [client] - an already-connected,
    *   already-`BEGIN`-ed client to use instead of the shared pool.
+   * @param {number|null} [priority] - Authentik scaling (Phase 1): the
+   *   claim priority (LOWER = more urgent). Omitted/null derives it from
+   *   `operationType` via `priorityForOperationType`, so existing callers
+   *   need no change and urgent op types are prioritised automatically. An
+   *   explicit value overrides the derived one.
    */
-  static async publishOperation(operationType, payload, createdBy = null, client = null) {
+  static async publishOperation(operationType, payload, createdBy = null, client = null, priority = null) {
     const query = `
-      INSERT INTO sync_operations (operation_type, target_user_id, target_group_id, payload, created_by, correlation_id)
-      VALUES ($1, $2, $3, $4, $5, $6)
+      INSERT INTO sync_operations (operation_type, target_user_id, target_group_id, payload, created_by, correlation_id, priority)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
       RETURNING id
     `;
 
     const executor = client || pool;
     const correlationId = getCorrelationId() || null;
+    const resolvedPriority = priority == null ? priorityForOperationType(operationType) : priority;
 
     const result = await executor.query(query, [
       operationType,
@@ -56,7 +67,8 @@ class EventPublisher {
       payload.target_group_id || null,
       JSON.stringify(payload),
       createdBy,
-      correlationId
+      correlationId,
+      resolvedPriority
     ]);
     
     return result.rows[0].id;
@@ -97,37 +109,45 @@ class EventPublisher {
    * @param {object[]} payloads - one entry per row to enqueue; may be empty.
    * @param {number|null} [createdBy]
    * @param {import('pg').PoolClient|null} [client]
+   * @param {number|null} [priority] - Authentik scaling (Phase 1): the
+   *   claim priority for every row in the batch (a batch is always one op
+   *   type, so one priority). Omitted/null derives it from `operationType`.
    * @returns {Promise<number[]>} the enqueued rows' ids, in the same
    *   order as `payloads`.
    */
-  static async publishOperationsBatch(operationType, payloads, createdBy = null, client = null) {
+  static async publishOperationsBatch(operationType, payloads, createdBy = null, client = null, priority = null) {
     if (payloads.length === 0) {
       return [];
     }
 
     const executor = client || pool;
     const correlationId = getCorrelationId() || null;
+    const resolvedPriority = priority == null ? priorityForOperationType(operationType) : priority;
     const ids = [];
 
+    // 7 bound parameters per row (operation_type, target_user_id,
+    // target_group_id, payload, created_by, correlation_id, priority).
+    const PARAMS_PER_ROW = 7;
     for (let chunkStart = 0; chunkStart < payloads.length; chunkStart += BATCH_INSERT_CHUNK_SIZE) {
       const chunk = payloads.slice(chunkStart, chunkStart + BATCH_INSERT_CHUNK_SIZE);
 
       const values = [];
       const placeholderRows = chunk.map((payload, index) => {
-        const base = index * 6;
+        const base = index * PARAMS_PER_ROW;
         values.push(
           operationType,
           payload.target_user_id || null,
           payload.target_group_id || null,
           JSON.stringify(payload),
           createdBy,
-          correlationId
+          correlationId,
+          resolvedPriority
         );
-        return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`;
+        return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7})`;
       });
 
       const query = `
-        INSERT INTO sync_operations (operation_type, target_user_id, target_group_id, payload, created_by, correlation_id)
+        INSERT INTO sync_operations (operation_type, target_user_id, target_group_id, payload, created_by, correlation_id, priority)
         VALUES ${placeholderRows.join(', ')}
         RETURNING id
       `;
