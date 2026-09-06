@@ -223,6 +223,7 @@ Every dense table (Teams, Team Detail's tabs, Team Devices, Users, Devices) rend
 
 ## Where to Look Next
 
-- `.kiro/steering/` — living conventions (stack/commands, code placement, product glossary, server/client conventions, feature flags, testing).
-- `.kiro/specs/` — completed feature specs, cited heavily in code comments by requirement number. History, not current documentation — a later spec overrules an earlier one where they conflict.
+- `.kiro/steering/` — living conventions (stack/commands, code placement, product glossary, server/client conventions, feature flags, testing, TAK Server/Marti integration facts).
 - `docs/END-USER-DOCS.md` — how a team member or team admin actually uses the product.
+
+Note: `.kiro/specs/` (ten completed feature specs) was removed once implemented; some older code comments still cite requirement/criterion numbers from those retired specs (e.g. `// device-management Requirement 5.3`) as historical provenance — the spec itself no longer exists, so treat the surrounding comment text as the source of truth.

@@ -25,8 +25,14 @@ Client: React 18, Vite, Tailwind, React Router, Vitest + fast-check, jsdom.
 - **There are two independent test runners and two dependency trees.** Root Jest for `server/`, `client/`'s Vitest for `client/`. A client dependency must be added to `client/package.json`.
 - **`TAK_SERVER_ENROLLMENT_URL` and `TAK_SERVER_URL` are deliberately different hosts, not aliases.** `TAK_SERVER_URL` is the Marti certadmin API's mutual-TLS endpoint (`TakServerService.js`), often internal/admin-only. `TAK_SERVER_ENROLLMENT_URL` is the public, client-dialable host `DeviceEnrollmentService` builds enrollment URIs/QR payloads from. They can legitimately point at different hostnames and/or ports — never collapse them to one var.
 
+## Health/readiness endpoints
+
+- `GET /health` (DB check, 2s timeout), `GET /health/ready` (DB + Authentik reachability, 3s), `GET /health/live` (no dependency checks) — `server/routes/health.js`.
+- The Sync_Worker exposes its OWN separate `/health` on `SYNC_WORKER_HEALTH_PORT`, backed by a `sync_worker_heartbeat` DB row with a 90s staleness threshold — it is a distinct process from the main server and is not covered by the routes above.
+
 ## Conventions
 
 - Security-critical deps (`jsonwebtoken`, `helmet`, `express-rate-limit`, `node-forge`) are pinned to exact versions and enforced in CI. New client deps are pinned exactly too.
+  - `node-forge` specifically converts the TAK Server admin P12 credential to PEM in pure JS, deliberately avoiding a runtime dependency on an `openssl` binary. See `tak-server-integration.md` for why.
 - Every environment variable the code reads must be documented in `.env.example` with a safe default.
 - Add new schema as a `node-pg-migrate` `.cjs` migration. Never hand-edit `schema.sql` as a source of truth. This app has never been deployed anywhere outside its own dev/test environment, so migration history is periodically re-squashed into a single baseline file rather than accumulating an ever-growing incremental chain — currently zero incremental migrations sit on top of the baseline; the next schema change should be its own new incremental migration alongside it.

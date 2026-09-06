@@ -254,6 +254,16 @@ class OrganisationCountryCodeImmutableError extends Error {
  * still-possible-in-principle collision if a future migration ever adds
  * a second Sub_Team-scoped uniqueness rule -- there is none today, so in
  * practice this is purely an Organisation-vs-Organisation conflict now.
+ *
+ * Bugfix (Foreign_Partner Organisation country prefix): the index is
+ * further scoped to `(country_code, callsign_prefix)` with `NULLS NOT
+ * DISTINCT` (`1789800000000_scope-callsign-prefix-uniqueness-to-country.cjs`),
+ * since the column this protects is the Organisation-prefix SEGMENT, not
+ * the effective composed prefix -- two Foreign_Partner Organisations
+ * with the same `callsign_prefix` under DIFFERENT `country_code` values
+ * (e.g. `FJI-FIRE` and `AUS-FIRE`) are not actually ambiguous and must
+ * not collide, while two domestic (`country_code IS NULL`) Organisations
+ * sharing a bare prefix still must.
  */
 class CallsignPrefixConflictError extends Error {
   constructor(conflictingValue) {
