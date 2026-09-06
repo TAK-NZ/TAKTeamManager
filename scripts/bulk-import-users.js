@@ -77,6 +77,8 @@ const fs = require('fs');
 const path = require('path');
 const pLimit = require('p-limit');
 const BulkImportService = require('../server/services/BulkImportService');
+const { enqueueAllGlobalChannelReconciles } = require('../server/services/OwnedGroupReconcileEnqueuer');
+const { isBulkGroupReconcileEnabled } = require('../server/config/bulkGroupReconcile');
 const { parse } = require('csv-parse/sync');
 
 function parseArgs(argv) {
@@ -134,11 +136,24 @@ async function main() {
   const results = new Array(rows.length);
   let completed = 0;
 
+  // Bulk global-channel handling, mirroring BulkImportService.importUsers:
+  // suppress the O(users) per-user assign_user_to_global_channels enqueue and
+  // issue ONE group-axis reconcile for all global channels after the batch --
+  // only on the group-axis path (BULK_GROUP_RECONCILE_ENABLED). With it off,
+  // the old per-user enqueue must run, or imported users get no global
+  // channels (the reconciler is inert when the flag is off).
+  const useGroupAxis = isBulkGroupReconcileEnabled();
+
   await Promise.all(
     rows.map((row, index) => limit(async () => {
       const rowNumber = index + 1;
       try {
-        const outcome = await BulkImportService.importUserRow(row, importingUser, args.teamId);
+        const outcome = await BulkImportService.importUserRow(
+          row,
+          importingUser,
+          args.teamId,
+          { skipGlobalChannelEnqueue: useGroupAxis }
+        );
         results[index] = { row: rowNumber, success: true, userId: outcome.localUserId };
       } catch (error) {
         results[index] = { row: rowNumber, success: false, error: error.message };
@@ -153,6 +168,21 @@ async function main() {
 
   const successCount = results.filter((r) => r.success).length;
   const failureCount = results.length - successCount;
+
+  // One group-axis global-channel reconcile for the whole run, replacing the
+  // per-user ops suppressed above (see BulkImportService.importUsers for the
+  // rationale). Only on the group-axis path and only if a row succeeded.
+  if (useGroupAxis && successCount > 0) {
+    try {
+      await enqueueAllGlobalChannelReconciles(null, null);
+      process.stdout.write('Enqueued one global-channel reconcile per group for the batch.\n');
+    } catch (error) {
+      process.stderr.write(
+        `Warning: failed to enqueue the post-batch global-channel reconcile (${error.message}); ` +
+        'the anti-drift sweep will converge these groups.\n'
+      );
+    }
+  }
 
   process.stdout.write(`\nDone: ${successCount} succeeded, ${failureCount} failed.\n`);
 

@@ -149,6 +149,41 @@ describe('UserProvisioningService.createAndAddUser', () => {
     );
   });
 
+  it('SUPPRESSES the per-user assign_user_to_global_channels enqueue when skipGlobalChannelEnqueue is true (bulk path)', async () => {
+    // At bulk scale the per-user enqueue is O(users); the bulk caller
+    // (BulkImportService / the local script) instead issues ONE group-axis
+    // reconcile for all global channels after the batch. So with the flag on,
+    // createAndAddUser must NOT enqueue an assign_user_to_global_channels op.
+    const client = buildMockClient((sql) => {
+      if (sql.includes('SELECT id FROM users WHERE authentik_user_id')) {
+        return Promise.resolve({ rows: [{ id: 101 }] });
+      }
+      if (sql.includes('WITH RECURSIVE parent_teams')) {
+        return Promise.resolve({ rows: [] });
+      }
+      if (sql.includes('SELECT id, authentik_group_id FROM channels')) {
+        return Promise.resolve({ rows: [{ id: 5, authentik_group_id: 'grp-team' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await UserProvisioningService.createAndAddUser(client, {
+      authentikUserId: 999,
+      username: 'alice',
+      email: 'alice@example.com',
+      firstName: 'Alice',
+      lastName: 'Smith',
+      teamId: 7,
+      createdBy: 3,
+      skipGlobalChannelEnqueue: true
+    });
+
+    const globalEnqueues = EventPublisher.publishOperation.mock.calls.filter(
+      (c) => c[0] === 'assign_user_to_global_channels'
+    );
+    expect(globalEnqueues).toHaveLength(0);
+  });
+
   it('creates an inherited team_membership row and queues a group operation for each parent team', async () => {
     const client = buildMockClient((sql, params) => {
       if (sql.includes('SELECT id FROM users WHERE authentik_user_id')) {

@@ -169,7 +169,7 @@ class UserProvisioningService {
    *   team/role) requires.
    * @returns {Promise<{localUserId: number, queuedGroups: number}>}
    */
-  static async createAndAddUser(client, { authentikUserId, username, email, firstName, lastName, teamId, callsign_suffix = null, createdBy = null, claimId = null, reclaimedUserId = null }) {
+  static async createAndAddUser(client, { authentikUserId, username, email, firstName, lastName, teamId, callsign_suffix = null, createdBy = null, claimId = null, reclaimedUserId = null, skipGlobalChannelEnqueue = false }) {
     // Requirement 13.3/13.4/13.5: resolve the target Team's Organisation
     // (the root of its Ancestor_Chain) on the caller's transaction client
     // and record it as the user's provenance.
@@ -335,9 +335,25 @@ class UserProvisioningService {
     // on the caller's SAME transaction client (Requirement 17.5's
     // client-threading pattern, matching the add_user_to_group enqueues
     // above) so it commits/rolls back atomically with this row's writes.
-    await EventPublisher.publishOperation('assign_user_to_global_channels', {
-      target_user_id: localUserId
-    }, createdBy, client);
+    //
+    // BULK EXCEPTION (`skipGlobalChannelEnqueue`): the per-user enqueue is the
+    // right, cheap choice for a SINGLE interactive create-and-add (one op,
+    // ~1 Authentik call, vs. reconciling all ~47 global groups). But at BULK
+    // scale it is O(users) -- a 15K import produced ~10K
+    // assign_user_to_global_channels ops for a membership set spanning only
+    // ~47 groups. So the bulk paths (CSV import route + the local bulk-import
+    // script, both via BulkImportService.importUserRow) pass
+    // `skipGlobalChannelEnqueue: true` and instead enqueue ONE
+    // reconcile_owned_group per global group ONCE after the whole batch
+    // (OwnedGroupReconcileEnqueuer.enqueueAllGlobalChannelReconciles) --
+    // O(groups), same end state (BCH read = every active user; region =
+    // org-flag-scoped) at ~200x fewer Authentik calls. The interactive route
+    // leaves the flag false, keeping its per-user op.
+    if (!skipGlobalChannelEnqueue) {
+      await EventPublisher.publishOperation('assign_user_to_global_channels', {
+        target_user_id: localUserId
+      }, createdBy, client);
+    }
 
     return { localUserId, queuedGroups };
   }

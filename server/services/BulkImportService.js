@@ -5,6 +5,8 @@ const UserProvisioningService = require('./UserProvisioningService');
 const UserAttributesService = require('./userAttributes');
 const authentikService = require('./authentik');
 const EventPublisher = require('./EventPublisher');
+const { enqueueAllGlobalChannelReconciles } = require('./OwnedGroupReconcileEnqueuer');
+const { isBulkGroupReconcileEnabled } = require('../config/bulkGroupReconcile');
 const { fetchWithTimeout } = require('../utils/fetchWithTimeout');
 const { isValidCallsignPrefix } = require('../utils/callsignValidation');
 const { isValidCountryCode } = require('../utils/isoCountry');
@@ -838,13 +840,28 @@ class BulkImportService {
       throw new BulkImportRowLimitExceededError(rowsToProcess);
     }
 
+    // Bulk global-channel handling: at O(users) scale the per-user
+    // assign_user_to_global_channels enqueue is the wrong axis (a 15K import
+    // -> ~10K per-user ops for a set spanning ~47 groups). So suppress it per
+    // row and issue ONE group-axis reconcile for all global channels after
+    // the batch. ONLY when BULK_GROUP_RECONCILE_ENABLED is on: with it off,
+    // the group reconciler is inert (its ops no-op) and dropping the per-user
+    // enqueue would leave imported users with no global channels — so the old
+    // per-user path must run unchanged in that case.
+    const useGroupAxis = isBulkGroupReconcileEnabled();
+
     for (const row of parsedRows) {
       rowNumber++;
       if (allowedRowNumbers && !allowedRowNumbers.has(rowNumber)) {
         continue;
       }
       try {
-        const outcome = await BulkImportService.importUserRow(row, importingUser, defaultTeamId);
+        const outcome = await BulkImportService.importUserRow(
+          row,
+          importingUser,
+          defaultTeamId,
+          { skipGlobalChannelEnqueue: useGroupAxis }
+        );
         results.push({ row: rowNumber, success: true, userId: outcome.localUserId });
         successCount++;
       } catch (error) {
@@ -854,6 +871,24 @@ class BulkImportService {
         );
         results.push({ row: rowNumber, success: false, error: error.message });
         failureCount++;
+      }
+    }
+
+    // One group-axis global-channel reconcile for the whole batch, replacing
+    // the per-user ops suppressed above. Only when at least one row succeeded
+    // (nothing to reconcile toward otherwise) and only on the group-axis path.
+    // Non-transactional (the batch has already committed row-by-row), so the
+    // reconcile enqueues are visible immediately. A failure here must not turn
+    // a successful import into a reported failure — the anti-drift sweep would
+    // converge the groups anyway — so it is caught and logged, not thrown.
+    if (useGroupAxis && successCount > 0) {
+      try {
+        await enqueueAllGlobalChannelReconciles(importingUser?.userId ?? null, null);
+      } catch (error) {
+        logger.error(
+          { err: error },
+          'CSV user import: failed to enqueue the post-batch global-channel reconcile; the anti-drift sweep will converge these groups'
+        );
       }
     }
 
@@ -1322,7 +1357,7 @@ class BulkImportService {
    * @throws {BulkImportRowError} on missing/invalid fields or
    *   insufficient per-row authorization.
    */
-  static async importUserRow(row, importingUser, defaultTeamId = null) {
+  static async importUserRow(row, importingUser, defaultTeamId = null, { skipGlobalChannelEnqueue = false } = {}) {
     const teamId = parseRowTeamId(row, defaultTeamId);
 
     // Requirement 29.3-29.4: per-row authorization, checked before any
@@ -1412,7 +1447,13 @@ class BulkImportService {
         // Claim_Row `resolveNewUserIdentity` already inserted under
         // `username` above -- adopted instead of the generic upsert.
         // `undefined` for a policy-disabled Organisation.
-        claimId
+        claimId,
+        // Bulk paths suppress the per-user global-channel enqueue; the
+        // batch caller (importUsers / the local script) issues ONE
+        // group-axis reconcile for all global channels after the batch
+        // instead of O(users) per-user ops. See createAndAddUser's own
+        // BULK EXCEPTION note.
+        skipGlobalChannelEnqueue
       });
 
       await client.query('COMMIT');
