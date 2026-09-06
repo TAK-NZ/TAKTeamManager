@@ -241,7 +241,18 @@ router.get('/admin/sync-status', authenticateToken, authorize, async (req, res) 
       pool.query(`
         SELECT
           COUNT(*) FILTER (WHERE status = 'pending')::int AS pending,
-          COUNT(*) FILTER (WHERE status = 'failed')::int AS failed,
+          -- RECENT failures only (rolling 24h), not all-time. The retention
+          -- job keeps terminal rows for 90 days, so an all-time COUNT would
+          -- report long-closed failures (e.g. an incident's cancelled ops)
+          -- as if they were current — alarming and useless to an operator.
+          -- A rolling window self-resets as old failures age out, with no
+          -- data deleted and the forensic trail intact. Keyed on
+          -- COALESCE(completed_at, created_at) since a failed row's
+          -- completed_at is when it reached the failed state.
+          COUNT(*) FILTER (
+            WHERE status = 'failed'
+              AND COALESCE(completed_at, created_at) > NOW() - INTERVAL '24 hours'
+          )::int AS failed_recent,
           COUNT(*) FILTER (WHERE status = 'processing')::int AS processing,
           EXTRACT(EPOCH FROM (NOW() - MIN(created_at) FILTER (WHERE status = 'pending')))::int AS oldest_pending_age_seconds
         FROM sync_operations
@@ -279,7 +290,8 @@ router.get('/admin/sync-status', authenticateToken, authorize, async (req, res) 
       queue: {
         pending: q.pending || 0,
         processing: q.processing || 0,
-        failed: q.failed || 0,
+        // Failures in the last 24h only (rolling window; see the query note).
+        failedRecent: q.failed_recent || 0,
         // null (not 0) when the queue is empty, so the client can render "—"
         // rather than a misleading "0 seconds behind".
         oldestPendingAgeSeconds: q.oldest_pending_age_seconds ?? null,

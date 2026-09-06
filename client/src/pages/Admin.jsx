@@ -808,9 +808,9 @@ export default function Admin({ user }) {
                 <p className="text-xl font-bold text-gray-900 dark:text-gray-100">
                   {formatNumber(syncHealth.queue?.pending ?? 0)}
                 </p>
-                {syncHealth.queue?.failed > 0 && (
+                {syncHealth.queue?.failedRecent > 0 && (
                   <p className="text-xs text-red-600 dark:text-red-400">
-                    {formatNumber(syncHealth.queue.failed)} failed
+                    {formatNumber(syncHealth.queue.failedRecent)} failed (24h)
                   </p>
                 )}
               </div>

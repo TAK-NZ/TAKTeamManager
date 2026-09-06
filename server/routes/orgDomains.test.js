@@ -278,7 +278,7 @@ describe('orgDomains routes (Task 9.2)', () => {
 
     it('reports queue depth, oldest-pending age, per-type breakdown, user_sync, and a fresh worker', async () => {
       mockFourQueries({
-        queue: { pending: 42, failed: 3, processing: 1, oldest_pending_age_seconds: 125 },
+        queue: { pending: 42, failed_recent: 3, processing: 1, oldest_pending_age_seconds: 125 },
         byType: [
           { operation_type: 'reconcile_owned_group', count: 40 },
           { operation_type: 'assign_user_to_global_channels', count: 2 }
@@ -291,7 +291,7 @@ describe('orgDomains routes (Task 9.2)', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.queue.pending).toBe(42);
-      expect(res.body.queue.failed).toBe(3);
+      expect(res.body.queue.failedRecent).toBe(3);
       expect(res.body.queue.oldestPendingAgeSeconds).toBe(125);
       expect(res.body.queue.pendingByType).toHaveLength(2);
       expect(res.body.userSync.status).toBe('success');
@@ -301,7 +301,7 @@ describe('orgDomains routes (Task 9.2)', () => {
 
     it('flags the worker stale when the last heartbeat is older than the threshold', async () => {
       mockFourQueries({
-        queue: { pending: 0, failed: 0, processing: 0, oldest_pending_age_seconds: null },
+        queue: { pending: 0, failed_recent: 0, processing: 0, oldest_pending_age_seconds: null },
         byType: [],
         userSync: null,
         heartbeat: { last_heartbeat_at: new Date(Date.now() - 120000).toISOString(), worker_id: '77' }
@@ -317,7 +317,7 @@ describe('orgDomains routes (Task 9.2)', () => {
 
     it('flags the worker stale when no heartbeat row exists yet', async () => {
       mockFourQueries({
-        queue: { pending: 0, failed: 0, processing: 0, oldest_pending_age_seconds: null },
+        queue: { pending: 0, failed_recent: 0, processing: 0, oldest_pending_age_seconds: null },
         byType: [],
         userSync: null,
         heartbeat: null
@@ -332,7 +332,7 @@ describe('orgDomains routes (Task 9.2)', () => {
 
     it('surfaces the completeness-guard sweep-skipped note from the user_sync error_message', async () => {
       mockFourQueries({
-        queue: { pending: 5, failed: 0, processing: 0, oldest_pending_age_seconds: 10 },
+        queue: { pending: 5, failed_recent: 0, processing: 0, oldest_pending_age_seconds: 10 },
         byType: [{ operation_type: 'reconcile_owned_group', count: 5 }],
         userSync: {
           status: 'success',
@@ -347,6 +347,27 @@ describe('orgDomains routes (Task 9.2)', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.userSync.message).toContain('incomplete fetch');
+    });
+
+    it('counts failures over a rolling 24h window, not all-time', async () => {
+      mockFourQueries({
+        queue: { pending: 0, failed_recent: 2, processing: 0, oldest_pending_age_seconds: null },
+        byType: [],
+        userSync: null,
+        heartbeat: { last_heartbeat_at: new Date().toISOString(), worker_id: '77' }
+      });
+
+      const res = await request(app).get('/api/admin/sync-status');
+
+      expect(res.status).toBe(200);
+      expect(res.body.queue.failedRecent).toBe(2);
+      // The queue aggregate is the first pool.query call; its SQL must scope
+      // the failed count to the last 24h (so long-closed incident failures
+      // don't show as current) rather than counting every failed row ever.
+      const [queueSql] = pool.query.mock.calls[0];
+      expect(queueSql).toMatch(/status = 'failed'/);
+      expect(queueSql).toMatch(/INTERVAL '24 hours'/);
+      expect(queueSql).toMatch(/COALESCE\(completed_at, created_at\)/);
     });
 
     it('returns 500 when a query fails', async () => {

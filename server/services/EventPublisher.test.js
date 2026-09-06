@@ -325,3 +325,77 @@ describe('EventPublisher priority derivation', () => {
     expect(params[13]).toBe(10);
   });
 });
+
+/**
+ * `publishReconcileOwnedGroup` coalesces duplicate PENDING reconcile ops via
+ * the partial unique dedup index (migration 1790100000000): the INSERT uses
+ * ON CONFLICT DO NOTHING, so a second identical enqueue while one is pending
+ * inserts nothing; the method then returns the existing pending op's id.
+ */
+describe('EventPublisher.publishReconcileOwnedGroup (dedup)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetCorrelationId.mockReturnValue(undefined);
+  });
+
+  it('inserts with ON CONFLICT DO NOTHING and returns the new id on a fresh enqueue', async () => {
+    pool.query.mockResolvedValueOnce({ rows: [{ id: 900 }] });
+
+    const opId = await EventPublisher.publishReconcileOwnedGroup({ group_kind: 'team_channel', channel_id: 3 });
+
+    expect(opId).toBe(900);
+    // Only the INSERT ran (a row was returned, so no fallback SELECT).
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    const [sql, params] = pool.query.mock.calls[0];
+    expect(sql).toContain('INSERT INTO sync_operations');
+    expect(sql).toContain('ON CONFLICT (operation_type, payload)');
+    expect(sql).toContain("status = 'pending'");
+    expect(sql).toContain('DO NOTHING');
+    // Payload is stored as jsonb; operation_type is fixed to reconcile.
+    expect(params).toContain(JSON.stringify({ group_kind: 'team_channel', channel_id: 3 }));
+  });
+
+  it('coalesces: on conflict (no row inserted) it returns the existing pending op id', async () => {
+    // INSERT ... DO NOTHING returns no row (duplicate pending exists), then the
+    // fallback SELECT finds the existing op.
+    pool.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: 42 }] });
+
+    const opId = await EventPublisher.publishReconcileOwnedGroup({ group_kind: 'team_channel', channel_id: 3 });
+
+    expect(opId).toBe(42);
+    expect(pool.query).toHaveBeenCalledTimes(2);
+    const [selectSql, selectParams] = pool.query.mock.calls[1];
+    expect(selectSql).toContain('SELECT id FROM sync_operations');
+    expect(selectSql).toContain("status = 'pending'");
+    expect(selectParams).toEqual([JSON.stringify({ group_kind: 'team_channel', channel_id: 3 })]);
+  });
+
+  it('returns null when the conflicting op was claimed (pending -> processing) between insert and select', async () => {
+    // A race: the pending row that caused the conflict got claimed before the
+    // fallback SELECT, so no pending row matches. Return null rather than
+    // fabricate an id.
+    pool.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const opId = await EventPublisher.publishReconcileOwnedGroup({ group_kind: 'region', region_channel_id: 9 });
+
+    expect(opId).toBeNull();
+  });
+
+  it('runs against the provided transactional client, not the pool', async () => {
+    const client = { query: jest.fn().mockResolvedValue({ rows: [{ id: 7 }] }) };
+
+    const opId = await EventPublisher.publishReconcileOwnedGroup(
+      { group_kind: 'cloudtak', team_id: 5 },
+      null,
+      client
+    );
+
+    expect(opId).toBe(7);
+    expect(client.query).toHaveBeenCalledTimes(1);
+    expect(pool.query).not.toHaveBeenCalled();
+  });
+});

@@ -44,8 +44,7 @@ const EventPublisher = require('./EventPublisher');
  * @returns {Promise<number>} the enqueued op id.
  */
 function enqueueTeamChannelReconcile(channelId, createdBy = null, client = null) {
-  return EventPublisher.publishOperation(
-    'reconcile_owned_group',
+  return EventPublisher.publishReconcileOwnedGroup(
     { group_kind: 'team_channel', channel_id: channelId },
     createdBy,
     client
@@ -89,17 +88,17 @@ async function enqueueAllGlobalChannelReconciles(createdBy = null, client = null
   const bchOps = [];
   for (const row of bchResult.rows) {
     bchOps.push(
-      await EventPublisher.publishOperation('reconcile_owned_group', { group_kind: 'bch_read', bch_channel_id: row.id }, createdBy, client)
+      await EventPublisher.publishReconcileOwnedGroup({ group_kind: 'bch_read', bch_channel_id: row.id }, createdBy, client)
     );
     bchOps.push(
-      await EventPublisher.publishOperation('reconcile_owned_group', { group_kind: 'bch_write', bch_channel_id: row.id }, createdBy, client)
+      await EventPublisher.publishReconcileOwnedGroup({ group_kind: 'bch_write', bch_channel_id: row.id }, createdBy, client)
     );
   }
 
   const regionOps = [];
   for (const row of regionResult.rows) {
     regionOps.push(
-      await EventPublisher.publishOperation('reconcile_owned_group', { group_kind: 'region', region_channel_id: row.id }, createdBy, client)
+      await EventPublisher.publishReconcileOwnedGroup({ group_kind: 'region', region_channel_id: row.id }, createdBy, client)
     );
   }
 
@@ -127,7 +126,7 @@ async function enqueueRegionTierReconciles(tier, createdBy = null, client = null
   const ids = [];
   for (const row of result.rows) {
     ids.push(
-      await EventPublisher.publishOperation('reconcile_owned_group', { group_kind: 'region', region_channel_id: row.id }, createdBy, client)
+      await EventPublisher.publishReconcileOwnedGroup({ group_kind: 'region', region_channel_id: row.id }, createdBy, client)
     );
   }
   return ids;
@@ -170,7 +169,7 @@ async function sweepAllOwnedGroups({ includeCloudTak = false } = {}) {
   if (includeCloudTak) {
     const teamResult = await pool.query('SELECT id FROM teams');
     for (const row of teamResult.rows) {
-      await EventPublisher.publishOperation('reconcile_owned_group', { group_kind: 'cloudtak', team_id: row.id }, null, null);
+      await EventPublisher.publishReconcileOwnedGroup({ group_kind: 'cloudtak', team_id: row.id }, null, null);
       counts.cloudtak += 1;
     }
   }

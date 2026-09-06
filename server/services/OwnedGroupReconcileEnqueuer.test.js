@@ -10,9 +10,12 @@
 const mockQuery = jest.fn();
 jest.mock('../config/database', () => ({ query: mockQuery }));
 
+// The enqueuer routes every reconcile through the coalescing
+// publishReconcileOwnedGroup (payload, createdBy, client) — NOT the raw
+// publishOperation — so at most one PENDING op per group exists.
 const mockPublish = jest.fn();
 jest.mock('./EventPublisher', () => ({
-  publishOperation: (...args) => mockPublish(...args)
+  publishReconcileOwnedGroup: (...args) => mockPublish(...args)
 }));
 
 const enqueuer = require('./OwnedGroupReconcileEnqueuer');
@@ -28,7 +31,6 @@ describe('enqueueTeamChannelReconcile', () => {
     await enqueuer.enqueueTeamChannelReconcile(7, 42, client);
 
     expect(mockPublish).toHaveBeenCalledWith(
-      'reconcile_owned_group',
       { group_kind: 'team_channel', channel_id: 7 },
       42,
       client
@@ -42,7 +44,7 @@ describe('enqueueTeamChannelReconciles', () => {
 
     // 3 unique non-null ids.
     expect(mockPublish).toHaveBeenCalledTimes(3);
-    const channelIds = mockPublish.mock.calls.map((c) => c[1].channel_id).sort();
+    const channelIds = mockPublish.mock.calls.map((c) => c[0].channel_id).sort();
     expect(channelIds).toEqual([1, 2, 3]);
   });
 });
@@ -60,7 +62,7 @@ describe('enqueueAllGlobalChannelReconciles', () => {
     expect(result.bchOps).toHaveLength(4);
     expect(result.regionOps).toHaveLength(1);
 
-    const kinds = mockPublish.mock.calls.map((c) => c[1].group_kind).sort();
+    const kinds = mockPublish.mock.calls.map((c) => c[0].group_kind).sort();
     expect(kinds).toEqual(['bch_read', 'bch_read', 'bch_write', 'bch_write', 'region']);
   });
 
@@ -83,7 +85,6 @@ describe('enqueueRegionTierReconciles', () => {
     expect(sql).toContain('is_active = true');
     expect(params).toEqual(['response']);
     expect(mockPublish).toHaveBeenCalledWith(
-      'reconcile_owned_group',
       { group_kind: 'region', region_channel_id: 30 },
       42,
       null
