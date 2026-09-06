@@ -425,7 +425,12 @@ describe('registry completeness: every required identifier is satisfiable', () =
   // it is an all-tenants view by design -- so it correctly has no resolver
   // and is satisfiable only by the global_manager wildcard, exactly like
   // `audit_log:read`. Reviewed and deliberate.
-  const REVIEWED_GLOBAL_MANAGER_ONLY = ['user:team:remove', 'user:bulk_remove_from_team', 'admin:stats:read'];
+  // `admin:sync_status:read` (GET /api/admin/sync-status) is likewise a
+  // deliberate, reviewed Global_Manager-only view: deployment-wide
+  // background-process health (sync_operations queue backlog + sync-worker
+  // heartbeat), operator-scoped and all-tenants by design, so it has no
+  // resolver and is wildcard-satisfied exactly like admin:stats:read.
+  const REVIEWED_GLOBAL_MANAGER_ONLY = ['user:team:remove', 'user:bulk_remove_from_team', 'admin:stats:read', 'admin:sync_status:read'];
 
   /**
    * UNREVIEWED pre-existing exceptions. Each of these is satisfiable only

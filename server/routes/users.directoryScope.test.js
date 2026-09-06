@@ -27,6 +27,11 @@ jest.mock('../config/database', () => ({
   connect: jest.fn(),
 }));
 
+// `server/routes/users.js` requires the Authentik service at load time (for
+// createUser/setUserPassword on the write routes). None of the GET routes this
+// file exercises call it — the list route was migrated to a local-only query
+// and no longer fetches from Authentik — but the module is stubbed so the real
+// HTTP-client module never loads during these route-level unit tests.
 jest.mock('../services/authentik', () => ({
   getUsers: jest.fn(),
 }));
@@ -455,25 +460,28 @@ describe('GET /api/users/available response and log examples (task 9.5)', () => 
 // users.directoryScope.integration.test.js: here the mocked pool/authentik let
 // each behaviour be exercised deterministically without a database.
 //
-//   - GET /api/users (scoped caller): `pagination.total` still equals the
-//     Authentik `count` (unadjusted by scoping) — Requirement 11.4; the
-//     Team_Owned_Device exclusion (`is_team_device`) is retained, so a device
-//     row is dropped from the response — Requirement 11.5; a candidate with NO
-//     local `users` row (absent from the batched facts map) is scoped by email
-//     domain alone, since it carries null org fields — Requirement 13.7.
+//   - GET /api/users (scoped caller): `pagination.total` is the EXACT LOCAL
+//     post-filter/post-scope count carried on each row as `total_count`, NOT
+//     an Authentik `count` (this route was migrated off the live Authentik
+//     fetch to the local `users`/`user_cache` query) — Requirement 11.4; the
+//     Team_Owned_Device exclusion (`is_team_device = false`) is now a SQL
+//     predicate in the list query rather than a JS filter over an Authentik
+//     page — Requirement 11.5; the scope disjunction (isUnscoped/orgIds/
+//     domain-LIKE patterns) is passed as query parameters so scoping,
+//     pagination and the exact total all run in SQL — Requirements 13.x.
 //   - GET /api/users/search (scoped caller): the `{ users }` shape carries no
 //     `scope` object — Requirement 10.3; the scoped SQL is issued (a
 //     `candidates` CTE carrying the `in_scope` expression) and the returned
 //     rows are stripped of the internal `excluded_count` /
 //     `direct_membership_org_id` projections.
 //
-// `authentikService.getUsers` is the mocked module already declared at the top
-// of this file; `pool.query` is mocked so the batched local query and the
-// scoped SQL can be driven and inspected. `resolveScope` stays mocked (per the
-// file header) so the scoped branch is entered deterministically, and
+// `pool.query` is mocked so the local list query and the `/search` scoped SQL
+// can be driven and inspected. `resolveScope` stays mocked (per the file
+// header) so the scoped branch is entered deterministically, and
 // `buildDirectoryScope` builds the real scope object flowing into the handler.
+// The list route no longer calls `authentikService.getUsers` at all — the
+// row source is the single local list query alone.
 // ════════════════════════════════════════════════════════════════════════════
-const authentikService = require('../services/authentik');
 
 describe('GET /api/users scoped-caller examples (task 10.4)', () => {
   let app;
@@ -483,10 +491,40 @@ describe('GET /api/users scoped-caller examples (task 10.4)', () => {
     app = buildApp();
   });
 
-  // Validates: Requirement 11.4 — `pagination.total` continues to derive from
-  // the Authentik `count` and is NOT adjusted downward by the scoping, even
-  // when the scoping excludes users from the returned page.
-  it('keeps pagination.total equal to the Authentik count for a scoped caller', async () => {
+  // Builds one `base`-shaped list-query row. The handler reads `total_count`
+  // off the first row for `pagination.total`, echoes `pk` (the Authentik id),
+  // and needs `origin_org_id`/`direct_membership_org_id`/`email` for the
+  // belt-and-braces predicate pass over a scoped caller's page.
+  function makeRow(overrides = {}) {
+    return {
+      pk: 'authentik-1',
+      local_user_id: 1,
+      username: 'user1',
+      email: 'user1@fireandemergency.nz',
+      first_name: 'User',
+      last_name: 'One',
+      is_active: true,
+      tak_role: null,
+      callsign_suffix: null,
+      account_status: 'active',
+      origin_org_id: 7,
+      tak_callsign: null,
+      tak_color: null,
+      team_id: null,
+      direct_membership_org_id: 7,
+      team_name: null,
+      live_certificate_count: 0,
+      total_count: 1,
+      ...overrides,
+    };
+  }
+
+  // Validates: Requirement 11.4 — `pagination.total` is the EXACT local
+  // post-filter/post-scope count the list query computes (`total_count`), not
+  // an Authentik directory `count`. The migration to a local row source made
+  // the total exact (the old Authentik `count` over-counted ignored-prefix and
+  // device rows the list then dropped), which is what this now asserts.
+  it('reports pagination.total from the exact local total_count for a scoped caller', async () => {
     const scope = buildDirectoryScope({
       organisations: [{ id: 7, name: 'FENZ' }],
       allowedDomains: ['fireandemergency.nz'],
@@ -494,38 +532,33 @@ describe('GET /api/users scoped-caller examples (task 10.4)', () => {
     });
     DirectoryScopeService.resolveScope.mockResolvedValue(scope);
 
-    // The Authentik page holds three users but reports a much larger total
-    // `count` (the whole directory). One user is in scope by domain; the other
-    // two are out of scope, so the scoping excludes two of the three on this
-    // page — yet `pagination.total` must still reflect Authentik's own count.
-    authentikService.getUsers.mockResolvedValue({
-      results: [
-        { pk: 'ak-1', email: 'in.scope@fireandemergency.nz', first_name: 'In', last_name: 'Scope' },
-        { pk: 'ak-2', email: 'out@elsewhere.example', first_name: 'Out', last_name: 'One' },
-        { pk: 'ak-3', email: 'out2@another.example', first_name: 'Out', last_name: 'Two' },
+    // The list query returns this page's rows, each carrying the SAME exact
+    // total the `counted` CTE computed over the whole filtered/scoped set —
+    // here 137, larger than the two rows on this page.
+    pool.query.mockResolvedValue({
+      rows: [
+        makeRow({ pk: 'ak-1', local_user_id: 1, email: 'a@fireandemergency.nz', total_count: 137 }),
+        makeRow({ pk: 'ak-2', local_user_id: 2, email: 'b@fireandemergency.nz', total_count: 137 }),
       ],
-      count: 4217,
     });
-
-    // No local `users` row for any of these three, so the batched query returns
-    // no rows and every candidate carries null org fields (domain-only scoping).
-    pool.query.mockResolvedValue({ rows: [] });
 
     const res = await request(app).get('/api/users');
 
     expect(res.status).toBe(200);
-    // Requirement 11.4: total is the Authentik count, untouched by scoping.
-    expect(res.body.pagination.total).toBe(4217);
-    // Only the in-scope user survives the predicate.
-    expect(res.body.users.map((u) => u.email)).toEqual(['in.scope@fireandemergency.nz']);
+    // Requirement 11.4: the exact local total, read off the row's total_count.
+    expect(res.body.pagination.total).toBe(137);
+    expect(res.body.users.map((u) => u.pk)).toEqual(['ak-1', 'ak-2']);
     // No `scope` object on this route (Requirement 10.3 — scope is /available only).
     expect(Object.prototype.hasOwnProperty.call(res.body, 'scope')).toBe(false);
   });
 
-  // Validates: Requirement 11.5 — a user whose local `users` row holds
-  // `is_team_device = true` is dropped BEFORE the scoping predicate, so a
-  // device row never appears even when its email domain is in scope.
-  it('retains the Team_Owned_Device exclusion: a device row is dropped even at an in-scope domain', async () => {
+  // Validates: Requirement 11.5 — the Team_Owned_Device exclusion is a SQL
+  // predicate (`u.is_team_device = false`) in the list query, applied BEFORE
+  // the page and the total are derived, so a device row can never reach the
+  // response. Asserting the predicate is present in the issued SQL proves the
+  // exclusion moved into the query (rather than a JS filter over an Authentik
+  // page, which is what the pre-migration implementation did).
+  it('retains the Team_Owned_Device exclusion as a SQL predicate on the list query', async () => {
     const scope = buildDirectoryScope({
       organisations: [{ id: 7, name: 'FENZ' }],
       allowedDomains: ['fireandemergency.nz'],
@@ -533,40 +566,27 @@ describe('GET /api/users scoped-caller examples (task 10.4)', () => {
     });
     DirectoryScopeService.resolveScope.mockResolvedValue(scope);
 
-    authentikService.getUsers.mockResolvedValue({
-      results: [
-        { pk: 'ak-human', email: 'human@fireandemergency.nz', first_name: 'Human', last_name: 'Person' },
-        { pk: 'ak-device', email: 'device@fireandemergency.nz', first_name: 'Team', last_name: 'Device' },
-      ],
-      count: 2,
-    });
-
-    // The batched local query flags `ak-device` as a Team_Owned_Device. Both
-    // rows sit at the in-scope domain, so only the device filter distinguishes
-    // them — proving the device exclusion is retained under scoping.
-    pool.query.mockResolvedValue({
-      rows: [
-        { authentik_user_id: 'ak-human', is_team_device: false, direct_membership_org_id: null, team_name: null },
-        { authentik_user_id: 'ak-device', is_team_device: true, direct_membership_org_id: null, team_name: null },
-      ],
-    });
+    pool.query.mockResolvedValue({ rows: [makeRow()] });
 
     const res = await request(app).get('/api/users');
-
     expect(res.status).toBe(200);
-    const returnedIds = res.body.users.map((u) => u.pk);
-    // The device row is excluded (Requirement 11.5); the human at the same
-    // in-scope domain is included.
-    expect(returnedIds).toContain('ak-human');
-    expect(returnedIds).not.toContain('ak-device');
+
+    const listSql = pool.query.mock.calls.map((c) => c[0]).find((sql) => /FROM users u/i.test(sql));
+    expect(listSql).toBeDefined();
+    // The device exclusion and the orphaned exclusion are both SQL predicates.
+    expect(listSql).toMatch(/u\.is_team_device\s*=\s*false/i);
+    expect(listSql).toMatch(/u\.account_status\s*<>\s*'orphaned'/i);
   });
 
-  // Validates: Requirement 13.7 — a candidate with NO local `users` row is
-  // absent from the batched facts map, so it carries null `originOrgId` and
-  // null `directMembershipOrgId`; only the Email_Domain condition can admit or
-  // exclude it. Here two such candidates differ only by domain: the in-scope
-  // one is included, the out-of-scope one is excluded, on domain alone.
-  it('scopes a candidate with no local users row by email domain alone', async () => {
+  // Validates: Requirements 13.x — for a scoped caller the scope disjunction
+  // is pushed into the list query as parameters: `isUnscoped=false`, the
+  // Scoped_Organisation id array, and the Allowed_Domain LIKE patterns, so
+  // scoping (and therefore the exact total and pagination) run in SQL. This
+  // replaces the pre-migration "candidate with no local users row is scoped by
+  // email domain alone" example: post-migration EVERY listed row IS a local
+  // `users` row, so that no-local-row case cannot occur — the meaningful
+  // assertion is that the scope predicate reaches the SQL.
+  it('passes the scope disjunction (isUnscoped/orgIds/domain patterns) to the list query for a scoped caller', async () => {
     const scope = buildDirectoryScope({
       organisations: [{ id: 7, name: 'FENZ' }],
       allowedDomains: ['fireandemergency.nz'],
@@ -574,24 +594,23 @@ describe('GET /api/users scoped-caller examples (task 10.4)', () => {
     });
     DirectoryScopeService.resolveScope.mockResolvedValue(scope);
 
-    authentikService.getUsers.mockResolvedValue({
-      results: [
-        { pk: 'ak-nolocal-in', email: 'ghost@fireandemergency.nz', first_name: 'Ghost', last_name: 'InScope' },
-        { pk: 'ak-nolocal-out', email: 'ghost@elsewhere.example', first_name: 'Ghost', last_name: 'OutScope' },
-      ],
-      count: 2,
-    });
-
-    // The batched query returns NO rows — neither candidate has a local `users`
-    // row — so both are absent from the facts map and scored on domain alone.
-    pool.query.mockResolvedValue({ rows: [] });
+    pool.query.mockResolvedValue({ rows: [makeRow()] });
 
     const res = await request(app).get('/api/users');
-
     expect(res.status).toBe(200);
-    const returnedIds = res.body.users.map((u) => u.pk);
-    expect(returnedIds).toContain('ak-nolocal-in');
-    expect(returnedIds).not.toContain('ak-nolocal-out');
+
+    const listCall = pool.query.mock.calls.find(([sql]) => /FROM users u/i.test(sql));
+    expect(listCall).toBeDefined();
+    const params = listCall[1];
+    // Param order: $1 searchPattern, $2 ignoredPrefixPatterns, $3 isUnscoped,
+    // $4 scopeOrgIds int[], $5 scopeDomainPatterns text[], $6 pageSize, $7 offset.
+    expect(params[2]).toBe(false); // scoped caller -> isUnscoped false
+    expect(params[3]).toEqual([7]); // the Scoped_Organisation ids
+    // The Allowed_Domain LIKE patterns are non-empty and match on the domain
+    // after the final `@` (built by buildEmailDomainLikePatterns).
+    expect(Array.isArray(params[4])).toBe(true);
+    expect(params[4].length).toBeGreaterThan(0);
+    expect(params[4].some((p) => /fireandemergency\.nz/i.test(p))).toBe(true);
   });
 });
 

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { MagnifyingGlassIcon, XMarkIcon, ChevronUpIcon, ChevronDownIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
-import { devicesAPI } from '../services/api'
+import { devicesAPI, teamsAPI } from '../services/api'
 import FormattedDate, { DATE_PRECISION } from '../components/FormattedDate'
 import MultipleCertificateWarning from '../components/MultipleCertificateWarning'
 import { DeviceExpiryLine } from '../components/DeviceListRow'
@@ -65,6 +65,18 @@ export default function Devices({ user }) {
   const [sortField, setSortField] = useState('deviceLabel')
   const [sortDirection, setSortDirection] = useState('asc')
 
+  // Large-directory filters, mirroring Users.jsx exactly (server-side; see
+  // GET /api/devices' teamId + labelInitial params). Both narrow BEFORE
+  // pagination so the footer count/page nav stay correct under a filter.
+  //   teamFilter    -- a team id string ('' = all teams).
+  //   labelFilter   -- a single uppercase letter, '#' (non-alphabetic
+  //                    device-label bucket), or '' (all initials).
+  const [teamFilter, setTeamFilter] = useState('')
+  const [labelFilter, setLabelFilter] = useState('')
+  // Teams the caller may filter by (Organisation-scoped, same source /users'
+  // filter + the Create/Transfer dialogs use). Loaded once.
+  const [filterTeams, setFilterTeams] = useState([])
+
   // The row currently open for inline edit, mirroring TeamDeviceList.jsx's
   // own editingDeviceId/editForm state.
   const [editingDeviceId, setEditingDeviceId] = useState(null)
@@ -92,7 +104,11 @@ export default function Devices({ user }) {
       const response = await devicesAPI.getAll({
         page: pagination.page,
         pageSize: pagination.pageSize,
-        search: searchQuery || undefined
+        search: searchQuery || undefined,
+        // Server-side filters; stripEmptyParams drops empty strings, so ''
+        // means "no filter" without sending a literal.
+        teamId: teamFilter || undefined,
+        labelInitial: labelFilter || undefined
       })
       setDevices(response.data?.devices || [])
       setPagination(response.data?.pagination || { page: 1, pageSize: 20, total: 0 })
@@ -103,11 +119,34 @@ export default function Devices({ user }) {
     } finally {
       setLoading(false)
     }
-  }, [pagination.page, pagination.pageSize, searchQuery])
+  }, [pagination.page, pagination.pageSize, searchQuery, teamFilter, labelFilter])
 
   useEffect(() => {
     fetchDevices()
   }, [fetchDevices])
+
+  // Load the teams the caller may filter by, once -- same Organisation-scoped
+  // source (+ admin all-teams fallback) /users' filter uses. Non-fatal on
+  // failure: the Team filter just stays empty, the list still works.
+  useEffect(() => {
+    let isCancelled = false
+    ;(async () => {
+      try {
+        const scopedResponse = await teamsAPI.getMyTeams({ scope: 'organisation' })
+        let teams = scopedResponse.data?.teams || []
+        if (teams.length === 0 && user?.isAdmin) {
+          const allResponse = await teamsAPI.getMyTeams()
+          teams = allResponse.data?.teams || []
+        }
+        if (!isCancelled) setFilterTeams(teams)
+      } catch (err) {
+        console.error('Failed to fetch teams for the Devices filter:', err)
+      }
+    })()
+    return () => {
+      isCancelled = true
+    }
+  }, [user?.isAdmin])
 
   // Performance-hardening: memoized against [devices, sortField,
   // sortDirection] so an unrelated re-render (e.g. opening an edit row or
@@ -226,20 +265,69 @@ export default function Devices({ user }) {
         </div>
       </div>
 
-      {/* Search */}
-      <div className="card">
-        <div className="relative">
-          <MagnifyingGlassIcon className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
-          <input
-            type="text"
-            placeholder="Search devices by name or username..."
-            className="input pl-10"
-            value={searchQuery}
-            onChange={(e) => {
-              setSearchQuery(e.target.value)
-              setPagination((prev) => ({ ...prev, page: 1 }))
-            }}
-          />
+      {/* Search + large-directory filters, mirroring /users exactly. */}
+      <div className="card space-y-4">
+        <div className="flex flex-col sm:flex-row gap-3">
+          <div className="relative flex-1">
+            <MagnifyingGlassIcon className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
+            <input
+              type="text"
+              placeholder="Search devices by name or username..."
+              className="input pl-10"
+              value={searchQuery}
+              onChange={(e) => {
+                setSearchQuery(e.target.value)
+                setPagination((prev) => ({ ...prev, page: 1 }))
+              }}
+            />
+          </div>
+          {/* Team filter (server-side teamId). display_name is the composed
+              "<Org prefix> - <team name>" GET /teams/my-teams returns. */}
+          <div className="sm:w-72">
+            <label htmlFor="devices-team-filter" className="sr-only">Filter by unit</label>
+            <select
+              id="devices-team-filter"
+              className="input"
+              value={teamFilter}
+              onChange={(e) => {
+                setTeamFilter(e.target.value)
+                setPagination((prev) => ({ ...prev, page: 1 }))
+              }}
+            >
+              <option value="">All units</option>
+              {filterTeams.map((t) => (
+                <option key={t.id} value={String(t.id)}>{t.display_name || t.name}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        {/* Alphabet bar (server-side labelInitial) -- filters by DEVICE LABEL
+            initial; '#' is the non-alphabetic bucket; "All" clears it. Active
+            state carried in text/style + aria-pressed, not colour alone. */}
+        <div className="flex flex-wrap gap-1" role="group" aria-label="Filter by device label initial">
+          {['All', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split(''), '#'].map((label) => {
+            const value = label === 'All' ? '' : label
+            const isActive = labelFilter === value
+            return (
+              <button
+                key={label}
+                type="button"
+                aria-pressed={isActive}
+                onClick={() => {
+                  setLabelFilter(value)
+                  setPagination((prev) => ({ ...prev, page: 1 }))
+                }}
+                className={`min-w-[2rem] px-2 py-1 text-sm rounded-md border ${
+                  isActive
+                    ? 'bg-primary-600 text-white border-primary-600 font-semibold'
+                    : 'bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700'
+                }`}
+              >
+                {label}
+              </button>
+            )
+          })}
         </div>
       </div>
 

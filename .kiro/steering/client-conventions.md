@@ -29,7 +29,7 @@ fileMatchPattern: 'client/src/**/*.{jsx,js}'
 
 ## Accessibility
 
-- Carry state in TEXT, never colour or font weight alone — neither reaches assistive technology. Decorative dots and glyphs are `aria-hidden`.
+- Carry state in TEXT, or in an icon that carries its own accessible name (an `sr-only` span or `aria-label`) — never in colour or font weight alone, since neither reaches assistive technology. An icon used to carry state must NOT itself be `aria-hidden`: a purely decorative glyph is `aria-hidden` and does not count as the signal, so it must sit beside real text/`sr-only` state. Decorative dots and glyphs are `aria-hidden`.
 - Graphical objects (icons, chevrons, affordances) need >= 3:1 contrast; body text >= 4.5:1. Both in light and dark, resting and hover.
 - COMPUTE contrast, never assert a remembered number and never verify by screenshot alone. Use `contrastRatio` from `client/src/utils/contrast.js`. A dim icon looks like a preference until someone produces a number — that is how a 1.46:1 failure shipped.
 - Resolve colour tokens through `COLOR_TOKEN_TABLE` / `resolveColorToken` in `client/src/utils/contrast.js`, built from `resolveConfig(tailwindConfig)`. Never hardcode hex and never assume stock Tailwind: the declared `gray` scale is byte-identical to stock today, so a hardcoded table would pass while measuring nothing, and `blue-*` is not declared at all. The `tailwindcss/resolveConfig.js` import needs its extension — extensionless fails at module resolution.

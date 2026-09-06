@@ -26,6 +26,13 @@ jest.mock('../middleware/requestContext', () => ({
   getLogger: () => ({ info: jest.fn(), error: jest.fn(), warn: jest.fn() })
 }));
 
+// GET /admin/sync-status requires the heartbeat staleness threshold from the
+// sync worker. Mock it to just the exported constant so the test does not pull
+// in the whole worker module (Pool, jobs, etc.).
+jest.mock('../workers/syncWorker', () => ({
+  HEARTBEAT_STALE_THRESHOLD_MS: 90000
+}));
+
 const mockListRequests = jest.fn();
 const mockUpdateStatus = jest.fn();
 
@@ -255,6 +262,100 @@ describe('orgDomains routes (Task 9.2)', () => {
 
       expect(res.status).toBe(500);
       expect(res.body.error).toBe('Failed to get admin stats');
+    });
+  });
+
+  describe('GET /admin/sync-status', () => {
+    // The handler fires four pool.query calls via Promise.all, in this order:
+    // (1) queue aggregate, (2) pending-by-type, (3) user_sync row, (4) heartbeat.
+    const mockFourQueries = ({ queue, byType, userSync, heartbeat }) => {
+      pool.query
+        .mockResolvedValueOnce({ rows: [queue] })
+        .mockResolvedValueOnce({ rows: byType })
+        .mockResolvedValueOnce({ rows: userSync ? [userSync] : [] })
+        .mockResolvedValueOnce({ rows: heartbeat ? [heartbeat] : [] });
+    };
+
+    it('reports queue depth, oldest-pending age, per-type breakdown, user_sync, and a fresh worker', async () => {
+      mockFourQueries({
+        queue: { pending: 42, failed: 3, processing: 1, oldest_pending_age_seconds: 125 },
+        byType: [
+          { operation_type: 'reconcile_owned_group', count: 40 },
+          { operation_type: 'assign_user_to_global_channels', count: 2 }
+        ],
+        userSync: { status: 'success', last_sync: '2026-09-06T04:00:00.000Z', records_synced: 100, error_message: null },
+        heartbeat: { last_heartbeat_at: new Date().toISOString(), worker_id: '77' }
+      });
+
+      const res = await request(app).get('/api/admin/sync-status');
+
+      expect(res.status).toBe(200);
+      expect(res.body.queue.pending).toBe(42);
+      expect(res.body.queue.failed).toBe(3);
+      expect(res.body.queue.oldestPendingAgeSeconds).toBe(125);
+      expect(res.body.queue.pendingByType).toHaveLength(2);
+      expect(res.body.userSync.status).toBe('success');
+      expect(res.body.worker.stale).toBe(false);
+      expect(res.body.worker.staleThresholdSeconds).toBe(90);
+    });
+
+    it('flags the worker stale when the last heartbeat is older than the threshold', async () => {
+      mockFourQueries({
+        queue: { pending: 0, failed: 0, processing: 0, oldest_pending_age_seconds: null },
+        byType: [],
+        userSync: null,
+        heartbeat: { last_heartbeat_at: new Date(Date.now() - 120000).toISOString(), worker_id: '77' }
+      });
+
+      const res = await request(app).get('/api/admin/sync-status');
+
+      expect(res.status).toBe(200);
+      expect(res.body.worker.stale).toBe(true);
+      // Empty queue -> null age, not a misleading 0.
+      expect(res.body.queue.oldestPendingAgeSeconds).toBeNull();
+    });
+
+    it('flags the worker stale when no heartbeat row exists yet', async () => {
+      mockFourQueries({
+        queue: { pending: 0, failed: 0, processing: 0, oldest_pending_age_seconds: null },
+        byType: [],
+        userSync: null,
+        heartbeat: null
+      });
+
+      const res = await request(app).get('/api/admin/sync-status');
+
+      expect(res.status).toBe(200);
+      expect(res.body.worker.stale).toBe(true);
+      expect(res.body.worker.lastHeartbeatAt).toBeNull();
+    });
+
+    it('surfaces the completeness-guard sweep-skipped note from the user_sync error_message', async () => {
+      mockFourQueries({
+        queue: { pending: 5, failed: 0, processing: 0, oldest_pending_age_seconds: 10 },
+        byType: [{ operation_type: 'reconcile_owned_group', count: 5 }],
+        userSync: {
+          status: 'success',
+          last_sync: '2026-09-06T04:00:00.000Z',
+          records_synced: 100,
+          error_message: 'Reconciliation sweep skipped: incomplete fetch (900 of 1000)'
+        },
+        heartbeat: { last_heartbeat_at: new Date().toISOString(), worker_id: '77' }
+      });
+
+      const res = await request(app).get('/api/admin/sync-status');
+
+      expect(res.status).toBe(200);
+      expect(res.body.userSync.message).toContain('incomplete fetch');
+    });
+
+    it('returns 500 when a query fails', async () => {
+      pool.query.mockRejectedValue(new Error('db down'));
+
+      const res = await request(app).get('/api/admin/sync-status');
+
+      expect(res.status).toBe(500);
+      expect(res.body.error).toBe('Failed to get sync status');
     });
   });
 });

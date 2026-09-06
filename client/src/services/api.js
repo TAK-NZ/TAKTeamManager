@@ -509,6 +509,11 @@ export const adminAPI = {
   // Aggregate counts for the /admin dashboard stat cards (Total Team
   // Devices, Total Channels = team + BCH + region). Global-Manager-only.
   getStats: () => api.get('/admin/stats'),
+  // Background-process health: sync_operations queue backlog (depth +
+  // oldest-pending age), the user_sync sync_status row, and sync-worker
+  // heartbeat liveness. Global-Manager-only. Backs the /admin "Background
+  // Sync" card so an operator can see how far behind the queue/sync are.
+  getSyncStatus: () => api.get('/admin/sync-status'),
   getExcludedDomains: () => api.get('/admin/excluded-domains'),
   updateExcludedDomains: (domains) => api.put('/admin/excluded-domains', { domains }),
   getOrgInterest: (params) => api.get('/admin/org-interest', { params }),

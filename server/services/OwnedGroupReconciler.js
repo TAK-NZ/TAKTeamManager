@@ -74,6 +74,14 @@ const AUTHENTIK_TOKEN = () => process.env.AUTHENTIK_API_TOKEN;
  * @returns {Promise<string[]>}
  */
 async function desiredTeamChannelMembers(teamId, client = pool) {
+  // Behaviour-preserving (validated live 2026-09): NO `is_active` filter.
+  // The event-driven path never removed a merely-deactivated user from their
+  // team-channel group, so the reconciler must not either -- otherwise
+  // enabling it would strip every inactive-but-present member from every
+  // group on the first pass. Desired set = every present member (direct OR
+  // inherited row) with a resolvable Authentik pk. (Purging inactive users
+  // from groups is a separate, deliberate decision, not a side effect of
+  // this scaling change.)
   const result = await client.query(
     `
     SELECT DISTINCT u.authentik_user_id
@@ -81,7 +89,6 @@ async function desiredTeamChannelMembers(teamId, client = pool) {
     JOIN users u ON u.id = tm.user_id
     WHERE tm.team_id = $1
       AND u.authentik_user_id IS NOT NULL
-      AND u.is_active = true
     `,
     [teamId]
   );
@@ -96,8 +103,11 @@ async function desiredTeamChannelMembers(teamId, client = pool) {
  * @returns {Promise<string[]>}
  */
 async function desiredBchReadMembers(bchChannelId, client = pool) {
+  // Behaviour-preserving: NO `is_active` filter (see desiredTeamChannelMembers).
+  // Every user with a resolvable pk is a BCH-read target, matching the
+  // event path's "never remove a deactivated user" behaviour.
   const usersResult = await client.query(
-    `SELECT authentik_user_id FROM users WHERE is_active = true AND authentik_user_id IS NOT NULL`
+    `SELECT authentik_user_id FROM users WHERE authentik_user_id IS NOT NULL`
   );
   const members = usersResult.rows.map((r) => String(r.authentik_user_id));
 
@@ -182,7 +192,6 @@ async function desiredRegionMembers(regionChannelId, client = pool) {
       FROM ancestors WHERE parent_team_id IS NULL
     ) org ON true
     WHERE tm.inherited_from_team_id IS NULL
-      AND u.is_active = true
       AND u.authentik_user_id IS NOT NULL
       AND COALESCE(org.flag, false) = true
     `,

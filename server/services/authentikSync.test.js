@@ -403,6 +403,105 @@ describe('AuthentikSyncService.reconcileOrphanedAccounts (account-lifecycle-mana
     reconcileSpy.mockRestore();
   });
 
+  // Resiliency-hardening (the live mass-false-orphan incident): the paginated
+  // user fetch can terminate "cleanly" (pagination.next goes falsy) while the
+  // accumulated `allUsers` is INCOMPLETE -- an unhealthy/mid-upgrade Authentik
+  // returning a short page or a prematurely-absent `next`. The old code trusted
+  // that incomplete set as complete and handed it to reconcileOrphanedAccounts,
+  // which then orphaned every real user the run happened not to see. The fix:
+  // syncUsers compares the accumulated count against the `pagination.count`
+  // Authentik reports and SKIPS the sweep entirely when they disagree.
+  it('resiliency-hardening: does NOT run the sweep when the fetched page count disagrees with pagination.count', async () => {
+    // Authentik REPORTS count=3 but the loop only ever receives 2 results
+    // (pagination.next is absent, so the loop terminates believing it is done).
+    const users = [
+      { pk: 1, username: 'user1', email: 'user1@example.com', groups: [], is_active: true, attributes: {} },
+      { pk: 2, username: 'user2', email: 'user2@example.com', groups: [], is_active: true, attributes: {} }
+    ];
+    db.query.mockResolvedValue({ rows: [] });
+    axios.get.mockImplementation((url) => {
+      if (url.includes('/api/v3/core/users/')) {
+        return Promise.resolve({ data: { results: users, pagination: { count: 3, next: null } } });
+      }
+      if (url.includes('/api/v3/core/groups/')) {
+        return Promise.resolve({ data: { results: [], pagination: {} } });
+      }
+      return Promise.reject(new Error(`Unexpected URL: ${url}`));
+    });
+
+    const reconcileSpy = jest.spyOn(authentikSync, 'reconcileOrphanedAccounts').mockResolvedValue(undefined);
+
+    await authentikSync.syncUsers();
+
+    // The sweep is the destructive, one-way step -- it must NOT run on a
+    // provably-incomplete fetch.
+    expect(reconcileSpy).not.toHaveBeenCalled();
+    // The incompleteness is surfaced (visible anomaly, not a silent skip).
+    expect(mockLoggerInstance.error).toHaveBeenCalledWith(
+      expect.objectContaining({ fetchedCount: 2, reportedCount: 3 }),
+      expect.stringContaining('incomplete')
+    );
+    reconcileSpy.mockRestore();
+  });
+
+  // The batch/user_cache processing is additive and self-correcting (it only
+  // writes rows it saw, never removes), so a partial fetch must still sync the
+  // cache -- only the destructive sweep is skipped. Assert processBatch still
+  // ran for the fetched users even though the sweep was skipped above.
+  it('resiliency-hardening: STILL syncs the fetched users to the cache when the sweep is skipped for incompleteness', async () => {
+    const users = [
+      { pk: 1, username: 'user1', email: 'user1@example.com', groups: [], is_active: true, attributes: {} }
+    ];
+    db.query.mockResolvedValue({ rows: [] });
+    axios.get.mockImplementation((url) => {
+      if (url.includes('/api/v3/core/users/')) {
+        return Promise.resolve({ data: { results: users, pagination: { count: 99, next: null } } });
+      }
+      if (url.includes('/api/v3/core/groups/')) {
+        return Promise.resolve({ data: { results: [], pagination: {} } });
+      }
+      return Promise.reject(new Error(`Unexpected URL: ${url}`));
+    });
+
+    const reconcileSpy = jest.spyOn(authentikSync, 'reconcileOrphanedAccounts').mockResolvedValue(undefined);
+    const processBatchSpy = jest.spyOn(authentikSync, 'processBatch').mockResolvedValue(undefined);
+
+    await authentikSync.syncUsers();
+
+    expect(reconcileSpy).not.toHaveBeenCalled();
+    expect(processBatchSpy).toHaveBeenCalledTimes(1);
+    expect(processBatchSpy).toHaveBeenCalledWith(users, expect.anything());
+    reconcileSpy.mockRestore();
+    processBatchSpy.mockRestore();
+  });
+
+  // The completeness guard fires only on a DISAGREEMENT: when the accumulated
+  // count matches pagination.count, the fetch is provably complete and the
+  // sweep runs as before.
+  it('resiliency-hardening: DOES run the sweep when the fetched count matches pagination.count', async () => {
+    const users = [
+      { pk: 1, username: 'user1', email: 'user1@example.com', groups: [], is_active: true, attributes: {} },
+      { pk: 2, username: 'user2', email: 'user2@example.com', groups: [], is_active: true, attributes: {} }
+    ];
+    db.query.mockResolvedValue({ rows: [] });
+    axios.get.mockImplementation((url) => {
+      if (url.includes('/api/v3/core/users/')) {
+        return Promise.resolve({ data: { results: users, pagination: { count: 2, next: null } } });
+      }
+      if (url.includes('/api/v3/core/groups/')) {
+        return Promise.resolve({ data: { results: [], pagination: {} } });
+      }
+      return Promise.reject(new Error(`Unexpected URL: ${url}`));
+    });
+
+    const reconcileSpy = jest.spyOn(authentikSync, 'reconcileOrphanedAccounts').mockResolvedValue(undefined);
+
+    await authentikSync.syncUsers();
+
+    expect(reconcileSpy).toHaveBeenCalledWith(['1', '2']);
+    reconcileSpy.mockRestore();
+  });
+
   it('resiliency-hardening: refuses to run the sweep at all against an empty fetched-id list, and issues no query', async () => {
     await authentikSync.reconcileOrphanedAccounts([]);
 
@@ -888,6 +987,52 @@ describe('AuthentikSyncService.syncSingleUser users.tak_role reconciliation (Req
     // (via `?? null`) rather than the previous `undefined` from
     // `user.attributes?.takRole`.
     expect(cacheParams[6]).toBeNull();
+  });
+
+  // /users "Last Login" restoration: the sync captures Authentik's own
+  // `last_login` into user_cache.last_login so the local-sourced /users list
+  // can render it (it showed "Never" for everyone after /users was migrated
+  // off the live Authentik fetch). Unlike the bootstrap-then-local fields,
+  // last_login is a mutable mirror and IS refreshed on conflict.
+  it('captures Authentik last_login into the user_cache upsert (positional value) and refreshes it on conflict', async () => {
+    const user = {
+      pk: 'user-ll',
+      username: 'lorna',
+      email: 'lorna@example.com',
+      groups: [],
+      is_active: true,
+      last_login: '2026-09-01T08:30:00.000Z',
+      attributes: {}
+    };
+    db.query.mockResolvedValue({ rows: [] });
+
+    await authentikSync.processBatch([user], {});
+
+    const [cacheSql, cacheParams] = db.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO user_cache'));
+    // last_login is the 13th positional value (index 12), appended after
+    // is_team_device so no existing index shifts.
+    expect(cacheParams[12]).toBe('2026-09-01T08:30:00.000Z');
+    // Mutable mirror: refreshed from EXCLUDED on conflict, unlike the
+    // bootstrap-then-local fields.
+    expect(cacheSql).toContain('last_login = EXCLUDED.last_login');
+  });
+
+  it('binds null last_login for a user Authentik reports as never having logged in', async () => {
+    const user = {
+      pk: 'user-never',
+      username: 'newbie',
+      email: 'newbie@example.com',
+      groups: [],
+      is_active: true,
+      last_login: null,
+      attributes: {}
+    };
+    db.query.mockResolvedValue({ rows: [] });
+
+    await authentikSync.processBatch([user], {});
+
+    const [, cacheParams] = db.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO user_cache'));
+    expect(cacheParams[12]).toBeNull();
   });
 
   it('seeds user_cache.tak_role from the local users row (RETURNING tak_role), NOT from Authentik\'s takRole attribute', async () => {

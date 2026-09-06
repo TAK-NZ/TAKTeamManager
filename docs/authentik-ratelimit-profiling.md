@@ -146,3 +146,46 @@ group-authoritative single-PATCH reconcile fits comfortably.
 - The open-loop profiler measures the server's response to an *offered* rate;
   reported timeouts mean the server did not answer within 30s, which is the
   operative failure mode for a real caller too.
+
+## Follow-up: true prod-class database (2026-09, write ceiling raised 3 → 4)
+
+The caveat above ("Re-profile a true prod-shaped DB before raising ceilings")
+was acted on: the test Authentik's database was upgraded to the production
+class, and the write ceiling was re-measured against it under real sustained
+load (a live 15K-user bulk import plus the worker draining its reconcile
+backlog), with ALB `TargetResponseTime` p50/p99, ECS CPU, and 5xx read from
+CloudWatch at each step. This was a step-up experiment on the RUNNING system,
+not the offered-rate profiler, so the numbers are "behaviour under real load"
+rather than "response to a synthetic ramp" — complementary evidence.
+
+| write/sec | ALB p99 | ECS CPU avg / max | 5xx |
+|---|---|---|---|
+| 3 (prior ceiling) | ~1.6s | ~28% / 44% | 0 |
+| 4 (**new ceiling**) | ~3.5–3.9s | ~46% / 65% | 0 |
+| 5 | ~3.7–4.5s | ~53% / 72% | occasional (isolated) |
+
+**Decision: `AUTHENTIK_RATE_LIMIT_WRITE_PER_SEC` raised from 3 to 4.** write=4
+is the sweet spot on the prod-class DB — a real throughput gain over 3, CPU
+under half on average with headroom, zero 5xx, and a p99 (~3.5s) that is fine
+for background sync writes no user waits on. write=5 was rejected: it produced
+little additional throughput (the worker's per-op pattern makes it not purely
+write-bound) while pushing CPU toward 70%+ and starting to emit isolated 5xx.
+Crucially, the prod-class DB did **not** exhibit the catastrophic latency
+collapse the older `db.serverless` box showed at write=5 (~19s p99) — it
+degrades gracefully instead, which is what made 4 safely reachable.
+
+`AUTHENTIK_RATE_LIMIT_READ_PER_SEC` was left at **5**: under the same load the
+instance was already near saturation (CPU ~55–80%, p99 ~3.7–4.8s, sporadic
+5xx), so there was no read headroom to claim at that moment — a heavy backlog
+of writes dominates the instance, and raising reads on top would push it
+further into the red rather than help. Re-baseline reads against an IDLE
+prod-class instance before raising that ceiling.
+
+### The latency-collapse signature (how to read a step-up)
+
+Across both the old and new DBs the failure mode is the same and worth naming:
+**Authentik never returns 429; it degrades.** The tell that a ceiling has been
+exceeded is p99 climbing toward multiple seconds (and eventually the 30s
+timeout) *while ECS CPU is still only moderate* — i.e. the bottleneck is
+downstream (DB / per-task concurrency), not app CPU. Back off the moment p99
+trends up sharply or any sustained 5xx appear, not when CPU saturates.

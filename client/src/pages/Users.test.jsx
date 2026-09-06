@@ -141,7 +141,9 @@ describe('Users Last Login cell renders through FormattedDate (task 6.7)', () =>
     })
   }
 
-  /** The Last Login cell -- the fourth of the row's five cells. */
+  /** The Last Login cell -- the fourth of the row's five cells. The Status
+      column was removed (its signal is now an inline badge by the name), so the
+      order is User | Callsign | Unit | Last Login | Actions. */
   const lastLoginCell = () => container.querySelectorAll('tbody tr td')[3]
   const hostOf = () => lastLoginCell().querySelector('span[tabindex="0"]')
 
@@ -356,6 +358,201 @@ describe('Users sortable columns (User, Last Login)', () => {
     })
 
     expect(bodyRowNames()).toEqual(['Alice', 'Charlie'])
+  })
+})
+
+// /users column finalisation: the avatar was removed (GET /api/users no longer
+// sources rows from a live Authentik fetch, so there is no `avatar` URL to
+// render, and the old `<img src={undefined}>` showed as a broken image), and a
+// Callsign column (`tak_callsign`, already returned by the API) was added. The
+// column order is now User | Callsign | Unit | Status | Last Login | Actions.
+describe('Users column layout (no avatar, Callsign column)', () => {
+  let container
+  let root
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    vi.clearAllMocks()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false })
+    configAPI.getPublic.mockResolvedValue({ data: {} })
+    setDisplayTimezone('UTC')
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    vi.restoreAllMocks()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+    setDisplayTimezone(DEFAULT_DISPLAY_TIMEZONE)
+  })
+
+  const mountWith = async (users) => {
+    usersAPI.getAll.mockResolvedValue({ data: { users } })
+    root = createRoot(container)
+    await act(async () => {
+      root.render(<Users />)
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+  }
+
+  it('renders no avatar image anywhere in the users table', async () => {
+    await mountWith([userRow({ tak_callsign: 'ALPHA-1' })])
+    // The row cell previously held an <img class="rounded-full">; assert the
+    // whole table body carries no <img> at all now.
+    expect(container.querySelectorAll('tbody img')).toHaveLength(0)
+  })
+
+  it('shows a Callsign header and renders the row\'s tak_callsign in the second (Callsign) cell', async () => {
+    await mountWith([userRow({ tak_callsign: 'ALPHA-1' })])
+
+    const headers = Array.from(container.querySelectorAll('thead th')).map((th) => th.textContent.trim())
+    expect(headers).toContain('Callsign')
+    // The Status column was removed, so the order is
+    // User(0) | Callsign(1) | Unit(2) | Last Login(3) | Actions(4).
+    expect(headers).not.toContain('Status')
+    const cells = container.querySelectorAll('tbody tr td')
+    expect(cells).toHaveLength(5)
+    expect(cells[1].textContent).toContain('ALPHA-1')
+  })
+
+  it('renders the literal "None" as the Callsign value for a user with no tak_callsign', async () => {
+    await mountWith([userRow({ tak_callsign: null })])
+    const cells = container.querySelectorAll('tbody tr td')
+    // The Callsign cell now stacks the callsign value over the "TAK device
+    // certificates: N" count, so its first child <div> is the callsign itself.
+    expect(cells[1].querySelector('div').textContent.trim()).toBe('None')
+  })
+
+  it('stacks the "TAK device certificates" count under the callsign value in the Callsign cell', async () => {
+    await mountWith([userRow({ tak_callsign: 'ALPHA-1', live_certificate_count: 3 })])
+    const cells = container.querySelectorAll('tbody tr td')
+    // Both facts live in the Callsign cell (index 1) now; the User cell (0)
+    // no longer carries the cert count.
+    expect(cells[1].textContent).toContain('ALPHA-1')
+    expect(cells[1].textContent).toContain('TAK device certificates: 3')
+    expect(cells[0].textContent).not.toContain('TAK device certificates')
+  })
+})
+
+// Large-directory filters: the alphabet bar (server-side lastNameInitial) and
+// the Team dropdown (server-side teamId). Both narrow GET /api/users in SQL, so
+// the client just forwards the param and resets to page 1; these tests assert
+// the param reaches usersAPI.getAll and that the page resets.
+describe('Users large-directory filters (alphabet bar + team dropdown)', () => {
+  let container
+  let root
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    vi.clearAllMocks()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false })
+    configAPI.getPublic.mockResolvedValue({ data: {} })
+    usersAPI.getAll.mockResolvedValue({ data: { users: [], pagination: { page: 1, pageSize: 20, total: 0 } } })
+    teamsAPI.getMyTeams.mockResolvedValue({ data: { teams: [{ id: 42, name: 'Ahipara', display_name: 'FENZ - Ahipara' }] } })
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    vi.restoreAllMocks()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  const mount = async () => {
+    root = createRoot(container)
+    await act(async () => {
+      root.render(<Users user={{ isAdmin: true }} />)
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+  }
+
+  it('sends lastNameInitial when an alphabet letter is clicked', async () => {
+    await mount()
+    const bButton = Array.from(container.querySelectorAll('[aria-label="Filter by last name initial"] button'))
+      .find((b) => b.textContent.trim() === 'B')
+    expect(bButton).not.toBeUndefined()
+
+    await act(async () => {
+      bButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await act(async () => { await Promise.resolve() })
+
+    const lastCall = usersAPI.getAll.mock.calls.at(-1)[0]
+    expect(lastCall.lastNameInitial).toBe('B')
+    expect(lastCall.page).toBe(1)
+    expect(bButton.getAttribute('aria-pressed')).toBe('true')
+  })
+
+  it("sends the '#' bucket when the # button is clicked", async () => {
+    await mount()
+    const hashButton = Array.from(container.querySelectorAll('[aria-label="Filter by last name initial"] button'))
+      .find((b) => b.textContent.trim() === '#')
+
+    await act(async () => {
+      hashButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await act(async () => { await Promise.resolve() })
+
+    expect(usersAPI.getAll.mock.calls.at(-1)[0].lastNameInitial).toBe('#')
+  })
+
+  it('clears the initial filter when "All" is clicked (no lastNameInitial sent)', async () => {
+    await mount()
+    const buttons = Array.from(container.querySelectorAll('[aria-label="Filter by last name initial"] button'))
+    await act(async () => {
+      buttons.find((b) => b.textContent.trim() === 'C').dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await act(async () => { await Promise.resolve() })
+    await act(async () => {
+      buttons.find((b) => b.textContent.trim() === 'All').dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await act(async () => { await Promise.resolve() })
+
+    // '' is falsy so stripEmptyParams drops it; getAll receives undefined.
+    expect(usersAPI.getAll.mock.calls.at(-1)[0].lastNameInitial).toBeUndefined()
+  })
+
+  it('sends teamId when a unit is selected in the Team filter, and resets to page 1', async () => {
+    await mount()
+    const select = container.querySelector('#users-team-filter')
+    expect(select).not.toBeNull()
+    // The scoped team loaded on mount is present as an option, labelled with
+    // its composed Org-prefixed display_name ("FENZ - Ahipara"), not the bare
+    // team name.
+    const optionLabels = Array.from(select.querySelectorAll('option')).map((o) => o.textContent)
+    expect(optionLabels).toContain('FENZ - Ahipara')
+    expect(optionLabels).not.toContain('Ahipara')
+
+    const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set
+    await act(async () => {
+      setter.call(select, '42')
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    await act(async () => { await Promise.resolve() })
+
+    const lastCall = usersAPI.getAll.mock.calls.at(-1)[0]
+    expect(lastCall.teamId).toBe('42')
+    expect(lastCall.page).toBe(1)
   })
 })
 
@@ -975,23 +1172,38 @@ describe('Users Status column renders describeAccountStatusBadge (bugfix)', () =
     })
   }
 
-  /** The Status cell -- the third of the row's five cells. */
-  const statusCell = () => container.querySelectorAll('tbody tr td')[2]
+  // The dedicated Status column was removed to reclaim width; the status
+  // signal is now an inline text badge beside the user's NAME (the first
+  // cell), shown ONLY for a non-active state. So these assertions target the
+  // whole row's text (the badge lives in the User cell now), and the ordinary
+  // active account shows NO status badge at all rather than an "Active" pill.
+  const rowText = () => container.querySelector('tbody tr').textContent
 
-  it('renders no extra badge for an active account -- only the plain Active/Inactive pill', async () => {
+  it('renders NO status badge at all for an ordinary active account', async () => {
     await mountWith([userRowWithTeam({ account_status: 'active', is_active: true })])
 
-    expect(statusCell().textContent).toContain('Active')
-    expect(statusCell().textContent).not.toContain('Suspended')
-    expect(statusCell().textContent).not.toContain('Account not found in Authentik')
+    const text = rowText()
+    // No "Active" pill any more, and none of the non-active labels either.
+    expect(text).not.toContain('Suspended')
+    expect(text).not.toContain('Account not found in Authentik')
+    expect(text).not.toContain('Inactive')
   })
 
-  it('renders a "Suspended" badge, distinct from the plain Inactive pill, for a suspended account', async () => {
+  it('renders a plain "Inactive" badge for an is_active=false account whose status is still active', async () => {
+    await mountWith([userRowWithTeam({ account_status: 'active', is_active: false })])
+
+    const badge = Array.from(container.querySelectorAll('tbody tr td:first-child span')).find(
+      (el) => el.textContent === 'Inactive'
+    )
+    expect(badge).not.toBeUndefined()
+    expect(rowText()).not.toContain('Suspended')
+  })
+
+  it('renders a "Suspended" badge for a suspended account', async () => {
     await mountWith([userRowWithTeam({ account_status: 'suspended', is_active: false })])
 
-    expect(statusCell().textContent).toContain('Inactive')
-    expect(statusCell().textContent).toContain('Suspended')
-    const badge = statusCell().querySelector('.bg-amber-100')
+    expect(rowText()).toContain('Suspended')
+    const badge = container.querySelector('tbody tr td:first-child .bg-amber-100')
     expect(badge).not.toBeNull()
     expect(badge.textContent).toBe('Suspended')
   })
@@ -999,21 +1211,22 @@ describe('Users Status column renders describeAccountStatusBadge (bugfix)', () =
   it('renders an "Account not found in Authentik" badge, distinct from "Suspended", for an orphaned account', async () => {
     await mountWith([userRowWithTeam({ account_status: 'orphaned', is_active: false })])
 
-    expect(statusCell().textContent).toContain('Account not found in Authentik')
-    expect(statusCell().textContent).not.toContain('Suspended')
-    const badge = Array.from(statusCell().querySelectorAll('span')).find(
+    expect(rowText()).toContain('Account not found in Authentik')
+    expect(rowText()).not.toContain('Suspended')
+    const badge = Array.from(container.querySelectorAll('tbody tr td:first-child span')).find(
       (el) => el.textContent === 'Account not found in Authentik'
     )
     expect(badge).not.toBeUndefined()
     expect(badge.className).toContain('bg-red-100')
   })
 
-  it('renders no extra badge for a row missing account_status entirely (fetched before this feature existed)', async () => {
-    const { account_status, ...rowWithoutStatus } = userRowWithTeam()
+  it('renders no status badge for an active row missing account_status entirely (fetched before this feature existed)', async () => {
+    const { account_status, ...rowWithoutStatus } = userRowWithTeam({ is_active: true })
     await mountWith([rowWithoutStatus])
 
-    expect(statusCell().textContent).not.toContain('Suspended')
-    expect(statusCell().textContent).not.toContain('Account not found in Authentik')
+    expect(rowText()).not.toContain('Suspended')
+    expect(rowText()).not.toContain('Account not found in Authentik')
+    expect(rowText()).not.toContain('Inactive')
   })
 })
 
@@ -1084,14 +1297,26 @@ describe('Users "Create User" dialog (Users-page-action-parity)', () => {
   })
 
   it('falls back to the all-teams list for a Global_Manager when the organisation-scoped list is empty', async () => {
-    teamsAPI.getMyTeams.mockResolvedValueOnce({ data: { teams: [] } })
-    teamsAPI.getMyTeams.mockResolvedValueOnce({ data: { teams: [{ id: 9, name: 'Charlie Team' }] } })
+    // The page now ALSO loads a scoped team list on mount for the /users Team
+    // FILTER control (its own getMyTeams call sequence, org-scoped then an
+    // all-teams fallback for an admin), so this test no longer asserts an exact
+    // global call count/order -- that would couple it to the filter effect. It
+    // instead drives every getMyTeams call with the same org-empty ->
+    // all-teams fallback (a default `mockResolvedValue`, not `...Once`) and
+    // asserts the DIALOG'S team picker shows the fallback team. `getMyTeams` is
+    // still asserted to have been called with the organisation scope AND
+    // without it (the fallback), regardless of how many times each occurred.
+    teamsAPI.getMyTeams.mockImplementation((arg) => {
+      if (arg && arg.scope === 'organisation') {
+        return Promise.resolve({ data: { teams: [] } })
+      }
+      return Promise.resolve({ data: { teams: [{ id: 9, name: 'Charlie Team' }] } })
+    })
     await mount({ isAdmin: true })
     await openDialog()
 
-    expect(teamsAPI.getMyTeams).toHaveBeenCalledTimes(2)
-    expect(teamsAPI.getMyTeams).toHaveBeenNthCalledWith(1, { scope: 'organisation' })
-    expect(teamsAPI.getMyTeams).toHaveBeenNthCalledWith(2)
+    expect(teamsAPI.getMyTeams).toHaveBeenCalledWith({ scope: 'organisation' })
+    expect(teamsAPI.getMyTeams).toHaveBeenCalledWith()
     const teamSelect = container.querySelector('#create-user-team')
     expect(Array.from(teamSelect.querySelectorAll('option')).map((o) => o.textContent)).toContain('Charlie Team')
   })

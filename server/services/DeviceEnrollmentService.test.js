@@ -1574,8 +1574,40 @@ describe('DeviceEnrollmentService.listAllDevices', () => {
     // cert-expiry-notifications task 14.1: two additive parameters,
     // expiringOnly (defaulting to false when not requested) and the
     // resolved expiryWarningDays threshold (defaulting to 30 when
-    // DEVICE_MGMT_EXPIRY_WARNING_DAYS is unset).
-    expect(params).toEqual([[], '%tanker%', true, 10, 10, false, 30]);
+    // DEVICE_MGMT_EXPIRY_WARNING_DAYS is unset). Large-directory filters add
+    // two more, $8 teamId and $9 labelInitial, both null when not supplied.
+    expect(params).toEqual([[], '%tanker%', true, 10, 10, false, 30, null, null]);
+  });
+
+  it('binds the large-directory teamId ($8) and labelInitial ($9) filters, and adds their SQL predicates', async () => {
+    DirectoryScopeService.resolveScope.mockResolvedValue(DirectoryScopeService.UNSCOPED);
+    mockCandidatesQuery([]);
+
+    await DeviceEnrollmentService.listAllDevices(
+      { userId: 1, is_global_manager: true },
+      { page: 1, pageSize: 50, teamId: '42', labelInitial: 'b' }
+    );
+
+    const [sql, params] = pool.query.mock.calls.find(([q]) => q.includes('FROM users u'));
+    expect(sql).toContain('tm.team_id = $8::int');
+    expect(sql).toContain('u.device_label ILIKE $9 || \'%\'');
+    expect(params[7]).toBe(42); // teamId parsed to int
+    expect(params[8]).toBe('B'); // labelInitial uppercased
+  });
+
+  it('binds null for an invalid teamId and the # bucket for labelInitial', async () => {
+    DirectoryScopeService.resolveScope.mockResolvedValue(DirectoryScopeService.UNSCOPED);
+    mockCandidatesQuery([]);
+
+    await DeviceEnrollmentService.listAllDevices(
+      { userId: 1, is_global_manager: true },
+      { page: 1, pageSize: 50, teamId: 'abc', labelInitial: '#' }
+    );
+
+    const [sql, params] = pool.query.mock.calls.find(([q]) => q.includes('FROM users u'));
+    expect(sql).toContain('u.device_label !~ \'^[A-Za-z]\'');
+    expect(params[7]).toBeNull(); // invalid teamId -> null
+    expect(params[8]).toBe('#');
   });
 
   // Bugfix (admins had no way to see a device's certificate expiring soon
@@ -1671,8 +1703,11 @@ describe('DeviceEnrollmentService.listAllDevices', () => {
 
       const [sql, params] = pool.query.mock.calls.find(([q]) => q.includes('FROM users u'));
       expect(sql).toContain('$6::boolean');
-      expect(params[params.length - 2]).toBe(false);
-      expect(params[params.length - 1]).toBe(30);
+      // expiringOnly is $6 (index 5), expiryWarningDays is $7 (index 6) --
+      // referenced by fixed position now that $8 teamId / $9 labelInitial
+      // are appended AFTER them.
+      expect(params[5]).toBe(false);
+      expect(params[6]).toBe(30);
     });
 
     it('passes expiringOnly=true and the configured DEVICE_MGMT_EXPIRY_WARNING_DAYS threshold when requested', async () => {
@@ -1686,8 +1721,8 @@ describe('DeviceEnrollmentService.listAllDevices', () => {
       );
 
       const [, params] = pool.query.mock.calls.find(([q]) => q.includes('FROM users u'));
-      expect(params[params.length - 2]).toBe(true);
-      expect(params[params.length - 1]).toBe(45);
+      expect(params[5]).toBe(true); // expiringOnly ($6)
+      expect(params[6]).toBe(45); // expiryWarningDays ($7)
     });
 
     it.each(['', '0', '-5', 'not-a-number'])(
@@ -1703,7 +1738,7 @@ describe('DeviceEnrollmentService.listAllDevices', () => {
         );
 
         const [, params] = pool.query.mock.calls.find(([q]) => q.includes('FROM users u'));
-        expect(params[params.length - 1]).toBe(30);
+        expect(params[6]).toBe(30); // expiryWarningDays ($7), fixed position
       }
     );
 

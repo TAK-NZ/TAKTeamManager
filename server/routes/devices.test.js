@@ -248,7 +248,7 @@ describe('GET /api/devices', () => {
     expect(res.body.pagination).toEqual({ page: 1, pageSize: 50, total: 1 });
     expect(DeviceEnrollmentService.listAllDevices).toHaveBeenCalledWith(
       mockUser,
-      { page: 1, pageSize: 50, search: undefined, expiringOnly: false }
+      { page: 1, pageSize: 50, search: undefined, expiringOnly: false, teamId: undefined, labelInitial: undefined }
     );
   });
 
@@ -264,7 +264,23 @@ describe('GET /api/devices', () => {
     expect(res.status).toBe(200);
     expect(DeviceEnrollmentService.listAllDevices).toHaveBeenCalledWith(
       mockUser,
-      { page: 2, pageSize: 10, search: 'tanker', expiringOnly: false }
+      { page: 2, pageSize: 10, search: 'tanker', expiringOnly: false, teamId: undefined, labelInitial: undefined }
+    );
+  });
+
+  it('forwards the large-directory teamId + labelInitial filters to the service', async () => {
+    asGlobalManager();
+    DeviceEnrollmentService.listAllDevices.mockResolvedValue({
+      devices: [],
+      pagination: { page: 1, pageSize: 50, total: 0 }
+    });
+
+    const res = await request(app).get('/api/devices').query({ teamId: '42', labelInitial: 'B' });
+
+    expect(res.status).toBe(200);
+    expect(DeviceEnrollmentService.listAllDevices).toHaveBeenCalledWith(
+      mockUser,
+      expect.objectContaining({ teamId: '42', labelInitial: 'B' })
     );
   });
 

@@ -19,27 +19,12 @@ import { getCountry } from '../utils/isoCountry'
 import RevokeDeviceDialog from '../components/RevokeDeviceDialog'
 import DeviceListRow, { DeviceListHeader, DeviceListCard } from '../components/DeviceListRow'
 import { EXPIRY_STATES, classifyExpiry, getExpiryWarningDays } from '../utils/expiryWarning'
-
-// --- The Visibility_Pause_Pattern (device-management Requirements 19.1-19.3) ---
-//
-// Both auto-refreshing cards on this page ("My Channels" and "My Devices")
-// share this one mechanism rather than each hand-rolling its own timer, so a
-// reader sees one pattern used twice. `startVisibilityPausedRefresh` owns the
-// whole lifecycle: it starts the interval, clears it WHILE the tab is hidden,
-// re-fetches immediately and restarts it WHEN the tab becomes visible again,
-// and returns a teardown that removes BOTH the interval and the listener --
-// so an effect can `return startVisibilityPausedRefresh(fn)` and be sure no
-// timer survives the component (Requirement 19.3).
-//
-// On the interval length: 60000 ms is a UI-CONSISTENCY choice, not a
-// data-freshness one. The server re-polls TAK Server on
-// `DEVICE_MGMT_POLL_INTERVAL_MS` (default 5 minutes) and re-syncs the
-// certificate list on `DEVICE_MGMT_SYNC_INTERVAL_MS` (default 15 minutes), so
-// most device refreshes re-read rows the server has not changed. The device
-// card ticks at 60000 ms because the channel card in the same view already
-// does, NOT because the underlying data moves that fast -- and neither server
-// cadence is tightened to match it (Requirement 19.7).
-const REFRESH_INTERVAL_MS = 60000
+// The Visibility_Pause_Pattern (device-management Requirements 19.1-19.3):
+// both auto-refreshing cards here ("My Channels"/"My Devices") share this one
+// mechanism. It was extracted to a shared util so the Admin page's stat cards
+// can reuse the identical lifecycle (see visibilityPausedRefresh.js's own doc
+// for the 60s "UI-consistency, not data-freshness" rationale).
+import { startVisibilityPausedRefresh } from '../utils/visibilityPausedRefresh'
 
 // Bugfix (top-level folder icons): the exact top-level folder names this
 // server can produce for a Team/BCH/Region channel's group name, once
@@ -59,31 +44,6 @@ const TOP_LEVEL_FOLDER_ICONS = Object.freeze({
   Support: IconBackhoe,
   XtraTools: IconTool
 })
-
-function startVisibilityPausedRefresh(refresh) {
-  let intervalId = setInterval(refresh, REFRESH_INTERVAL_MS)
-
-  const handleVisibilityChange = () => {
-    // Always clear before (re)starting: a `visibilitychange` that reports
-    // visible twice in a row would otherwise leave the previous interval
-    // running and double the fetch rate.
-    if (intervalId) {
-      clearInterval(intervalId)
-      intervalId = null
-    }
-    if (!document.hidden) {
-      // Tab became visible again -- refresh immediately, then restart timer.
-      refresh()
-      intervalId = setInterval(refresh, REFRESH_INTERVAL_MS)
-    }
-  }
-  document.addEventListener('visibilitychange', handleVisibilityChange)
-
-  return () => {
-    document.removeEventListener('visibilitychange', handleVisibilityChange)
-    if (intervalId) clearInterval(intervalId)
-  }
-}
 
 export default function Dashboard({ user }) {
   // Bugfix (generic-pending-tasks-banner): this banner's count previously

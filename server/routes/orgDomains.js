@@ -212,4 +212,99 @@ router.get('/admin/stats', authenticateToken, authorize, async (req, res) => {
   }
 });
 
+// GET /admin/sync-status — Global_Manager-only background-process health for
+// the /admin "Background Sync" card. Gives an operator direct insight into how
+// far behind the background processes are, which previously was invisible in
+// the UI. Three parts, all local reads (no Authentik round-trip):
+//
+//   - queue:  the `sync_operations` backlog. `pending` (total) + `pendingByType`
+//             (per operation_type) show DEPTH; `oldestPendingAgeSeconds`
+//             (NOW() - the oldest pending row's created_at) shows how far BEHIND
+//             the worker is in wall-clock terms; `failed` counts rows that
+//             exhausted retries / hit a permanent validation failure.
+//   - userSync: the single `sync_status` 'user_sync' row (status, last_sync,
+//             records_synced, and error_message -- which also carries the
+//             completeness-guard "Reconciliation sweep skipped: incomplete
+//             fetch" note, so it surfaces here instead of being invisible).
+//   - worker: the sync-worker liveness, read from the shared
+//             `sync_worker_heartbeat` row and compared against the worker's OWN
+//             staleness threshold (required from syncWorker.js so the two never
+//             disagree). `stale` true means the worker has not heartbeat within
+//             the threshold -- i.e. it may be down and the queue is not draining.
+router.get('/admin/sync-status', authenticateToken, authorize, async (req, res) => {
+  try {
+    // Single-source the staleness threshold from the worker rather than
+    // re-declaring 90000 here (mirrors the health endpoint's own reuse).
+    const { HEARTBEAT_STALE_THRESHOLD_MS } = require('../workers/syncWorker');
+
+    const [queueResult, byTypeResult, userSyncResult, heartbeatResult] = await Promise.all([
+      pool.query(`
+        SELECT
+          COUNT(*) FILTER (WHERE status = 'pending')::int AS pending,
+          COUNT(*) FILTER (WHERE status = 'failed')::int AS failed,
+          COUNT(*) FILTER (WHERE status = 'processing')::int AS processing,
+          EXTRACT(EPOCH FROM (NOW() - MIN(created_at) FILTER (WHERE status = 'pending')))::int AS oldest_pending_age_seconds
+        FROM sync_operations
+      `),
+      pool.query(`
+        SELECT operation_type, COUNT(*)::int AS count
+        FROM sync_operations
+        WHERE status = 'pending'
+        GROUP BY operation_type
+        ORDER BY count DESC
+      `),
+      pool.query(
+        `SELECT status, last_sync, records_synced, error_message
+         FROM sync_status WHERE sync_type = 'user_sync'`
+      ),
+      pool.query('SELECT last_heartbeat_at, worker_id FROM sync_worker_heartbeat WHERE id = 1')
+    ]);
+
+    const q = queueResult.rows[0] || {};
+    const userSync = userSyncResult.rows[0] || null;
+
+    // Worker liveness: stale (or unknown) when there is no heartbeat row yet or
+    // the last heartbeat is at/over the worker's staleness threshold. Mirrors
+    // checkSyncWorkerHeartbeatHealth's own logic without re-importing it (a
+    // NaN/absent timestamp is treated as stale).
+    const hb = heartbeatResult.rows[0] || null;
+    const lastHeartbeatAt = hb && hb.last_heartbeat_at ? hb.last_heartbeat_at : null;
+    let workerStale = true;
+    if (lastHeartbeatAt) {
+      const ageMs = Date.now() - new Date(lastHeartbeatAt).getTime();
+      workerStale = Number.isNaN(ageMs) || ageMs >= HEARTBEAT_STALE_THRESHOLD_MS;
+    }
+
+    res.json({
+      queue: {
+        pending: q.pending || 0,
+        processing: q.processing || 0,
+        failed: q.failed || 0,
+        // null (not 0) when the queue is empty, so the client can render "—"
+        // rather than a misleading "0 seconds behind".
+        oldestPendingAgeSeconds: q.oldest_pending_age_seconds ?? null,
+        pendingByType: byTypeResult.rows
+      },
+      userSync: userSync
+        ? {
+            status: userSync.status,
+            lastSync: userSync.last_sync,
+            recordsSynced: userSync.records_synced,
+            // Carries the completeness-guard skip note when present.
+            message: userSync.error_message
+          }
+        : null,
+      worker: {
+        lastHeartbeatAt,
+        workerId: hb ? hb.worker_id : null,
+        stale: workerStale,
+        staleThresholdSeconds: Math.round(HEARTBEAT_STALE_THRESHOLD_MS / 1000)
+      }
+    });
+  } catch (error) {
+    getLogger().error({ err: error }, 'Failed to get sync status');
+    res.status(500).json({ error: 'Failed to get sync status' });
+  }
+});
+
 module.exports = router;

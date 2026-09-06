@@ -208,6 +208,50 @@ describe('Devices page', () => {
     expect(container.textContent).toContain('Spare Tablet')
   })
 
+  // Large-directory filters, mirroring /users: server-side team dropdown
+  // (teamId) + alphabet bar (labelInitial, by device label). Both forward the
+  // param to devicesAPI.getAll and reset to page 1.
+  describe('large-directory filters (alphabet bar + team dropdown)', () => {
+    it('sends labelInitial when an alphabet letter is clicked, and resets to page 1', async () => {
+      teamsAPI.getMyTeams.mockResolvedValue({ data: { teams: [{ id: 3, name: 'Auckland', display_name: 'AUK - Auckland' }] } })
+      await mountWith([deviceRow()])
+
+      const bButton = Array.from(container.querySelectorAll('[aria-label="Filter by device label initial"] button'))
+        .find((b) => b.textContent.trim() === 'B')
+      expect(bButton).not.toBeUndefined()
+      await act(async () => {
+        bButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+      await act(async () => { await Promise.resolve() })
+
+      const lastCall = devicesAPI.getAll.mock.calls.at(-1)[0]
+      expect(lastCall.labelInitial).toBe('B')
+      expect(lastCall.page).toBe(1)
+      expect(bButton.getAttribute('aria-pressed')).toBe('true')
+    })
+
+    it('sends teamId with the Org-prefixed unit label in the dropdown, and resets to page 1', async () => {
+      teamsAPI.getMyTeams.mockResolvedValue({ data: { teams: [{ id: 3, name: 'Auckland', display_name: 'AUK - Auckland' }] } })
+      await mountWith([deviceRow()])
+
+      const select = container.querySelector('#devices-team-filter')
+      expect(select).not.toBeNull()
+      const optionLabels = Array.from(select.querySelectorAll('option')).map((o) => o.textContent)
+      expect(optionLabels).toContain('AUK - Auckland')
+
+      const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set
+      await act(async () => {
+        setter.call(select, '3')
+        select.dispatchEvent(new Event('change', { bubbles: true }))
+      })
+      await act(async () => { await Promise.resolve() })
+
+      const lastCall = devicesAPI.getAll.mock.calls.at(-1)[0]
+      expect(lastCall.teamId).toBe('3')
+      expect(lastCall.page).toBe(1)
+    })
+  })
+
   describe('sorting', () => {
     it('defaults to ascending by device display name on initial load', async () => {
       await mountWith([

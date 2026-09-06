@@ -6,13 +6,13 @@ const { paginationParams } = require('../middleware/pagination');
 const User = require('../models/User');
 const Team = require('../models/Team');
 const authentikService = require('../services/authentik');
-const { isIgnoredAuthentikUsername } = require('../config/authentikSyncIgnore');
+const { isIgnoredAuthentikUsername, getIgnoredUsernamePrefixes } = require('../config/authentikSyncIgnore');
 const UserAttributesService = require('../services/userAttributes');
 const TeamMembershipService = require('../services/TeamMembershipService');
 const UserProvisioningService = require('../services/UserProvisioningService');
 const ManagedIdentifierService = require('../services/ManagedIdentifierService');
 const DirectoryScopeService = require('../services/DirectoryScopeService');
-const { buildEmailDomainLikePatterns, partitionCandidates } = require('../utils/directoryScope');
+const { buildEmailDomainLikePatterns, partitionCandidates, escapeLikePattern } = require('../utils/directoryScope');
 const { CallsignSuffixConflictError, checkCallsignSuffixUniqueness } = require('../services/CallsignSuffixUniquenessService');
 const { isValidCallsignSuffix } = require('../utils/callsignValidation');
 const {
@@ -44,87 +44,32 @@ const pool = require('../config/database');
 const { getLogger } = require('../middleware/requestContext');
 const router = express.Router();
 
-// List all users
+// List all users.
 //
-// Requirement 11.3: team-name resolution for the full returned user list
-// runs as a single batched query, independent of the number of users
-// returned, instead of one recursive-CTE query per user (the previous
-// implementation's N+1 pattern via `Promise.all(authentikUsers.map(...))`).
+// NOTE: `GET /api/users` was migrated from a live per-request Authentik
+// fetch to the LOCAL database (`users` LEFT JOIN `user_cache`) -- see that
+// route handler's own doc comment below for the rationale, the exact-total
+// improvement, and the one behavioural trade-off (out-of-band Authentik
+// creates appear only after the next sync). The historical design notes
+// that used to live here described the superseded Authentik-sourced N+1/
+// batched-decoration implementation and have been removed to avoid
+// describing code that no longer exists.
 //
-// The `WITH RECURSIVE team_root` CTE below computes, for every team in the
-// (small, bounded) `teams` table, its root ancestor's `callsign_prefix`/
-// `name` exactly once per request -- not once per returned user -- by
-// walking every team's `parent_team_id` chain up to its root row
-// (`parent_team_id IS NULL`) in a single pass. The outer query then LEFT
-// JOINs `users` -> `team_memberships` (direct membership only, i.e.
-// `inherited_from_team_id IS NULL`, matching the prior per-user query's
-// filter exactly, now expressed as part of the JOIN condition rather than
-// the WHERE clause so a user with no direct team membership still produces
-// a row instead of being dropped) -> `teams` -> that precomputed root-team
-// result, filtered to `WHERE u.authentik_user_id = ANY($1)` for the full
-// batch of Authentik user ids at once. Cost is therefore bounded by the
-// size of the `teams` table, not by the number of users returned.
-//
-// Requirement 11.4: the shared `paginationParams` middleware validates
-// `page`/`pageSize` (rejecting out-of-range values with 400 before any
-// Authentik/DB call runs) and attaches `req.pagination`. The resolved
-// `page`/`pageSize` are passed straight through to
-// `authentikService.getUsers()`, which maps them onto Authentik's own
-// `page`/`page_size` query parameters (see that method's doc comment for
-// why this option was chosen over in-memory slicing of a full fetch) --
-// so only the requested page of users is fetched from Authentik at all,
-// and the batched team-name query's `ANY($1)` id array is scoped to that
-// same page.
-//
-// Requirement 27.9 (task 49.5): excludes every Team_Owned_Device
-// (`users.is_team_device = true`) from the response. The primary user
-// list here is sourced from AUTHENTIK (`authentikService.getUsers`), not
-// the local `users` table.
-//
-// device-management follow-up: `DeviceEnrollmentService.createDevice` now
-// creates a device's Authentik user with `type: 'service_account'`
-// (`server/services/authentik.js`'s `createUser`), so a NEWLY created
-// device is already excluded upstream by `getUsers({page, pageSize})`'s
-// `?type=internal` filter -- it never reaches `authentikUsers` at all.
-// This local filter is kept anyway, and remains load-bearing, because a
-// Team_Owned_Device created BEFORE this change is still `type: 'internal'`
-// in Authentik (confirmed live against account.test.tak.nz: an existing
-// device's Authentik user was not retroactively changed) and has no
-// scheduled backfill migration -- so a device is indistinguishable from a
-// human user on the Authentik side for any row created under the old
-// behavior. `is_team_device` is a LOCAL-only flag (added to `users`/
-// `user_cache` by task 49.1's migration), so exclusion must happen here,
-// after the Authentik fetch, by cross-referencing the local `users`
-// table. The SAME single batched query already used for team-name
-// resolution above is extended to additionally select `u.is_team_device`,
-// keyed by `authentik_user_id`, avoiding a third database round trip
-// (Requirement 11.3's "1-2 queries" allowance).
-//
-// `pagination.total` is INTENTIONALLY left as Authentik's own `count`
-// (from its `type=internal` pagination envelope) rather than adjusted
-// downward by the number of excluded devices. Getting an exactly-accurate
-// adjusted total would require either (a) an additional, page-independent
-// `COUNT(*) FROM users WHERE is_team_device = true` query run on every
-// request regardless of page contents (a real, if small, cost for a field
-// that's advisory at best), or (b) filtering Authentik's OWN result set
-// by a criterion Authentik has no concept of for a pre-existing,
-// still-`internal`-typed device row. Per this task's explicit allowance
-// for a documented compromise, `pagination.total` may therefore
-// over-count by the number of still-`internal`-typed Team_Owned_Devices
-// that exist; the returned `users` array itself is always correctly
-// filtered, which is the requirement's primary concern (Requirement
-// 27.9's "excludes every Team_Owned_Device from any user-facing ...
-// count").
+// The remainder of this comment documents `GET /api/users/count`, which
+// was ALREADY local-only and is unchanged by the list migration.
 
-// Bugfix: the Admin page's "Total Users" stat previously read `GET /api/users`'
-// own `pagination.total`, which is Authentik's raw `type=internal` count --
-// this is EXACTLY the over-count `GET /` itself documents above and
-// deliberately tolerates for its own paginated-list purposes (an ignored-
-// prefix account like `etl-earthquakes` is materialized in Authentik but
-// never gets a local `users` row at all -- see `authentikSync.js`'s
-// `syncSingleUser`/`isIgnoredAuthentikUsername` skip -- and a still-`internal`
-// -typed Team_Owned_Device row is filtered from the LIST but not from that
-// total). A dedicated, unpaginated route gives the Admin stat an EXACT count
+// `GET /api/users/count` gives the Admin "Total Users" stat an EXACT local
+// count, excluding Team_Owned_Devices (`is_team_device = true`), orphaned
+// rows (`account_status = 'orphaned'`), and ignored-prefix usernames
+// (`AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES`, e.g. `akadmin`/`etl-`, applied
+// in JS since the prefix list is env-configured). Historically this route
+// existed because the OLD Authentik-sourced `GET /` reported Authentik's raw
+// `type=internal` count as `pagination.total`, which over-counted (it
+// included ignored-prefix and still-`internal`-typed device rows the list
+// then dropped). The list route now sources locally and returns an exact
+// post-filter total of its own, so the two counts should agree closely; this
+// dedicated route remains the cheapest source for the single stat number. A
+// dedicated, unpaginated route gives the Admin stat an EXACT count
 // instead: a single local `COUNT(*)` naturally excludes both, since neither
 // an ignored-prefix account nor (after this WHERE) a Team_Owned_Device row is
 // counted. Local-only (never calls Authentik), so this is cheap enough to run
@@ -164,126 +109,146 @@ router.get('/count', authenticateToken, authorize, async (req, res) => {
 });
 
 router.get('/', authenticateToken, authorize, paginationParams, async (req, res) => {
+  // Authentik-scaling follow-up: this list is now sourced from the LOCAL
+  // database (`users` LEFT JOIN `user_cache`), NOT a live per-request
+  // Authentik `GET /core/users/`. The local mirror is the authoritative,
+  // freshest copy of everything this list renders -- the periodic
+  // `authentikSync.js` pushes local first_name/last_name/tak_role/is_active
+  // to Authentik, and every field this route decorates rows with was
+  // already read from `users`/`user_cache` even under the old
+  // Authentik-sourced implementation (which fetched from Authentik and then
+  // overwrote most fields with these same local columns). Reading local:
+  //   - removes a live Authentik read on every page load and every search
+  //     keystroke (the whole point of the rate-limiting/scaling work), and
+  //     makes the page independent of Authentik availability;
+  //   - lets pagination, search, and directory-scope narrowing all run in
+  //     SQL, so `pagination.total` is now an EXACT post-filter/post-scope
+  //     count (the old Authentik `count` over-counted -- it included
+  //     ignored-prefix and still-`internal`-typed device rows the list then
+  //     dropped in JS, a documented compromise now eliminated);
+  //   - mirrors `GET /api/users/me`, already migrated from live Authentik to
+  //     the `user_cache`-backed `req.user` for the same reasons.
+  // The one behavioural trade-off: a user created DIRECTLY in Authentik
+  // (out of band) appears only after the next sync (<= SYNC_INTERVAL_MINUTES,
+  // default 10). This app is the normal creation path (it writes the local
+  // row synchronously at create time), so that gap only affects out-of-band
+  // Authentik creates.
   try {
-    const { page, pageSize } = req.pagination;
-    // Pagination follow-up: `search` narrows the list server-side via
-    // Authentik's own `search` query param (confirmed live: matches a
-    // substring across username/name/email), the same
-    // `req.query.search`-straight-through shape `GET /api/devices`
-    // already uses. No validation/sanitization here -- it is forwarded
-    // as an opaque search TERM, never interpolated into SQL or a URL by
-    // hand (see `AuthentikService.getUsers`'s own doc comment on why it
-    // uses axios's `params` object instead of string interpolation).
+    const { page, pageSize, offset } = req.pagination;
     const { search } = req.query;
-    const { results: authentikUsers, count: totalUsers } = await authentikService.getUsers({ page, pageSize, search });
+    const searchTerm = typeof search === 'string' ? search.trim() : '';
+    const searchPattern = searchTerm ? `%${searchTerm}%` : null;
 
-    const authentikUserIds = authentikUsers.map((user) => user.pk);
+    // Large-directory filters (both optional, both applied IN SQL before the
+    // COUNT and the LIMIT so the exact total and pagination stay correct):
+    //
+    //   teamId          -- narrow to a single DIRECT-membership team. Parsed to
+    //                      a positive integer or null; a non-numeric/absent
+    //                      value means "all teams" (no narrowing). This only
+    //                      ever NARROWS what the caller can already see -- the
+    //                      directory-scope disjunction below still applies, so
+    //                      passing a teamId outside the caller's scope yields
+    //                      an empty page, never a widening.
+    //   lastNameInitial -- alphabet-bar filter. A single letter A-Z (case-
+    //                      insensitive) matches `last_name` beginning with that
+    //                      letter; the literal '#' matches every row whose
+    //                      last_name does NOT begin with an ASCII letter
+    //                      (null, empty, or a digit/symbol/non-Latin initial),
+    //                      so the buckets partition the whole set. Any other
+    //                      value is ignored (no narrowing).
+    const teamIdRaw = req.query.teamId;
+    const parsedTeamId = /^\d+$/.test(String(teamIdRaw ?? '')) ? parseInt(teamIdRaw, 10) : null;
+    const teamId = parsedTeamId && parsedTeamId > 0 ? parsedTeamId : null;
 
-    // Map of authentik_user_id -> team_name, built from the single batched
-    // query below. Defaults to an empty map (all users get team_name: null)
-    // when there are no users to look up, avoiding an unnecessary query.
-    const teamNameByAuthentikUserId = new Map();
-    // Requirement 27.9: authentik_user_id -> is_team_device, built from the
-    // SAME batched query below, used to exclude Team_Owned_Device rows
-    // from the response after the map is built.
-    const isTeamDeviceByAuthentikUserId = new Map();
-    // device-management task 15.4: authentik_user_id -> LOCAL `users.id`,
-    // built from the SAME batched query below. The user list is sourced from
-    // Authentik, so every row's `pk` is an AUTHENTIK id -- but local
-    // per-user resources (here: `GET /api/device-management/users/:userId/
-    // devices`, whose `:userId` is validated as an integer and matched
-    // against `tak_devices.user_id`, a FK to `users(id)`) are keyed on the
-    // LOCAL id. Projecting it here lets the Users view address those
-    // resources without a second round trip per row, and its absence (a
-    // user with no local `users` row yet) is exactly the signal that no
-    // local per-user resource can exist for that row.
-    const localUserIdByAuthentikUserId = new Map();
-    // Users-page-action-parity: authentik_user_id -> the user's DIRECT
-    // Membership team id (the same `tm.team_id`/`t.id` this query already
-    // joins to build `team_name`, just also projected as a raw id). The
-    // Users view's row actions (Edit via `PATCH /api/teams/:teamId/
-    // members/:userId`, and the Transfer dialog's source-team exclusion/
-    // display) need the ACTUAL team id, not only its rendered display
-    // string -- `team_name` alone cannot drive either. `null` for a user
-    // with no direct team membership, exactly like `team_name`.
-    const teamIdByAuthentikUserId = new Map();
-    // Users-page-action-parity: authentik_user_id -> the LOCAL editable
-    // fields the Member_List edit form (`MemberEditRow`) needs to pre-fill
-    // itself -- `first_name`/`last_name`/`tak_role`/`callsign_suffix` --
-    // sourced from the `users` row this query already joins via
-    // `tm.user_id = u.id`, rather than from Authentik's own payload
-    // (Authentik's `name`/`attributes` are a periodic-sync MIRROR of these
-    // same local columns per `authentikSync.js`, and `PATCH /api/teams/
-    // :teamId/members/:userId` writes to `users` directly -- so `users` is
-    // the authoritative, freshest copy). `null` for a user with no local
-    // `users` row, exactly like `local_user_id`.
-    const memberEditFieldsByAuthentikUserId = new Map();
-    // account-lifecycle-management: authentik_user_id -> the local
-    // `users.account_status`/`username` pair, sourced from the SAME
-    // batched query below rather than a second lookup. `account_status`
-    // drives the Suspend/Unsuspend action's icon/label/mode on this page
-    // (mirroring `TeamDetail.jsx`'s Member_List, which already carries
-    // it via `Team.getMembers`'s `SELECT u.*`), and `username` is the
-    // value `SuspendAccountDialog`'s type-to-confirm input requires for
-    // `mode="suspend"` -- present for BOTH a human row and a
-    // Team_Owned_Device row, unlike `email`, which the
-    // Device_Email_Null_Invariant allows to be null for a device. `null`
-    // for a user with no local `users` row, exactly like `local_user_id`.
-    const accountLifecycleFieldsByAuthentikUserId = new Map();
-    // takserver-enrollment Requirement 13.2/13.6: authentik_user_id ->
-    // live certificate count, built from the SAME batched query below via
-    // an additional `certs` derived-table LEFT JOIN keyed on `u.id`. A
-    // `tak_devices` row's mere existence (with `revoked = false`) IS what
-    // "live certificate" means -- `device-management` Requirement 17
-    // deletes every row whose underlying certificate is no longer live on
-    // each fully-successful sync, so counting rows needs no further
-    // filtering. Projecting it here, exactly like `local_user_id` above,
-    // lets the Users view render the Multiple_Certificate_Warning without
-    // a second round trip per row; it is NOT flag-gated by
-    // `isDeviceMgmtEnabled()` because while device-management is off
-    // nothing populates `tak_devices`, so every count is already zero.
-    const liveCertificateCountByAuthentikUserId = new Map();
-    // Requirement 11.2/11.3: authentik_user_id -> the local scoping facts,
-    // built from the SAME batched query below. Each entry carries the
-    // candidate's Direct_Membership Organisation id (the root of its
-    // Ancestor_Chain, projected from the existing `team_root` CTE) so the
-    // scoping predicate can run without an extra round trip, along with the
-    // candidate's `origin_org_id` provenance (Requirement 13.6).
-    const factsByAuthentikUserId = new Map();
+    const initialRaw = typeof req.query.lastNameInitial === 'string' ? req.query.lastNameInitial.trim() : '';
+    // A single A-Z letter, or '#' for the non-alphabetic bucket. Anything else
+    // (including '') disables the filter.
+    const lastNameInitial = /^[A-Za-z]$/.test(initialRaw)
+      ? initialRaw.toUpperCase()
+      : initialRaw === '#'
+        ? '#'
+        : null;
 
-    if (authentikUserIds.length > 0) {
-      const teamNameResult = await pool.query(`
-        WITH RECURSIVE team_root AS (
-          SELECT id AS team_id, id AS root_id, name AS root_name,
-                 callsign_prefix AS root_callsign_prefix, parent_team_id
-          FROM teams
-          UNION ALL
-          SELECT tr.team_id, p.id AS root_id, p.name AS root_name,
-                 p.callsign_prefix AS root_callsign_prefix, p.parent_team_id
-          FROM team_root tr
-          JOIN teams p ON p.id = tr.parent_team_id
-          WHERE tr.parent_team_id IS NOT NULL
-        )
-        SELECT u.authentik_user_id AS authentik_user_id,
-               u.id AS local_user_id,
-               u.is_team_device AS is_team_device,
-               u.origin_org_id AS origin_org_id,
-               u.first_name AS local_first_name,
-               u.last_name AS local_last_name,
-               u.tak_role AS local_tak_role,
-               u.callsign_suffix AS local_callsign_suffix,
-               u.username AS local_username,
-               u.account_status AS local_account_status,
-               root.root_id AS direct_membership_org_id,
-               t.id AS team_id,
-               CASE
-                 WHEN t.parent_team_id IS NOT NULL THEN
-                   COALESCE(root.root_callsign_prefix, root.root_name, '') || ' - ' || t.name
-                 ELSE t.name
-               END AS team_name,
-               COALESCE(certs.live_certificate_count, 0) AS live_certificate_count
+    // Directory-scope visibility (Requirement 8/9/10). A Global_Manager is
+    // UNSCOPED (no narrowing); a scoped caller narrows to their
+    // Scoped_Organisations by provenance, direct-membership org, OR
+    // allowed-email-domain -- fail-closed: an empty scope yields empty
+    // predicates (`= ANY('{}')`/`LIKE ANY('{}')` are both false), so the
+    // page is empty rather than everyone. This is the SAME disjunction the
+    // pure `isCandidateVisible` predicate enforces; it is pushed into SQL
+    // here so pagination and the exact `total` are correct, and the pure
+    // predicate is then re-run over the returned page as a belt-and-braces
+    // pass (per directoryScope.js's own "SQL pre-narrows, the predicate
+    // decides" contract).
+    const scope = await DirectoryScopeService.resolveScope(req.user);
+    const isUnscoped = scope === DirectoryScopeService.UNSCOPED;
+    const scopeOrgIds = isUnscoped ? [] : scope.organisationIds;
+    const scopeDomainPatterns = isUnscoped ? [] : buildEmailDomainLikePatterns(scope);
+
+    // Ignored-prefix usernames (AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES,
+    // e.g. `akadmin`/`etl-`) are excluded IN SQL here -- built as escaped
+    // `prefix%` LIKE patterns -- rather than filtered in JS after the fact,
+    // so the count and pagination stay exact. `escapeLikePattern` neutralises
+    // any LIKE metacharacter in a configured prefix. An empty list yields an
+    // empty pattern array, and `username LIKE ANY('{}')` is false, so nothing
+    // is excluded on that basis (the unset-variable default).
+    const ignoredPrefixPatterns = getIgnoredUsernamePrefixes().map(
+      (prefix) => `${escapeLikePattern(prefix)}%`
+    );
+
+    // One CTE chain, sourced entirely from the local DB:
+    //   base      -- every candidate `users` row joined to its cache row,
+    //                its DIRECT team membership (and that team's Organisation
+    //                root via team_root), and its live-certificate count,
+    //                with all filters (device/orphaned/ignored-prefix/search/
+    //                scope) applied so both the count and the page derive from
+    //                the SAME filtered set.
+    //   total     -- COUNT(*) over base (exact).
+    //   page      -- base ORDER BY/LIMIT/OFFSET for this page.
+    const params = [
+      searchPattern, // $1
+      ignoredPrefixPatterns, // $2
+      isUnscoped, // $3
+      scopeOrgIds, // $4  (int[])
+      scopeDomainPatterns, // $5 (text[])
+      pageSize, // $6
+      offset, // $7
+      teamId, // $8  (int | null) -- direct-membership team filter
+      lastNameInitial // $9  (text | null) -- 'A'..'Z' letter, '#', or null
+    ];
+
+    const listResult = await pool.query(
+      `
+      WITH RECURSIVE team_root AS (
+        ${DirectoryScopeService.TEAM_ROOT_CTE}
+      ),
+      base AS (
+        SELECT
+          u.authentik_user_id AS pk,
+          u.id AS local_user_id,
+          u.username AS username,
+          u.email AS email,
+          u.first_name AS first_name,
+          u.last_name AS last_name,
+          u.is_active AS is_active,
+          u.tak_role AS tak_role,
+          u.callsign_suffix AS callsign_suffix,
+          u.account_status AS account_status,
+          u.origin_org_id AS origin_org_id,
+          uc.tak_callsign AS tak_callsign,
+          uc.tak_color AS tak_color,
+          uc.last_login AS last_login,
+          t.id AS team_id,
+          root.root_id AS direct_membership_org_id,
+          CASE
+            WHEN t.parent_team_id IS NOT NULL THEN
+              COALESCE(root.root_callsign_prefix, root.root_name, '') || ' - ' || t.name
+            ELSE t.name
+          END AS team_name,
+          COALESCE(certs.live_certificate_count, 0) AS live_certificate_count
         FROM users u
-        LEFT JOIN team_memberships tm ON u.id = tm.user_id AND tm.inherited_from_team_id IS NULL
+        LEFT JOIN user_cache uc ON uc.authentik_id = u.authentik_user_id::text
+        LEFT JOIN team_memberships tm ON tm.user_id = u.id AND tm.inherited_from_team_id IS NULL
         LEFT JOIN teams t ON tm.team_id = t.id
         LEFT JOIN team_root root ON root.team_id = t.id AND root.parent_team_id IS NULL
         LEFT JOIN (
@@ -292,187 +257,119 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
           WHERE user_id IS NOT NULL AND revoked = false
           GROUP BY user_id
         ) certs ON certs.user_id = u.id
-        WHERE u.authentik_user_id = ANY($1)
-      `, [authentikUserIds]);
+        WHERE u.is_team_device = false
+          AND u.account_status <> 'orphaned'
+          AND NOT (u.username LIKE ANY($2::text[]))
+          AND (
+            $1::text IS NULL
+            OR u.username ILIKE $1
+            OR u.email ILIKE $1
+            OR u.first_name ILIKE $1
+            OR u.last_name ILIKE $1
+          )
+          AND (
+            $3::boolean = true
+            OR COALESCE(u.origin_org_id = ANY($4::int[]), false)
+            OR COALESCE(root.root_id = ANY($4::int[]), false)
+            OR COALESCE(u.email ILIKE ANY($5::text[]), false)
+          )
+          -- teamId filter ($8): NULL disables it (all teams). Otherwise narrow
+          -- to the caller's chosen DIRECT-membership team. This is applied AND
+          -- alongside the scope disjunction above, so it can only narrow, never
+          -- widen, what the caller may see.
+          AND (
+            $8::int IS NULL
+            OR t.id = $8::int
+          )
+          -- lastNameInitial filter ($9): NULL disables it. A letter matches a
+          -- last_name beginning with it (case-insensitively; a single [A-Z]
+          -- letter is safe as a LIKE prefix since it carries no LIKE
+          -- metacharacters). '#' is the complement bucket: every row whose
+          -- last_name does NOT begin with an ASCII letter (NULL/empty/digit/
+          -- symbol/non-Latin), so letters + '#' partition the whole set.
+          AND (
+            $9::text IS NULL
+            OR ($9 <> '#' AND u.last_name ILIKE $9 || '%')
+            OR ($9 = '#' AND (u.last_name IS NULL OR u.last_name !~ '^[A-Za-z]'))
+          )
+      ),
+      counted AS (
+        SELECT COUNT(*)::int AS total FROM base
+      )
+      SELECT base.*, (SELECT total FROM counted) AS total_count
+      FROM base
+      ORDER BY base.username ASC
+      LIMIT $6 OFFSET $7
+      `,
+      params
+    );
 
-      for (const row of teamNameResult.rows) {
-        teamNameByAuthentikUserId.set(row.authentik_user_id, row.team_name);
-        isTeamDeviceByAuthentikUserId.set(row.authentik_user_id, row.is_team_device === true);
-        localUserIdByAuthentikUserId.set(row.authentik_user_id, row.local_user_id ?? null);
-        liveCertificateCountByAuthentikUserId.set(row.authentik_user_id, row.live_certificate_count ?? 0);
-        teamIdByAuthentikUserId.set(row.authentik_user_id, row.team_id ?? null);
-        memberEditFieldsByAuthentikUserId.set(row.authentik_user_id, {
-          first_name: row.local_first_name ?? null,
-          last_name: row.local_last_name ?? null,
-          tak_role: row.local_tak_role ?? null,
-          callsign_suffix: row.local_callsign_suffix ?? null,
-        });
-        accountLifecycleFieldsByAuthentikUserId.set(row.authentik_user_id, {
-          account_status: row.local_account_status ?? null,
-          username: row.local_username ?? null,
-        });
-        // The `users` row exists locally, so its email/first_name are known,
-        // but scoping only needs the org facts here; the email a candidate is
-        // matched on comes from the Authentik payload in `toFacts` below,
-        // which is the only email a candidate WITHOUT a local row has.
-        factsByAuthentikUserId.set(row.authentik_user_id, {
-          originOrgId: row.origin_org_id ?? null,
-          directMembershipOrgId: row.direct_membership_org_id ?? null,
-        });
-      }
+    const rows = listResult.rows;
+    const totalUsers = rows.length > 0 ? Number(rows[0].total_count) : 0;
+
+    // Belt-and-braces predicate pass over the returned page (never widens
+    // beyond the SQL scope; mirrors listAllDevices / GET /api/users/available).
+    // Skipped entirely for a Global_Manager (UNSCOPED), matching the existing
+    // routes' own short-circuit.
+    let scopedRows = rows;
+    if (!isUnscoped) {
+      const { visible } = partitionCandidates(scope, rows, (row) => ({
+        email: row.email,
+        originOrgId: row.origin_org_id ?? null,
+        directMembershipOrgId: row.direct_membership_org_id ?? null
+      }));
+      scopedRows = visible;
     }
 
-    // No further async DB calls needed per user; attach each user's
-    // team_name synchronously from the lookup map built above (defaulting
-    // to null for a user with no direct team membership, matching the
-    // previous per-user fallback behavior), and drop any user whose local
-    // `users` row has `is_team_device = true` (Requirement 27.9). A user
-    // absent from the map (no corresponding local `users` row at all)
-    // defaults to `false` via the `=== true` comparison above and is
-    // therefore never excluded on that basis alone.
-    // Bugfix: reuses the SAME `AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES`
-    // predicate `authentikSync.js` already applies to decide which
-    // Authentik accounts get materialized locally (ETL/service accounts,
-    // and now also admin accounts like `akadmin`/`ckadmin` an operator
-    // configures) -- this is the SAME class of "administrative/service
-    // account that should never appear as a manageable TAK Team Manager
-    // user" the sync-skip already exists for, and this route was the one
-    // remaining place such an account was still visible: it fetches
-    // directly from Authentik's `/core/users/?type=internal` and does
-    // not consult the local `users` table's rows for exclusion (only for
-    // the `is_team_device` cross-reference below, which is a different
-    // condition). Filtering here, in-memory over the current page (like
-    // the `is_team_device` filter immediately below it), is therefore the
-    // only way to keep this account out of the Users view -- there is no
-    // Authentik-side query parameter for "exclude these usernames".
-    const usersWithTeams = authentikUsers
-      .filter((user) => !isIgnoredAuthentikUsername(user.username))
-      .filter((user) => !isTeamDeviceByAuthentikUserId.get(user.pk))
-      .map((user) => ({
-        ...user,
-        team_name: teamNameByAuthentikUserId.get(user.pk) ?? null,
-        // device-management task 15.4: additive, and null for a user with no
-        // local `users` row. `pk` (Authentik) is left untouched, so every
-        // existing consumer of this response is unaffected.
-        local_user_id: localUserIdByAuthentikUserId.get(user.pk) ?? null,
-        // takserver-enrollment Requirement 13.2/13.6: additive, and 0 for a
-        // user absent from the batched query result (no local `users` row)
-        // or with zero live `tak_devices` rows -- never null/undefined, so
-        // the Multiple_Certificate_Warning can compare against a number
-        // unconditionally.
-        live_certificate_count: liveCertificateCountByAuthentikUserId.get(user.pk) ?? 0,
-        // Users-page-action-parity: additive, and null for a user with no
-        // direct team membership -- same fallback shape as `team_name`,
-        // which this is the raw id counterpart of.
-        team_id: teamIdByAuthentikUserId.get(user.pk) ?? null,
-        // Users-page-action-parity: additive, and null (each field) for a
-        // user with no local `users` row. These are the LOCAL columns the
-        // Member_List edit form pre-fills from -- deliberately spread
-        // AFTER `...user` so they win over anything same-named Authentik
-        // happened to return (Authentik's own payload carries no
-        // `tak_role`/`callsign_suffix` at all and no `first_name`/
-        // `last_name` split, only `name`, so there is no real collision
-        // today; this ordering is a documented safeguard against that
-        // changing silently).
-        ...(memberEditFieldsByAuthentikUserId.get(user.pk) ?? {
-          first_name: null,
-          last_name: null,
-          tak_role: null,
-          callsign_suffix: null,
-        }),
-        // account-lifecycle-management: additive, defaulting to null for
-        // a user with no local `users` row -- same fallback shape as
-        // every other local-column field above. Spread AFTER `...user`
-        // for the same documented reason as memberEditFieldsByAuthentikUserId's
-        // own spread: Authentik's own payload carries no `account_status`
-        // at all and its `username` is the SAME value (this app's sync
-        // writes Authentik's username FROM the local column, never the
-        // reverse), so there is no real collision today, but the ordering
-        // guards against that changing silently.
-        ...(accountLifecycleFieldsByAuthentikUserId.get(user.pk) ?? {
-          account_status: null,
-          username: null,
-        })
-      }));
-
-    // Users-page-action-parity: `can_manage` -- whether THIS caller may
-    // act on THIS row's own team (Edit/Transfer/Delete), independent of
-    // the `DirectoryScopeService` VISIBILITY scoping resolved just below.
-    // Visibility (who appears in the list) and management authority (which
-    // visible rows carry action buttons) are deliberately separate
-    // questions: `/users` must not be a wider-reaching escape hatch than
-    // `/teams`' own Member_List, where a Team_Admin can only edit/transfer/
-    // remove a member of a team they administer (`Team.isAdmin`) or one of
-    // its descendants.
-    //
-    // A Global_Manager can manage every row -- resolved from the SAME
-    // cached `is_global_manager` attribute `DirectoryScopeService
-    // .resolveScope` and the `user:read:team_admin` authorize.js resolver
-    // both already key off, so all three cannot disagree about who one is
-    // -- with no query issued. A non-Global_Manager gets ONE query (`Team
-    // .getManagedTeamIds`, resolved once per request, not once per row) and
-    // `can_manage` becomes a Set-membership test against each row's own
-    // `team_id`. A row with no direct team membership (`team_id: null`) is
-    // never manageable this way -- `Set.prototype.has(null)` is false --
-    // matching `MemberActions`' own `hasTeam` gating on the client.
+    // can_manage, resolved ONCE for the whole page (never per row), exactly
+    // as the old implementation did: a Global_Manager manages every row; a
+    // scoped caller manages a row iff its team is in Team.getManagedTeamIds.
     const managedTeamIds = req.user && req.user.is_global_manager
       ? null
       : await Team.getManagedTeamIds(req.user && req.user.userId);
 
-    const usersWithManagement = usersWithTeams.map((user) => ({
-      ...user,
-      can_manage: managedTeamIds === null ? true : managedTeamIds.has(user.team_id)
-    }));
-
-    // Requirement 10: a Global_Manager's response is not scoped at all.
-    // `resolveScope` returns the frozen UNSCOPED sentinel for that caller, in
-    // which case the EXISTING behaviour is preserved verbatim -- no scoping
-    // predicate and no scope log line.
-    const scope = await DirectoryScopeService.resolveScope(req.user);
-
-    if (scope === DirectoryScopeService.UNSCOPED) {
-      res.json({
-        users: usersWithManagement,
-        pagination: { page, pageSize, total: totalUsers }
-      });
-      return;
-    }
-
-    // Scoped (non-Global_Manager) caller. No SQL narrowing is possible here --
-    // the page is Authentik's -- so the predicate runs in JS over the page.
-    // The Team_Owned_Device exclusion has ALREADY happened above (Requirement
-    // 11.5), so `partitionCandidates` runs over `usersWithManagement` and its
-    // `excludedCount` counts users excluded BY THE SCOPING, not by the device
-    // filter (Requirement 14.1).
-    //
-    // A candidate with NO local `users` row is absent from
-    // `factsByAuthentikUserId`; it takes its email from the Authentik payload
-    // and carries `null` for both org fields, so domain matching is the only
-    // condition that can admit it (Requirement 13.7).
-    const toFacts = (user) => {
-      const local = factsByAuthentikUserId.get(user.pk);
+    // Compose the response rows in the SAME shape the client already
+    // consumes (Users.jsx): `pk` stays the AUTHENTIK id, `name` is the
+    // composed display name (Authentik used to supply it; composed here from
+    // the local first/last name), and every decoration field is preserved.
+    const users = scopedRows.map((row) => {
+      const composedName = `${row.first_name || ''}${row.last_name ? ` ${row.last_name}` : ''}`.trim();
       return {
-        email: user.email,
-        originOrgId: local ? local.originOrgId : null,
-        directMembershipOrgId: local ? local.directMembershipOrgId : null,
+        pk: row.pk,
+        username: row.username,
+        email: row.email,
+        name: composedName || row.username,
+        is_active: row.is_active,
+        first_name: row.first_name ?? null,
+        last_name: row.last_name ?? null,
+        tak_role: row.tak_role ?? null,
+        callsign_suffix: row.callsign_suffix ?? null,
+        tak_callsign: row.tak_callsign ?? null,
+        tak_color: row.tak_color ?? null,
+        // Cached mirror of Authentik's last_login (user_cache.last_login,
+        // refreshed each periodic sync). null => never logged in / not yet
+        // synced; the /users page renders that as "Never".
+        last_login: row.last_login ?? null,
+        account_status: row.account_status ?? null,
+        team_name: row.team_name ?? null,
+        team_id: row.team_id ?? null,
+        local_user_id: row.local_user_id ?? null,
+        live_certificate_count: row.live_certificate_count ?? 0,
+        can_manage: managedTeamIds === null ? true : managedTeamIds.has(row.team_id)
       };
-    };
-    const { visible, excludedCount } = partitionCandidates(scope, usersWithManagement, toFacts);
-
-    DirectoryScopeService.logScopedResponse('GET /api/users', {
-      userId: req.user.userId,
-      scope,
-      excludedCount,
-      returnedCount: visible.length,
     });
 
-    // The response keeps its existing shape (Requirement 10.3: the `scope`
-    // object is `/available` only). `pagination.total` continues to derive from
-    // Authentik's own `count` and is NOT adjusted downward -- the same
-    // documented compromise the `is_team_device` filter already carries
-    // (Requirement 11.4).
+    if (!isUnscoped) {
+      DirectoryScopeService.logScopedResponse('GET /api/users', {
+        userId: req.user.userId,
+        scope,
+        excludedCount: rows.length - scopedRows.length,
+        returnedCount: users.length
+      });
+    }
+
     res.json({
-      users: visible,
+      users,
       pagination: { page, pageSize, total: totalUsers }
     });
   } catch (error) {

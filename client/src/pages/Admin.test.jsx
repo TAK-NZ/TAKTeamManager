@@ -161,10 +161,12 @@ describe('Admin.jsx non-table Date_Render_Positions (task 6.7)', () => {
     expect(adminSource).toMatch(
       /import\s+FormattedDate[^\n]*from\s+'\.\.\/components\/FormattedDate'/
     )
-    expect(occurrences('<FormattedDate')).toBe(2)
-    // The two positions this page owns, named by the value each renders.
+    expect(occurrences('<FormattedDate')).toBe(3)
+    // The three positions this page owns, named by the value each renders.
+    // The third is the Background Sync card's sync-worker last-heartbeat time.
     expect(normalized).toContain('<FormattedDate value={syncStatus.last_sync}')
     expect(normalized).toContain('<FormattedDate value={templateUpdatedAt}')
+    expect(normalized).toContain('<FormattedDate value={syncHealth.worker.lastHeartbeatAt}')
   })
 
   it('leaves no direct Date_Format_Helper call behind (Criteria 2.1, 2.12)', () => {
@@ -177,13 +179,13 @@ describe('Admin.jsx non-table Date_Render_Positions (task 6.7)', () => {
   })
 
   it('gives both the same Sideways_Tooltip_Placement as the table positions (Criterion 3.8)', () => {
-    // Both are leading-half positions, so both open rightward. One tooltip
+    // All are leading-half positions, so all open rightward. One tooltip
     // behaviour for the application, not one per surrounding element type.
-    expect(occurrences('side={TOOLTIP_SIDES.RIGHT}')).toBe(2)
+    expect(occurrences('side={TOOLTIP_SIDES.RIGHT}')).toBe(3)
     expect(normalized).not.toContain('TOOLTIP_SIDES.LEFT')
-    // Both render a timestamp, so both anchor their phrase on the value's own
+    // All render a timestamp, so each anchors its phrase on the value's own
     // instant rather than on a Midnight_Anchor (Criterion 4.5).
-    expect(occurrences('precision={DATE_PRECISION.DATE_TIME}')).toBe(2)
+    expect(occurrences('precision={DATE_PRECISION.DATE_TIME}')).toBe(3)
     // Matched WITH the closing brace: `DATE_PRECISION.DATE` is a prefix of
     // `DATE_PRECISION.DATE_TIME`, so the bare token matches both.
     expect(normalized).not.toContain('precision={DATE_PRECISION.DATE}')
@@ -202,6 +204,41 @@ describe('Admin.jsx non-table Date_Render_Positions (task 6.7)', () => {
 // adminAPI.getStats(). Source-contract assertions, matching this file's
 // established convention (Admin.jsx is a large stateful page with no
 // exported pure helpers for this UI).
+// Background Sync card: surfaces how far behind the background processes are
+// (sync_operations backlog depth + oldest-pending age + sync-worker
+// heartbeat), via GET /api/admin/sync-status (adminAPI.getSyncStatus). Same
+// source-contract convention as the rest of this file.
+describe('Admin.jsx Background Sync card', () => {
+  it('fetches background-process health via adminAPI.getSyncStatus()', () => {
+    expect(adminSource).toContain('adminAPI.getSyncStatus()')
+    // A dedicated auto-refreshing fetcher, wired like fetchStats/fetchSyncStatus.
+    expect(adminSource).toContain('const fetchSyncHealth = useCallback(')
+  })
+
+  it('auto-refreshes the sync health on the visibility-paused interval', () => {
+    // fetchSyncHealth is called both on first load and inside the refresh
+    // closure passed to startVisibilityPausedRefresh.
+    const refreshBlock = normalized.slice(normalized.indexOf('const refresh = () => {'))
+    expect(refreshBlock).toContain('fetchSyncHealth()')
+  })
+
+  it('renders the queued-operations depth, oldest-queued age, and worker liveness', () => {
+    expect(normalized).toContain('Queued operations')
+    expect(normalized).toContain('Oldest queued')
+    expect(normalized).toContain('Sync worker')
+    // Worker liveness carried in TEXT (not colour alone).
+    expect(adminSource).toContain('Not responding')
+    expect(adminSource).toContain('Healthy')
+    // Uses the pure age formatter for the oldest-queued figure.
+    expect(adminSource).toContain('formatQueueAge(')
+  })
+
+  it('surfaces the user_sync note (the completeness-guard sweep-skipped message)', () => {
+    expect(normalized).toContain('Last sync note')
+    expect(adminSource).toContain('syncHealth.userSync?.message')
+  })
+})
+
 describe('Admin.jsx stat cards (Total Team Devices, Total Channels)', () => {
   it('fetches the aggregate counts via adminAPI.getStats() alongside the existing users/teams calls', () => {
     expect(adminSource).toContain("import { configAPI, usersAPI, teamsAPI, syncAPI, bulkImportAPI, communicationsAPI, settingsAPI, adminAPI } from '../services/api'")

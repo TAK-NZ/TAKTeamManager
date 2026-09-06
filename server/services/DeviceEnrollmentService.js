@@ -713,9 +713,29 @@ class DeviceEnrollmentService {
    * @param {{page: number, pageSize: number, search?: string, expiringOnly?: boolean}} pageParams
    * @returns {Promise<{devices: Array<{deviceUserId: number, username: string, deviceLabel: string|null, callsignSuffix: string|null, takRole: string, callsign: string|null, teamId: number|null, teamName: string|null, createdAt: string, accountStatus: 'active'|'suspended'|'orphaned', liveCertificateCount: number, expiresAt: string|null, canManage: boolean}>, pagination: {page: number, pageSize: number, total: number}}>}
    */
-  static async listAllDevices(actingUser, { page, pageSize, search, expiringOnly = false } = {}) {
+  static async listAllDevices(actingUser, { page, pageSize, search, expiringOnly = false, teamId, labelInitial } = {}) {
     const offset = (page - 1) * pageSize;
     const searchTerm = typeof search === 'string' ? search.trim() : '';
+
+    // Large-directory filters, mirroring GET /api/users' teamId +
+    // lastNameInitial (a device inventory can also run to thousands). Both
+    // are applied IN SQL before the windowed COUNT and the LIMIT, so the
+    // exact total and pagination stay correct, and both only ever NARROW
+    // within the caller's existing directory scope.
+    //   teamId       -- a device's DIRECT-membership team (a Team_Owned_Device
+    //                   always has exactly one). Positive int or null.
+    //   labelInitial -- alphabet-bar filter on the device_label initial: a
+    //                   single letter A-Z (case-insensitive), or '#' for the
+    //                   complement bucket (label null/empty or not beginning
+    //                   with an ASCII letter). Any other value is ignored.
+    const parsedTeamId = /^\d+$/.test(String(teamId ?? '')) ? parseInt(teamId, 10) : null;
+    const teamIdFilter = parsedTeamId && parsedTeamId > 0 ? parsedTeamId : null;
+    const initialRaw = typeof labelInitial === 'string' ? labelInitial.trim() : '';
+    const labelInitialFilter = /^[A-Za-z]$/.test(initialRaw)
+      ? initialRaw.toUpperCase()
+      : initialRaw === '#'
+        ? '#'
+        : null;
 
     const DEFAULT_EXPIRY_WARNING_DAYS = 30;
     const parsedExpiryWarningDays = parseInt(process.env.DEVICE_MGMT_EXPIRY_WARNING_DAYS, 10);
@@ -789,6 +809,18 @@ class DeviceEnrollmentService {
           -- than fetching every device to filter client-side.
           AND ($6::boolean = false OR certs.earliest_expires_at IS NOT NULL)
           AND ($6::boolean = false OR certs.earliest_expires_at <= NOW() + ($7::int * INTERVAL '1 day'))
+          -- teamId filter ($8): NULL disables it; otherwise narrow to the
+          -- device's direct-membership team (ANDed, so it only narrows).
+          AND ($8::int IS NULL OR tm.team_id = $8::int)
+          -- labelInitial filter ($9): NULL disables it. A letter matches a
+          -- device_label beginning with it; '#' is the complement bucket
+          -- (label null/empty or not starting with an ASCII letter), so
+          -- letters + '#' partition the whole set.
+          AND (
+            $9::text IS NULL
+            OR ($9 <> '#' AND u.device_label ILIKE $9 || '%')
+            OR ($9 = '#' AND (u.device_label IS NULL OR u.device_label !~ '^[A-Za-z]'))
+          )
       ),
       counted AS (
         SELECT c.*, COUNT(*) FILTER (WHERE $3::boolean OR c.in_scope) OVER () AS total_count
@@ -801,7 +833,7 @@ class DeviceEnrollmentService {
       LIMIT $4 OFFSET $5
     `;
 
-    params.push(isUnscoped, pageSize, offset, expiringOnly, expiryWarningDays);
+    params.push(isUnscoped, pageSize, offset, expiringOnly, expiryWarningDays, teamIdFilter, labelInitialFilter);
 
     const result = await pool.query(query, params);
 

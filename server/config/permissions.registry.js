@@ -553,6 +553,14 @@ const routes = {
   // Global_Manager-scoped view.
   'GET /api/admin/stats': ['admin:stats:read'],
 
+  // Background-process health for the /admin "Background Sync" card: the
+  // sync_operations queue backlog (depth + oldest-pending age), the user_sync
+  // sync_status row, and the sync-worker heartbeat liveness. Global_Manager-
+  // only via a dedicated 'admin:sync_status:read' identifier (NOT in
+  // roleDefaults.authenticated_user) — a deployment-wide operational view, the
+  // same gate shape as admin:stats:read / audit_log:read.
+  'GET /api/admin/sync-status': ['admin:sync_status:read'],
+
   // --- /api/openapi (server/routes/openapi.js) ---
   // Generated OpenAPI document (server/config/openapi.js), derived from
   // this registry and publicRoutes.js. Gated to 'docs:openapi:read'

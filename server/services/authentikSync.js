@@ -50,6 +50,13 @@ class AuthentikSyncService {
       let allUsers = [];
       let currentPage = 1;
       let hasMorePages = true;
+      // The total Authentik REPORTS for this fetch (DRF pagination `count`).
+      // Captured from whatever page carries it (kept as the last non-null
+      // value seen) so it can be compared against `allUsers.length` after the
+      // loop -- see the completeness guard below the loop. Stays null if
+      // Authentik never reports a count (older shapes / test doubles that mock
+      // `pagination: {}`), in which case the guard falls back to proceeding.
+      let reportedCount = null;
 
       // Fetch all users with pagination. Authentik's pagination metadata
       // lives under `response.data.pagination.next` (a page NUMBER), not
@@ -100,6 +107,13 @@ class AuthentikSyncService {
           { fetchedCount: response.data.results.length, totalFetched: allUsers.length },
           'Fetched a page of Authentik users'
         );
+
+        if (
+          response.data.pagination
+          && typeof response.data.pagination.count === 'number'
+        ) {
+          reportedCount = response.data.pagination.count;
+        }
 
         if (response.data.pagination && response.data.pagination.next) {
           currentPage = response.data.pagination.next;
@@ -154,12 +168,49 @@ class AuthentikSyncService {
       // `allUsers` is exactly the set this run's fetch returned; passing
       // anything less than the complete set would orphan every row this
       // run happened not to see.
-      await this.reconcileOrphanedAccounts(allUsers.map(u => String(u.pk)));
+      //
+      // COMPLETENESS GUARD (the live mass-false-orphan incident): the
+      // pagination loop terminates when `pagination.next` goes falsy, but a
+      // page can go missing WITHOUT the loop ever noticing -- an
+      // unhealthy/mid-upgrade Authentik can answer 200 with a short page or a
+      // prematurely-absent `next`, so the loop "cleanly" finishes with an
+      // INCOMPLETE `allUsers` that looks complete. Authentik reports the true
+      // total on every page as `pagination.count`; if that disagrees with what
+      // we actually accumulated, the fetch is NOT trustworthy as the complete
+      // set, and running the sweep against it would orphan every real user the
+      // short fetch missed (confirmed live: ~1100 real, still-existing accounts
+      // false-orphaned during a concurrent bulk import + DB upgrade). In that
+      // case we SKIP the sweep only -- the destructive, effectively one-way
+      // step -- while still having synced whatever users we did fetch to the
+      // cache above (that write is additive and self-correcting: it only writes
+      // rows it saw and never removes, so a partial sync is harmless and the
+      // next complete run fills the gaps). When Authentik reports no count at
+      // all (`reportedCount` stayed null), we fall back to the prior behaviour
+      // and run the sweep, since there is no signal to prove incompleteness.
+      const fetchComplete = reportedCount === null || allUsers.length === reportedCount;
+      let sweepSkippedMessage = null;
+      if (fetchComplete) {
+        await this.reconcileOrphanedAccounts(allUsers.map(u => String(u.pk)));
+      } else {
+        sweepSkippedMessage = `Reconciliation sweep skipped: incomplete fetch (${allUsers.length} of ${reportedCount})`;
+        logger.error(
+          { fetchedCount: allUsers.length, reportedCount },
+          'Reconciliation_Sweep: SKIPPED -- the paginated Authentik user fetch '
+            + 'was incomplete (accumulated count disagrees with the reported total); '
+            + 'refusing to orphan against a partial set. The cache sync still ran; '
+            + 'the sweep will run on the next fully-complete fetch.'
+        );
+      }
 
-      // Update sync status
+      // Update sync status. The cache sync itself succeeded, so status is
+      // 'success' either way -- but when the sweep was SKIPPED for an
+      // incomplete fetch, `error_message` carries that skip reason (instead of
+      // being cleared to NULL) so the anomaly stays visible to an operator on
+      // the Admin sync-status surface rather than being silently swallowed by a
+      // 'success' row.
       await db.query(
-        'UPDATE sync_status SET status = $1, records_synced = $2, error_message = NULL WHERE sync_type = $3',
-        ['success', syncedCount, 'user_sync']
+        'UPDATE sync_status SET status = $1, records_synced = $2, error_message = $3 WHERE sync_type = $4',
+        ['success', syncedCount, sweepSkippedMessage, 'user_sync']
       );
 
       this.lastSync = new Date();
@@ -545,13 +596,18 @@ class AuthentikSyncService {
       await db.query(`
         INSERT INTO user_cache (
           authentik_id, username, email, first_name, last_name, 
-          is_active, tak_role, tak_color, tak_callsign, groups, is_admin, is_team_device
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+          is_active, tak_role, tak_color, tak_callsign, groups, is_admin, is_team_device, last_login
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         ON CONFLICT (authentik_id) DO UPDATE SET
           username = EXCLUDED.username,
           email = EXCLUDED.email,
           groups = EXCLUDED.groups,
           is_admin = EXCLUDED.is_admin,
+          -- last_login is a cached MIRROR of Authentik's value and is inherently
+          -- mutable (advances on every login), so unlike the bootstrap-then-local
+          -- fields above it IS refreshed from EXCLUDED every sync. Authentik is
+          -- authoritative for it; there is no local write path that sets it.
+          last_login = EXCLUDED.last_login,
           updated_at = CURRENT_TIMESTAMP
       `, [
         user.pk,
@@ -570,7 +626,12 @@ class AuthentikSyncService {
         user.attributes?.takCallsign,
         groupNames,
         isAdmin,
-        isTeamDevice
+        isTeamDevice,
+        // last_login: Authentik's own field. `null` (never logged in) is a
+        // valid, expected value and is stored as-is; the /users page renders
+        // it as "Never". `?? null` normalises `undefined` (an older Authentik
+        // response shape omitting the field) to a real SQL NULL.
+        user.last_login ?? null
       ]);
 
       // --- Push local-authoritative attributes to Authentik when they differ ---
@@ -897,6 +958,25 @@ class AuthentikSyncService {
   }
 
   startPeriodicSync() {
+    // Operational kill-switch for the periodic user sync AND its
+    // Reconciliation_Sweep. This is an opt-OUT, not the usual `'true'`-only
+    // feature-flag: the sync is ON by default (an absent or any-other value
+    // leaves it running, preserving existing behaviour), and is disabled ONLY
+    // when AUTHENTIK_SYNC_ENABLED is explicitly the string 'false'. It exists
+    // so an operator can halt the sweep during a bulk import or an Authentik
+    // maintenance window, where a partial/errored Authentik fetch would
+    // otherwise drive reconcileOrphanedAccounts to false-orphan real users
+    // (the documented pagination-race incident this file already carries
+    // several comments about). Disabling here stops the initial run and the
+    // recurring interval both -- nothing schedules the sweep if this returns.
+    if (process.env.AUTHENTIK_SYNC_ENABLED === 'false') {
+      logger.warn(
+        'Periodic Authentik sync DISABLED via AUTHENTIK_SYNC_ENABLED=false; '
+          + 'the reconciliation sweep will not run until it is re-enabled'
+      );
+      return;
+    }
+
     // Clamped to a 1-minute floor, mirroring the guard already used for the
     // Sync_Worker's own scheduled jobs (ExpiryScheduler, RetentionCleanupJob,
     // SubscriptionPoller, DeviceSync, AdminCredentialRefreshJob): a

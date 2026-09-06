@@ -28,5 +28,5 @@ Production hostname: **`team.tak.nz`**. One SPA served from one origin — Team 
 - Never delete a federated identity to achieve a local outcome. Deleting an Authentik user is unrecoverable.
 - Authorization is deny-by-default. An unmapped route is denied, not permitted.
 - Feature flags are inert by default and true only for the exact string `'true'`.
-- State a user must perceive is carried by TEXT, never colour alone.
+- State a user must perceive is carried by TEXT or by an icon that has an accessible name (e.g. an `sr-only` label or `aria-label`), never colour alone. Colour may reinforce a state but is never the sole signal, because it reaches neither assistive technology nor a colourblind user.
 - A teamless user's Callsign/Team_Color is the literal string `'None'`, never blank and never a real assignable colour name. Colours like `'White'` are deployment-configured (see `TeamFormDialog.jsx`'s colour list) and could collide with "no team" if used as the empty-state fallback.

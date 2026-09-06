@@ -58,8 +58,12 @@ describe('desiredTeamChannelMembers', () => {
     expect(members).toEqual(['10', '11']);
     const [sql, params] = mockQuery.mock.calls[0];
     expect(sql).toContain('FROM team_memberships');
-    expect(sql).toContain('is_active = true');
     expect(sql).toContain('authentik_user_id IS NOT NULL');
+    // Behaviour-preserving: the desired set deliberately does NOT filter on
+    // is_active, so a merely-deactivated but still-present member is NOT
+    // stripped from the group (matching the event path). Guard against the
+    // filter being reintroduced.
+    expect(sql).not.toContain('is_active');
     expect(params).toEqual([5]);
   });
 

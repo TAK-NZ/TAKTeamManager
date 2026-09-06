@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { UserGroupIcon, UsersIcon, CogIcon, CheckIcon, ArrowUpTrayIcon, ArrowDownTrayIcon, DocumentTextIcon, EnvelopeIcon, NoSymbolIcon, ArrowsRightLeftIcon, DevicePhoneMobileIcon, SignalIcon } from '@heroicons/react/24/outline'
 import { configAPI, usersAPI, teamsAPI, syncAPI, bulkImportAPI, communicationsAPI, settingsAPI, adminAPI } from '../services/api'
 import FormattedDate, { DATE_PRECISION, TOOLTIP_SIDES } from '../components/FormattedDate'
@@ -6,11 +6,22 @@ import { getVariableHints } from '../utils/templateVariableHints'
 import { buildTemplateUpdatePayload, validateTemplateDraft } from '../utils/templateUpdatePayload'
 import { unzipExportedArchive, isImportPayloadShape } from '../utils/settingsImportTransform'
 import ExcludedDomainsManager from '../components/ExcludedDomainsManager'
+import { formatQueueAge } from '../utils/formatQueueAge'
+// Keep the stat cards + sync-status current while the page is open, on the
+// same visibility-paused 60s interval the Dashboard cards use (shared util).
+// Only the read-only display data auto-refreshes; the editor/form surfaces
+// (site config, email templates, bulk import, export/import) deliberately do
+// NOT, so a background refresh can never disturb operator-in-progress input.
+import { startVisibilityPausedRefresh } from '../utils/visibilityPausedRefresh'
 
 export default function Admin({ user }) {
   const [stats, setStats] = useState({ totalUsers: 0, totalTeams: 0, totalDevices: 0, totalChannels: 0 })
   const [syncStatus, setSyncStatus] = useState(null)
   const [syncing, setSyncing] = useState(false)
+  // Background-process health for the "Background Sync" card (queue backlog
+  // depth + oldest-pending age, the user_sync row, worker heartbeat liveness).
+  // Auto-refreshed alongside the stat cards; never cleared on a failed refresh.
+  const [syncHealth, setSyncHealth] = useState(null)
   // --- Site Content editor state (dropdown-selector pattern, matching the
   // Email Templates tab below). `siteConfig` remains the single fetched list
   // (Requirement source of truth); `selectedConfigKey` is the one item
@@ -71,60 +82,78 @@ export default function Admin({ user }) {
   const [testEmailError, setTestEmailError] = useState(null)
   const [testEmailSending, setTestEmailSending] = useState(false)
   
+  // `fetchStats`/`fetchSyncStatus` are the ONLY two fetches on this page
+  // that auto-refresh (the read-only stat cards + sync status). They are
+  // hoisted to component scope as stable `useCallback`s so BOTH the
+  // first-load effect and the visibility-paused refresh effect below call the
+  // same function. Following the client-conventions refresh rules, neither
+  // raises a spinner (there is none for these cards) and neither CLEARS the
+  // last-good values on failure -- a failed background refresh just logs and
+  // leaves the previously-rendered numbers on screen.
+  //
+  // Every raw axios.* call in this file previously sent
+  // `Authorization: Bearer ${localStorage.getItem('token')}` -- but this app
+  // has never stored a token in localStorage (auth lives solely in the
+  // httpOnly `tak_session` cookie; see server/middleware/auth.js), so that
+  // header was always literally "Bearer null" and the session cookie was
+  // never sent, 401ing every call -- which is why the stats never loaded.
+  // Replaced throughout with the shared, correctly-configured `api` instance.
+  const fetchStats = useCallback(async () => {
+    try {
+      const [usersCountResponse, teamsResponse, adminStatsResponse] = await Promise.all([
+        // Bugfix: "Total Users" previously read GET /api/users' own
+        // pagination.total, which is Authentik's raw type=internal count
+        // -- it included AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES matches
+        // (e.g. etl- accounts) and still-internal-typed Team_Owned_Devices,
+        // both of which that endpoint's own list filters out but its total
+        // deliberately does not (see its doc comment). GET /api/users/count
+        // is a dedicated, exact, unpaginated count excluding both.
+        usersAPI.getCount(),
+        teamsAPI.getMyTeams(),
+        // Total Team Devices + Total Channels (team + global) -- a
+        // dedicated Global-Manager-only aggregate endpoint.
+        adminAPI.getStats()
+      ])
+
+      // teams.getMyTeams is paginated (default pageSize 50 -- see
+      // server/middleware/pagination.js) -- use pagination.total, not
+      // the returned array's .length, so this stat doesn't silently
+      // undercount once there are more than one page of teams.
+      setStats({
+        totalUsers: usersCountResponse.data.count ?? 0,
+        totalTeams: teamsResponse.data.pagination?.total ?? teamsResponse.data.teams?.length ?? 0,
+        totalDevices: adminStatsResponse.data.totalDevices ?? 0,
+        totalChannels: adminStatsResponse.data.totalChannels ?? 0
+      })
+    } catch (error) {
+      // Failed background/first refresh: leave the last-good counts on
+      // screen (never zero them), per the client-conventions refresh rule.
+      console.error('Failed to fetch stats:', error)
+    }
+  }, [])
+
+  const fetchSyncStatus = useCallback(async () => {
+    try {
+      const response = await syncAPI.getStatus()
+      setSyncStatus(response.data)
+    } catch (error) {
+      console.error('Failed to fetch sync status:', error)
+    }
+  }, [])
+
+  // Background-process health (queue backlog + worker heartbeat). Same refresh
+  // discipline as fetchStats/fetchSyncStatus: no spinner, and never clear the
+  // last-good value on a failed background refresh.
+  const fetchSyncHealth = useCallback(async () => {
+    try {
+      const response = await adminAPI.getSyncStatus()
+      setSyncHealth(response.data)
+    } catch (error) {
+      console.error('Failed to fetch background sync health:', error)
+    }
+  }, [])
+
   useEffect(() => {
-    // Every raw axios.* call in this file previously sent
-    // `Authorization: Bearer ${localStorage.getItem('token')}` -- but this
-    // app has never stored a token in localStorage (auth lives solely in
-    // the httpOnly `tak_session` cookie set by the server; see
-    // server/middleware/auth.js), so that header was always literally
-    // "Bearer null", and none of these raw calls set
-    // `withCredentials: true` either, so the real session cookie was never
-    // sent. Every one of these calls has been failing with 401 the entire
-    // time -- which is why the whole page's stats cards never actually
-    // loaded real data. Replaced throughout with the shared,
-    // correctly-configured `api` axios instance via its API wrapper
-    // functions.
-    const fetchStats = async () => {
-      try {
-        const [usersCountResponse, teamsResponse, adminStatsResponse] = await Promise.all([
-          // Bugfix: "Total Users" previously read GET /api/users' own
-          // pagination.total, which is Authentik's raw type=internal count
-          // -- it included AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES matches
-          // (e.g. etl- accounts) and still-internal-typed Team_Owned_Devices,
-          // both of which that endpoint's own list filters out but its total
-          // deliberately does not (see its doc comment). GET /api/users/count
-          // is a dedicated, exact, unpaginated count excluding both.
-          usersAPI.getCount(),
-          teamsAPI.getMyTeams(),
-          // Total Team Devices + Total Channels (team + global) -- a
-          // dedicated Global-Manager-only aggregate endpoint.
-          adminAPI.getStats()
-        ])
-
-        // teams.getMyTeams is paginated (default pageSize 50 -- see
-        // server/middleware/pagination.js) -- use pagination.total, not
-        // the returned array's .length, so this stat doesn't silently
-        // undercount once there are more than one page of teams.
-        setStats({
-          totalUsers: usersCountResponse.data.count ?? 0,
-          totalTeams: teamsResponse.data.pagination?.total ?? teamsResponse.data.teams?.length ?? 0,
-          totalDevices: adminStatsResponse.data.totalDevices ?? 0,
-          totalChannels: adminStatsResponse.data.totalChannels ?? 0
-        })
-      } catch (error) {
-        console.error('Failed to fetch stats:', error)
-      }
-    }
-
-    const fetchSyncStatus = async () => {
-      try {
-        const response = await syncAPI.getStatus()
-        setSyncStatus(response.data)
-      } catch (error) {
-        console.error('Failed to fetch sync status:', error)
-      }
-    }
-
     const fetchSiteConfig = async () => {
       try {
         const response = await configAPI.getAll()
@@ -160,14 +189,35 @@ export default function Admin({ user }) {
 
     fetchStats()
     fetchSyncStatus()
+    fetchSyncHealth()
     fetchSiteConfig()
     fetchTemplateList()
     // `user?.isAdmin` is a dependency: fetchTemplateList guards on it
     // internally (it must not fetch templates for a non-admin), so the
-    // effect must re-run if the caller's admin status changes. The four
-    // fetch functions are defined inline in this effect, so they are not
-    // themselves dependencies.
-  }, [user?.isAdmin])
+    // effect must re-run if the caller's admin status changes.
+    // `fetchStats`/`fetchSyncStatus` are stable (`useCallback` with no deps)
+    // and are listed for exhaustive-deps correctness; `fetchSiteConfig`/
+    // `fetchTemplateList` remain inline (load-once) so they are not deps.
+  }, [user?.isAdmin, fetchStats, fetchSyncStatus, fetchSyncHealth])
+
+  // Keep the read-only stat cards + sync status current while the page is
+  // open, on the shared visibility-paused 60s interval (the same mechanism
+  // the Dashboard cards use). Separate from the first-load effect above so
+  // mounting still performs exactly one fetch per source --
+  // `startVisibilityPausedRefresh` only SCHEDULES subsequent refreshes, it
+  // does not fetch up front. Deliberately refreshes ONLY these two display
+  // sources: the editor/form surfaces (site config, email templates, bulk
+  // import, export/import) must never be refreshed out from under an
+  // operator mid-edit.
+  useEffect(() => {
+    const refresh = () => {
+      fetchStats()
+      fetchSyncStatus()
+      fetchSyncHealth()
+    }
+    return startVisibilityPausedRefresh(refresh)
+  }, [fetchStats, fetchSyncStatus, fetchSyncHealth])
+
   const [activeTab, setActiveTab] = useState('site')
 
   // --- Bulk Import (Team CSV) state (Requirements 9.14, 14.1) ---
@@ -734,6 +784,93 @@ export default function Admin({ user }) {
           </div>
         </div>
       </div>
+
+      {/* Background Sync card: how far behind the background processes are.
+          Previously an admin had no in-UI insight into the sync_operations
+          backlog or whether the Sync_Worker was even alive -- both are now
+          surfaced here (GET /api/admin/sync-status), auto-refreshed on the same
+          visibility-paused interval as the stat cards. Every state is carried
+          in TEXT (never colour alone); the icons are decorative
+          (`aria-hidden`) and sit beside real words. */}
+      {syncHealth && (
+        <div className="grid grid-cols-1">
+          <div className="card space-y-3">
+            <div className="flex items-center">
+              <CogIcon className="h-8 w-8 text-blue-600 flex-shrink-0" aria-hidden="true" />
+              <p className="ml-4 text-sm font-medium text-gray-500 dark:text-gray-400">Background Sync</p>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              {/* Queue backlog depth */}
+              <div>
+                <p className="text-xs font-medium text-gray-500 dark:text-gray-400">Queued operations</p>
+                <p className="text-xl font-bold text-gray-900 dark:text-gray-100">
+                  {syncHealth.queue?.pending ?? 0}
+                </p>
+                {syncHealth.queue?.failed > 0 && (
+                  <p className="text-xs text-red-600 dark:text-red-400">
+                    {syncHealth.queue.failed} failed
+                  </p>
+                )}
+              </div>
+
+              {/* How far behind, in wall-clock terms */}
+              <div>
+                <p className="text-xs font-medium text-gray-500 dark:text-gray-400">Oldest queued</p>
+                <p className="text-xl font-bold text-gray-900 dark:text-gray-100">
+                  {syncHealth.queue?.oldestPendingAgeSeconds != null
+                    ? formatQueueAge(syncHealth.queue.oldestPendingAgeSeconds)
+                    : '—'}
+                </p>
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  {syncHealth.queue?.pending ? 'behind' : 'queue empty'}
+                </p>
+              </div>
+
+              {/* Sync-worker liveness -- carried in TEXT, colour only reinforces */}
+              <div>
+                <p className="text-xs font-medium text-gray-500 dark:text-gray-400">Sync worker</p>
+                <p className={`text-xl font-bold ${
+                  syncHealth.worker?.stale ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'
+                }`}>
+                  {syncHealth.worker?.stale ? 'Not responding' : 'Healthy'}
+                </p>
+                {syncHealth.worker?.lastHeartbeatAt && (
+                  <p className="text-xs text-gray-500 dark:text-gray-400">
+                    last beat{' '}
+                    <FormattedDate
+                      value={syncHealth.worker.lastHeartbeatAt}
+                      fallback=""
+                      precision={DATE_PRECISION.DATE_TIME}
+                      side={TOOLTIP_SIDES.RIGHT}
+                    />
+                  </p>
+                )}
+              </div>
+            </div>
+
+            {/* Per-type breakdown of the pending backlog, when there is one. */}
+            {syncHealth.queue?.pendingByType?.length > 0 && (
+              <div className="text-xs text-gray-500 dark:text-gray-400">
+                <span className="font-medium">Pending by type: </span>
+                {syncHealth.queue.pendingByType
+                  .map((t) => `${t.operation_type} (${t.count})`)
+                  .join(', ')}
+              </div>
+            )}
+
+            {/* The completeness-guard "sweep skipped: incomplete fetch" note (or
+                any user_sync error) surfaces here rather than staying invisible
+                in the DB. */}
+            {syncHealth.userSync?.message && (
+              <div className="text-xs text-amber-700 dark:text-amber-300">
+                <span className="font-medium">Last sync note: </span>
+                {syncHealth.userSync.message}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Configuration Tabs. Mobile fix: below `sm:`, each tab collapses to
           its icon alone (no visible label) so all five fit one row without

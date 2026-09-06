@@ -133,6 +133,20 @@ export default function Users({ user }) {
   const [sortField, setSortField] = useState('name')
   const [sortDirection, setSortDirection] = useState('asc')
 
+  // Large-directory filters (server-side; see GET /api/users' teamId +
+  // lastNameInitial params). Both narrow the query BEFORE pagination/total, so
+  // the footer count and page navigation stay correct under a filter.
+  //   teamFilter      -- a team id string ('' = all teams).
+  //   lastNameFilter  -- a single uppercase letter, '#' (non-alphabetic
+  //                      last-name bucket), or '' (all initials).
+  const [teamFilter, setTeamFilter] = useState('')
+  const [lastNameFilter, setLastNameFilter] = useState('')
+
+  // Teams the caller may filter by, loaded once (Organisation-scoped, same
+  // source the Create/Transfer dialogs use). A Global_Manager with no team of
+  // their own falls back to every team, exactly as those dialogs do.
+  const [filterTeams, setFilterTeams] = useState([])
+
   // Pagination follow-up: mirrors Devices.jsx's own fetchDevices exactly --
   // a useCallback depending on [pagination.page, pagination.pageSize,
   // searchQuery], echoing the server's returned pagination object back
@@ -147,7 +161,11 @@ export default function Users({ user }) {
       const response = await usersAPI.getAll({
         page: pagination.page,
         pageSize: pagination.pageSize,
-        search: searchQuery || undefined
+        search: searchQuery || undefined,
+        // Server-side filters; `stripEmptyParams` in usersAPI.getAll drops an
+        // empty string, so '' means "no filter" without sending a literal.
+        teamId: teamFilter || undefined,
+        lastNameInitial: lastNameFilter || undefined
       })
       setUsers(response.data?.users || response.data || [])
       setPagination((prev) => response.data?.pagination || prev)
@@ -158,7 +176,7 @@ export default function Users({ user }) {
     } finally {
       setLoading(false)
     }
-  }, [pagination.page, pagination.pageSize, searchQuery])
+  }, [pagination.page, pagination.pageSize, searchQuery, teamFilter, lastNameFilter])
 
   useEffect(() => {
     fetchUsers()
@@ -182,6 +200,31 @@ export default function Users({ user }) {
       isCancelled = true
     }
   }, [])
+
+  // Load the teams the caller may filter by, once. Organisation-scoped (the
+  // same source the Create/Transfer dialogs use); a Global_Manager with no
+  // team of their own falls back to every team, exactly as those dialogs do.
+  // Failure is non-fatal: the Team filter simply stays empty (the list still
+  // works, just without that one narrowing control).
+  useEffect(() => {
+    let isCancelled = false
+    ;(async () => {
+      try {
+        const scopedResponse = await teamsAPI.getMyTeams({ scope: 'organisation' })
+        let teams = scopedResponse.data?.teams || []
+        if (teams.length === 0 && user?.isAdmin) {
+          const allResponse = await teamsAPI.getMyTeams()
+          teams = allResponse.data?.teams || []
+        }
+        if (!isCancelled) setFilterTeams(teams)
+      } catch (err) {
+        console.error('Failed to fetch teams for the Users filter:', err)
+      }
+    })()
+    return () => {
+      isCancelled = true
+    }
+  }, [user?.isAdmin])
 
   // Pagination follow-up: search is now server-side (GET /api/users'
   // `search` param, forwarded to Authentik -- see fetchUsers above), so
@@ -491,19 +534,76 @@ export default function Users({ user }) {
           input): changing the term resets to page 1, since a filtered
           result set has its own page count, and staying on the
           previously-viewed page could point past the end of it. */}
-      <div className="card">
-        <div className="relative">
-          <MagnifyingGlassIcon className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
-          <input
-            type="text"
-            placeholder="Search users by name, email, or username..."
-            className="input pl-10"
-            value={searchQuery}
-            onChange={(e) => {
-              setSearchQuery(e.target.value)
-              setPagination((prev) => ({ ...prev, page: 1 }))
-            }}
-          />
+      <div className="card space-y-4">
+        <div className="flex flex-col sm:flex-row gap-3">
+          <div className="relative flex-1">
+            <MagnifyingGlassIcon className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
+            <input
+              type="text"
+              placeholder="Search users by name, email, or username..."
+              className="input pl-10"
+              value={searchQuery}
+              onChange={(e) => {
+                setSearchQuery(e.target.value)
+                setPagination((prev) => ({ ...prev, page: 1 }))
+              }}
+            />
+          </div>
+          {/* Team filter (server-side `teamId`). Narrows to a single
+              direct-membership team the caller can see. Changing it resets to
+              page 1, since a filtered result set has its own page count. */}
+          <div className="sm:w-72">
+            <label htmlFor="users-team-filter" className="sr-only">Filter by unit</label>
+            <select
+              id="users-team-filter"
+              className="input"
+              value={teamFilter}
+              onChange={(e) => {
+                setTeamFilter(e.target.value)
+                setPagination((prev) => ({ ...prev, page: 1 }))
+              }}
+            >
+              <option value="">All units</option>
+              {filterTeams.map((t) => (
+                // `display_name` is the composed "<Org prefix> - <team name>"
+                // (e.g. "FENZ - Ahipara") that GET /teams/my-teams already
+                // returns from Team.getOrganisationTeams -- the SAME label the
+                // Create-User picker and request-access surfaces use. Fall back
+                // to the bare name only if display_name is somehow absent.
+                <option key={t.id} value={String(t.id)}>{t.display_name || t.name}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        {/* Alphabet bar (server-side `lastNameInitial`). Filters by LAST NAME
+            initial; '#' is the non-alphabetic bucket; "All" clears it. Each
+            control carries its active state in TEXT/style, not colour alone
+            (accessibility rule), via aria-pressed. Changing it resets to page
+            1. Wraps on narrow screens. */}
+        <div className="flex flex-wrap gap-1" role="group" aria-label="Filter by last name initial">
+          {['All', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split(''), '#'].map((label) => {
+            const value = label === 'All' ? '' : label
+            const isActive = lastNameFilter === value
+            return (
+              <button
+                key={label}
+                type="button"
+                aria-pressed={isActive}
+                onClick={() => {
+                  setLastNameFilter(value)
+                  setPagination((prev) => ({ ...prev, page: 1 }))
+                }}
+                className={`min-w-[2rem] px-2 py-1 text-sm rounded-md border ${
+                  isActive
+                    ? 'bg-primary-600 text-white border-primary-600 font-semibold'
+                    : 'bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700'
+                }`}
+              >
+                {label}
+              </button>
+            )
+          })}
         </div>
       </div>
 
@@ -553,23 +653,28 @@ export default function Users({ user }) {
                 </div>
               ) : (
                 <div key={targetUser.pk} className="p-4 space-y-2 text-sm">
-                  <div className="flex items-start gap-3">
-                    <div className="flex-shrink-0 h-10 w-10">
-                      <img className="h-10 w-10 rounded-full" src={targetUser.avatar} alt="" />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <p className="font-medium text-gray-900 dark:text-gray-100 break-words">{targetUser.name}</p>
-                      <p className="text-xs text-gray-500 dark:text-gray-400 break-all">{targetUser.email}</p>
+                  {/* Avatar removed (see the desktop table's own note): no
+                      `avatar` field post-migration; it was decorative. */}
+                  <div className="min-w-0">
+                    <p className="font-medium text-gray-900 dark:text-gray-100 break-words">{targetUser.name}</p>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 break-all">{targetUser.email}</p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+                    {/* Callsign + the "TAK device certificates: N" count
+                        stacked together (the count moved out of the name block
+                        above) -- both are TAK-identity facts, grouped. */}
+                    <div>
+                      <p className="text-gray-500 dark:text-gray-400">
+                        Callsign: <span className="text-gray-900 dark:text-gray-100">{targetUser.tak_callsign || 'None'}</span>
+                      </p>
                       <p className="text-xs text-gray-500 dark:text-gray-400">
                         TAK device certificates: {targetUser.live_certificate_count ?? 0}
                       </p>
                     </div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-x-4 gap-y-1">
-                    <p className="text-gray-500 dark:text-gray-400">
+                    <p className="text-gray-500 dark:text-gray-400 text-right">
                       Unit: <span className="text-gray-900 dark:text-gray-100">{targetUser.team_name || 'Not assigned'}</span>
                     </p>
-                    <p className="text-gray-500 dark:text-gray-400 text-right">
+                    <p className="text-gray-500 dark:text-gray-400">
                       Last login:{' '}
                       <span className="text-gray-900 dark:text-gray-100">
                         {targetUser.last_login ? (
@@ -585,18 +690,24 @@ export default function Users({ user }) {
                       </span>
                     </p>
                   </div>
-                  <div>
-                    <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-                      targetUser.is_active ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
-                    }`}>
-                      {targetUser.is_active ? 'Active' : 'Inactive'}
-                    </span>
-                    {describeAccountStatusBadge(targetUser.account_status) && (
-                      <span className={`ml-2 ${describeAccountStatusBadge(targetUser.account_status).className}`}>
-                        {describeAccountStatusBadge(targetUser.account_status).label}
-                      </span>
-                    )}
-                  </div>
+                  {/* Status signal: same "only when there's something to say"
+                      rule as the desktop table's inline badge -- nothing for an
+                      ordinary active account; a text pill for a non-active one.
+                      The whole block is omitted when there is nothing to show,
+                      so an active user's card is not padded by an empty row. */}
+                  {(targetUser.is_active === false || (targetUser.account_status && targetUser.account_status !== 'active')) && (
+                    <div>
+                      {targetUser.account_status && targetUser.account_status !== 'active' && describeAccountStatusBadge(targetUser.account_status) ? (
+                        <span className={describeAccountStatusBadge(targetUser.account_status).className}>
+                          {describeAccountStatusBadge(targetUser.account_status).label}
+                        </span>
+                      ) : (
+                        <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-200">
+                          Inactive
+                        </span>
+                      )}
+                    </div>
+                  )}
                   {targetUser.local_user_id ? (
                     <MemberActions
                       member={{
@@ -646,11 +757,16 @@ export default function Users({ user }) {
                     </div>
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                    Unit
+                    Callsign
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                    Status
+                    Unit
                   </th>
+                  {/* The dedicated Status column was removed to reclaim width
+                      for a large directory. The status signal is now an inline
+                      text badge next to the user's name (shown ONLY for a
+                      non-active state), carried in TEXT per the accessibility
+                      rule -- never a colour-only row highlight. */}
                   <th
                     onClick={() => handleSort('last_login')}
                     className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-600"
@@ -682,65 +798,65 @@ export default function Users({ user }) {
                   ) : (
                   <tr key={targetUser.pk}>
                     <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="flex items-center">
-                        <div className="flex-shrink-0 h-10 w-10">
-                          <img className="h-10 w-10 rounded-full" src={targetUser.avatar} alt="" />
-                        </div>
-                        <div className="ml-4">
-                          <div className="text-sm font-medium text-gray-900 dark:text-gray-100">{targetUser.name}</div>
-                          <div className="text-sm text-gray-500 dark:text-gray-400">{targetUser.email}</div>
-                          {/* Bugfix: replaces the old MultipleCertificateWarning
-                              note ("This account has N active TAK Server
-                              certificates."), which only appeared for N > 1 and
-                              read as a warning (amber) for what is actually an
-                              ordinary state -- more than one live certificate
-                              per user (ATAK, CloudTAK, a second device, etc.)
-                              is normal, not a defect. Shown UNCONDITIONALLY for
-                              every user now, as a plain informational count,
-                              matching the same "always show, never gate on a
-                              threshold" convention EnrollmentView.jsx's own
-                              "Active TAK Server Certificates" field already
-                              uses. `live_certificate_count` is GET /api/users'
-                              own field, from the SAME batched query this
-                              page's fetch already runs (no second request),
-                              and the route's own doc comment guarantees it is
-                              never null/undefined -- always a real integer,
-                              0 or more -- so no fallback is needed here. */}
-                          <div className="text-xs text-gray-500 dark:text-gray-400">
-                            TAK device certificates: {targetUser.live_certificate_count ?? 0}
+                      {/* Avatar removed: GET /api/users no longer sources rows
+                          from a live Authentik fetch, so it does not return an
+                          `avatar` URL, and the old `<img src={undefined}>`
+                          rendered as a broken image. The avatar was purely
+                          decorative here, so it is dropped rather than
+                          re-plumbed. The name/email/cert block is now the
+                          cell's sole content, left-aligned with no avatar
+                          gutter. */}
+                      <div>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-sm font-medium text-gray-900 dark:text-gray-100">{targetUser.name}</span>
+                            {/* Inline status signal, replacing the removed
+                                Status column. Shown ONLY for a non-active state
+                                (nothing for an ordinary active account), and
+                                always carried in TEXT (the pill label reads
+                                "Inactive"/"Suspended"/"Account not found in
+                                Authentik"), never colour alone. The
+                                suspended/orphaned badge comes from the shared
+                                describeAccountStatusBadge helper (returns null
+                                for active); the plain "Inactive" pill covers an
+                                is_active=false account whose account_status is
+                                still 'active' (e.g. deactivated but not
+                                suspended). */}
+                            {targetUser.account_status !== 'active' && targetUser.account_status && describeAccountStatusBadge(targetUser.account_status) ? (
+                              <span className={describeAccountStatusBadge(targetUser.account_status).className}>
+                                {describeAccountStatusBadge(targetUser.account_status).label}
+                              </span>
+                            ) : targetUser.is_active === false ? (
+                              <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-gray-200 text-gray-700 dark:bg-gray-600 dark:text-gray-200">
+                                Inactive
+                              </span>
+                            ) : null}
                           </div>
-                        </div>
+                          <div className="text-sm text-gray-500 dark:text-gray-400">{targetUser.email}</div>
+                      </div>
+                    </td>
+                    {/* Callsign (`tak_callsign`, already returned by GET
+                        /api/users from user_cache). A teamless user's value is
+                        the literal string 'None' (never blank, never a real
+                        colour/callsign) per the domain rules, rendered as-is.
+                        The "TAK device certificates: N" count sits UNDER the
+                        callsign value here (moved out of the User cell): both
+                        are TAK-identity facts about the user, so grouping the
+                        cert count with the callsign reads better than mixing it
+                        with the name/email. Shown unconditionally, plain (not a
+                        warning) -- more than one live cert per user is ordinary;
+                        `live_certificate_count` is GET /api/users' own field
+                        from the same batched query and is never null. */}
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-gray-100">
+                      <div>{targetUser.tak_callsign || 'None'}</div>
+                      <div className="text-xs text-gray-500 dark:text-gray-400">
+                        TAK device certificates: {targetUser.live_certificate_count ?? 0}
                       </div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-gray-100">
                       {targetUser.team_name || 'Not assigned to a unit'}
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-                        targetUser.is_active ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
-                      }`}>
-                        {targetUser.is_active ? 'Active' : 'Inactive'}
-                      </span>
-                      {/* Bugfix (account-lifecycle-management Requirement
-                          1.11/4.1: /users showed NO indicator distinguishing
-                          a suspended account from an orphaned one -- both
-                          rendered as the SAME plain "Inactive" pill above,
-                          and the only other signal was the suspend action
-                          icon itself changing shape/disappearing, which is
-                          easy to miss and, for 'orphaned', is colour/
-                          icon-only with no text at all. Mirrors
-                          TeamDetail.jsx's identical badge treatment on the
-                          Members/Team Admins tabs -- same shared helper,
-                          same "returns null for 'active', render nothing"
-                          convention. */}
-                      {describeAccountStatusBadge(targetUser.account_status) && (
-                        <div className="mt-1">
-                          <span className={describeAccountStatusBadge(targetUser.account_status).className}>
-                            {describeAccountStatusBadge(targetUser.account_status).label}
-                          </span>
-                        </div>
-                      )}
-                    </td>
+                    {/* Status column removed -- the status signal is the inline
+                        text badge beside the name (above). */}
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                       {/* Date_Render_Position 6 (Criteria 2.1, 2.2, 2.3): the
                           Last Login value renders through the ONE shared

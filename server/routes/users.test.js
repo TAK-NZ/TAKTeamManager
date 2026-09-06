@@ -70,894 +70,366 @@ function buildApp() {
   return app;
 }
 
-describe('GET /api/users batched team-name lookup (Requirement 11.3)', () => {
+
+/**
+ * Authentik-scaling follow-up: `GET /api/users` now sources its rows from
+ * the LOCAL database (`users` LEFT JOIN `user_cache` + team_root CTE +
+ * tak_devices cert count), NOT a live per-request Authentik fetch. These
+ * tests exercise the mounted route via supertest with `pool.query` mocked to
+ * return the joined rows the new single query produces (shape: pk,
+ * local_user_id, username, email, first_name, last_name, is_active, tak_role,
+ * callsign_suffix, account_status, origin_org_id, tak_callsign, tak_color,
+ * team_id, direct_membership_org_id, team_name, live_certificate_count,
+ * total_count). Device/orphaned/ignored-prefix exclusion and search/scope
+ * narrowing now happen IN SQL, so those are asserted at the SQL level
+ * (predicate presence + bound params) plus faithful row->response mapping.
+ *
+ * `authenticateToken`/`authorize` are mocked to bypass real auth; the list
+ * route no longer calls `authentikService` at all.
+ */
+
+// A joined row as the new local query returns it. Only `pk` and `username`
+// are required here; every other column defaults to a sensible value so a
+// test names just the fields it cares about.
+function makeRow(overrides = {}) {
+  return {
+    pk: 1,
+    local_user_id: 100,
+    username: 'alice',
+    email: 'alice@example.com',
+    first_name: 'Alice',
+    last_name: 'Anders',
+    is_active: true,
+    tak_role: 'Team Member',
+    callsign_suffix: null,
+    account_status: 'active',
+    origin_org_id: null,
+    tak_callsign: null,
+    tak_color: null,
+    last_login: null,
+    team_id: null,
+    direct_membership_org_id: null,
+    team_name: null,
+    live_certificate_count: 0,
+    total_count: 1,
+    ...overrides
+  };
+}
+
+describe('GET /api/users (local-sourced list)', () => {
   let app;
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockAuthUser.id = 1;
+    mockAuthUser.userId = 1;
+    mockAuthUser.is_global_manager = true; // default: Global_Manager (unscoped)
     app = buildApp();
   });
 
-  it('issues exactly one pool.query call for team-name lookup regardless of user count', async () => {
-    authentikService.getUsers.mockResolvedValue({
-      results: [
-        { pk: 1, username: 'alice' },
-        { pk: 2, username: 'bob' },
-        { pk: 3, username: 'carol' }
-      ],
-      count: 3
-    });
+  it('does NOT call authentikService for the list (sources from local DB only)', async () => {
     pool.query.mockResolvedValue({ rows: [] });
 
     const res = await request(app).get('/api/users');
 
     expect(res.status).toBe(200);
-    // Exactly one call to pool.query for the whole batch, not once per user.
-    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(authentikService.getUsers).not.toHaveBeenCalled();
   });
 
-  it('attaches the correct team_name for a top-level team and a sub-team, using the single query result', async () => {
-    authentikService.getUsers.mockResolvedValue({
-      results: [
-        { pk: 1, username: 'alice' }, // top-level team member
-        { pk: 2, username: 'bob' } // sub-team member
-      ],
-      count: 2
-    });
-
+  it('runs a single local query against users (not user_cache as the row source) and returns the mapped rows', async () => {
     pool.query.mockResolvedValue({
       rows: [
-        { authentik_user_id: 1, team_name: 'Alpha Team' },
-        { authentik_user_id: 2, team_name: 'HQ - Bravo Squad' }
+        makeRow({ pk: 1, username: 'alice', team_name: 'Alpha Team', total_count: 2 }),
+        makeRow({ pk: 2, local_user_id: 101, username: 'bob', first_name: 'Bob', last_name: 'Brown', team_name: 'HQ - Bravo Squad', total_count: 2 })
       ]
     });
 
     const res = await request(app).get('/api/users');
 
     expect(res.status).toBe(200);
+    // One query for the list (GM path issues no Team.getManagedTeamIds).
     expect(pool.query).toHaveBeenCalledTimes(1);
+    const [sql] = pool.query.mock.calls[0];
+    expect(sql).toContain('FROM users u');
+    expect(sql).toContain('LEFT JOIN user_cache uc');
 
     const alice = res.body.users.find((u) => u.pk === 1);
     const bob = res.body.users.find((u) => u.pk === 2);
-
     expect(alice.team_name).toBe('Alpha Team');
-    // Preserves the exact existing sub-team display-name format:
-    // `prefix - subteam name`.
     expect(bob.team_name).toBe('HQ - Bravo Squad');
+    // name is composed from local first/last name.
+    expect(alice.name).toBe('Alice Anders');
+    expect(bob.name).toBe('Bob Brown');
   });
 
-  it('passes the full array of Authentik user ids as a single ANY($1) parameter', async () => {
-    authentikService.getUsers.mockResolvedValue({
-      results: [
-        { pk: 10, username: 'a' },
-        { pk: 20, username: 'b' },
-        { pk: 30, username: 'c' }
-      ],
-      count: 3
-    });
-    pool.query.mockResolvedValue({ rows: [] });
-
-    await request(app).get('/api/users');
-
-    expect(pool.query).toHaveBeenCalledTimes(1);
-    const [, params] = pool.query.mock.calls[0];
-    expect(params).toEqual([[10, 20, 30]]);
-  });
-
-  it('defaults team_name to null for a user absent from the query result rows', async () => {
-    authentikService.getUsers.mockResolvedValue({
-      results: [
-        { pk: 1, username: 'alice' },
-        { pk: 2, username: 'no-team-user' }
-      ],
-      count: 2
-    });
-
-    // Only alice has a direct team membership row returned by the query;
-    // pk 2 has no direct membership and is simply absent from the result.
+  it('derives an EXACT pagination.total from the query rows total_count', async () => {
     pool.query.mockResolvedValue({
-      rows: [{ authentik_user_id: 1, team_name: 'Alpha Team' }]
+      rows: [makeRow({ pk: 1, total_count: 4237 })]
     });
 
     const res = await request(app).get('/api/users');
 
     expect(res.status).toBe(200);
-    const noTeamUser = res.body.users.find((u) => u.pk === 2);
-    expect(noTeamUser.team_name).toBeNull();
+    expect(res.body.pagination.total).toBe(4237);
   });
 
-  it('does not query the database at all when there are no Authentik users', async () => {
-    authentikService.getUsers.mockResolvedValue({ results: [], count: 0 });
+  it('returns total 0 and an empty list when no rows match', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
 
     const res = await request(app).get('/api/users');
 
     expect(res.status).toBe(200);
     expect(res.body.users).toEqual([]);
-    expect(pool.query).not.toHaveBeenCalled();
+    expect(res.body.pagination.total).toBe(0);
   });
 
-  it('returns 500 without throwing when the batched query itself fails', async () => {
-    authentikService.getUsers.mockResolvedValue({ results: [{ pk: 1, username: 'alice' }], count: 1 });
+  it('excludes Team_Owned_Devices, orphaned rows, and ignored-prefix usernames IN SQL (predicate presence)', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+
+    await request(app).get('/api/users');
+
+    const [sql] = pool.query.mock.calls[0];
+    expect(sql).toContain('u.is_team_device = false');
+    expect(sql).toContain("u.account_status <> 'orphaned'");
+    expect(sql).toContain('u.username LIKE ANY($2::text[])');
+  });
+
+  it('forwards a search term as an ILIKE %term% bound parameter over username/email/name', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+
+    await request(app).get('/api/users?search=reynolds');
+
+    const [sql, params] = pool.query.mock.calls[0];
+    expect(sql).toContain('u.username ILIKE $1');
+    expect(sql).toContain('u.email ILIKE $1');
+    expect(params[0]).toBe('%reynolds%');
+  });
+
+  it('passes a null search parameter when no search term is supplied', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+
+    await request(app).get('/api/users');
+
+    const [, params] = pool.query.mock.calls[0];
+    expect(params[0]).toBeNull();
+  });
+
+  it('applies pagination via LIMIT/OFFSET bound params', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+
+    await request(app).get('/api/users?page=3&pageSize=20');
+
+    const [sql, params] = pool.query.mock.calls[0];
+    expect(sql).toContain('LIMIT $6 OFFSET $7');
+    // pageSize (index 5) and offset (index 6) = (3-1)*20 = 40.
+    expect(params[5]).toBe(20);
+    expect(params[6]).toBe(40);
+  });
+
+  // Large-directory filters: teamId ($8) and lastNameInitial ($9), both applied
+  // in SQL before the COUNT/LIMIT so the exact total + pagination stay correct.
+  it('passes a null teamId and null lastNameInitial when neither filter is supplied', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+
+    await request(app).get('/api/users');
+
+    const [sql, params] = pool.query.mock.calls[0];
+    // The predicates are present but inert (the $8/$9 IS NULL disable branch).
+    expect(sql).toContain('$8::int IS NULL');
+    expect(sql).toContain('$9::text IS NULL');
+    expect(params[7]).toBeNull(); // teamId
+    expect(params[8]).toBeNull(); // lastNameInitial
+  });
+
+  it('binds a numeric teamId to $8 and narrows to that direct-membership team', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+
+    await request(app).get('/api/users?teamId=55');
+
+    const [sql, params] = pool.query.mock.calls[0];
+    expect(sql).toContain('t.id = $8::int');
+    expect(params[7]).toBe(55);
+  });
+
+  it('treats a non-numeric teamId as no filter (null $8)', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+
+    await request(app).get('/api/users?teamId=abc');
+
+    const [, params] = pool.query.mock.calls[0];
+    expect(params[7]).toBeNull();
+  });
+
+  it('binds an uppercased single-letter lastNameInitial to $9', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+
+    await request(app).get('/api/users?lastNameInitial=b');
+
+    const [sql, params] = pool.query.mock.calls[0];
+    expect(sql).toContain("u.last_name ILIKE $9 || '%'");
+    expect(params[8]).toBe('B');
+  });
+
+  it("binds the '#' non-alphabetic bucket for lastNameInitial='#'", async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+
+    await request(app).get('/api/users?lastNameInitial=%23'); // %23 = '#'
+
+    const [sql, params] = pool.query.mock.calls[0];
+    expect(sql).toContain("u.last_name !~ '^[A-Za-z]'");
+    expect(params[8]).toBe('#');
+  });
+
+  it('ignores a multi-character or invalid lastNameInitial (null $9)', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+
+    await request(app).get('/api/users?lastNameInitial=abc');
+
+    const [, params] = pool.query.mock.calls[0];
+    expect(params[8]).toBeNull();
+  });
+
+  it('composes teamId + lastNameInitial + search together in one query', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+
+    await request(app).get('/api/users?teamId=7&lastNameInitial=S&search=smith');
+
+    const [sql, params] = pool.query.mock.calls[0];
+    // All three narrowings present in the same statement.
+    expect(sql).toContain('t.id = $8::int');
+    expect(sql).toContain("u.last_name ILIKE $9 || '%'");
+    expect(params[0]).toBe('%smith%');
+    expect(params[7]).toBe(7);
+    expect(params[8]).toBe('S');
+  });
+
+  it('maps every client-consumed field faithfully from the local row', async () => {
+    pool.query.mockResolvedValue({
+      rows: [makeRow({
+        pk: 7,
+        local_user_id: 700,
+        username: 'carol',
+        email: 'carol@example.com',
+        first_name: 'Carol',
+        last_name: 'Chen',
+        is_active: false,
+        tak_role: 'Team Lead',
+        callsign_suffix: 'C1',
+        account_status: 'suspended',
+        tak_callsign: 'CAROL',
+        tak_color: 'Cyan',
+        last_login: '2026-09-01T08:30:00.000Z',
+        team_id: 55,
+        team_name: 'Alpha Team',
+        live_certificate_count: 2,
+        total_count: 1
+      })]
+    });
+
+    const res = await request(app).get('/api/users');
+    const carol = res.body.users[0];
+
+    expect(carol).toMatchObject({
+      pk: 7,
+      local_user_id: 700,
+      username: 'carol',
+      email: 'carol@example.com',
+      name: 'Carol Chen',
+      is_active: false,
+      first_name: 'Carol',
+      last_name: 'Chen',
+      tak_role: 'Team Lead',
+      callsign_suffix: 'C1',
+      tak_callsign: 'CAROL',
+      tak_color: 'Cyan',
+      last_login: '2026-09-01T08:30:00.000Z',
+      account_status: 'suspended',
+      team_name: 'Alpha Team',
+      team_id: 55,
+      live_certificate_count: 2
+    });
+    // Global_Manager manages every row.
+    expect(carol.can_manage).toBe(true);
+  });
+
+  it('returns 500 without throwing when the query fails', async () => {
     pool.query.mockRejectedValue(new Error('db unavailable'));
 
     const res = await request(app).get('/api/users');
-
     expect(res.status).toBe(500);
   });
-});
 
-/**
- * Requirement 27.9 (task 49.5): `GET /api/users` excludes every
- * Team_Owned_Device (`users.is_team_device = true`) from its response,
- * even though Authentik itself can return that device's user unchanged.
- * A Team_Owned_Device created BEFORE the device-management follow-up
- * (`DeviceEnrollmentService.createDevice` now creates a device's
- * Authentik user with `type: 'service_account'`) is still `type:
- * 'internal'` in Authentik, identical to a human user, so
- * `authentikService.getUsers({page, pageSize})` -- which filters on
- * `?type=internal` -- still includes it. This test mocks `getUsers` to
- * return exactly that pre-existing-device shape, and the exclusion must
- * therefore happen locally, by cross-referencing `users.is_team_device`
- * via the same batched query already used for team-name resolution.
- */
-describe('GET /api/users excludes Team_Owned_Device rows (Requirement 27.9)', () => {
-  let app;
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-    app = buildApp();
-  });
-
-  it('excludes a user whose local users row has is_team_device = true, even though Authentik returns it', async () => {
-    authentikService.getUsers.mockResolvedValue({
-      results: [
-        { pk: 1, username: 'alice' },
-        { pk: 2, username: 'device-abc123' }
-      ],
-      count: 2
+  describe('scoped (non-Global_Manager) caller', () => {
+    beforeEach(() => {
+      mockAuthUser.is_global_manager = false;
     });
 
-    pool.query.mockResolvedValue({
-      rows: [
-        { authentik_user_id: 1, team_name: 'Alpha Team', is_team_device: false },
-        { authentik_user_id: 2, team_name: 'Alpha Team', is_team_device: true }
-      ]
+    it('passes isUnscoped=false and the caller scope org ids / domain patterns into the query', async () => {
+      // DirectoryScopeService.resolveScope issues its own queries; make the
+      // first calls (scope resolution) return an admin org, then the list
+      // query, then Team.getManagedTeamIds. Simplest: resolve scope to one
+      // org id via the recursive-CTE query result, no allowed domains.
+      pool.query.mockImplementation((sql) => {
+        if (sql.includes('WITH RECURSIVE admin_teams')) {
+          return Promise.resolve({ rows: [{ id: 42, name: 'Org42' }] });
+        }
+        if (sql.includes('FROM org_allowed_domains')) {
+          return Promise.resolve({ rows: [] });
+        }
+        if (sql.includes('FROM system_config')) {
+          return Promise.resolve({ rows: [] });
+        }
+        if (sql.includes('FROM users u')) {
+          return Promise.resolve({ rows: [] }); // list query
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      const res = await request(app).get('/api/users');
+
+      expect(res.status).toBe(200);
+      const listCall = pool.query.mock.calls.find(([sql]) => sql.includes('FROM users u'));
+      expect(listCall).toBeDefined();
+      const params = listCall[1];
+      // isUnscoped=false, org ids = [42].
+      expect(params[2]).toBe(false);
+      expect(params[3]).toEqual([42]);
     });
 
-    const res = await request(app).get('/api/users');
+    it('runs the belt-and-braces predicate pass so a row outside scope is dropped from the response', async () => {
+      pool.query.mockImplementation((sql) => {
+        if (sql.includes('WITH RECURSIVE admin_teams')) {
+          return Promise.resolve({ rows: [{ id: 42, name: 'Org42' }] });
+        }
+        if (sql.includes('FROM org_allowed_domains')) {
+          return Promise.resolve({ rows: [] });
+        }
+        if (sql.includes('FROM system_config')) {
+          return Promise.resolve({ rows: [] });
+        }
+        if (sql.includes('FROM users u')) {
+          // Two rows: one whose direct-membership org is in scope (42),
+          // one whose org is 99 (out of scope) and no matching domain.
+          return Promise.resolve({
+            rows: [
+              makeRow({ pk: 1, username: 'inscope', direct_membership_org_id: 42, origin_org_id: 42, total_count: 2 }),
+              makeRow({ pk: 2, username: 'outscope', direct_membership_org_id: 99, origin_org_id: 99, email: 'x@notallowed.example', total_count: 2 })
+            ]
+          });
+        }
+        if (sql.includes('team_memberships') && sql.includes('role')) {
+          return Promise.resolve({ rows: [] }); // getManagedTeamIds
+        }
+        return Promise.resolve({ rows: [] });
+      });
 
-    expect(res.status).toBe(200);
-    expect(res.body.users).toHaveLength(1);
-    expect(res.body.users[0].pk).toBe(1);
-    expect(res.body.users.find((u) => u.pk === 2)).toBeUndefined();
-  });
+      const res = await request(app).get('/api/users');
 
-  it('does not exclude a user with is_team_device = false or absent from the local table', async () => {
-    authentikService.getUsers.mockResolvedValue({
-      results: [
-        { pk: 1, username: 'alice' },
-        { pk: 2, username: 'bob' }
-      ],
-      count: 2
+      expect(res.status).toBe(200);
+      // The out-of-scope row is removed by the predicate pass even though
+      // the SQL mock returned it.
+      expect(res.body.users.map((u) => u.pk)).toEqual([1]);
     });
-
-    // pk 1 has an explicit is_team_device: false row; pk 2 has no
-    // corresponding local users row at all (absent from the result set).
-    pool.query.mockResolvedValue({
-      rows: [{ authentik_user_id: 1, team_name: null, is_team_device: false }]
-    });
-
-    const res = await request(app).get('/api/users');
-
-    expect(res.status).toBe(200);
-    expect(res.body.users).toHaveLength(2);
-  });
-});
-
-/**
- * Bugfix: `GET /api/users` now ALSO filters out any Authentik user whose
- * `username` matches `AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES` (the SAME
- * predicate `authentikSync.js` already uses to decide which accounts
- * never get materialized into the local `users` table -- ETL/service
- * accounts, and administrative accounts like `akadmin`/`ckadmin`). This
- * route fetches directly from Authentik's `/core/users/?type=internal`
- * and, unlike the `is_team_device` exclusion above, has no local-table
- * cross-reference to lean on -- the filter runs on `user.username` alone,
- * entirely independent of the batched query's rows.
- */
-describe('GET /api/users excludes AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES matches (bugfix)', () => {
-  let app;
-  const originalEnv = process.env.AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES;
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-    app = buildApp();
-  });
-
-  afterEach(() => {
-    if (originalEnv === undefined) {
-      delete process.env.AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES;
-    } else {
-      process.env.AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES = originalEnv;
-    }
-  });
-
-  it('excludes a user whose username exactly matches a configured entry (akadmin/ckadmin), even with no local users row at all', async () => {
-    process.env.AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES = 'akadmin,ckadmin';
-    authentikService.getUsers.mockResolvedValue({
-      results: [
-        { pk: 1, username: 'alice' },
-        { pk: 2, username: 'akadmin' },
-        { pk: 3, username: 'ckadmin' }
-      ],
-      count: 3
-    });
-    // No local users rows for any of these -- the filter must not depend
-    // on the batched query's result at all.
-    pool.query.mockResolvedValue({ rows: [] });
-
-    const res = await request(app).get('/api/users');
-
-    expect(res.status).toBe(200);
-    expect(res.body.users).toHaveLength(1);
-    expect(res.body.users[0].pk).toBe(1);
-  });
-
-  it('excludes a genuine prefix match (etl-) exactly like the sync-skip predicate does', async () => {
-    process.env.AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES = 'etl-';
-    authentikService.getUsers.mockResolvedValue({
-      results: [
-        { pk: 1, username: 'etl-earthquakes' },
-        { pk: 2, username: 'alice' }
-      ],
-      count: 2
-    });
-    pool.query.mockResolvedValue({ rows: [] });
-
-    const res = await request(app).get('/api/users');
-
-    expect(res.status).toBe(200);
-    expect(res.body.users).toHaveLength(1);
-    expect(res.body.users[0].pk).toBe(2);
-  });
-
-  it('excludes nothing when the variable is unset (preserves existing behavior)', async () => {
-    delete process.env.AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES;
-    authentikService.getUsers.mockResolvedValue({
-      results: [
-        { pk: 1, username: 'alice' },
-        { pk: 2, username: 'akadmin' }
-      ],
-      count: 2
-    });
-    pool.query.mockResolvedValue({ rows: [] });
-
-    const res = await request(app).get('/api/users');
-
-    expect(res.status).toBe(200);
-    expect(res.body.users).toHaveLength(2);
-  });
-
-  it('composes with the is_team_device exclusion -- both filters can remove rows from the same response', async () => {
-    process.env.AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES = 'akadmin';
-    authentikService.getUsers.mockResolvedValue({
-      results: [
-        { pk: 1, username: 'alice' },
-        { pk: 2, username: 'akadmin' },
-        { pk: 3, username: 'device-abc123' }
-      ],
-      count: 3
-    });
-    pool.query.mockResolvedValue({
-      rows: [
-        { authentik_user_id: 1, team_name: 'Alpha Team', is_team_device: false },
-        { authentik_user_id: 3, team_name: 'Alpha Team', is_team_device: true }
-      ]
-    });
-
-    const res = await request(app).get('/api/users');
-
-    expect(res.status).toBe(200);
-    expect(res.body.users).toHaveLength(1);
-    expect(res.body.users[0].pk).toBe(1);
-  });
-});
-
-/**
- * takserver-enrollment Requirement 13.2/13.6: `GET /api/users` projects
- * `live_certificate_count`, derived from a `certs` derived-table LEFT JOIN
- * added to the SAME batched team-name query -- never a second query --
- * so the Multiple_Certificate_Warning can be rendered without a per-row
- * round trip. Row presence in `tak_devices` (with `revoked = false`) is
- * what "live certificate" means; a revoked row or a row with a null
- * `user_id` must never be counted.
- */
-describe('GET /api/users live certificate count (Requirement 13.2, 13.6)', () => {
-  let app;
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-    app = buildApp();
-  });
-
-  it('attaches live_certificate_count: 0 for a user with no certificate rows', async () => {
-    authentikService.getUsers.mockResolvedValue({
-      results: [{ pk: 1, username: 'alice' }],
-      count: 1
-    });
-    pool.query.mockResolvedValue({
-      rows: [{ authentik_user_id: 1, team_name: null, is_team_device: false, live_certificate_count: 0 }]
-    });
-
-    const res = await request(app).get('/api/users');
-
-    expect(res.status).toBe(200);
-    const alice = res.body.users.find((u) => u.pk === 1);
-    expect(alice.live_certificate_count).toBe(0);
-  });
-
-  it('attaches live_certificate_count: 1 for a user with exactly one live certificate', async () => {
-    authentikService.getUsers.mockResolvedValue({
-      results: [{ pk: 1, username: 'alice' }],
-      count: 1
-    });
-    pool.query.mockResolvedValue({
-      rows: [{ authentik_user_id: 1, team_name: null, is_team_device: false, live_certificate_count: 1 }]
-    });
-
-    const res = await request(app).get('/api/users');
-
-    expect(res.status).toBe(200);
-    const alice = res.body.users.find((u) => u.pk === 1);
-    expect(alice.live_certificate_count).toBe(1);
-  });
-
-  it('attaches the correct count for a user with 2 or more live certificates', async () => {
-    authentikService.getUsers.mockResolvedValue({
-      results: [{ pk: 1, username: 'alice' }],
-      count: 1
-    });
-    pool.query.mockResolvedValue({
-      rows: [{ authentik_user_id: 1, team_name: null, is_team_device: false, live_certificate_count: 3 }]
-    });
-
-    const res = await request(app).get('/api/users');
-
-    expect(res.status).toBe(200);
-    const alice = res.body.users.find((u) => u.pk === 1);
-    expect(alice.live_certificate_count).toBe(3);
-  });
-
-  it('defaults live_certificate_count to 0 (not null/undefined) for a user absent from the query result rows', async () => {
-    authentikService.getUsers.mockResolvedValue({
-      results: [{ pk: 1, username: 'alice' }],
-      count: 1
-    });
-    // No corresponding row at all -- the LEFT JOIN chain still produces a
-    // row per user in the real query, but this exercises the JS-side
-    // fallback for a user missing from the map.
-    pool.query.mockResolvedValue({ rows: [] });
-
-    const res = await request(app).get('/api/users');
-
-    expect(res.status).toBe(200);
-    const alice = res.body.users.find((u) => u.pk === 1);
-    expect(alice.live_certificate_count).toBe(0);
-    expect(alice.live_certificate_count).not.toBeNull();
-    expect(alice.live_certificate_count).not.toBeUndefined();
-  });
-
-  it('issues the SAME number of pool.query calls as before this change (no new round trip)', async () => {
-    authentikService.getUsers.mockResolvedValue({
-      results: [
-        { pk: 1, username: 'alice' },
-        { pk: 2, username: 'bob' },
-        { pk: 3, username: 'carol' }
-      ],
-      count: 3
-    });
-    pool.query.mockResolvedValue({
-      rows: [
-        { authentik_user_id: 1, team_name: 'Alpha Team', is_team_device: false, live_certificate_count: 2 },
-        { authentik_user_id: 2, team_name: 'Alpha Team', is_team_device: false, live_certificate_count: 0 },
-        { authentik_user_id: 3, team_name: 'Alpha Team', is_team_device: false, live_certificate_count: 1 }
-      ]
-    });
-
-    const res = await request(app).get('/api/users');
-
-    expect(res.status).toBe(200);
-    // Exactly one call for the whole batch -- same as the pre-existing
-    // team-name lookup's call count, independent of the number of users
-    // returned (Criterion 13.6).
-    expect(pool.query).toHaveBeenCalledTimes(1);
-  });
-
-  it('the SQL text includes the certs derived-table join, scoped to non-revoked rows with a non-null user_id', async () => {
-    authentikService.getUsers.mockResolvedValue({
-      results: [{ pk: 1, username: 'alice' }],
-      count: 1
-    });
-    pool.query.mockResolvedValue({ rows: [] });
-
-    await request(app).get('/api/users');
-
-    expect(pool.query).toHaveBeenCalledTimes(1);
-    const [sql] = pool.query.mock.calls[0];
-    expect(sql).toMatch(/FROM tak_devices/);
-    expect(sql).toMatch(/user_id IS NOT NULL AND revoked = false/);
-    expect(sql).toMatch(/COALESCE\(certs\.live_certificate_count, 0\) AS live_certificate_count/);
-  });
-});
-
-/**
- * Users-page-action-parity: `GET /api/users` additionally projects
- * `team_id` -- the user's direct-membership team's raw id, alongside the
- * pre-existing `team_name` display string. The Users view's row actions
- * (Edit via `PATCH /api/teams/:teamId/members/:userId`, and the Transfer
- * dialog's source-team context) need the actual id, not only the rendered
- * name, and it comes from the SAME batched query -- no new round trip.
- */
-describe('GET /api/users projects team_id alongside team_name (Users-page-action-parity)', () => {
-  let app;
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-    app = buildApp();
-  });
-
-  it('attaches team_id for a user with a direct team membership', async () => {
-    authentikService.getUsers.mockResolvedValue({
-      results: [{ pk: 1, username: 'alice' }],
-      count: 1
-    });
-    pool.query.mockResolvedValue({
-      rows: [{ authentik_user_id: 1, team_name: 'Alpha Team', team_id: 42 }]
-    });
-
-    const res = await request(app).get('/api/users');
-
-    expect(res.status).toBe(200);
-    const alice = res.body.users.find((u) => u.pk === 1);
-    expect(alice.team_id).toBe(42);
-  });
-
-  it('defaults team_id to null for a user absent from the query result rows', async () => {
-    authentikService.getUsers.mockResolvedValue({
-      results: [{ pk: 1, username: 'no-team-user' }],
-      count: 1
-    });
-    pool.query.mockResolvedValue({ rows: [] });
-
-    const res = await request(app).get('/api/users');
-
-    expect(res.status).toBe(200);
-    const user = res.body.users.find((u) => u.pk === 1);
-    expect(user.team_id).toBeNull();
-  });
-
-  it('defaults team_id to null when the query returns the row but with no team_id (no direct membership)', async () => {
-    authentikService.getUsers.mockResolvedValue({
-      results: [{ pk: 1, username: 'no-team-user' }],
-      count: 1
-    });
-    pool.query.mockResolvedValue({
-      rows: [{ authentik_user_id: 1, team_name: null, team_id: null }]
-    });
-
-    const res = await request(app).get('/api/users');
-
-    expect(res.status).toBe(200);
-    const user = res.body.users.find((u) => u.pk === 1);
-    expect(user.team_id).toBeNull();
-  });
-
-  it('the SQL text projects t.id as team_id', async () => {
-    authentikService.getUsers.mockResolvedValue({
-      results: [{ pk: 1, username: 'alice' }],
-      count: 1
-    });
-    pool.query.mockResolvedValue({ rows: [] });
-
-    await request(app).get('/api/users');
-
-    expect(pool.query).toHaveBeenCalledTimes(1);
-    const [sql] = pool.query.mock.calls[0];
-    expect(sql).toMatch(/t\.id AS team_id/);
-  });
-});
-
-/**
- * Users-page-action-parity: `GET /api/users` additionally projects the
- * LOCAL `users` columns the Member_List edit form (`MemberEditRow`) needs
- * to pre-fill itself -- `first_name`, `last_name`, `tak_role`,
- * `callsign_suffix` -- from the SAME batched query, never from
- * Authentik's own payload.
- */
-describe('GET /api/users projects local member-edit fields (Users-page-action-parity)', () => {
-  let app;
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-    app = buildApp();
-  });
-
-  it('attaches first_name, last_name, tak_role, callsign_suffix from the local users row', async () => {
-    authentikService.getUsers.mockResolvedValue({
-      results: [{ pk: 1, username: 'alice', name: 'Alice Authentik' }],
-      count: 1
-    });
-    pool.query.mockResolvedValue({
-      rows: [{
-        authentik_user_id: 1,
-        local_first_name: 'Alice',
-        local_last_name: 'Local',
-        local_tak_role: 'Team Lead',
-        local_callsign_suffix: 'A.Local'
-      }]
-    });
-
-    const res = await request(app).get('/api/users');
-
-    expect(res.status).toBe(200);
-    const alice = res.body.users.find((u) => u.pk === 1);
-    expect(alice.first_name).toBe('Alice');
-    expect(alice.last_name).toBe('Local');
-    expect(alice.tak_role).toBe('Team Lead');
-    expect(alice.callsign_suffix).toBe('A.Local');
-  });
-
-  it('defaults all four fields to null for a user absent from the query result rows', async () => {
-    authentikService.getUsers.mockResolvedValue({
-      results: [{ pk: 1, username: 'no-local-row' }],
-      count: 1
-    });
-    pool.query.mockResolvedValue({ rows: [] });
-
-    const res = await request(app).get('/api/users');
-
-    expect(res.status).toBe(200);
-    const user = res.body.users.find((u) => u.pk === 1);
-    expect(user.first_name).toBeNull();
-    expect(user.last_name).toBeNull();
-    expect(user.tak_role).toBeNull();
-    expect(user.callsign_suffix).toBeNull();
-  });
-
-  it('the SQL text projects the four local columns under their local_ aliases', async () => {
-    authentikService.getUsers.mockResolvedValue({
-      results: [{ pk: 1, username: 'alice' }],
-      count: 1
-    });
-    pool.query.mockResolvedValue({ rows: [] });
-
-    await request(app).get('/api/users');
-
-    expect(pool.query).toHaveBeenCalledTimes(1);
-    const [sql] = pool.query.mock.calls[0];
-    expect(sql).toMatch(/u\.first_name AS local_first_name/);
-    expect(sql).toMatch(/u\.last_name AS local_last_name/);
-    expect(sql).toMatch(/u\.tak_role AS local_tak_role/);
-    expect(sql).toMatch(/u\.callsign_suffix AS local_callsign_suffix/);
-  });
-});
-
-/**
- * account-lifecycle-management: `GET /api/users` additionally projects
- * `account_status` and `username` from the LOCAL `users` row, needed by
- * the Users page's Suspend/Unsuspend action -- `account_status` drives
- * the action's icon/label/mode, and `username` is the value
- * `SuspendAccountDialog`'s type-to-confirm input requires for
- * `mode="suspend"`. Sourced from the SAME batched query as the other
- * local-column fields above, never from Authentik's own payload.
- */
-describe('GET /api/users projects account_status and username (account-lifecycle-management)', () => {
-  let app;
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-    app = buildApp();
-  });
-
-  it('attaches account_status and username from the local users row', async () => {
-    authentikService.getUsers.mockResolvedValue({
-      results: [{ pk: 1, username: 'alice-authentik' }],
-      count: 1
-    });
-    pool.query.mockResolvedValue({
-      rows: [{
-        authentik_user_id: 1,
-        local_account_status: 'suspended',
-        local_username: 'alice-local'
-      }]
-    });
-
-    const res = await request(app).get('/api/users');
-
-    expect(res.status).toBe(200);
-    const alice = res.body.users.find((u) => u.pk === 1);
-    expect(alice.account_status).toBe('suspended');
-    expect(alice.username).toBe('alice-local');
-  });
-
-  it('defaults both fields to null for a user absent from the query result rows', async () => {
-    authentikService.getUsers.mockResolvedValue({
-      results: [{ pk: 1, username: 'no-local-row' }],
-      count: 1
-    });
-    pool.query.mockResolvedValue({ rows: [] });
-
-    const res = await request(app).get('/api/users');
-
-    expect(res.status).toBe(200);
-    const user = res.body.users.find((u) => u.pk === 1);
-    expect(user.account_status).toBeNull();
-    expect(user.username).toBeNull();
-  });
-
-  it('the SQL text projects both local columns under their local_ aliases', async () => {
-    authentikService.getUsers.mockResolvedValue({
-      results: [{ pk: 1, username: 'alice' }],
-      count: 1
-    });
-    pool.query.mockResolvedValue({ rows: [] });
-
-    await request(app).get('/api/users');
-
-    expect(pool.query).toHaveBeenCalledTimes(1);
-    const [sql] = pool.query.mock.calls[0];
-    expect(sql).toMatch(/u\.account_status AS local_account_status/);
-    expect(sql).toMatch(/u\.username AS local_username/);
-  });
-});
-
-/**
- * Users-page-action-parity: `GET /api/users` additionally projects
- * `can_manage`, answering "may THIS caller act on THIS row's own team"
- * (Edit/Transfer/Delete), independent of `DirectoryScopeService`'s
- * VISIBILITY scoping. A Global_Manager can manage every row with no
- * extra query; a non-Global_Manager gets exactly one extra query
- * (`Team.getManagedTeamIds`) and `can_manage` becomes a Set-membership
- * test against the row's own `team_id`.
- */
-describe('GET /api/users projects can_manage (Users-page-action-parity)', () => {
-  let app;
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-    app = buildApp();
-  });
-
-  afterEach(() => {
-    // Restore the shared mock user to the Global_Manager every other
-    // describe block in this file relies on.
-    mockAuthUser.id = 1;
-    mockAuthUser.userId = 1;
-    mockAuthUser.is_global_manager = true;
-  });
-
-  it('sets can_manage: true for every row for a Global_Manager, with no extra query', async () => {
-    authentikService.getUsers.mockResolvedValue({
-      results: [{ pk: 1, username: 'alice' }, { pk: 2, username: 'bob' }],
-      count: 2
-    });
-    pool.query.mockResolvedValue({
-      rows: [
-        { authentik_user_id: 1, team_name: 'Alpha Team', team_id: 4 },
-        { authentik_user_id: 2, team_name: null, team_id: null }
-      ]
-    });
-
-    const res = await request(app).get('/api/users');
-
-    expect(res.status).toBe(200);
-    // The team-name batched query is the ONLY pool.query call -- no
-    // Team.getManagedTeamIds query for a Global_Manager.
-    expect(pool.query).toHaveBeenCalledTimes(1);
-    expect(res.body.users.find((u) => u.pk === 1).can_manage).toBe(true);
-    expect(res.body.users.find((u) => u.pk === 2).can_manage).toBe(true);
-  });
-
-  it('sets can_manage: true only for rows whose team_id is in Team.getManagedTeamIds\'s result, for a non-Global_Manager', async () => {
-    mockAuthUser.id = 9;
-    mockAuthUser.userId = 9;
-    mockAuthUser.is_global_manager = false;
-
-    authentikService.getUsers.mockResolvedValue({
-      results: [
-        { pk: 1, username: 'alice' }, // managed team
-        { pk: 2, username: 'bob' },   // unmanaged team
-        { pk: 3, username: 'carol' }  // no team at all
-      ],
-      count: 3
-    });
-
-    pool.query.mockImplementation(async (sql) => {
-      // `managed_teams` is the CTE name UNIQUE to Team.getManagedTeamIds --
-      // DirectoryScopeService.resolveScope's Q1 also names its first CTE
-      // `admin_teams`, so matching on that alone would also intercept
-      // (and mis-shape the response for) the VISIBILITY-scoping query this
-      // non-Global_Manager path additionally issues.
-      if (typeof sql === 'string' && sql.includes('managed_teams')) {
-        // Team.getManagedTeamIds(9) -- caller administers team 4 (and its
-        // descendants, already flattened by the real recursive query;
-        // this mock just returns the flattened set directly).
-        return { rows: [{ team_id: 4 }] };
-      }
-      // DirectoryScopeService.resolveScope's Q1 (Scoped_Organisations):
-      // this test is about `can_manage`, a SEPARATE question from
-      // visibility, so it admits every candidate via provenance
-      // (`origin_org_id: 100` on every row below, matched against this
-      // resolved Organisation) rather than actually exercising the
-      // domain-matching path -- Q2/Q3 below are answered empty since
-      // provenance alone is enough to admit them.
-      if (typeof sql === 'string' && sql.includes('WITH RECURSIVE admin_teams')) {
-        return { rows: [{ id: 100, name: 'Org' }] };
-      }
-      if (typeof sql === 'string' && sql.includes('org_allowed_domains')) {
-        return { rows: [] };
-      }
-      if (typeof sql === 'string' && sql.includes('excluded_email_domains')) {
-        return { rows: [] };
-      }
-      // The team-name batched query.
-      return {
-        rows: [
-          { authentik_user_id: 1, team_name: 'Alpha Team', team_id: 4, origin_org_id: 100 },
-          { authentik_user_id: 2, team_name: 'Beta Team', team_id: 7, origin_org_id: 100 },
-          { authentik_user_id: 3, team_name: null, team_id: null, origin_org_id: 100 }
-        ]
-      };
-    });
-
-    const res = await request(app).get('/api/users');
-
-    expect(res.status).toBe(200);
-    expect(res.body.users.find((u) => u.pk === 1).can_manage).toBe(true);
-    expect(res.body.users.find((u) => u.pk === 2).can_manage).toBe(false);
-    expect(res.body.users.find((u) => u.pk === 3).can_manage).toBe(false);
-  });
-
-  it('calls Team.getManagedTeamIds with req.user.userId (the LOCAL id), not req.user.id (the Authentik id)', async () => {
-    mockAuthUser.id = 999; // Authentik id -- must NOT be what's queried
-    mockAuthUser.userId = 9; // local users.id -- must be what's queried
-    mockAuthUser.is_global_manager = false;
-
-    authentikService.getUsers.mockResolvedValue({
-      results: [{ pk: 1, username: 'alice' }],
-      count: 1
-    });
-
-    let capturedParams = null;
-    pool.query.mockImplementation(async (sql, params) => {
-      // `managed_teams` disambiguates Team.getManagedTeamIds's query from
-      // DirectoryScopeService.resolveScope's own, differently-shaped
-      // `admin_teams`-named CTE -- both happen to take the same [userId]
-      // parameter shape here, so matching the wrong one would still pass
-      // this specific assertion while testing nothing real.
-      if (typeof sql === 'string' && sql.includes('managed_teams')) {
-        capturedParams = params;
-        return { rows: [] };
-      }
-      if (typeof sql === 'string' && sql.includes('WITH RECURSIVE admin_teams')) {
-        return { rows: [] };
-      }
-      if (typeof sql === 'string' && (sql.includes('org_allowed_domains') || sql.includes('excluded_email_domains'))) {
-        return { rows: [] };
-      }
-      return { rows: [{ authentik_user_id: 1, team_name: null, team_id: null }] };
-    });
-
-    await request(app).get('/api/users');
-
-    expect(capturedParams).toEqual([9]);
-  });
-
-  it('sets can_manage: false for every row when Team.getManagedTeamIds resolves an empty Set (no administered team anywhere)', async () => {
-    mockAuthUser.id = 9;
-    mockAuthUser.userId = 9;
-    mockAuthUser.is_global_manager = false;
-
-    authentikService.getUsers.mockResolvedValue({
-      results: [{ pk: 1, username: 'alice' }],
-      count: 1
-    });
-
-    pool.query.mockImplementation(async (sql) => {
-      // See the disambiguation note in the test above: `managed_teams` is
-      // unique to Team.getManagedTeamIds, distinct from
-      // DirectoryScopeService.resolveScope's own `admin_teams`-named CTE.
-      if (typeof sql === 'string' && sql.includes('managed_teams')) {
-        return { rows: [] };
-      }
-      if (typeof sql === 'string' && sql.includes('WITH RECURSIVE admin_teams')) {
-        return { rows: [{ id: 100, name: 'Org' }] };
-      }
-      if (typeof sql === 'string' && sql.includes('org_allowed_domains')) {
-        return { rows: [] };
-      }
-      if (typeof sql === 'string' && sql.includes('excluded_email_domains')) {
-        return { rows: [] };
-      }
-      return { rows: [{ authentik_user_id: 1, team_name: 'Alpha Team', team_id: 4, origin_org_id: 100 }] };
-    });
-
-    const res = await request(app).get('/api/users');
-
-    expect(res.status).toBe(200);
-    expect(res.body.users.find((u) => u.pk === 1).can_manage).toBe(false);
-  });
-});
-
-describe('GET /api/users pagination (Requirement 11.4)', () => {
-  let app;
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-    app = buildApp();
-  });
-
-  it('returns 400 for an out-of-range pageSize before calling Authentik or the database', async () => {
-    const res = await request(app).get('/api/users').query({ pageSize: 500 });
-
-    expect(res.status).toBe(400);
-    expect(authentikService.getUsers).not.toHaveBeenCalled();
-    expect(pool.query).not.toHaveBeenCalled();
-  });
-
-  it('returns 400 for a non-numeric page before calling Authentik or the database', async () => {
-    const res = await request(app).get('/api/users').query({ page: 'abc' });
-
-    expect(res.status).toBe(400);
-    expect(authentikService.getUsers).not.toHaveBeenCalled();
-    expect(pool.query).not.toHaveBeenCalled();
-  });
-
-  it('passes the resolved page/pageSize through to authentikService.getUsers and echoes them in the response', async () => {
-    authentikService.getUsers.mockResolvedValue({
-      results: [{ pk: 1, username: 'alice' }],
-      count: 42
-    });
-    pool.query.mockResolvedValue({ rows: [] });
-
-    const res = await request(app).get('/api/users').query({ page: 2, pageSize: 5 });
-
-    expect(res.status).toBe(200);
-    expect(authentikService.getUsers).toHaveBeenCalledWith({ page: 2, pageSize: 5 });
-    expect(res.body.pagination).toEqual({ page: 2, pageSize: 5, total: 42 });
-  });
-
-  it('defaults to page 1 / pageSize 50 when no query params are supplied', async () => {
-    authentikService.getUsers.mockResolvedValue({ results: [], count: 0 });
-    pool.query.mockResolvedValue({ rows: [] });
-
-    const res = await request(app).get('/api/users');
-
-    expect(res.status).toBe(200);
-    expect(authentikService.getUsers).toHaveBeenCalledWith({ page: 1, pageSize: 50 });
-  });
-
-  // Pagination follow-up: server-side search, forwarded verbatim to
-  // authentikService.getUsers (which is what actually talks to Authentik's
-  // own `search` query param -- see that service's own tests).
-  it('passes a supplied search term through to authentikService.getUsers alongside page/pageSize', async () => {
-    authentikService.getUsers.mockResolvedValue({ results: [], count: 0 });
-    pool.query.mockResolvedValue({ rows: [] });
-
-    const res = await request(app).get('/api/users').query({ page: 1, pageSize: 50, search: 'reynolds' });
-
-    expect(res.status).toBe(200);
-    expect(authentikService.getUsers).toHaveBeenCalledWith({ page: 1, pageSize: 50, search: 'reynolds' });
-  });
-
-  it('omits search from the getUsers call when no search query param is supplied', async () => {
-    authentikService.getUsers.mockResolvedValue({ results: [], count: 0 });
-    pool.query.mockResolvedValue({ rows: [] });
-
-    await request(app).get('/api/users');
-
-    const [callArgs] = authentikService.getUsers.mock.calls[0];
-    expect(callArgs.search).toBeUndefined();
   });
 });
 

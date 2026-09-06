@@ -278,7 +278,17 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
     // "1"/"TRUE") is treated as absent/false, never partially truthy.
     const expiringOnly = req.query.expiringOnly === 'true';
 
-    const result = await DeviceEnrollmentService.listAllDevices(req.user, { page, pageSize, search, expiringOnly });
+    // Large-directory filters, forwarded raw -- listAllDevices parses/validates
+    // teamId (positive int else null) and labelInitial (single letter / '#'
+    // else null) itself, mirroring GET /api/users' own teamId/lastNameInitial.
+    const result = await DeviceEnrollmentService.listAllDevices(req.user, {
+      page,
+      pageSize,
+      search,
+      expiringOnly,
+      teamId: req.query.teamId,
+      labelInitial: req.query.labelInitial
+    });
 
     res.json(result);
   } catch (error) {

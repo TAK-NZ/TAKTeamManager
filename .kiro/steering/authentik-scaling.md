@@ -66,6 +66,22 @@ SKIP the group — never PATCH `users:[]`. This is the same class of bug as the
 `authentikSync.js` mass-orphaning incident: discriminate on the run's
 OUTCOME, never the size of the derived set.
 
+The mass-orphaning incident recurred (2026-09) and its fix is now built, and
+generalises the same principle to the READ side: `authentikSync.js`'s
+Reconciliation_Sweep marks a local user `orphaned` when it is absent from the
+periodic user fetch. That fetch paginates `GET /core/users/`, and a mid-upgrade
+/loaded Authentik can return a short page or a prematurely-absent
+`pagination.next`, terminating the loop "cleanly" with an INCOMPLETE set that
+looks complete — orphaning every user it didn't see (confirmed live: ~1,100
+real users false-orphaned during a concurrent import). The **completeness
+guard**: the sync compares the accumulated user count against the
+`pagination.count` Authentik reports on every page and SKIPS the sweep entirely
+when they disagree (logging + a `sync_status` note), while still running the
+additive cache write. Same rule as above — the sweep's trust is gated on the
+fetch being PROVABLY complete, not on the set being non-empty. See
+`docs/authentik-scaling-lessons.md`. An operator can also hard-stop the sweep
+with the `AUTHENTIK_SYNC_ENABLED=false` kill-switch (`feature-flags.md`).
+
 ## Scenario handling (all must work at scale)
 
 - **Large new-user batch into one org (the 15K test):** `POST /core/users/`
@@ -115,18 +131,30 @@ OUTCOME, never the size of the derived set.
 
 ### Empirically-derived defaults (see the profiling note)
 
-Measured on a prod-shaped stack (2 vCPU ×2 tasks, `db.serverless`): reads
-clean to ~5–8 rps, writes clean to ~3–5 rps, both collapsing into timeouts
-above that, with zero 429s. Recommended conservative `.env` defaults:
+Original measurement on a prod-SHAPED stack (2 vCPU ×2 tasks, `db.serverless`):
+reads clean to ~5–8 rps, writes clean to ~3–5 rps, both collapsing into
+timeouts above that, with zero 429s. A 2026-09 FOLLOW-UP re-measured against
+the true prod-CLASS database under real sustained load (a live 15K import +
+worker backlog drain) and raised the write ceiling: at write=4 the prod-class
+DB held p99 ~3.5s, CPU <half, zero 5xx; write=5 degraded (CPU ~70%+, isolated
+5xx, little extra throughput) but did NOT collapse the way the serverless box
+did at 5. Current `.env` defaults:
 
-- `AUTHENTIK_RATE_LIMIT_WRITE_PER_SEC=3`
+- `AUTHENTIK_RATE_LIMIT_WRITE_PER_SEC=4` (raised from 3 on the prod-class DB;
+  see `docs/authentik-ratelimit-profiling.md`'s follow-up section)
 - `AUTHENTIK_RATE_LIMIT_WRITE_PRIORITY_PER_SEC=2`
-- `AUTHENTIK_RATE_LIMIT_READ_PER_SEC=5`
+- `AUTHENTIK_RATE_LIMIT_READ_PER_SEC=5` (NOT raised — under a heavy write
+  backlog the instance was already near saturation, so there was no read
+  headroom to claim; re-baseline reads against an IDLE prod-class instance
+  before raising this)
 - `AUTHENTIK_RATE_LIMIT_ENABLED=true`
 
-These are deliberately low, and that is the point: per-user fan-outs are
-infeasible at 3–5 writes/sec, which is exactly why the group-authoritative
-bulk reconcile is mandatory rather than optional.
+These are still deliberately low, and that is the point: per-user fan-outs are
+infeasible at ~4 writes/sec, which is exactly why the group-authoritative bulk
+reconcile is mandatory rather than optional. A 15K bulk import leaves a
+tens-of-thousands-op reconcile backlog that drains over HOURS at this pace —
+expected, not a fault; do not raise ceilings to "speed it up" while the
+instance is already loaded (that pushes it past the collapse point).
 
 ## Conventions this design must follow (from existing steering)
 
@@ -206,14 +234,22 @@ ops to `reconcile_owned_group`.
     left unchanged (already whole-group reconciles or create/delete, not
     per-user fan-out).
 
-## Validation still outstanding
+## Validation status (2026-09)
 
-Nothing has been run against a live Authentik with the flags ON. The
-intended sequence: enable `BULK_GROUP_RECONCILE_ENABLED` with dry-run ON
-(default), validate the logged desired-set diffs against the prod-shaped
-test Authentik, then set `BULK_GROUP_RECONCILE_DRY_RUN=false`, then enable
-the sweep. The migration (`1789900000000`) also still needs applying to a
-real database.
+Validated live against the prod-class test Authentik. The migration
+(`1789900000000`) was applied to a real database, the rate limiter was
+validated under load, and a real 15K-user bulk import was run through the
+reconciler with `BULK_GROUP_RECONCILE_ENABLED` on (dry-run). Findings folded
+in above: the write ceiling was re-measured and raised to 4; the false-orphan
+recurrence drove the completeness guard + `AUTHENTIK_SYNC_ENABLED` kill-switch;
+`GET /api/users` and `GET /api/devices` were migrated off live-Authentik reads
+to the local `users`/`user_cache` model (removing a per-request Authentik read
+on every list/search).
+
+Still outstanding: taking `BULK_GROUP_RECONCILE_DRY_RUN` to `false` (real group
+PATCHes) and enabling the anti-drift sweep (`OWNED_GROUP_SWEEP_ENABLED`) in
+sustained operation — both were kept in their safe posture (dry-run on, sweep
+off) through the import and its recovery.
 
 ## Load testing against Authentik
 

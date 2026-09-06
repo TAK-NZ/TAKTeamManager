@@ -14,22 +14,25 @@
  * ## What this arm is about
  *
  * `GET /api/users` (`server/routes/users.js`) attaches `live_certificate_count`
- * to every returned user from ONE derived-table LEFT JOIN added to the
- * existing batched `team_root` query -- never a second query, and never one
- * query per user (task 8.6). This test never executes real SQL: `pool.query`
- * is mocked with an interpreter that answers the join's result the way
- * Postgres would, computed from a generated in-memory `tak_devices` table.
- * The "expectation" this test checks against is computed a second time,
+ * to every returned user from ONE derived-table LEFT JOIN in the local
+ * `users`/`user_cache`/`team_root` list query -- never a second query, and
+ * never one query per user. (This route was migrated from a live per-request
+ * Authentik fetch to the LOCAL database; the certificate-count join rides on
+ * that single local list query rather than a separate decoration pass over an
+ * Authentik page.) This test never executes real SQL: `pool.query` is mocked
+ * with an interpreter that answers the list query's rows the way Postgres
+ * would, computed from a generated in-memory `tak_devices` table. The
+ * "expectation" this test checks against is computed a second time,
  * independently, by filtering the SAME generated rows in plain JavaScript --
  * exactly the design's required re-derivation technique -- so a bug in the
- * route's Map-based attach-by-id logic (wrong key, cross-principal leakage,
- * a dropped `?? 0` default, counting a query call per principal) is what
- * this test is positioned to catch, not a bug in Postgres.
+ * route's attach-by-id logic (wrong key, cross-principal leakage, a dropped
+ * `?? 0` default) is what this test is positioned to catch, not a bug in
+ * Postgres.
  *
  * ## Generator shape
  *
- * A SMALL fixed `user_id` alphabet (five ids) stands in for "the set of
- * principals a real deployment has", crossed against a MUCH LARGER row
+ * A SMALL fixed principal alphabet (five Authentik ids) stands in for "the set
+ * of principals a real deployment has", crossed against a MUCH LARGER row
  * count per scenario: for every alphabet id, a per-id plan draws a
  * `targetLive` count -- concentrated on exactly 0, 1 and 2 (the warning's
  * threshold sits between the last two), with a small broader arm up to 6 so
@@ -38,43 +41,41 @@
  * rows per principal, including revoked ones that must not count, are the
  * COMMON case rather than an edge case. A separate pool of rows carries a
  * NULL `user_id`, revoked and non-revoked, equally common. The list of
- * principal ids returned on the page is a (possibly empty) subset of the
+ * principals returned on the page is a (possibly empty) subset of the
  * alphabet, weighted toward non-empty so the interesting per-principal
- * assertions run on most iterations while the empty-list case (zero
- * `pool.query` calls at all, per the route's own `if (authentikUserIds
- * .length > 0)` guard) is still exercised regularly.
+ * assertions run on most iterations while the empty-page case is still
+ * exercised regularly.
  *
  * ## What is asserted, and how "never leaks" is checked
  *
- * For every principal id in the generated list: the response's
+ * For every principal in the generated page: the response's
  * `live_certificate_count` equals the count of rows in the FULL generated
- * table whose `user_id` is that principal's id AND whose `revoked` is
- * `false` -- filtered fresh in the assertion, not read back from whatever
- * the mock happened to return, so a route that attached the wrong map entry
- * would be caught even though the mock's own data was correct. `pool.query`
- * is asserted to have been called exactly once for a non-empty list and
- * exactly zero times for the empty list -- never once per principal --
- * which is the "independent of the list's length" clause. Anti-vacuity
- * counters (checked in the trailing `it()`, after every `test.prop` run) confirm
- * the generated runs actually included a principal with exactly one live
- * certificate and a principal with two or more.
+ * table whose `user_id` is that principal's LOCAL id AND whose `revoked` is
+ * `false` -- filtered fresh in the assertion, not read back from whatever the
+ * mock happened to return, so a route that attached the wrong row would be
+ * caught even though the mock's own data was correct. `pool.query` is asserted
+ * to have been called exactly ONCE regardless of the page's length (the local
+ * list query is always the single statement in play for a Global_Manager,
+ * whose scope short-circuits to UNSCOPED with no extra query) -- never once
+ * per principal, which is the "independent of the list's length" clause.
+ * Anti-vacuity counters (checked in the trailing `it()`, after every
+ * `test.prop` run) confirm the generated runs actually included a principal
+ * with exactly one live certificate and a principal with two or more.
  */
 
 jest.mock('../../config/database', () => ({
   query: jest.fn()
 }));
 
-jest.mock('../../services/authentik', () => ({
-  getUsers: jest.fn()
-}));
-
 jest.mock('../../middleware/auth', () => ({
   authenticateToken: (req, res, next) => {
     // is_global_manager: true short-circuits DirectoryScopeService.resolveScope
     // to its UNSCOPED sentinel with no further DB query, so the ONLY
-    // pool.query call in play is the batched certificate-count join this
-    // property is about (task 8.6's real, un-mocked DirectoryScopeService is
-    // otherwise exercised, deliberately, rather than mocking it too).
+    // pool.query call in play is the batched local list query this property is
+    // about (the real, un-mocked DirectoryScopeService is otherwise exercised,
+    // deliberately, rather than mocking it too). It also means Team
+    // .getManagedTeamIds is never called (a Global_Manager manages every row),
+    // so no second query sneaks in on that path either.
     req.user = { id: 1, userId: 1, is_global_manager: true };
     next();
   },
@@ -89,7 +90,6 @@ const fc = require('fast-check');
 const { test } = require('@fast-check/jest');
 
 const pool = require('../../config/database');
-const authentikService = require('../../services/authentik');
 const usersRouter = require('../users');
 
 function buildApp() {
@@ -131,8 +131,7 @@ const nullRowRevokedFlagsArb = fc.array(fc.boolean(), { minLength: 0, maxLength:
 /**
  * The principals "returned on this page" -- a possibly-empty subset of the
  * alphabet. Weighted toward non-empty so the per-principal assertions below
- * run on most iterations; the empty-list arm still recurs regularly enough
- * to exercise the route's zero-query short-circuit.
+ * run on most iterations; the empty-page arm still recurs regularly.
  */
 const principalIdsArb = fc.oneof(
   { weight: 1, arbitrary: fc.constant([]) },
@@ -207,10 +206,9 @@ describe('Property 12 (query arm): Certificate counts are per-principal, non-rev
       // SINGLE jest test, so `beforeEach`'s `jest.clearAllMocks()` runs
       // once for the whole test, not once per generated run. Without this
       // per-run clear, `pool.query`'s call count accumulates across every
-      // prior iteration and the "independent of list length" assertion
-      // below would be comparing against the wrong baseline.
+      // prior iteration and the "single query" assertion below would be
+      // comparing against the wrong baseline.
       pool.query.mockClear();
-      authentikService.getUsers.mockClear();
 
       const devices = buildDevices(perIdPlan, nullRowRevokedFlags);
 
@@ -222,25 +220,37 @@ describe('Property 12 (query arm): Certificate counts are per-principal, non-rev
         if (count >= 2) seen.twoOrMore = true;
       }
 
-      authentikService.getUsers.mockResolvedValue({
-        results: principalIds.map((id) => ({ pk: id, username: `user${id}` })),
-        count: principalIds.length
-      });
-
-      // The interpreter: answers the batched query the way the real
-      // derived-table LEFT JOIN would, computed from the SAME generated
-      // devices table, for whichever ids are actually requested via
-      // ANY($1). Never a second call, never a per-principal call.
-      pool.query.mockImplementation((sql, params) => {
-        const requestedIds = params[0];
-        return Promise.resolve({
-          rows: requestedIds.map((id) => ({
-            authentik_user_id: id,
-            team_name: null,
-            is_team_device: false,
-            live_certificate_count: expectedLiveCount(devices, id)
-          }))
-        });
+      // The interpreter: answers the single local list query the way the
+      // real derived-table LEFT JOIN would, computed from the SAME generated
+      // devices table, returning one `base`-shaped row per principal on the
+      // page. `pk` is the Authentik id the response echoes; `local_user_id`
+      // is the `users.id` the `certs` derived table is keyed on and the id
+      // this re-derivation filters `tak_devices` by. The exact local total is
+      // carried on every row as `total_count`, exactly as the real query's
+      // `(SELECT total FROM counted)` projection does. Never a second call,
+      // never a per-principal call.
+      const total = principalIds.length;
+      pool.query.mockResolvedValue({
+        rows: principalIds.map((id) => ({
+          pk: `authentik-${id}`,
+          local_user_id: id,
+          username: `user${id}`,
+          email: `user${id}@example.org`,
+          first_name: 'User',
+          last_name: String(id),
+          is_active: true,
+          tak_role: null,
+          callsign_suffix: null,
+          account_status: 'active',
+          origin_org_id: null,
+          tak_callsign: null,
+          tak_color: null,
+          team_id: null,
+          direct_membership_org_id: null,
+          team_name: null,
+          live_certificate_count: expectedLiveCount(devices, id),
+          total_count: total
+        }))
       });
 
       const res = await request(app).get('/api/users');
@@ -248,20 +258,22 @@ describe('Property 12 (query arm): Certificate counts are per-principal, non-rev
       expect(res.status).toBe(200);
       expect(res.body.users).toHaveLength(principalIds.length);
 
-      // Independent of the list's length: zero calls for the empty list,
-      // exactly one call for any non-empty list -- never one call per
-      // principal and never a count that scales with the list.
-      expect(pool.query).toHaveBeenCalledTimes(principalIds.length > 0 ? 1 : 0);
+      // Independent of the page's length: exactly ONE pool.query call for the
+      // local list -- never one call per principal and never a count that
+      // scales with the page. A Global_Manager short-circuits scope resolution
+      // (no scope query) and manages every row (no getManagedTeamIds query),
+      // so the list query is the sole statement issued.
+      expect(pool.query).toHaveBeenCalledTimes(1);
 
       for (const id of principalIds) {
-        const returned = res.body.users.find((u) => u.pk === id);
+        const returned = res.body.users.find((u) => u.pk === `authentik-${id}`);
         expect(returned).toBeDefined();
 
         // Re-derived fresh here, filtering the generated table directly --
         // never read back from the mock's own canned response -- so a route
-        // bug that attached the wrong map entry (e.g. by array position
-        // rather than by authentik_user_id) would still be caught even
-        // though the mock's data was correct.
+        // bug that attached the wrong row (e.g. by array position rather than
+        // by principal) would still be caught even though the mock's data was
+        // correct.
         const expected = devices.filter((row) => row.user_id === id && row.revoked === false).length;
         expect(returned.live_certificate_count).toBe(expected);
 
