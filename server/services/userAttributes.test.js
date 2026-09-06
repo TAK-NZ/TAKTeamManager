@@ -646,7 +646,7 @@ describe('UserAttributesService.clearTeamAttributes', () => {
     delete global.fetch;
   });
 
-  it('sets callsign and color to the literal string "None" in both Authentik and user_cache, leaving takRole untouched', async () => {
+  it('DELETES takCallsign/takColor in Authentik and NULLs them in user_cache (never the literal "None"), leaving takRole untouched', async () => {
     pool.query.mockImplementation((sql) => {
       if (typeof sql === 'string' && sql.includes('SELECT authentik_user_id FROM users')) {
         return Promise.resolve({ rows: [{ authentik_user_id: 'authentik-user-7' }] });
@@ -664,19 +664,19 @@ describe('UserAttributesService.clearTeamAttributes', () => {
 
     expect(result).toBe(true);
 
-    // Authentik: takRole preserved, callsign/color overwritten to 'None'.
+    // ABSENT-not-'None': takRole preserved, takCallsign/takColor REMOVED
+    // from the merged attributes dict entirely -- never set to 'None'/''.
     const [, patchCall] = global.fetch.mock.calls;
     const patchedAttributes = JSON.parse(patchCall[1].body).attributes;
-    expect(patchedAttributes).toEqual({
-      takCallsign: 'None',
-      takColor: 'None',
-      takRole: 'Team Lead'
-    });
+    expect(patchedAttributes).toEqual({ takRole: 'Team Lead' });
+    expect(patchedAttributes).not.toHaveProperty('takCallsign');
+    expect(patchedAttributes).not.toHaveProperty('takColor');
 
-    // user_cache mirror, keyed by authentik_id (not the local users.id).
+    // user_cache mirror set to SQL NULL (in the statement, no bound value),
+    // keyed by authentik_id (not the local users.id).
     expect(pool.query).toHaveBeenCalledWith(
-      'UPDATE user_cache SET tak_callsign = $1, tak_color = $2 WHERE authentik_id = $3',
-      ['None', 'None', 'authentik-user-7']
+      'UPDATE user_cache SET tak_callsign = NULL, tak_color = NULL WHERE authentik_id = $1',
+      ['authentik-user-7']
     );
   });
 
@@ -934,11 +934,15 @@ describe('UserAttributesService.updateTeamUserAttributes - inherited-row regress
  */
 describe('Property 21: Authentik attribute updates are a partial merge, never a wholesale replace', () => {
   const attrValueArb = fc.string({ minLength: 0, maxLength: 10 });
+  // A supplied value may be a string (set), or `null` (ABSENT-not-'None'
+  // rule: DELETE the mapped key). `undefined`/absent keys are modelled by
+  // `requiredKeys: []` (leave the existing key untouched).
+  const suppliedValueArb = fc.oneof(attrValueArb, fc.constant(null));
   const suppliedAttributesArb = fc.record(
     {
-      callsign: attrValueArb,
-      color: attrValueArb,
-      role: attrValueArb
+      callsign: suppliedValueArb,
+      color: suppliedValueArb,
+      role: suppliedValueArb
     },
     { requiredKeys: [] }
   );
@@ -960,9 +964,14 @@ describe('Property 21: Authentik attribute updates are a partial merge, never a 
       const patchedAttributes = JSON.parse(patchCall[1].body).attributes;
 
       const expected = { ...existingAttributes };
-      if (suppliedAttributes.callsign !== undefined) expected.takCallsign = suppliedAttributes.callsign;
-      if (suppliedAttributes.color !== undefined) expected.takColor = suppliedAttributes.color;
-      if (suppliedAttributes.role !== undefined) expected.takRole = suppliedAttributes.role;
+      const applyKey = (mappedKey, supplied) => {
+        if (supplied === undefined) return; // leave existing untouched
+        if (supplied === null) { delete expected[mappedKey]; return; } // delete
+        expected[mappedKey] = supplied; // set
+      };
+      applyKey('takCallsign', suppliedAttributes.callsign);
+      applyKey('takColor', suppliedAttributes.color);
+      applyKey('takRole', suppliedAttributes.role);
 
       expect(patchedAttributes).toEqual(expected);
 

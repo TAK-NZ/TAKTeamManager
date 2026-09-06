@@ -1692,23 +1692,30 @@ class DeviceEnrollmentService {
     // Criterion 10.5, 15.3: local values only, never read back from
     // Authentik. `role` comes directly off the already-resolved row.
     // `callsign`/`color` need a team to resolve against; with none, the
-    // explicit string 'None' is used for both, following the
-    // Enrollment_Lambda's own `extractAttribute` default -- there is no
-    // Organisation to read a colour from either.
-    let callsign = 'None';
-    let color = 'None';
+    // value is ABSENT (`null`) for both -- there is no Organisation to
+    // read a colour from either.
+    //
+    // ABSENT-not-'None' rule: this preview object carries `null` for an
+    // unresolved TAK_Attribute, NEVER the literal string 'None' or ''.
+    // The DISPLAY of the word "None" is a purely client-side rendering
+    // fallback (`EnrollmentView.jsx`'s `orNone()` shows "None" for any
+    // null/blank value) -- the wire value stays absent so nothing
+    // downstream can ingest 'None' as if it were a real callsign/colour
+    // (and 'None' is not a valid TAK_Color).
+    let callsign = null;
+    let color = null;
     if (teamId !== undefined) {
       const attributes = await UserAttributesService.generateCallsign(principal.id, teamId);
       if (attributes) {
-        callsign = attributes.callsign || 'None';
-        color = attributes.color || 'None';
+        callsign = attributes.callsign || null;
+        color = attributes.color || null;
       }
     }
 
     const takAttributes = {
       callsign,
       color,
-      role: principal.tak_role || 'None'
+      role: principal.tak_role || null
     };
 
     // Requirement 13.2: the ONLY `tak_devices` access in this method --

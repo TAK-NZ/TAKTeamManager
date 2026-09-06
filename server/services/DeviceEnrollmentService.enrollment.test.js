@@ -50,8 +50,9 @@
  *   5. `takAttributes` never reflect a (hypothetical, hostile) Authentik
  *      `attributes.takRole`/`takCallsign`/`takColor` value anywhere on
  *      this path.
- *   6. The exact string `'None'` for callsign, color AND role for a
- *      principal with NO team membership and no `tak_role` set.
+ *   6. `null` (ABSENT) for callsign, color AND role for a principal with
+ *      NO team membership and no `tak_role` set -- never the string
+ *      `'None'` or `''` (the ABSENT-not-'None' rule).
  *   7. The positive half of Criterion 3.2: `#buildEnrollment`'s full,
  *      complete return shape for a human principal (`is_team_device =
  *      false`), reached via `generateSelfEnrollment`, with no error and no
@@ -383,13 +384,15 @@ describe('takAttributes are read from LOCAL columns only, never from any Authent
 });
 
 // ---------------------------------------------------------------------------
-// 6. 'None' for callsign, color AND role for a principal with NO team
-// membership and no tak_role set (Criterion 15.3) -- not '', not null,
-// not undefined.
+// 6. ABSENT (null) callsign, color AND role for a principal with NO team
+// membership and no tak_role set -- never the literal string 'None' and
+// never '' (the ABSENT-not-'None' rule). The client renders the word
+// "None" as a DISPLAY fallback for these null values (EnrollmentView's
+// orNone()); the wire value itself is absent.
 // ---------------------------------------------------------------------------
 
-describe("a principal with NO team membership yields the exact string 'None' for callsign, color AND role", () => {
-  it("returns { callsign: 'None', color: 'None', role: 'None' } when tak_role is null and the principal has no team membership at all", async () => {
+describe('a principal with NO team membership yields null (ABSENT) for callsign, color AND role, never the string \'None\'', () => {
+  it('returns { callsign: null, color: null, role: null } when tak_role is null and the principal has no team membership at all', async () => {
     User.findById.mockResolvedValue({ ...HUMAN_ROW, tak_role: null });
     mockAxiosClient.post.mockResolvedValue({ data: { identifier: 'device-enrollment-xyz', expires: '2024-01-01T00:30:00.000Z' } });
     mockAxiosClient.get.mockResolvedValue({ data: { key: 'super-secret-app-password' } });
@@ -398,12 +401,12 @@ describe("a principal with NO team membership yields the exact string 'None' for
 
     const result = await DeviceEnrollmentService.generateSelfEnrollment({ userId: 43, is_global_manager: false });
 
-    expect(result.takAttributes).toEqual({ callsign: 'None', color: 'None', role: 'None' });
+    expect(result.takAttributes).toEqual({ callsign: null, color: null, role: null });
+    // ABSENT-not-'None': explicitly NOT the literal 'None' or '' anywhere.
+    expect(result.takAttributes.callsign).not.toBe('None');
+    expect(result.takAttributes.color).not.toBe('None');
+    expect(result.takAttributes.role).not.toBe('None');
     expect(result.takAttributes.callsign).not.toBe('');
-    expect(result.takAttributes.color).not.toBe('');
-    expect(result.takAttributes.role).not.toBe('');
-    expect(result.takAttributes.callsign).not.toBeNull();
-    expect(result.takAttributes.role).not.toBeUndefined();
     // With no team resolved, generateCallsign has nothing to be called with.
     expect(UserAttributesService.generateCallsign).not.toHaveBeenCalled();
   });

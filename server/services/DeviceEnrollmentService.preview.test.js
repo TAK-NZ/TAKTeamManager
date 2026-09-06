@@ -175,7 +175,7 @@ describe('previewSelfEnrollment / previewEnrollmentQrCode (mint nothing)', () =>
         principalKind: 'device',
         username: 'AUK-DW8YK3T9',
         host: 'ops.example.com',
-        takAttributes: { callsign: 'None', color: 'None', role: 'None' },
+        takAttributes: { callsign: null, color: null, role: null },
         liveCertificateCount: 0,
         teamId: 5
       });

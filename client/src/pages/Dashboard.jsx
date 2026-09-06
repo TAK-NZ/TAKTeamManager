@@ -696,21 +696,22 @@ export default function Dashboard({ user }) {
               <div>
                 <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">My Organisation's Function</dt>
                 <dd className="flex items-center text-sm text-gray-900 dark:text-gray-100">
-                  {/* Bugfix (Dashboard/Enrollment callsign-and-color
-                      divergence): a user with no team now carries the
-                      explicit string 'None' here (never a real color
-                      name -- see UserAttributesService.clearTeamAttributes),
-                      so no swatch is rendered for it. Rendering one would
-                      fall back to getTakColorHex's neutral gray, which is
-                      itself a color this deployment could plausibly assign
-                      -- state must be carried in text, never a colour swatch
-                      that could be mistaken for a real value. */}
-                  {freshUser.takColor !== 'None' && (
-                    <div
-                      className="w-4 h-4 rounded border border-gray-300 mr-2"
-                      style={{ backgroundColor: getTakColorHex(freshUser.takColor) }}
-                    ></div>
-                  )}
+                  {/* ABSENT-not-'None' rule: a teamless user's takColor is
+                      now ABSENT (null/undefined), never the literal 'None'
+                      or a real colour name -- see
+                      UserAttributesService.clearTeamAttributes. This whole
+                      row is already gated on `freshUser.takColor` being
+                      truthy above, so it only renders for a real assigned
+                      colour, and the swatch renders unconditionally with
+                      it. State is carried in the colour NAME text beside
+                      the swatch, never the swatch alone (the accessibility
+                      rule), so a decorative swatch here always sits next to
+                      a real value. */}
+                  <div
+                    className="w-4 h-4 rounded border border-gray-300 mr-2"
+                    aria-hidden="true"
+                    style={{ backgroundColor: getTakColorHex(freshUser.takColor) }}
+                  ></div>
                   {getOrganizationName(freshUser.takColor)}
                 </dd>
               </div>
@@ -719,9 +720,11 @@ export default function Dashboard({ user }) {
               <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">My Organisation</dt>
               {/* Structural Organisation name (teams.name, root of the
                   Ancestor_Chain -- server/routes/users.js's `rt.name`), not
-                  the colour-derived "function" shown above. A teamless
-                  user carries the literal string 'None', never blank
-                  (see the product rule on the None sentinel). */}
+                  the colour-derived "function" shown above. A teamless user
+                  has no organisation, rendered as the DISPLAY fallback word
+                  "None" here (a render-only label for an absent value --
+                  the stored/wire value is absent, never the string 'None';
+                  see the ABSENT-not-'None' rule). */}
               <dd className="text-sm text-gray-900 dark:text-gray-100">{userTeam?.organisation_name || 'None'}</dd>
             </div>
             {/* My Country: a Foreign_Partner Organisation's ISO 3166-1

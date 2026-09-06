@@ -549,12 +549,14 @@ describe('AuthentikSyncService.reconcileOrphanedAccounts (account-lifecycle-mana
     expect(db.query).toHaveBeenCalledTimes(1); // only the SELECT
   });
 
-  it('performs all 4 steps for a human candidate row: enqueue tak_usernames, clear cache callsign/color, mark orphaned + is_active=false on both tables, and a system-attributed audit log', async () => {
+  it('performs all 4 steps for a TEAMLESS human candidate row: enqueue tak_usernames, NULL cache callsign/color, mark orphaned + is_active=false on both tables, and a system-attributed audit log', async () => {
     const candidateRow = { id: 42, authentik_user_id: 999, is_team_device: false, username: 'ada' };
     db.query.mockImplementation((sql) => {
       if (typeof sql === 'string' && sql.includes('FROM users')) {
         return Promise.resolve({ rows: [candidateRow] });
       }
+      // The team_memberships direct-membership probe returns empty here
+      // (teamless) -> the cache is cleared to NULL.
       return Promise.resolve({ rows: [] });
     });
     EventPublisher.publishOperation.mockResolvedValue(1);
@@ -567,7 +569,14 @@ describe('AuthentikSyncService.reconcileOrphanedAccounts (account-lifecycle-mana
       null
     );
 
+    // ABSENT-not-'None': the teamless orphan's cache callsign/color are set
+    // to SQL NULL, never the literal 'None'.
     expect(db.query).toHaveBeenCalledWith(
+      'UPDATE user_cache SET tak_callsign = NULL, tak_color = NULL WHERE authentik_id = $1',
+      ['999']
+    );
+    // And never the old 'None' write.
+    expect(db.query).not.toHaveBeenCalledWith(
       'UPDATE user_cache SET tak_callsign = $1, tak_color = $2 WHERE authentik_id = $3',
       ['None', 'None', '999']
     );
@@ -605,7 +614,12 @@ describe('AuthentikSyncService.reconcileOrphanedAccounts (account-lifecycle-mana
       null
     );
 
-    // No callsign/color clear for a device row (Requirement 3 Criterion 2).
+    // No callsign/color clear for a device row (Requirement 3 Criterion 2)
+    // -- neither the NULL clear nor the retired 'None' write.
+    expect(db.query).not.toHaveBeenCalledWith(
+      'UPDATE user_cache SET tak_callsign = NULL, tak_color = NULL WHERE authentik_id = $1',
+      expect.anything()
+    );
     expect(db.query).not.toHaveBeenCalledWith(
       'UPDATE user_cache SET tak_callsign = $1, tak_color = $2 WHERE authentik_id = $3',
       expect.anything()
@@ -686,6 +700,49 @@ describe('AuthentikSyncService.reconcileOrphanedAccounts (account-lifecycle-mana
     expect(mockLoggerInstance.error).toHaveBeenCalledWith(
       expect.objectContaining({ err: expect.any(Error) }),
       expect.stringContaining('failed to query candidate rows')
+    );
+  });
+
+  it('does NOT clear the cache callsign/color for an orphan candidate that STILL holds a direct team membership (false-orphan protection)', async () => {
+    // A human candidate who is a likely false orphan: Authentik reports the
+    // identity missing (so it is a sweep candidate), but the user still has
+    // a DIRECT team_memberships row. The ABSENT-not-'None' clear must be
+    // SKIPPED so a real team member's callsign/colour is never wiped.
+    const teamedRow = { id: 84, authentik_user_id: 253, is_team_device: false, username: 'daniel.jordan@tak.nz' };
+    db.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('FROM users')) {
+        return Promise.resolve({ rows: [teamedRow] });
+      }
+      // The direct-membership probe finds a row -> still teamed.
+      if (typeof sql === 'string' && sql.includes('FROM team_memberships')) {
+        return Promise.resolve({ rows: [{ '?column?': 1 }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    EventPublisher.publishOperation.mockResolvedValue(1);
+
+    await authentikSync.reconcileOrphanedAccounts(['unrelated-fetched-id']);
+
+    // Neither the NULL clear nor the retired 'None' write happened.
+    expect(db.query).not.toHaveBeenCalledWith(
+      'UPDATE user_cache SET tak_callsign = NULL, tak_color = NULL WHERE authentik_id = $1',
+      expect.anything()
+    );
+    expect(db.query).not.toHaveBeenCalledWith(
+      'UPDATE user_cache SET tak_callsign = $1, tak_color = $2 WHERE authentik_id = $3',
+      expect.anything()
+    );
+
+    // A log records that the clear was skipped for a still-teamed candidate.
+    expect(mockLoggerInstance.info).toHaveBeenCalledWith(
+      expect.objectContaining({ localUserId: 84 }),
+      expect.stringContaining('still holds a direct team membership')
+    );
+
+    // The account is still marked orphaned (the sweep's other steps run).
+    expect(db.query).toHaveBeenCalledWith(
+      "UPDATE users SET account_status = 'orphaned', is_active = false WHERE id = $1",
+      [84]
     );
   });
 });
@@ -2181,6 +2238,97 @@ describe('AuthentikSyncService.syncSingleUser External_Unlock Detection (bugfix)
       expect.objectContaining({ err: expect.any(Error) }),
       expect.stringContaining('External_Unlock Detection')
     );
+  });
+
+  it('recomputes and restores the team-derived callsign/color on unlock when the recovered account STILL holds a direct team membership (stale takColor fix)', async () => {
+    // The daniel.jordan@tak.nz scenario: an account that was (falsely)
+    // orphaned then externally unsuspended, but still holds a direct FENZ
+    // membership. On unlock, the recovery recompute must re-derive the real
+    // callsign/colour from the direct team and mirror it into user_cache --
+    // never leave a stale absent value that would later be pushed up.
+    const UserAttributesService = require('./userAttributes');
+    const generateSpy = jest
+      .spyOn(UserAttributesService, 'generateCallsign')
+      .mockResolvedValue({ callsign: 'FENZ-MATA-D.Jordan', color: 'Red', role: 'Team Member' });
+
+    const user = {
+      pk: '253',
+      username: 'daniel.jordan@tak.nz',
+      email: 'daniel.jordan@tak.nz',
+      groups: [],
+      is_active: true, // externally unsuspended in Authentik
+      attributes: {}
+    };
+    db.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO users')) {
+        return Promise.resolve({ rows: [{ id: 118671, is_team_device: false }] });
+      }
+      if (typeof sql === 'string' && sql.includes('SELECT first_name, last_name, tak_role, is_active, account_status FROM users')) {
+        return Promise.resolve({ rows: [{ first_name: 'Daniel', last_name: 'Jordan', tak_role: 'Team Member', is_active: false, account_status: 'suspended' }] });
+      }
+      if (typeof sql === 'string' && sql.includes('SELECT tak_callsign, tak_color FROM user_cache')) {
+        // Stale absent values left behind by the earlier false orphaning.
+        return Promise.resolve({ rows: [{ tak_callsign: null, tak_color: null }] });
+      }
+      // The recovery recompute's direct-membership probe: still teamed.
+      if (typeof sql === 'string' && sql.includes('FROM team_memberships')) {
+        return Promise.resolve({ rows: [{ team_id: 5908 }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await authentikSync.processBatch([user], {});
+
+    // Recompute called against the DIRECT team id, and the real values
+    // mirrored into user_cache (never NULL/'None').
+    expect(generateSpy).toHaveBeenCalledWith(118671, 5908);
+    expect(db.query).toHaveBeenCalledWith(
+      'UPDATE user_cache SET tak_callsign = $1, tak_color = $2 WHERE authentik_id = $3',
+      ['FENZ-MATA-D.Jordan', 'Red', '253']
+    );
+
+    generateSpy.mockRestore();
+  });
+
+  it('leaves the cache untouched on unlock when the recovered account is genuinely TEAMLESS (no direct membership)', async () => {
+    const UserAttributesService = require('./userAttributes');
+    const generateSpy = jest.spyOn(UserAttributesService, 'generateCallsign');
+
+    const user = {
+      pk: 'teamless-recovered',
+      username: 'nomad',
+      email: 'nomad@example.com',
+      groups: [],
+      is_active: true,
+      attributes: {}
+    };
+    db.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO users')) {
+        return Promise.resolve({ rows: [{ id: 900, is_team_device: false }] });
+      }
+      if (typeof sql === 'string' && sql.includes('SELECT first_name, last_name, tak_role, is_active, account_status FROM users')) {
+        return Promise.resolve({ rows: [{ first_name: 'No', last_name: 'Mad', tak_role: 'Team Member', is_active: false, account_status: 'suspended' }] });
+      }
+      if (typeof sql === 'string' && sql.includes('SELECT tak_callsign, tak_color FROM user_cache')) {
+        return Promise.resolve({ rows: [{ tak_callsign: null, tak_color: null }] });
+      }
+      // No direct team membership row -> genuinely teamless.
+      if (typeof sql === 'string' && sql.includes('FROM team_memberships')) {
+        return Promise.resolve({ rows: [] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await authentikSync.processBatch([user], {});
+
+    // No recompute, and no callsign/color cache write of any shape.
+    expect(generateSpy).not.toHaveBeenCalled();
+    expect(db.query).not.toHaveBeenCalledWith(
+      'UPDATE user_cache SET tak_callsign = $1, tak_color = $2 WHERE authentik_id = $3',
+      expect.anything()
+    );
+
+    generateSpy.mockRestore();
   });
 });
 

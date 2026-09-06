@@ -836,9 +836,12 @@ export default function Users({ user }) {
                       </div>
                     </td>
                     {/* Callsign (`tak_callsign`, already returned by GET
-                        /api/users from user_cache). A teamless user's value is
-                        the literal string 'None' (never blank, never a real
-                        colour/callsign) per the domain rules, rendered as-is.
+                        /api/users from user_cache). A teamless user's stored
+                        value is ABSENT (null) -- never the literal string
+                        'None' and never a real colour/callsign (ABSENT-not-
+                        'None' rule). The word "None" here is a DISPLAY
+                        fallback only (`|| 'None'`), rendered for that absent
+                        value; it is never written back as data.
                         The "TAK device certificates: N" count sits UNDER the
                         callsign value here (moved out of the User cell): both
                         are TAK-identity facts about the user, so grouping the

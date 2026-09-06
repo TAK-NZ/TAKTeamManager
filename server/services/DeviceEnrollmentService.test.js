@@ -540,7 +540,7 @@ describe('DeviceEnrollmentService.generateEnrollmentQrCode', () => {
     expect(result.reEnrollmentDate).toBeDefined();
     expect(result.atakQrDataUrl).toMatch(/^data:image\/png;base64,/);
     expect(result.itakQrDataUrl).toMatch(/^data:image\/png;base64,/);
-    expect(result.takAttributes).toEqual({ callsign: 'None', color: 'None', role: 'None' });
+    expect(result.takAttributes).toEqual({ callsign: null, color: null, role: null });
     expect(result.liveCertificateCount).toBe(0);
   });
 

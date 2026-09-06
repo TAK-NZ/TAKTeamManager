@@ -373,11 +373,57 @@ class AuthentikSyncService {
         // reused directly rather than re-derived, keyed on
         // authentik_user_id since that (not the local id) is
         // user_cache's own key.
+        //
+        // Bugfix (stale takColor='None' on team-holding members): this
+        // clear is now GATED on the user actually being teamless (zero
+        // DIRECT team_memberships rows). An orphaning can be a FALSE
+        // POSITIVE -- a pagination race during a concurrent bulk import
+        // once falsely orphaned ~180 real, still-existing accounts, and
+        // this exact clear then wiped the callsign/color of members who
+        // still held a valid FENZ (etc.) membership. Because the
+        // orphan-RECOVERY paths (External_Unlock and Account_Reclaim)
+        // restore is_active but historically never recomputed the
+        // team-derived callsign/color, that cleared value became permanent
+        // and was subsequently pushed up to Authentik by the routine
+        // per-user push -- surfacing as the impossible `takColor: None` on
+        // a user assigned to a team. Clearing ONLY when the user is
+        // genuinely teamless keeps the legitimate teamless behaviour intact
+        // while never corrupting a still-teamed member's attributes on a
+        // false orphan. (The recovery-path recompute added alongside this
+        // is the belt-and-braces other half; this gate is the part that
+        // stops the bad write happening in the first place.)
+        //
+        // ABSENT-not-'None' rule: when the user IS genuinely teamless we
+        // NULL the user_cache columns -- never the literal 'None' or ''
+        // ('None' is not a valid TAK_Color and must never be stored or
+        // pushed; "no team" is the attribute being absent). Deliberately a
+        // DIRECT cache NULL rather than a call to
+        // UserAttributesService.clearTeamAttributes: this row is being
+        // orphaned precisely because Authentik reports its identity as
+        // MISSING, so there is no live Authentik user to PATCH/delete keys
+        // on -- issuing an Authentik HTTP call here would just 404. The
+        // cache NULL is the whole job; if the account is ever reclaimed,
+        // the recovery recompute (recomputeTeamAttributesOnRecovery) or a
+        // team re-add restores real values, and the push block only ever
+        // deletes/sets keys for a still-present Authentik user.
         if (!row.is_team_device && row.authentik_user_id) {
-          await db.query(
-            'UPDATE user_cache SET tak_callsign = $1, tak_color = $2 WHERE authentik_id = $3',
-            ['None', 'None', String(row.authentik_user_id)]
+          const directMembership = await db.query(
+            'SELECT 1 FROM team_memberships WHERE user_id = $1 AND inherited_from_team_id IS NULL LIMIT 1',
+            [row.id]
           );
+          if (directMembership.rows.length === 0) {
+            await db.query(
+              'UPDATE user_cache SET tak_callsign = NULL, tak_color = NULL WHERE authentik_id = $1',
+              [String(row.authentik_user_id)]
+            );
+          } else {
+            logger.info(
+              { authentikUserId: row.authentik_user_id, localUserId: row.id },
+              'Reconciliation_Sweep: NOT clearing tak_callsign/tak_color -- ' +
+              'this orphan candidate still holds a direct team membership (a likely ' +
+              'false orphan); its team-derived attributes are preserved'
+            );
+          }
         }
 
         // Step 3 (Requirement 3 Criterion 3): mark the row orphaned and
@@ -823,6 +869,28 @@ class AuthentikSyncService {
                 // no is_active mismatch to re-push.
                 local.is_active = true;
                 local.account_status = 'active';
+
+                // Bugfix (stale takColor='None' on team-holding members):
+                // recompute this recovered account's team-derived
+                // callsign/color from its DIRECT team, rather than leaving
+                // whatever `user_cache` currently holds. The observed
+                // failure mode is orphaned -> suspended_externally ->
+                // unsuspended_externally: the Reconciliation_Sweep had
+                // (often falsely) cleared tak_callsign/tak_color on
+                // orphaning, and NOTHING between there and here ever
+                // restored them -- so a real FENZ member came back active
+                // with an absent/stale colour, which the routine per-user
+                // push below then propagated up to Authentik. Now that the
+                // account is active again, if it still holds a direct team
+                // membership we re-derive the correct values (organisation
+                // colour + assembled callsign) and mirror them into
+                // user_cache here; the push block immediately below then
+                // sends the CORRECT value to Authentik in the same sync
+                // pass. A genuinely teamless recovered account has no
+                // direct membership, so generateCallsign resolves nothing
+                // and we leave the cache untouched -- its absent (NULL)
+                // callsign/colour is then legitimate.
+                await this.recomputeTeamAttributesOnRecovery(localUserId, user.pk, cache);
               } catch (unlockDetectionError) {
                 logger.error(
                   { err: unlockDetectionError, authentikUserId: user.pk, localUserId },
@@ -881,20 +949,45 @@ class AuthentikSyncService {
             // Local authoritative values
             const localFirstName = local.first_name || '';
             const localLastName = local.last_name || '';
-            const localTakCallsign = cache.tak_callsign || '';
-            const localTakColor = cache.tak_color || '';
             const localTakRole = local.tak_role || 'Team Member';
             const localIsActive = local.is_active !== false; // default true
             const localFullName = `${localFirstName}${localLastName ? ' ' + localLastName : ''}`;
 
+            // ABSENT-not-'None' rule for the team-derived attributes:
+            // tak_callsign/tak_color are team-derived and a teamless user
+            // has them ABSENT (NULL in user_cache, key deleted in
+            // Authentik) -- never the literal 'None' or ''. Treat NULL,
+            // '' and the legacy 'None' sentinel all as "absent" here: a
+            // present local value is pushed/set; an absent one means the
+            // Authentik key must be DELETED, never set to '' or 'None'
+            // (which would re-introduce exactly the invalid value this
+            // whole change removes, and 'None' is not a valid TAK_Color).
+            const isAbsentTakValue = (v) => v === null || v === undefined || v === '' || v === 'None';
+            const hasLocalCallsign = !isAbsentTakValue(cache.tak_callsign);
+            const hasLocalColor = !isAbsentTakValue(cache.tak_color);
+            const localTakCallsign = hasLocalCallsign ? cache.tak_callsign : '';
+            const localTakColor = hasLocalColor ? cache.tak_color : '';
+
+            // Authentik-side presence, normalising its own legacy '' /
+            // 'None' values to "absent" so a stale 'None' up there is seen
+            // as a difference worth correcting (by deletion).
+            const authentikHasCallsign = !isAbsentTakValue(authentikAttrs.takCallsign);
+            const authentikHasColor = !isAbsentTakValue(authentikAttrs.takColor);
+
             // Check if anything differs
             const nameChanged = authentikName !== localFullName;
             const isActiveChanged = user.is_active !== localIsActive;
+            const callsignChanged = hasLocalCallsign
+              ? (authentikAttrs.takCallsign || '') !== localTakCallsign
+              : authentikHasCallsign; // local absent: changed iff Authentik still has one
+            const colorChanged = hasLocalColor
+              ? (authentikAttrs.takColor || '') !== localTakColor
+              : authentikHasColor; // local absent: changed iff Authentik still has one
             const attrsChanged = (
               (authentikAttrs.first_name || '') !== localFirstName ||
               (authentikAttrs.last_name || '') !== localLastName ||
-              (authentikAttrs.takCallsign || '') !== localTakCallsign ||
-              (authentikAttrs.takColor || '') !== localTakColor ||
+              callsignChanged ||
+              colorChanged ||
               (authentikAttrs.takRole || '') !== localTakRole
             );
 
@@ -903,10 +996,23 @@ class AuthentikSyncService {
                 ...authentikAttrs,
                 first_name: localFirstName,
                 last_name: localLastName,
-                takCallsign: localTakCallsign,
-                takColor: localTakColor,
                 takRole: localTakRole
               };
+
+              // ABSENT-not-'None': set the team-derived key only when a
+              // real local value exists; otherwise DELETE it from the
+              // merged dict so the PATCH removes it from Authentik (rather
+              // than writing '' or 'None').
+              if (hasLocalCallsign) {
+                mergedAttributes.takCallsign = localTakCallsign;
+              } else {
+                delete mergedAttributes.takCallsign;
+              }
+              if (hasLocalColor) {
+                mergedAttributes.takColor = localTakColor;
+              } else {
+                delete mergedAttributes.takColor;
+              }
 
               const patchPayload = {
                 name: localFullName,
@@ -938,6 +1044,83 @@ class AuthentikSyncService {
       }
     } catch (error) {
       logger.error({ err: error, username: user.username }, 'Failed to sync user');
+    }
+  }
+
+  /**
+   * Bugfix (stale takColor='None' on team-holding members): re-derive a
+   * just-recovered account's team-derived callsign/color from its DIRECT
+   * team and mirror the result into `user_cache`, mutating the in-memory
+   * `cache` snapshot in place so the caller's push-to-Authentik comparison
+   * (which reads `cache.tak_callsign`/`cache.tak_color`) sees the corrected
+   * values and pushes THOSE to Authentik in the same pass.
+   *
+   * A user directly in a Sub_Team also holds INHERITED membership rows in
+   * every ancestor; the callsign/colour must be resolved against the
+   * DIRECT team (`inherited_from_team_id IS NULL`) only, exactly as
+   * `server/routes/teams.js`'s member-edit path documents -- resolving
+   * against an ancestor drops the Sub_Team segment. A genuinely teamless
+   * account has no such row: `generateCallsign` is never called, the cache
+   * is left untouched, and any legitimate absent (NULL) callsign/colour it
+   * carries stands.
+   *
+   * Best-effort and self-contained: any failure is logged and swallowed so
+   * it can never abort the enclosing per-user sync -- the next sync run
+   * retries. This is a private helper on the service so it can be spied on
+   * directly in tests without reaching into Authentik.
+   *
+   * @param {number} localUserId - local `users.id` of the recovered account
+   * @param {string|number} authentikUserId - Authentik pk (user_cache key)
+   * @param {{tak_callsign?: string, tak_color?: string}} cache - the
+   *   in-memory user_cache snapshot to keep consistent with the DB write
+   * @returns {Promise<void>}
+   */
+  async recomputeTeamAttributesOnRecovery(localUserId, authentikUserId, cache) {
+    try {
+      if (!localUserId) return;
+
+      const directTeamResult = await db.query(
+        'SELECT team_id FROM team_memberships WHERE user_id = $1 AND inherited_from_team_id IS NULL LIMIT 1',
+        [localUserId]
+      );
+      const directTeamId = directTeamResult.rows[0]?.team_id;
+
+      // No direct membership -> genuinely teamless -> nothing team-derived
+      // to restore. Leave the cache exactly as-is (a legitimate 'None').
+      if (directTeamId === undefined || directTeamId === null) {
+        return;
+      }
+
+      const UserAttributesService = require('./userAttributes');
+      const attributes = await UserAttributesService.generateCallsign(localUserId, directTeamId);
+
+      // generateCallsign returns null when the user/team can't be resolved
+      // (e.g. team since deleted). Don't overwrite the cache with nothing.
+      if (!attributes) {
+        return;
+      }
+
+      await db.query(
+        'UPDATE user_cache SET tak_callsign = $1, tak_color = $2 WHERE authentik_id = $3',
+        [attributes.callsign, attributes.color, String(authentikUserId)]
+      );
+
+      // Keep the caller's in-memory snapshot consistent, so the
+      // push-to-Authentik comparison sends the corrected values this pass.
+      if (cache) {
+        cache.tak_callsign = attributes.callsign;
+        cache.tak_color = attributes.color;
+      }
+
+      logger.info(
+        { authentikUserId, localUserId, directTeamId, color: attributes.color },
+        'Recovery recompute: restored team-derived tak_callsign/tak_color for a recovered account that still holds a direct team membership'
+      );
+    } catch (recomputeError) {
+      logger.error(
+        { err: recomputeError, authentikUserId, localUserId },
+        'Recovery recompute: failed to restore team-derived callsign/color; will retry on the next sync'
+      );
     }
   }
 

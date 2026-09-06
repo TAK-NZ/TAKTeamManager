@@ -111,7 +111,7 @@ describe('POST /api/enrollment/me', () => {
       },
       atakQrDataUrl: 'data:image/png;base64,AAAA',
       itakQrDataUrl: 'data:image/png;base64,BBBB',
-      takAttributes: { callsign: 'None', color: 'None', role: 'None' },
+      takAttributes: { callsign: null, color: null, role: null },
       liveCertificateCount: 0
     };
     DeviceEnrollmentService.generateSelfEnrollment.mockResolvedValue(enrollment);
@@ -254,7 +254,7 @@ describe('GET /api/enrollment/me/preview', () => {
       principalKind: 'human',
       username: 'AUK-U7K3QMX',
       host: 'ops.example.com',
-      takAttributes: { callsign: 'None', color: 'None', role: 'None' },
+      takAttributes: { callsign: null, color: null, role: null },
       liveCertificateCount: 0
     };
     DeviceEnrollmentService.previewSelfEnrollment.mockResolvedValue(preview);

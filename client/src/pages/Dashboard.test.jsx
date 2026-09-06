@@ -1884,17 +1884,15 @@ describe('Connected_Label and expiry markers in the card (Reqs 20.9, 20.11, 21.2
 })
 
 /**
- * Bugfix (Dashboard/Enrollment callsign-and-color divergence): the TAK
- * Profile card's "My Organisation's Function" row renders NO colour swatch
- * when `freshUser.takColor` is the explicit string `'None'` (the value
- * `UserAttributesService.clearTeamAttributes` now writes for a user with
- * no team), since rendering one would fall back to `getTakColorHex`'s
- * neutral gray -- itself a colour this deployment could plausibly assign
- * -- making "has no team" visually indistinguishable from "was actually
- * assigned that colour". The row's TEXT ("None") is unaffected either
- * way; only the swatch is conditional.
+ * ABSENT-not-'None' rule: the TAK Profile card's "My Organisation's
+ * Function" row is gated on `freshUser.takColor` being a truthy, real
+ * colour. A teamless user's `takColor` is now ABSENT (null/undefined) --
+ * never the literal string `'None'` and never a real colour name (see
+ * `UserAttributesService.clearTeamAttributes`) -- so the WHOLE row is
+ * omitted for them, rather than rendering a sentinel with a suppressed
+ * swatch. For a real assigned colour, the row renders with its swatch.
  */
-describe('Dashboard TAK Profile "My Organisation\'s Function" row -- no swatch for the None sentinel', () => {
+describe('Dashboard TAK Profile "My Organisation\'s Function" row -- ABSENT-not-None', () => {
   let container
   let root
 
@@ -1947,18 +1945,23 @@ describe('Dashboard TAK Profile "My Organisation\'s Function" row -- no swatch f
     Array.from(container.querySelectorAll('dt')).find((dt) => dt.textContent.trim() === "My Organisation's Function")
       ?.closest('div')
 
-  it("renders no swatch element for the 'None' sentinel, while still showing the text", async () => {
-    await mountWithTakColor('None')
+  it('omits the whole row entirely for a teamless user whose takColor is ABSENT (null), never rendering a sentinel', async () => {
+    await mountWithTakColor(null)
 
-    const row = organisationRow()
-    expect(row).toBeTruthy()
-    expect(row.querySelector('dd').textContent.trim()).toBe('None')
-    // Named by the classes the swatch itself carries, since it has no
-    // other distinguishing attribute.
-    expect(row.querySelector('.rounded.border.border-gray-300')).toBeNull()
+    // The row is gated on a truthy takColor, so an absent value drops it
+    // completely -- no sentinel text, no swatch.
+    expect(organisationRow()).toBeFalsy()
+    // And the retired literal 'None' must not appear as this row's value.
+    const noneRow = Array.from(container.querySelectorAll('dd')).find(
+      (dd) => dd.textContent.trim() === 'None'
+    )
+    // (Other cells like "My Organisation" may legitimately show the display
+    // fallback "None"; this asserts the FUNCTION row specifically is gone.)
+    expect(organisationRow()).toBeFalsy()
+    void noneRow
   })
 
-  it('still renders the swatch for a real, assigned colour value', async () => {
+  it('still renders the row and its swatch for a real, assigned colour value', async () => {
     await mountWithTakColor('Red')
 
     const row = organisationRow()

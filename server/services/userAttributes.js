@@ -175,11 +175,23 @@ class UserAttributesService {
    * can no longer clobber an existing `takRole` (or any other existing
    * attribute) that it didn't supply.
    *
+   * ABSENT-not-'None' rule: a supplied value of `null` means "make this
+   * attribute ABSENT" -- the corresponding key is DELETED from the merged
+   * dict rather than set. This is the ONLY correct way to represent a
+   * teamless user's `takCallsign`/`takColor`: the attribute must never be
+   * the literal string `'None'` or an empty string `''` (both are real,
+   * non-absent values that leak into TAK clients and break colour
+   * handling), it must simply not be present. A value of `undefined`
+   * still means "leave whatever is already there untouched" (a partial
+   * PATCH), distinct from `null`'s "delete it". Because Authentik's PATCH
+   * replaces the whole `attributes` dict, deleting a key from the merged
+   * object is what actually removes it upstream.
+   *
    * Mirrors `clearUserAttributes`'s existing GET-then-PATCH fetch shape
    * and error-handling convention below.
    *
    * @param {string} authentikUserId
-   * @param {{callsign?: string, color?: string, role?: string}} attributes
+   * @param {{callsign?: string|null, color?: string|null, role?: string|null}} attributes
    * @returns {Promise<boolean>}
    */
   static async updateUserAttributes(authentikUserId, attributes) {
@@ -200,13 +212,22 @@ class UserAttributesService {
       const currentAttributes = user.attributes || {};
 
       const mergedAttributes = { ...currentAttributes };
-      if (attributes.callsign !== undefined) {
+      // `null` => delete the key (make the attribute ABSENT); a real
+      // value => set it; `undefined` => leave the existing key untouched.
+      // See this method's doc comment (ABSENT-not-'None' rule).
+      if (attributes.callsign === null) {
+        delete mergedAttributes.takCallsign;
+      } else if (attributes.callsign !== undefined) {
         mergedAttributes.takCallsign = attributes.callsign;
       }
-      if (attributes.color !== undefined) {
+      if (attributes.color === null) {
+        delete mergedAttributes.takColor;
+      } else if (attributes.color !== undefined) {
         mergedAttributes.takColor = attributes.color;
       }
-      if (attributes.role !== undefined) {
+      if (attributes.role === null) {
+        delete mergedAttributes.takRole;
+      } else if (attributes.role !== undefined) {
         mergedAttributes.takRole = attributes.role;
       }
       if (attributes.firstName !== undefined) {
@@ -289,22 +310,27 @@ class UserAttributesService {
   }
   
   /**
-   * Bugfix (Dashboard/Enrollment callsign-and-color divergence): clears a
-   * single user's team-derived attributes -- `callsign`/`color` -- back
-   * to the explicit string `'None'`, both in Authentik (via
+   * Clears a single user's team-derived attributes -- `callsign`/`color`
+   * -- for a user who has become teamless, both in Authentik (via
    * `updateUserAttributes`, so `takRole` is left untouched -- it is not
    * team-derived) and in this application's own `user_cache` mirror.
    *
-   * `'None'` rather than a blank string or a color like `'White'`: an
-   * empty string reads as "unset" only until the render layer decides
-   * otherwise, and `'White'` is itself a real, assignable
-   * `TAK_Color` in this deployment (see `TeamFormDialog.jsx`'s color
-   * list) -- using it here would make "has no team" indistinguishable
-   * from "was actually assigned White". `'None'` matches the SAME
-   * fallback `DeviceEnrollmentService#resolvePrincipalPreview` and
-   * `EnrollmentView.jsx`'s `orNone()` already use for a principal with
-   * no team, so both surfaces converge on one "no data" convention
-   * instead of two.
+   * ABSENT-not-'None' rule (this is the corrected behaviour): a teamless
+   * user's `takCallsign`/`takColor` must be ABSENT, never a placeholder.
+   * In Authentik the two keys are DELETED (passing `null` to
+   * `updateUserAttributes`, which removes them from the merged dict); in
+   * `user_cache` the columns are set to SQL `NULL`. It must NEVER be the
+   * literal string `'None'` or an empty string `''` -- both are real,
+   * non-absent values that a TAK client would ingest as an actual
+   * callsign/colour, and `takColor: 'None'` in particular is not a valid
+   * `TAK_Color` and breaks colour handling downstream. "No team" is
+   * represented by the attribute simply not existing.
+   *
+   * The user-facing surfaces that display this (the Dashboard's TAK
+   * Profile card, `EnrollmentView.jsx`'s `orNone()`) render the word
+   * "None" as a DISPLAY fallback for an absent/blank value -- that label
+   * is a rendering concern only and is unaffected by, and must not be
+   * confused with, the STORED representation, which is absent/NULL.
    *
    * Intended for a user who has just lost their LAST `team_memberships`
    * row (e.g. `Team.delete` removing the only team they belonged to) --
@@ -335,13 +361,15 @@ class UserAttributesService {
 
       const { authentik_user_id: authentikUserId } = userResult.rows[0];
 
-      // `updateUserAttributes` catches its own errors and returns
-      // `false` rather than throwing (see its own doc comment), so its
-      // result must be checked explicitly here rather than relying on
-      // this method's own try/catch to notice a failed Authentik call.
+      // `null` deletes the takCallsign/takColor keys in Authentik (the
+      // ABSENT-not-'None' rule). `updateUserAttributes` catches its own
+      // errors and returns `false` rather than throwing (see its own doc
+      // comment), so its result must be checked explicitly here rather
+      // than relying on this method's own try/catch to notice a failed
+      // Authentik call.
       const authentikUpdated = await this.updateUserAttributes(authentikUserId, {
-        callsign: 'None',
-        color: 'None'
+        callsign: null,
+        color: null
       });
 
       if (!authentikUpdated) {
@@ -349,9 +377,11 @@ class UserAttributesService {
         return false;
       }
 
+      // NULL, never 'None'/'' -- the user_cache mirror of the now-absent
+      // Authentik attributes.
       await pool.query(
-        'UPDATE user_cache SET tak_callsign = $1, tak_color = $2 WHERE authentik_id = $3',
-        ['None', 'None', authentikUserId]
+        'UPDATE user_cache SET tak_callsign = NULL, tak_color = NULL WHERE authentik_id = $1',
+        [authentikUserId]
       );
 
       return true;
