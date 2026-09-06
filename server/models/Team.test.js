@@ -3481,6 +3481,28 @@ describe('Team.addMember CloudTAK enqueue (Requirement 5.1/5.2/5.3, 1.4)', () =>
     );
   });
 
+  it('coerces a STRING teamId (as arrives from req.params.teamId) to a NUMBER in the enqueued payload', async () => {
+    // Regression guard: this method is reached from routes passing
+    // `req.params.teamId` (always a string). The update_cloudtak_group
+    // payload schema requires `team_id: 'number'`; a string enqueues a
+    // payload that fails validation at dequeue as a PERMANENT failure and
+    // never runs (the batch of failed update_cloudtak_group ops in the
+    // queue was exactly this). The payload must carry a real number.
+    process.env.CLOUDTAK_ENABLED = 'true';
+
+    await Team.addMember('5', 42, 'admin');
+
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'update_cloudtak_group',
+      { team_id: 5 },
+      null
+    );
+    const [, payload] = EventPublisher.publishOperation.mock.calls.find(
+      ([op]) => op === 'update_cloudtak_group'
+    );
+    expect(typeof payload.team_id).toBe('number');
+  });
+
   it("enqueues exactly one update_cloudtak_group with { team_id } when the flag is on for role='member' (demote path)", async () => {
     process.env.CLOUDTAK_ENABLED = 'true';
 
@@ -3621,6 +3643,23 @@ describe('Team.create / Team.update CloudTAK enqueue (Requirement 2.1/2.6/6.1/6.
     await Team.create({ name: 'FENZ', parent_team_id: null, created_by: 99 });
 
     expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+  });
+
+  it('Team.update coerces a STRING teamId (req.params.teamId) to a NUMBER in the enqueued payload', async () => {
+    // Regression guard, same defect as the Team.addMember case: PATCH
+    // /api/teams/:teamId passes the string route param straight into
+    // Team.update, and the update_cloudtak_group schema requires a number.
+    process.env.CLOUDTAK_ENABLED = 'true';
+    pool.query.mockResolvedValue({ rows: [{ id: 5585, name: 'Renamed', parent_team_id: null }] });
+
+    await Team.update('5585', { name: 'Renamed' });
+
+    const call = EventPublisher.publishOperation.mock.calls.find(
+      ([op]) => op === 'update_cloudtak_group'
+    );
+    expect(call).toBeTruthy();
+    expect(call[1]).toEqual({ team_id: 5585 });
+    expect(typeof call[1].team_id).toBe('number');
   });
 
   it('Team.update enqueues update_cloudtak_group with { team_id } on a name change, on the default pool, when the flag is on (Requirement 6.1)', async () => {

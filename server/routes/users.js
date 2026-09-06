@@ -1163,9 +1163,15 @@ router.post('/create-and-add', authenticateToken, authorize, [
       // back atomically with the promotion above (Requirement 9.2). Guarded
       // by the enablement flag so nothing enqueues when CloudTAK is off.
       if (isCloudTakEnabled()) {
+        // Coerce to a number: `teamId` is `req.body.teamId`, validated as an
+        // int by express-validator but NOT coerced by it, so a client
+        // sending it as a JSON string leaves it a string here. The
+        // `update_cloudtak_group` schema requires `team_id: 'number'`; a
+        // string enqueues a payload that fails validation at dequeue as a
+        // permanent failure.
         await EventPublisher.publishOperation(
           'update_cloudtak_group',
-          { team_id: teamId },
+          { team_id: Number(teamId) },
           req.user?.userId ?? null,
           client
         );

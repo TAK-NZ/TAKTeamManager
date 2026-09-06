@@ -1018,7 +1018,14 @@ class Team {
       // never breaks membership changes.
       if (isCloudTakEnabled()) {
         try {
-          await EventPublisher.publishOperation('update_cloudtak_group', { team_id: teamId }, null);
+          // Coerce to a number: the `update_cloudtak_group` payload schema
+          // requires `team_id: 'number'`, but this method is reached from
+          // routes that pass `req.params.teamId` (always a STRING). A string
+          // here enqueues `{ team_id: "3" }`, which then fails payload
+          // validation at dequeue as a PERMANENT `validation` failure -- the
+          // op never runs and sits `failed` forever (this is exactly the
+          // batch of failed update_cloudtak_group ops found in the queue).
+          await EventPublisher.publishOperation('update_cloudtak_group', { team_id: Number(teamId) }, null);
         } catch (enqueueError) {
           logger.error({ err: enqueueError, teamId }, 'Error enqueuing update_cloudtak_group');
         }
@@ -1661,7 +1668,13 @@ class Team {
       // wrapped in its own try/catch that logs and does NOT rethrow.
       if (isCloudTakEnabled() && (name !== undefined || description !== undefined)) {
         try {
-          await EventPublisher.publishOperation('update_cloudtak_group', { team_id: teamId }, null);
+          // Coerce to a number: the `update_cloudtak_group` payload schema
+          // requires `team_id: 'number'`, and this method is reached from
+          // `PATCH /api/teams/:teamId` routes that pass `req.params.teamId`
+          // (always a STRING). Without this, the enqueued `{ team_id: "5585" }`
+          // fails payload validation at dequeue (permanent `validation`
+          // failure) and never runs.
+          await EventPublisher.publishOperation('update_cloudtak_group', { team_id: Number(teamId) }, null);
         } catch (enqueueError) {
           logger.error({ err: enqueueError, teamId }, 'Error enqueuing update_cloudtak_group');
         }

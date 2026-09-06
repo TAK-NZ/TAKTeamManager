@@ -102,6 +102,23 @@ describe('SyncWorker.reconcileOwnedGroup', () => {
     expect(reconciler.replaceGroupMembers).toHaveBeenCalledWith('write-uuid', ['99'], expect.any(Object));
   });
 
+  it('bch_write: a NULL write_group_id is a SATISFIED NO-OP, not a retryable defer (read-only broadcast channel with no write group)', async () => {
+    // Regression guard: a read-only BCH channel imported via "Sync
+    // Existing Channels" (only a _READ group existed in Authentik) has
+    // write_group_id = NULL by design. This must NOT throw a retryable
+    // error and defer forever (the one bch_write op that sat ~15h behind
+    // in the queue) -- there is no write group to reconcile, so it is a
+    // no-op success: no desired-set query, no PATCH, no throw.
+    worker.pool.query.mockResolvedValue({ rows: [{ write_group_id: null }] });
+
+    await expect(
+      worker.reconcileOwnedGroup({ group_kind: 'bch_write', bch_channel_id: 5 })
+    ).resolves.toBeUndefined();
+
+    expect(reconciler.desiredBchWriteMembers).not.toHaveBeenCalled();
+    expect(reconciler.replaceGroupMembers).not.toHaveBeenCalled();
+  });
+
   it('region: delegates to desiredRegionMembers with the group_id', async () => {
     worker.pool.query.mockResolvedValue({ rows: [{ group_id: 'region-uuid' }] });
     reconciler.desiredRegionMembers.mockResolvedValue(['5']);

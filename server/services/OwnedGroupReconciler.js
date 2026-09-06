@@ -175,6 +175,14 @@ async function desiredRegionMembers(regionChannelId, client = pool) {
   const flagColumn =
     tier === 'response' ? 'response_channel_access' : 'support_channel_access';
 
+  // NOTE: this query has NO bind parameters. Membership is gated purely on
+  // the (literal, tier-chosen) `flagColumn` and the direct-membership /
+  // non-null-pk predicates -- the region channel id is NOT referenced here
+  // (it was already consumed by the tier lookup above). Passing a params
+  // array to a parameterless statement makes Postgres reject the bind with
+  // "bind message supplies 1 parameters, but prepared statement requires 0",
+  // which made every `region` reconcile fail and retry for ~a day before
+  // exhausting max_retries. So NO second argument is passed here.
   const result = await client.query(
     `
     SELECT u.authentik_user_id
@@ -194,8 +202,7 @@ async function desiredRegionMembers(regionChannelId, client = pool) {
     WHERE tm.inherited_from_team_id IS NULL
       AND u.authentik_user_id IS NOT NULL
       AND COALESCE(org.flag, false) = true
-    `,
-    [regionChannelId]
+    `
   );
   return dedupe(result.rows.map((r) => String(r.authentik_user_id)));
 }

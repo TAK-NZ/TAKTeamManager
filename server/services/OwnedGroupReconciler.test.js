@@ -117,9 +117,17 @@ describe('desiredRegionMembers', () => {
     const members = await reconciler.desiredRegionMembers(12);
 
     expect(members).toEqual(['3', '4']);
-    const [memberSql] = mockQuery.mock.calls[1];
+    const [memberSql, memberParams] = mockQuery.mock.calls[1];
     expect(memberSql).toContain('response_channel_access');
     expect(memberSql).toContain('inherited_from_team_id IS NULL');
+
+    // Regression guard (the "bind message supplies 1 parameters, but
+    // prepared statement requires 0" bug that made every `region` reconcile
+    // fail and retry for ~a day): the member query is PARAMETERLESS -- it
+    // references no `$N` placeholder, so it must be called with NO params
+    // array. A params array here is exactly what Postgres rejects.
+    expect(memberSql).not.toMatch(/\$\d/);
+    expect(memberParams).toBeUndefined();
   });
 
   it('throws a PERMANENT AuthentikApiError for a row with an invalid tier (never PATCHes)', async () => {

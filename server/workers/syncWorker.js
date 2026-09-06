@@ -2992,6 +2992,27 @@ class SyncWorker {
           logger.info(logContext, 'reconcile_owned_group: bch_channel no longer exists; no-op');
           return;
         }
+        // A NULL write_group_id on a bch_write reconcile is a SATISFIED
+        // NO-OP, not a retryable defer. Unlike a team_channel/bch_read
+        // group -- whose NULL id genuinely means "the group-create op has
+        // not drained yet" -- a BCH channel can legitimately have NO write
+        // group at all: a read-only broadcast channel imported via "Sync
+        // Existing Channels" only ever had a `_READ` group in Authentik
+        // (its sibling write group never existed), so
+        // `syncExistingGlobalChannels` stored write_group_id = NULL by
+        // design. There is no write group to reconcile and there never
+        // will be, so `requireGroupId` here would throw a RETRYABLE error
+        // and this op would defer forever until max_retries (this is
+        // exactly the one bch_write op that sat ~15h behind in the queue).
+        // `desiredBchWriteMembers` would return [] anyway; short-circuit
+        // to a no-op success instead.
+        if (row.write_group_id === null || row.write_group_id === undefined || row.write_group_id === '') {
+          logger.info(
+            logContext,
+            'reconcile_owned_group (bch_write): channel has no write group (read-only broadcast channel); nothing to reconcile, no-op'
+          );
+          return;
+        }
         groupUuid = requireGroupId(row.write_group_id, groupKind, logContext);
         desiredMembers = await ownedGroupReconciler.desiredBchWriteMembers(payload.bch_channel_id, this.pool);
         break;
