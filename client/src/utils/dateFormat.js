@@ -303,6 +303,25 @@ export function setDisplayLocale(locale) {
 }
 
 /**
+ * The configured display locale (the `display_locale` public-config key, set
+ * via `setDisplayLocale`, defaulting to `DEFAULT_DISPLAY_LOCALE`). Exposed so
+ * OTHER presentation helpers -- notably `formatNumber` -- format against the
+ * SAME operator-chosen locale the date-abbreviation suffix uses, rather than
+ * each hand-rolling its own locale state or falling back to the browser's.
+ *
+ * Unlike `getDisplayTimezone`, this returns the CONFIGURED value directly (not
+ * a post-fallback "resolved" value): the date path's fallback chain exists to
+ * pick a locale `Intl.DateTimeFormat` will accept for the zone-abbreviation
+ * lookup, whereas a number formatter (`Number#toLocaleString`) does its own
+ * graceful fallback for an unknown locale, so handing it the configured value
+ * is correct and keeps this a pure getter with no resolution side effects.
+ * @returns {string} a BCP-47 locale tag.
+ */
+export function getDisplayLocale() {
+  return configuredLocale
+}
+
+/**
  * @param {string|number|Date|null|undefined} value
  * @returns {Date|null} null for null/undefined/unparseable input.
  */

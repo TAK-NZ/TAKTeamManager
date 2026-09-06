@@ -17,6 +17,7 @@ import {
   toTransferMember
 } from '../components/TeamDeviceList'
 import { describeAccountStatusBadge } from '../utils/accountStatusBadge'
+import { formatNumber } from '../utils/formatNumber'
 
 /**
  * Devices-page-parity: the org-wide counterpart of `/users`, listing every
@@ -518,8 +519,8 @@ export default function Devices({ user }) {
         {!loading && !error && sortedDevices.length > 0 && (
           <div className="mt-6 flex flex-wrap items-center justify-between gap-2">
             <div className="text-sm text-gray-500 dark:text-gray-400">
-              Showing {(pagination.page - 1) * pagination.pageSize + 1} to{' '}
-              {Math.min(pagination.page * pagination.pageSize, pagination.total)} of {pagination.total} devices
+              Showing {formatNumber((pagination.page - 1) * pagination.pageSize + 1)} to{' '}
+              {formatNumber(Math.min(pagination.page * pagination.pageSize, pagination.total))} of {formatNumber(pagination.total)} devices
             </div>
             <div className="flex items-center space-x-2">
               <button

@@ -7,6 +7,7 @@ import { buildTemplateUpdatePayload, validateTemplateDraft } from '../utils/temp
 import { unzipExportedArchive, isImportPayloadShape } from '../utils/settingsImportTransform'
 import ExcludedDomainsManager from '../components/ExcludedDomainsManager'
 import { formatQueueAge } from '../utils/formatQueueAge'
+import { formatNumber } from '../utils/formatNumber'
 // Keep the stat cards + sync-status current while the page is open, on the
 // same visibility-paused 60s interval the Dashboard cards use (shared util).
 // Only the read-only display data auto-refreshes; the editor/form surfaces
@@ -676,7 +677,7 @@ export default function Admin({ user }) {
             </div>
             <div className="ml-4">
               <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Total Teams</p>
-              <p className="text-2xl font-bold text-gray-900 dark:text-gray-100">{stats.totalTeams}</p>
+              <p className="text-2xl font-bold text-gray-900 dark:text-gray-100">{formatNumber(stats.totalTeams)}</p>
             </div>
           </div>
         </div>
@@ -688,7 +689,7 @@ export default function Admin({ user }) {
             </div>
             <div className="ml-4">
               <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Total Users</p>
-              <p className="text-2xl font-bold text-gray-900 dark:text-gray-100">{stats.totalUsers}</p>
+              <p className="text-2xl font-bold text-gray-900 dark:text-gray-100">{formatNumber(stats.totalUsers)}</p>
             </div>
           </div>
         </div>
@@ -700,7 +701,7 @@ export default function Admin({ user }) {
             </div>
             <div className="ml-4">
               <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Total Team Devices</p>
-              <p className="text-2xl font-bold text-gray-900 dark:text-gray-100">{stats.totalDevices}</p>
+              <p className="text-2xl font-bold text-gray-900 dark:text-gray-100">{formatNumber(stats.totalDevices)}</p>
             </div>
           </div>
         </div>
@@ -714,7 +715,7 @@ export default function Admin({ user }) {
               {/* Total Channels = team channels + global channels (BCH +
                   region), per the server's GET /api/admin/stats. */}
               <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Total Channels</p>
-              <p className="text-2xl font-bold text-gray-900 dark:text-gray-100">{stats.totalChannels}</p>
+              <p className="text-2xl font-bold text-gray-900 dark:text-gray-100">{formatNumber(stats.totalChannels)}</p>
             </div>
           </div>
         </div>
@@ -805,11 +806,11 @@ export default function Admin({ user }) {
               <div>
                 <p className="text-xs font-medium text-gray-500 dark:text-gray-400">Queued operations</p>
                 <p className="text-xl font-bold text-gray-900 dark:text-gray-100">
-                  {syncHealth.queue?.pending ?? 0}
+                  {formatNumber(syncHealth.queue?.pending ?? 0)}
                 </p>
                 {syncHealth.queue?.failed > 0 && (
                   <p className="text-xs text-red-600 dark:text-red-400">
-                    {syncHealth.queue.failed} failed
+                    {formatNumber(syncHealth.queue.failed)} failed
                   </p>
                 )}
               </div>

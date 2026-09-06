@@ -253,11 +253,11 @@ describe('Admin.jsx stat cards (Total Team Devices, Total Channels)', () => {
 
   it('renders a Total Team Devices card bound to stats.totalDevices', () => {
     expect(normalized).toContain('Total Team Devices')
-    expect(normalized).toContain('{stats.totalDevices}')
+    expect(normalized).toContain('{formatNumber(stats.totalDevices)}')
   })
 
   it('renders a Total Channels card bound to stats.totalChannels', () => {
     expect(normalized).toContain('Total Channels')
-    expect(normalized).toContain('{stats.totalChannels}')
+    expect(normalized).toContain('{formatNumber(stats.totalChannels)}')
   })
 })

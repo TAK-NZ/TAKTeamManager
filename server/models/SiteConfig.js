@@ -166,15 +166,18 @@ class SiteConfig {
     config.display_timezone = process.env.DISPLAY_TIMEZONE || 'Pacific/Auckland';
 
     // Display_Locale (Requirements 18.1, 18.5's sibling): the locale the
-    // Client's Date_Format_Helpers use ONLY to read a short timezone
-    // abbreviation (e.g. "NZST", "PDT") to append to a rendered
-    // date-and-time value -- `Intl.DateTimeFormat`'s `timeZoneName: 'short'`
-    // resolves that abbreviation differently per locale for the same IANA
-    // zone (e.g. Pacific/Auckland reads "NZST" under 'en-NZ' but "GMT+12"
-    // under 'en-US'). The numeric `yyyy-mm-dd HH:MM` components stay
-    // locale-independent, exactly as documented in `dateFormat.js` -- this
-    // locale is consulted for the abbreviation suffix alone. A client that
-    // never receives this key falls back to the same `en-NZ` literal.
+    // Client uses for locale-DEPENDENT formatting. Two consumers today:
+    //   1. the short timezone abbreviation the Date_Format_Helpers append to
+    //      a rendered date-and-time (e.g. "NZST" under 'en-NZ' vs "GMT+12"
+    //      under 'en-US' for the same Pacific/Auckland zone). The numeric
+    //      `yyyy-mm-dd HH:MM` components stay locale-INdependent.
+    //   2. thousands grouping separators on counts/totals via
+    //      `client/src/utils/formatNumber.js` (e.g. "13,329" under 'en-NZ',
+    //      "13.329" under 'de-DE') -- surfaced on /admin stat cards, the
+    //      Background Sync card, and pagination footers.
+    // Both read the SAME configured locale (via `getDisplayLocale`), never the
+    // browser's own (non-deterministic across machines). A client that never
+    // receives this key falls back to the same `en-NZ` literal.
     config.display_locale = process.env.DISPLAY_LOCALE || 'en-NZ';
 
     // Expiry_Warning_Days (Requirements 21.1, 21.7): how many days ahead of a

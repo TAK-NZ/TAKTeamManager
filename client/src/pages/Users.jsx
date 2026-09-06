@@ -15,6 +15,7 @@ import TransferMemberDialog from '../components/TransferMemberDialog'
 import SuspendAccountDialog from '../components/SuspendAccountDialog'
 import { describeAccountStatusBadge } from '../utils/accountStatusBadge'
 import { isValidNewUserEmail, extractCallsignSuffixServerError } from '../utils/newUserForm'
+import { formatNumber } from '../utils/formatNumber'
 
 /**
  * Users-page-action-parity: /users' row actions (Edit, Resend welcome,
@@ -971,8 +972,8 @@ export default function Users({ user }) {
         {!loading && !error && sortedUsers.length > 0 && (
           <div className="mt-6 flex flex-wrap items-center justify-between gap-2">
             <div className="text-sm text-gray-500 dark:text-gray-400">
-              Showing {(pagination.page - 1) * pagination.pageSize + 1} to{' '}
-              {Math.min(pagination.page * pagination.pageSize, pagination.total)} of {pagination.total} users
+              Showing {formatNumber((pagination.page - 1) * pagination.pageSize + 1)} to{' '}
+              {formatNumber(Math.min(pagination.page * pagination.pageSize, pagination.total))} of {formatNumber(pagination.total)} users
             </div>
             <div className="flex items-center space-x-2">
               <button

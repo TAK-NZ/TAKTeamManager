@@ -5,6 +5,7 @@ import FormattedDate, {
   DATE_PRECISION,
   TOOLTIP_SIDES,
 } from '../components/FormattedDate'
+import { formatNumber } from '../utils/formatNumber'
 
 /**
  * Global_Manager-only page rendering the filter bar, results table,
@@ -493,8 +494,8 @@ export default function AuditLogs({ user }) {
         {!loading && auditLogs.length > 0 && (
           <div className="mt-6 flex flex-wrap items-center justify-between gap-2">
             <div className="text-sm text-gray-500 dark:text-gray-400">
-              Showing {(pagination.page - 1) * pagination.pageSize + 1} to{' '}
-              {Math.min(pagination.page * pagination.pageSize, pagination.total)} of {pagination.total} entries
+              Showing {formatNumber((pagination.page - 1) * pagination.pageSize + 1)} to{' '}
+              {formatNumber(Math.min(pagination.page * pagination.pageSize, pagination.total))} of {formatNumber(pagination.total)} entries
             </div>
             <div className="flex items-center space-x-2">
               <button
