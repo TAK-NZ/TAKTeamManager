@@ -453,7 +453,7 @@ describe('TeamMembershipService.addUserToTeam / removeUserFromTeam - task 58.4 (
 
   it('removal also removes inherited rows: the DELETE has no inherited_from_team_id filter, so it removes both direct and inherited rows unconditionally', async () => {
     const mockClient = buildMockClient((sql) => {
-      if (sql.includes('SELECT c.authentik_group_id')) {
+      if (sql.includes('SELECT c.id, c.authentik_group_id')) {
         return Promise.resolve({ rows: [] });
       }
       if (sql.includes('SELECT COUNT(*) as count FROM team_memberships')) {
@@ -517,7 +517,7 @@ describe('TeamMembershipService.removeUserFromTeam - externally-provided client 
 
   it('uses the caller-provided client and does not call pool.connect, BEGIN, COMMIT, or release', async () => {
     const externalClient = buildMockClient((sql) => {
-      if (sql.includes('SELECT c.authentik_group_id')) {
+      if (sql.includes('SELECT c.id, c.authentik_group_id')) {
         return Promise.resolve({ rows: [{ authentik_group_id: 'grp-team' }] });
       }
       if (sql.includes('SELECT COUNT(*) as count FROM team_memberships')) {
@@ -562,7 +562,7 @@ describe('TeamMembershipService.removeUserFromTeam - externally-provided client 
 
   it('falls back to acquiring its own client (original behavior) when no external client is given', async () => {
     const mockClient = buildMockClient((sql) => {
-      if (sql.includes('SELECT c.authentik_group_id')) {
+      if (sql.includes('SELECT c.id, c.authentik_group_id')) {
         return Promise.resolve({ rows: [] });
       }
       if (sql.includes('SELECT COUNT(*) as count FROM team_memberships')) {
@@ -589,7 +589,7 @@ describe('TeamMembershipService.removeUserFromTeam', () => {
 
   it('passes the open transactional client through to publishOperation for team-channel removal', async () => {
     const mockClient = buildMockClient((sql) => {
-      if (sql.includes('SELECT c.authentik_group_id')) {
+      if (sql.includes('SELECT c.id, c.authentik_group_id')) {
         return Promise.resolve({ rows: [{ authentik_group_id: 'grp-team' }] });
       }
       if (sql.includes('SELECT COUNT(*) as count FROM team_memberships')) {
@@ -613,7 +613,7 @@ describe('TeamMembershipService.removeUserFromTeam', () => {
 
   it('passes the open transactional client through when also removing global-channel memberships (no teams left)', async () => {
     const mockClient = buildMockClient((sql) => {
-      if (sql.includes('SELECT c.authentik_group_id')) {
+      if (sql.includes('SELECT c.id, c.authentik_group_id')) {
         return Promise.resolve({ rows: [] });
       }
       if (sql.includes('SELECT COUNT(*) as count FROM team_memberships')) {
@@ -654,7 +654,7 @@ describe('TeamMembershipService.removeUserFromTeam', () => {
 
   it('enqueues a revoke_tak_certificates operation on the same client when the user has no teams left (Requirement 26.6)', async () => {
     const mockClient = buildMockClient((sql) => {
-      if (sql.includes('SELECT c.authentik_group_id')) {
+      if (sql.includes('SELECT c.id, c.authentik_group_id')) {
         return Promise.resolve({ rows: [] });
       }
       if (sql.includes('SELECT COUNT(*) as count FROM team_memberships')) {
@@ -683,7 +683,7 @@ describe('TeamMembershipService.removeUserFromTeam', () => {
 
   it('does not enqueue revoke_tak_certificates when the user still has other teams', async () => {
     const mockClient = buildMockClient((sql) => {
-      if (sql.includes('SELECT c.authentik_group_id')) {
+      if (sql.includes('SELECT c.id, c.authentik_group_id')) {
         return Promise.resolve({ rows: [{ authentik_group_id: 'grp-team' }] });
       }
       if (sql.includes('SELECT COUNT(*) as count FROM team_memberships')) {
@@ -706,7 +706,7 @@ describe('TeamMembershipService.removeUserFromTeam', () => {
 
   it('does not enqueue revoke_tak_certificates when the user has no resolvable username', async () => {
     const mockClient = buildMockClient((sql) => {
-      if (sql.includes('SELECT c.authentik_group_id')) {
+      if (sql.includes('SELECT c.id, c.authentik_group_id')) {
         return Promise.resolve({ rows: [] });
       }
       if (sql.includes('SELECT COUNT(*) as count FROM team_memberships')) {
@@ -735,7 +735,7 @@ describe('TeamMembershipService.removeUserFromTeam', () => {
 
   it('rolls back the membership removal when the sync_operations insert (publishOperation) fails', async () => {
     const mockClient = buildMockClient((sql) => {
-      if (sql.includes('SELECT c.authentik_group_id')) {
+      if (sql.includes('SELECT c.id, c.authentik_group_id')) {
         return Promise.resolve({ rows: [{ authentik_group_id: 'grp-team' }] });
       }
       if (sql.includes('SELECT COUNT(*) as count FROM team_memberships')) {
@@ -812,7 +812,7 @@ describe('TeamMembershipService.removeUserFromTeam CloudTAK enqueue (Requirement
     process.env.CLOUDTAK_ENABLED = 'true';
 
     const mockClient = buildMockClient((sql) => {
-      if (sql.includes('SELECT c.authentik_group_id')) {
+      if (sql.includes('SELECT c.id, c.authentik_group_id')) {
         return Promise.resolve({ rows: [] });
       }
       // The direct-admin capture query: user held direct admin on Teams 3 and 7.
@@ -853,7 +853,7 @@ describe('TeamMembershipService.removeUserFromTeam CloudTAK enqueue (Requirement
     process.env.CLOUDTAK_ENABLED = 'true';
 
     const mockClient = buildMockClient((sql) => {
-      if (sql.includes('SELECT c.authentik_group_id')) {
+      if (sql.includes('SELECT c.id, c.authentik_group_id')) {
         return Promise.resolve({ rows: [] });
       }
       if (sql.includes("role = 'admin' AND inherited_from_team_id IS NULL")) {
@@ -881,7 +881,7 @@ describe('TeamMembershipService.removeUserFromTeam CloudTAK enqueue (Requirement
     process.env.CLOUDTAK_ENABLED = 'false';
 
     const mockClient = buildMockClient((sql) => {
-      if (sql.includes('SELECT c.authentik_group_id')) {
+      if (sql.includes('SELECT c.id, c.authentik_group_id')) {
         return Promise.resolve({ rows: [] });
       }
       if (sql.includes('SELECT COUNT(*) as count FROM team_memberships')) {

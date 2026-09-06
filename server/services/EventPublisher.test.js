@@ -57,7 +57,8 @@ describe('EventPublisher.publishOperation', () => {
       'grp-1',
       JSON.stringify({ target_user_id: 1, target_group_id: 'grp-1' }),
       7,
-      null
+      null,
+      100 // Phase 1: normal priority derived from op type
     ]);
   });
 
@@ -83,7 +84,8 @@ describe('EventPublisher.publishOperation', () => {
       'grp-2',
       JSON.stringify({ target_user_id: 2, target_group_id: 'grp-2' }),
       8,
-      null
+      null,
+      100 // Phase 1: normal priority derived from op type
     ]);
   });
 
@@ -193,9 +195,9 @@ describe('EventPublisher.publishOperationsBatch', () => {
     expect(sql).toContain('INSERT INTO sync_operations');
     expect(sql.match(/\(\$/g)).toHaveLength(3); // three value-tuples
     expect(params).toEqual([
-      'assign_user_to_global_channels', 10, null, JSON.stringify({ target_user_id: 10 }), null, null,
-      'assign_user_to_global_channels', 11, null, JSON.stringify({ target_user_id: 11 }), null, null,
-      'assign_user_to_global_channels', 12, null, JSON.stringify({ target_user_id: 12 }), null, null
+      'assign_user_to_global_channels', 10, null, JSON.stringify({ target_user_id: 10 }), null, null, 100,
+      'assign_user_to_global_channels', 11, null, JSON.stringify({ target_user_id: 11 }), null, null, 100,
+      'assign_user_to_global_channels', 12, null, JSON.stringify({ target_user_id: 12 }), null, null, 100
     ]);
   });
 
@@ -229,8 +231,8 @@ describe('EventPublisher.publishOperationsBatch', () => {
 
     const [, params] = pool.query.mock.calls[0];
     expect(params).toEqual([
-      'add_user_to_group', 1, 'grp-a', JSON.stringify({ target_user_id: 1, target_group_id: 'grp-a' }), 42, 'corr-batch-1',
-      'add_user_to_group', 2, 'grp-b', JSON.stringify({ target_user_id: 2, target_group_id: 'grp-b' }), 42, 'corr-batch-1'
+      'add_user_to_group', 1, 'grp-a', JSON.stringify({ target_user_id: 1, target_group_id: 'grp-a' }), 42, 'corr-batch-1', 100,
+      'add_user_to_group', 2, 'grp-b', JSON.stringify({ target_user_id: 2, target_group_id: 'grp-b' }), 42, 'corr-batch-1', 100
     ]);
   });
 
@@ -241,7 +243,7 @@ describe('EventPublisher.publishOperationsBatch', () => {
     let callCount = 0;
     pool.query.mockImplementation((sql, params) => {
       callCount += 1;
-      const rowsInThisCall = params.length / 6;
+      const rowsInThisCall = params.length / 7; // Phase 1: 7 params/row (added priority)
       const idsForCall = Array.from({ length: rowsInThisCall }, (_, i) => ({ id: (callCount - 1) * 1000 + i }));
       return Promise.resolve({ rows: idsForCall });
     });
@@ -265,5 +267,61 @@ describe('EventPublisher.publishOperationsBatch', () => {
     ).rejects.toThrow('batch insert failed');
 
     expect(pool.query).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Authentik scaling (Phase 1): the enqueued `priority` column. An urgent
+ * operation type (delete/revoke/cleanup) must be enqueued at the low
+ * (more-urgent) priority so it pre-empts a backlog of normal work; every
+ * other op type defaults to normal (100). An explicit `priority` argument
+ * overrides the derived value.
+ */
+describe('EventPublisher priority derivation', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetCorrelationId.mockReturnValue(undefined);
+  });
+
+  it('enqueues an urgent op type (revoke_tak_certificates) at the urgent priority (10)', async () => {
+    pool.query.mockResolvedValue({ rows: [{ id: 1 }] });
+
+    await EventPublisher.publishOperation('revoke_tak_certificates', { target_user_id: 5 });
+
+    const [, params] = pool.query.mock.calls[0];
+    // priority is the 7th bound parameter (index 6).
+    expect(params[6]).toBe(10);
+  });
+
+  it('enqueues a normal op type (add_user_to_group) at the normal priority (100)', async () => {
+    pool.query.mockResolvedValue({ rows: [{ id: 1 }] });
+
+    await EventPublisher.publishOperation('add_user_to_group', { target_user_id: 5, target_group_id: 'g' });
+
+    const [, params] = pool.query.mock.calls[0];
+    expect(params[6]).toBe(100);
+  });
+
+  it('honours an explicit priority argument over the derived one', async () => {
+    pool.query.mockResolvedValue({ rows: [{ id: 1 }] });
+
+    await EventPublisher.publishOperation('add_user_to_group', { target_user_id: 5 }, null, null, 42);
+
+    const [, params] = pool.query.mock.calls[0];
+    expect(params[6]).toBe(42);
+  });
+
+  it('applies the derived urgent priority to every row of a batch', async () => {
+    pool.query.mockResolvedValue({ rows: [{ id: 1 }, { id: 2 }] });
+
+    await EventPublisher.publishOperationsBatch('cleanup_orphaned_authentik_user', [
+      { authentik_user_id: 1 },
+      { authentik_user_id: 2 }
+    ]);
+
+    const [, params] = pool.query.mock.calls[0];
+    // 7 params/row; priority is index 6 of each row.
+    expect(params[6]).toBe(10);
+    expect(params[13]).toBe(10);
   });
 });

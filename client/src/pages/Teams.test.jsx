@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { isValidCallsignPrefixInput } from '../components/TeamFormDialog.jsx';
-import { getParentBreadcrumb, rootOrgLabel } from './Teams.jsx';
+import { getParentBreadcrumb, rootOrgLabel, effectivePrefix } from './Teams.jsx';
 
 // Validates: Requirement 3.10
 //
@@ -259,7 +259,10 @@ describe('Teams.jsx mobile card fallback (sm:hidden cards + hidden sm:block tabl
     expect(cardBlock).toContain('{team.device_count || 0}')
     expect(cardBlock).toContain('{team.admin_count || 0}')
     expect(cardBlock).toContain('{team.sub_teams_count || 0}')
-    expect(cardBlock).toContain('{team.callsign_prefix}')
+    // Bugfix (Foreign_Partner Organisation country prefix): the card
+    // shows the EFFECTIVE prefix (country + callsign_prefix composed),
+    // not the bare callsign_prefix column alone.
+    expect(cardBlock).toContain('{effectivePrefix(team)}')
   })
 
   it('shows each stat as "Label: value" on a single line, not a label stacked above the value on two lines', () => {
@@ -329,6 +332,20 @@ describe('getParentBreadcrumb / rootOrgLabel (root Organisation, not immediate p
     expect(getParentBreadcrumb({ level: 1, id: 900, parent_team_id: 999 }, teams)).toBeNull()
   })
 
+  // Bugfix (Foreign_Partner Organisation country prefix): a Foreign_Partner
+  // Organisation's breadcrumb/prefix label must be the EFFECTIVE prefix
+  // (country + callsign_prefix composed, e.g. "FJI-FIRE"), not the bare
+  // callsign_prefix alone -- mirroring userAttributes.computeCallsignAttributes's
+  // own composition rule server-side.
+  it("resolves a Foreign_Partner Organisation's effective (country-composed) prefix as the root label", () => {
+    const foreignTeams = [
+      { id: 100, name: 'National Fire Authority of Fiji', callsign_prefix: 'FIRE', country_code: 'FJI' },
+      { id: 101, name: 'Suva', callsign_prefix: 'SUVA', parent_team_id: 100 },
+    ]
+    expect(getParentBreadcrumb({ level: 1, id: 101, parent_team_id: 100 }, foreignTeams)).toBe('FJI-FIRE')
+    expect(rootOrgLabel({ id: 101, parent_team_id: 100 }, foreignTeams)).toBe('FJI-FIRE')
+  })
+
   it('does not loop forever on a cyclic parent_team_id chain (defensive)', () => {
     const cyclic = [
       { id: 20, name: 'A', callsign_prefix: 'A', parent_team_id: 21 },
@@ -337,6 +354,44 @@ describe('getParentBreadcrumb / rootOrgLabel (root Organisation, not immediate p
     // Should terminate and return one of the two labels, never hang.
     const result = getParentBreadcrumb({ level: 1, id: 20, parent_team_id: 21 }, cyclic)
     expect(['A', 'B']).toContain(result)
+  })
+})
+
+// Bugfix (/teams showed only the bare `callsign_prefix` column for a
+// Foreign_Partner Organisation, e.g. "FIRE" instead of "FJI-FIRE",
+// silently dropping the country segment from display -- even though the
+// column itself is present on every team row via the existing `SELECT
+// t.*` queries). `effectivePrefix` composes `country_code` (if any)
+// ahead of `callsign_prefix`, mirroring
+// `userAttributes.computeCallsignAttributes`'s own composition rule
+// exactly (`[country_code, callsign_prefix].filter(...).join('-')`).
+describe('effectivePrefix (Foreign_Partner Organisation country prefix composition)', () => {
+  it('composes country_code ahead of callsign_prefix when both are present', () => {
+    expect(effectivePrefix({ callsign_prefix: 'FIRE', country_code: 'FJI' })).toBe('FJI-FIRE')
+    expect(effectivePrefix({ callsign_prefix: 'FIRE', country_code: 'AUS' })).toBe('AUS-FIRE')
+  })
+
+  it('returns the bare callsign_prefix for a domestic team (no country_code)', () => {
+    expect(effectivePrefix({ callsign_prefix: 'FENZ', country_code: null })).toBe('FENZ')
+    expect(effectivePrefix({ callsign_prefix: 'FENZ' })).toBe('FENZ')
+  })
+
+  it('returns the bare callsign_prefix for a Sub_Team, whose own country_code is always null', () => {
+    expect(effectivePrefix({ callsign_prefix: 'SUVA', country_code: null, parent_team_id: 100 })).toBe('SUVA')
+  })
+
+  it('returns null when neither country_code nor callsign_prefix is present', () => {
+    expect(effectivePrefix({ callsign_prefix: null, country_code: null })).toBeNull()
+    expect(effectivePrefix({})).toBeNull()
+  })
+
+  it('returns null for a falsy/missing team', () => {
+    expect(effectivePrefix(null)).toBeNull()
+    expect(effectivePrefix(undefined)).toBeNull()
+  })
+
+  it('falls back to just the country_code when callsign_prefix is absent', () => {
+    expect(effectivePrefix({ callsign_prefix: null, country_code: 'AUS' })).toBe('AUS')
   })
 })
 

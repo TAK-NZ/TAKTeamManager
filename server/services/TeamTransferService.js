@@ -5,6 +5,12 @@ const TeamMembershipService = require('./TeamMembershipService');
 const EventPublisher = require('./EventPublisher');
 const UserAttributesService = require('./userAttributes');
 const EmailService = require('./EmailService');
+// Authentik scaling (Phase 3): the transfer's ADDITIVE side is delegated to
+// TeamMembershipService.addUserToTeam (already flipped), so only the REVOKE
+// side lives here -- flipped to a reconcile_owned_group{team_channel} per
+// revoked channel when the reconciler is enabled, unchanged when off.
+const { isBulkGroupReconcileEnabled } = require('../config/bulkGroupReconcile');
+const { enqueueTeamChannelReconcile } = require('./OwnedGroupReconcileEnqueuer');
 
 // Module-scope singleton, following `SignupFlowService`'s existing shape
 // for a service whose methods are static: `applyPostCommitEffects` has no
@@ -461,10 +467,22 @@ class TeamTransferService {
         // Threading `client` is Requirement 7.3: a rolled-back transfer
         // leaves no `sync_operations` row behind. Same pattern as
         // `createAndAddUser` and `addUserToTeam`.
-        await EventPublisher.publishOperation('remove_user_from_group', {
-          target_user_id: userId,
-          target_group_id: row.authentik_group_id
-        }, actorId, client);
+        //
+        // Authentik scaling (Phase 3): when the reconciler is enabled,
+        // enqueue one reconcile_owned_group{team_channel} for the revoked
+        // channel instead of the per-user remove -- recomputing the group's
+        // membership drops this now-revoked user. `revokedAuthentikGroupIds`
+        // is still recorded (unchanged) for the outcome, since it reflects
+        // which groups the transfer revoked regardless of HOW the sync is
+        // enqueued.
+        if (isBulkGroupReconcileEnabled()) {
+          await enqueueTeamChannelReconcile(row.channel_id, actorId, client);
+        } else {
+          await EventPublisher.publishOperation('remove_user_from_group', {
+            target_user_id: userId,
+            target_group_id: row.authentik_group_id
+          }, actorId, client);
+        }
 
         revokedAuthentikGroupIds.push(row.authentik_group_id);
       }

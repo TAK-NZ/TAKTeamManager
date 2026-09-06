@@ -552,7 +552,9 @@ describe('Property 3: Payload validation failures never schedule a retry', () =>
     // keeps this map in lockstep with operationSchemas.
     create_cloudtak_group: 'createCloudTakGroup',
     update_cloudtak_group: 'updateCloudTakGroup',
-    delete_cloudtak_group: 'deleteCloudTakGroup'
+    delete_cloudtak_group: 'deleteCloudTakGroup',
+    // Authentik scaling (Phase 2): the group-authoritative reconcile.
+    reconcile_owned_group: 'reconcileOwnedGroup'
   };
 
   // Sanity check that the mapping above and operationSchemas.js haven't

@@ -15,6 +15,10 @@ const { buildRegionSeedWorkItems } = require('../config/regions');
 // three can never disagree on the naming convention, since none of them
 // builds or validates a username with its own inline logic.
 const { buildDefaultServiceAccountUsername, isValidServiceAccountUsername } = require('../utils/serviceAccountUsername');
+// Authentik scaling (Phase 3): the "reconcile everyone into the global
+// channels" driver flips to O(groups) per-channel reconciles when enabled.
+const { isBulkGroupReconcileEnabled } = require('../config/bulkGroupReconcile');
+const { enqueueAllGlobalChannelReconciles } = require('./OwnedGroupReconcileEnqueuer');
 // Special-character bugfix (Māori macrons): the `target_group_pattern`
 // values below MUST equal, character-for-character, the Authentik group
 // names the Sync_Worker creates (createBchChannelGroups /
@@ -315,6 +319,24 @@ class GlobalChannelService {
   }
 
   async assignAllUsersToGlobalChannels() {
+    // Authentik scaling (Phase 3): with the reconciler enabled, "reconcile
+    // everyone into the global channels" becomes O(groups): one reconcile
+    // per active BCH read+write group and per active region group, each of
+    // which recomputes its FULL membership from the DB (BCH read = every
+    // active user; region = org-flag-scoped). This replaces enqueuing one
+    // assign_user_to_global_channels per active user (O(users)) -- the
+    // dominant fan-out at thousands of users. When the flag is off, the
+    // original per-user batch runs unchanged.
+    if (isBulkGroupReconcileEnabled()) {
+      const { bchOps, regionOps } = await enqueueAllGlobalChannelReconciles(null);
+      const groupsQueued = bchOps.length + regionOps.length;
+      logger.info(
+        { groupsQueued, bchOps: bchOps.length, regionOps: regionOps.length },
+        'Enqueued group-authoritative global-channel reconciles (replacing per-user fan-out)'
+      );
+      return { groupsQueued };
+    }
+
     // Get all active users
     const usersResult = await pool.query('SELECT id FROM users WHERE is_active = true');
     const userIds = usersResult.rows.map(row => row.id);

@@ -22,6 +22,34 @@ import TeamFormDialog from '../components/TeamFormDialog'
 const MAX_TABLE_INDENT_LEVELS = 3
 
 /**
+ * Bugfix (Foreign_Partner Organisation country prefix): a team's
+ * DISPLAYED prefix must be its EFFECTIVE prefix -- the Foreign_Partner
+ * `country_code` (if any) composed as the leading segment ahead of
+ * `callsign_prefix`, e.g. `FJI-FIRE` for a Fiji fire Organisation whose
+ * own `callsign_prefix` is just `FIRE` -- not the bare `callsign_prefix`
+ * column alone. Mirrors `userAttributes.computeCallsignAttributes`'s own
+ * composition rule exactly (`[country_code, callsign_prefix].filter(...)
+ * .join('-')`), so this page shows the same prefix that is actually
+ * assembled into every member's callsign. A Sub_Team's own `country_code`
+ * is always null (Organisation-only, per `Team.create`/`Team.update`),
+ * so this degrades to the bare `callsign_prefix` for one automatically --
+ * safe to call on any team row, root or not.
+ *
+ * @param {{callsign_prefix?: string|null, country_code?: string|null}|null|undefined} team
+ * @returns {string|null} the effective prefix, or null when the team has
+ *   neither a country nor a prefix at all.
+ */
+export function effectivePrefix(team) {
+  if (!team) {
+    return null
+  }
+  const composed = [team.country_code, team.callsign_prefix]
+    .filter((segment) => !!segment && String(segment).trim() !== '')
+    .join('-')
+  return composed || null
+}
+
+/**
  * The immediate parent's display label for a team's mobile-card breadcrumb
  * ("Parent ›" above the team name) -- the same fallback chain
  * (`callsign_prefix || name || 'Root'`) the table's own
@@ -95,7 +123,7 @@ export function rootOrgLabel(team, teams) {
   if (!root) {
     return null
   }
-  return root.callsign_prefix || root.name || 'Root'
+  return effectivePrefix(root) || root.name || 'Root'
 }
 
 /**
@@ -330,10 +358,14 @@ export default function Teams({ user }) {
   const allFlatTeams = flattenHierarchy(hierarchicalTeams, 0, true)
   
   // Filter teams
-  const filteredTeams = searchTerm ? 
+  const filteredTeams = searchTerm ?
     allFlatTeams.filter(team =>
       team.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      (team.callsign_prefix && team.callsign_prefix.toLowerCase().includes(searchTerm.toLowerCase()))
+      // Bugfix (Foreign_Partner Organisation country prefix): search the
+      // EFFECTIVE prefix (e.g. "FJI-FIRE"), not just the bare
+      // callsign_prefix column, so typing a country code alone (e.g.
+      // "FJI") finds the org too.
+      (effectivePrefix(team) && effectivePrefix(team).toLowerCase().includes(searchTerm.toLowerCase()))
     ) : flattenHierarchy(hierarchicalTeams)
 
   // Pagination
@@ -613,10 +645,10 @@ export default function Teams({ user }) {
                           {team.sub_teams_count || 0}
                         </Link>
                       </div>
-                      {team.callsign_prefix && (
+                      {effectivePrefix(team) && (
                         <div className="flex items-baseline gap-1">
                           <span className="text-xs text-gray-500 dark:text-gray-400">Prefix:</span>
-                          <span className="text-gray-900 dark:text-gray-100">{team.callsign_prefix}</span>
+                          <span className="text-gray-900 dark:text-gray-100">{effectivePrefix(team)}</span>
                         </div>
                       )}
                       <div className="flex items-baseline gap-1">
@@ -810,7 +842,7 @@ export default function Teams({ user }) {
                       </div>
                     </td>
                     <td className="hidden md:table-cell px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                      {team.callsign_prefix || '-'}
+                      {effectivePrefix(team) || '-'}
                     </td>
                     {/* px-3 (was px-6) to match the narrowed icon headers
                         above, so these count columns are actually narrower

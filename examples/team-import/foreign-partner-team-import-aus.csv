@@ -1,0 +1,8 @@
+rowId,parentRowRef,parentTeamName,parentTeamId,name,visibility,callsignPrefix,color,canJoin,countryCode
+org1,,,,National Fire Authority of Australia,public,FIRE,Blue,true,AUS
+d1,org1,,,New South Wales,public,NSW,,,
+,d1,,,Sydney,public,SYD,,true,
+,d1,,,Newcastle,public,NEWC,,true,
+d2,org1,,,Victoria,public,VIC,,,
+,d2,,,Melbourne,public,MELB,,true,
+,d2,,,Geelong,public,GEEL,,true,

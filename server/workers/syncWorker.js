@@ -62,7 +62,60 @@ const logger = require('../config/logger').createLogger('syncWorker');
 // Resiliency-hardening: every raw `fetch()` call in this file goes
 // through `fetchWithTimeout`, which attaches a bounded `AbortSignal` so a
 // hung Authentik connection can never stall a queued operation forever.
-const { fetchWithTimeout } = require('../utils/fetchWithTimeout');
+//
+// Authentik scaling (Phase 1): every one of those calls is an Authentik
+// call (see this comment's original wording), so the raw helper is
+// imported under an aliased name and a local `fetchWithTimeout` wrapper
+// routes each call through the SHARED cross-process rate limiter first.
+// The lane is inferred from the HTTP method: GET -> read, DELETE ->
+// write_priority (deletes are the urgent lane, matching the queue-claim
+// priority for delete ops), everything else -> write. This makes the
+// worker's Authentik load draw from the same token budget as the main
+// server's, instead of the two hammering Authentik independently. When
+// the limiter flag is off, `authentikRequest.run` is a transparent
+// pass-through, so this reduces to the previous raw behaviour.
+const { fetchWithTimeout: rawFetchWithTimeout } = require('../utils/fetchWithTimeout');
+const authentikRequest = require('../services/authentikRequest');
+
+function laneForMethod(method) {
+  const upper = (method || 'GET').toUpperCase();
+  if (upper === 'GET') return 'read';
+  if (upper === 'DELETE') return 'write_priority';
+  return 'write';
+}
+
+function fetchWithTimeout(url, options = {}, timeoutMs) {
+  const kind = laneForMethod(options.method);
+  return authentikRequest.run({ kind }, () => rawFetchWithTimeout(url, options, timeoutMs));
+}
+
+// Authentik scaling (Phase 2): helpers for `reconcileOwnedGroup`'s payload/
+// row validation. A `group_kind` naming an id it did not carry is a
+// PERMANENT payload defect (retrying the same malformed payload can never
+// succeed). A resolvable row whose Authentik group id is still NULL means
+// the group's create op has not drained yet, which IS retryable -- the
+// next attempt reconciles it once the id is populated. These are defined at
+// module scope (not as methods) because they are pure guards with no
+// instance state, and are asserted directly by the reconcile tests.
+function requireId(value, fieldName, groupKind) {
+  if (value === null || value === undefined) {
+    throw new AuthentikApiError(
+      `reconcile_owned_group group_kind "${groupKind}" requires payload field "${fieldName}"`,
+      'permanent'
+    );
+  }
+}
+
+function requireGroupId(groupUuid, groupKind, logContext) {
+  if (groupUuid === null || groupUuid === undefined || groupUuid === '') {
+    throw new AuthentikApiError(
+      `reconcile_owned_group (${groupKind}): owning row has no Authentik group id yet ` +
+        `(${JSON.stringify(logContext)}); its group-create op has likely not drained -- deferring`,
+      'retryable'
+    );
+  }
+  return groupUuid;
+}
 
 // Special-character bugfix (Māori macrons): TAK Server cannot handle
 // non-ASCII characters in an LDAP group name, so every `tak_...` group
@@ -76,6 +129,11 @@ const { toAsciiIdentifier } = require('../utils/asciiNormalize');
 // started/stopped alongside the poll loop, health server, and expiry
 // scheduler below (see `start()`/`stop()`), per design.md's Section 20.
 const RetentionCleanupJob = require('../services/RetentionCleanupJob');
+// Authentik scaling (Phase 3): the periodic anti-drift sweep, started/
+// stopped alongside the other scheduled jobs. Its own `start()` gates on
+// both OWNED_GROUP_SWEEP_ENABLED and BULK_GROUP_RECONCILE_ENABLED, so it is
+// safe to start unconditionally here.
+const OwnedGroupSweepJob = require('../services/OwnedGroupSweepJob');
 // cert-expiry-notifications Requirement 5 (task 6.2): the daily
 // certificate-expiry digest job, started/stopped alongside the poll
 // loop, health server, expiry scheduler, and retention cleanup job below
@@ -171,35 +229,22 @@ class PayloadValidationError extends Error {
  * unchanged `handleOperationError` retry-scheduling path, exactly like any
  * other unclassified error today.
  */
-class AuthentikApiError extends Error {
-  constructor(message, classification) {
-    super(message);
-    this.name = 'AuthentikApiError';
-    this.classification = classification;
-  }
-}
-
-/**
- * Requirement 26.8 (task 48.5): the TAK Server analogue of
- * `AuthentikApiError`, thrown by `revokeTakCertificates` whenever
- * `TakServerService`'s underlying axios call throws -- either a
- * non-2xx HTTP status from TAK Server's Marti `certadmin` API (classified
- * via `classifyFailure(error.response.status)`) or a network/timeout
- * error with no response at all (classified via
- * `classifyFailure(error)`, which treats any `Error` instance as
- * retryable). A dedicated class (rather than reusing `AuthentikApiError`)
- * keeps the error's `name`/log output honest about which upstream system
- * actually failed, while `executeOperationSafely`'s classification check
- * below inspects both classes identically via their shared
- * `classification` field.
- */
-class TakServerApiError extends Error {
-  constructor(message, classification) {
-    super(message);
-    this.name = 'TakServerApiError';
-    this.classification = classification;
-  }
-}
+// Authentik scaling (Phase 2): `AuthentikApiError`/`TakServerApiError` were
+// moved to `./apiErrors` so a delegated service (the OwnedGroupReconciler)
+// can throw the SAME classified type this worker inspects, without a
+// circular worker<->reconciler import. Imported here so every existing use
+// below (and the `instanceof` checks in `executeOperationSafely`) is
+// unchanged.
+const { AuthentikApiError, TakServerApiError } = require('./apiErrors');
+// Authentik scaling (Phase 2): the group-authoritative reconciler. Its
+// desired-set queries mirror the event-path membership definitions, and its
+// replaceGroupMembers issues the single full-replace group PATCH (honoring
+// the dry-run flag). The `reconcile_owned_group` handler below is a thin
+// dispatcher over it.
+const ownedGroupReconciler = require('../services/OwnedGroupReconciler');
+const {
+  isBulkGroupReconcileEnabled
+} = require('../config/bulkGroupReconcile');
 
 /**
  * Feature device-management, Requirements 12.12/12.13 (task 24.3): thrown by
@@ -431,6 +476,11 @@ class SyncWorker {
     // health server (see `start()`/`stop()` below).
     this.retentionCleanupJob = new RetentionCleanupJob();
 
+    // Authentik scaling (Phase 3): the anti-drift sweep, constructed
+    // unconditionally (no timer/I/O at construction) like the jobs above;
+    // its `start()` self-gates on the sweep + reconcile flags.
+    this.ownedGroupSweepJob = new OwnedGroupSweepJob();
+
     // cert-expiry-notifications Requirement 5 (task 6.2): constructed
     // unconditionally (like every other job above) -- opens no timer,
     // reads no secret, and makes no network call until `start()` is
@@ -504,6 +554,12 @@ class SyncWorker {
     // sync_operations/audit_logs retention cleanup runs on its own
     // (default 24h) cadence independent of the poll loop.
     this.retentionCleanupJob.start();
+
+    // Authentik scaling (Phase 3): start the anti-drift sweep. Its own
+    // `start()` no-ops unless OWNED_GROUP_SWEEP_ENABLED and
+    // BULK_GROUP_RECONCILE_ENABLED are both on, so this call site is
+    // unconditional (matching the retention/expiry jobs' self-gating shape).
+    this.ownedGroupSweepJob.start();
 
     // cert-expiry-notifications Requirement 5.2/5.3/5.4 (task 6.2): the
     // job's own `start()` re-checks BOTH `CERT_EXPIRY_NOTIFICATIONS_ENABLED`
@@ -650,6 +706,10 @@ class SyncWorker {
     // alongside the health server.
     this.retentionCleanupJob.stop();
 
+    // Authentik scaling (Phase 3): stop the anti-drift sweep alongside the
+    // other scheduled jobs.
+    this.ownedGroupSweepJob.stop();
+
     // cert-expiry-notifications Requirement 5 (task 6.2): stopped
     // UNCONDITIONALLY -- i.e. without re-checking either flag -- mirroring
     // every other job's `stop()` convention here: idempotent, safe even
@@ -775,10 +835,20 @@ class SyncWorker {
         // 10-500, default 50) instead of a single row, still using
         // FOR UPDATE SKIP LOCKED so concurrent worker instances never
         // claim the same row.
+        //
+        // Authentik scaling (Phase 1): ordered by `priority ASC` FIRST,
+        // then `created_at ASC`. `sync_operations.priority` is LOWER =
+        // more urgent (default 100 = normal), so an urgent mutation
+        // (delete/suspend/revoke/cleanup, enqueued at a lower number by
+        // EventPublisher) pre-empts a large backlog of normal-priority
+        // bulk work rather than waiting behind it. Within a single
+        // priority the original FIFO (`created_at`) order is preserved,
+        // so this is behaviour-preserving for the existing all-100 case.
+        // Index-supported by idx_sync_operations_priority_claim.
         const result = await client.query(`
           SELECT * FROM sync_operations 
           WHERE status = 'pending' AND next_retry_at <= NOW()
-          ORDER BY created_at ASC 
+          ORDER BY priority ASC, created_at ASC 
           LIMIT $1 
           FOR UPDATE SKIP LOCKED
         `, [this.batchSize]);
@@ -1132,6 +1202,10 @@ class SyncWorker {
 
       case 'delete_cloudtak_group':
         await this.deleteCloudTakGroup(payload);
+        break;
+
+      case 'reconcile_owned_group':
+        await this.reconcileOwnedGroup(payload);
         break;
 
       default:
@@ -2825,8 +2899,189 @@ class SyncWorker {
   }
 
   /**
+   * Authentik scaling (Phase 2): the `reconcile_owned_group` handler.
+   *
+   * Computes an owned group's COMPLETE desired member set from the local
+   * database and writes it with a single full-replace group PATCH, via
+   * `OwnedGroupReconciler`. Dispatches on `payload.group_kind`:
+   *   - 'team_channel' -> resolve channels row by `channel_id`; members =
+   *     any team_memberships row on the channel's team.
+   *   - 'bch_read' / 'bch_write' -> resolve bch_channels row by
+   *     `bch_channel_id`; members per the read/write definition.
+   *   - 'region' -> resolve region_channels row by `region_channel_id`;
+   *     members = direct-membership users whose Org tier flag is true.
+   *   - 'cloudtak' -> group is name-keyed (`CloudTAKAgency<team_id>`, no
+   *     stored pk); resolve the UUID by name. Members = Direct_Admin_Set.
+   *
+   * FLAG: when `BULK_GROUP_RECONCILE_ENABLED` is off, this is an immediate
+   * no-op success (no DB read, no Authentik call) so the op is inert until
+   * the feature is turned on.
+   *
+   * FAIL-CLOSED: the desired-set query is computed BEFORE any PATCH. If it
+   * throws (DB error / partial read), the error propagates and NO PATCH is
+   * issued -- the group is never emptied over a transient fault. A group
+   * whose owning row / Authentik group id is not resolvable yet (e.g. its
+   * create op has not drained) is a RETRYABLE `AuthentikApiError`, so the
+   * next attempt reconciles it once the group exists. A payload naming a
+   * `group_kind` without its matching id is a PERMANENT payload defect.
+   *
+   * @param {object} payload
+   */
+  async reconcileOwnedGroup(payload) {
+    if (!isBulkGroupReconcileEnabled()) {
+      logger.debug(
+        { groupKind: payload.group_kind },
+        'reconcile_owned_group: feature disabled; no-op'
+      );
+      return;
+    }
+
+    const { group_kind: groupKind } = payload;
+
+    // Resolve (groupUuid, desiredMembers) per kind. A missing id for the
+    // kind is a permanent payload defect. A resolvable-row-but-null-group-id
+    // (or an as-yet-uncreated CloudTAK group) is retryable.
+    let groupUuid;
+    let desiredMembers;
+    const logContext = { groupKind };
+
+    switch (groupKind) {
+      case 'team_channel': {
+        requireId(payload.channel_id, 'channel_id', groupKind);
+        logContext.channelId = payload.channel_id;
+        const row = (await this.pool.query(
+          'SELECT team_id, authentik_group_id FROM channels WHERE id = $1',
+          [payload.channel_id]
+        )).rows[0];
+        if (!row) {
+          // The channel row is gone (deleted between enqueue and now). A
+          // deleted channel's group is handled by remove_team_channel_group;
+          // nothing to reconcile here -> satisfied no-op.
+          logger.info(logContext, 'reconcile_owned_group: channel no longer exists; no-op');
+          return;
+        }
+        groupUuid = requireGroupId(row.authentik_group_id, groupKind, logContext);
+        desiredMembers = await ownedGroupReconciler.desiredTeamChannelMembers(row.team_id, this.pool);
+        break;
+      }
+
+      case 'bch_read': {
+        requireId(payload.bch_channel_id, 'bch_channel_id', groupKind);
+        logContext.bchChannelId = payload.bch_channel_id;
+        const row = (await this.pool.query(
+          'SELECT read_group_id FROM bch_channels WHERE id = $1',
+          [payload.bch_channel_id]
+        )).rows[0];
+        if (!row) {
+          logger.info(logContext, 'reconcile_owned_group: bch_channel no longer exists; no-op');
+          return;
+        }
+        groupUuid = requireGroupId(row.read_group_id, groupKind, logContext);
+        desiredMembers = await ownedGroupReconciler.desiredBchReadMembers(payload.bch_channel_id, this.pool);
+        break;
+      }
+
+      case 'bch_write': {
+        requireId(payload.bch_channel_id, 'bch_channel_id', groupKind);
+        logContext.bchChannelId = payload.bch_channel_id;
+        const row = (await this.pool.query(
+          'SELECT write_group_id FROM bch_channels WHERE id = $1',
+          [payload.bch_channel_id]
+        )).rows[0];
+        if (!row) {
+          logger.info(logContext, 'reconcile_owned_group: bch_channel no longer exists; no-op');
+          return;
+        }
+        groupUuid = requireGroupId(row.write_group_id, groupKind, logContext);
+        desiredMembers = await ownedGroupReconciler.desiredBchWriteMembers(payload.bch_channel_id, this.pool);
+        break;
+      }
+
+      case 'region': {
+        requireId(payload.region_channel_id, 'region_channel_id', groupKind);
+        logContext.regionChannelId = payload.region_channel_id;
+        const row = (await this.pool.query(
+          'SELECT group_id FROM region_channels WHERE id = $1',
+          [payload.region_channel_id]
+        )).rows[0];
+        if (!row) {
+          logger.info(logContext, 'reconcile_owned_group: region_channel no longer exists; no-op');
+          return;
+        }
+        groupUuid = requireGroupId(row.group_id, groupKind, logContext);
+        desiredMembers = await ownedGroupReconciler.desiredRegionMembers(payload.region_channel_id, this.pool);
+        break;
+      }
+
+      case 'cloudtak': {
+        requireId(payload.team_id, 'team_id', groupKind);
+        logContext.teamId = payload.team_id;
+        const name = groupName(payload.team_id);
+        logContext.name = name;
+        // Name-keyed group: resolve its UUID. If it doesn't exist yet, the
+        // create/update op hasn't drained -> retryable so we reconcile once
+        // it exists (never create it here; that is create_cloudtak_group's job).
+        groupUuid = await this.resolveGroupUuidByName(name);
+        if (!groupUuid) {
+          throw new AuthentikApiError(
+            `CloudTAK group "${name}" not found yet; deferring reconcile until it is created`,
+            'retryable'
+          );
+        }
+        desiredMembers = await ownedGroupReconciler.desiredCloudTakMembers(payload.team_id, this.pool);
+        break;
+      }
+
+      default:
+        throw new AuthentikApiError(
+          `reconcile_owned_group: unknown group_kind "${groupKind}"`,
+          'permanent'
+        );
+    }
+
+    // Desired set computed successfully above (a throw would have
+    // propagated and skipped this PATCH -- fail-closed). Now write it.
+    await ownedGroupReconciler.replaceGroupMembers(groupUuid, desiredMembers, logContext);
+  }
+
+  /**
+   * Resolve an Authentik group's UUID (`pk`) by its exact name, for the
+   * name-keyed CloudTAK groups. Returns the pk string, or null when no
+   * group with that exact name exists. A non-2xx lookup is a retryable
+   * `AuthentikApiError`.
+   *
+   * @param {string} name
+   * @returns {Promise<string|null>}
+   */
+  async resolveGroupUuidByName(name) {
+    const response = await fetchWithTimeout(
+      `${process.env.AUTHENTIK_URL}/api/v3/core/groups/?name=${encodeURIComponent(name)}`,
+      { headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` } }
+    );
+    if (!response.ok) {
+      throw new AuthentikApiError(
+        `Failed to look up group "${name}": ${response.statusText}`,
+        classifyFailure(response.status)
+      );
+    }
+    const data = await response.json();
+    const group = data?.results?.find((g) => g.name === name);
+    return group ? group.pk : null;
+  }
+
+  /**
    * Requirement 26.8 (task 48.5): revokes TAK Server certificates. The payload
    * carries one of two mutually exclusive shapes (feature device-management,
+   * Requirements 12.2/12.3, tasks 19.2/19.3), and the shape decides both the
+   * certificate view fetched and the field matched:
+   *
+   * - `tak_usernames` (user-scoped, the three pre-existing call sites): every
+   *   certificate in `listCertificates()` whose `creatorDn` matches any of the
+   *   given usernames -- unchanged behaviour, deliberately spanning every Device
+   *   that user holds.
+   * - `client_uid` (device-scoped, this feature's per-Device Revoke): exactly the
+   *   Live_Certificates (`listLiveCertificates()`: in `/active`, NOT in
+   *   `/revoked`) carrying that one `clientUid`, and no certificate carrying
    * Requirements 12.2/12.3, tasks 19.2/19.3), and the shape decides both the
    * certificate view fetched and the field matched:
    *

@@ -38,6 +38,11 @@ const ManagedIdentifierService = require('./ManagedIdentifierService');
 const { checkCallsignSuffixUniqueness } = require('./CallsignSuffixUniquenessService');
 const { IDENTIFIER_TYPE_MARKERS } = require('../utils/managedIdentifier');
 const { isValidCallsignPrefix } = require('../utils/callsignValidation');
+// Authentik scaling (Phase 3): flip the per-user team-channel adds to a
+// group-authoritative reconcile_owned_group when the reconciler is enabled;
+// unchanged when off.
+const { isBulkGroupReconcileEnabled } = require('../config/bulkGroupReconcile');
+const { enqueueTeamChannelReconcile } = require('./OwnedGroupReconcileEnqueuer');
 
 /**
  * Requirement 11.6 (task 22.1): thrown by `resolveCallsignSuffixForNewUser`
@@ -270,12 +275,16 @@ class UserProvisioningService {
           [parentChannel.id, localUserId, 'read_write']
         );
 
-        if (parentChannel.authentik_group_id) {
-          // Requirement 17.5's client-threading pattern extends here too:
-          // this function already runs inside the caller's open
-          // transaction, so pass that same `client` through so the
-          // sync_operations INSERT commits/rolls back atomically with the
-          // rest of this function's local writes.
+        // Authentik scaling (Phase 3): reconcile the whole ancestor
+        // primary-channel group when enabled, else the per-user add. The
+        // reconcile path enqueues regardless of authentik_group_id (the
+        // handler defers on a not-yet-created group id). Client-threaded
+        // either way (Requirement 17.5), so it commits atomically with
+        // this function's local writes.
+        if (isBulkGroupReconcileEnabled()) {
+          await enqueueTeamChannelReconcile(parentChannel.id, createdBy, client);
+          queuedGroups++;
+        } else if (parentChannel.authentik_group_id) {
           await EventPublisher.publishOperation('add_user_to_group', {
             target_user_id: localUserId,
             target_group_id: parentChannel.authentik_group_id
@@ -299,7 +308,11 @@ class UserProvisioningService {
         [channel.id, localUserId, 'read_write']
       );
 
-      if (channel.authentik_group_id) {
+      // Authentik scaling (Phase 3): same flip as the ancestor loop above.
+      if (isBulkGroupReconcileEnabled()) {
+        await enqueueTeamChannelReconcile(channel.id, createdBy, client);
+        queuedGroups++;
+      } else if (channel.authentik_group_id) {
         await EventPublisher.publishOperation('add_user_to_group', {
           target_user_id: localUserId,
           target_group_id: channel.authentik_group_id
