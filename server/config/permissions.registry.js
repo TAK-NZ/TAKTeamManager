@@ -575,7 +575,20 @@ const routes = {
   // two identifiers are not: a statically-held identifier would satisfy
   // `resolveAccess` outright and bypass the row-scoped resolver entirely,
   // letting every authenticated user read it.
-  'GET /api/openapi.json': ['docs:openapi:read']
+  'GET /api/openapi.json': ['docs:openapi:read'],
+
+  // --- /api/offline-maps (server/routes/offlineMaps.js) ---
+  // Offline map (.mbtiles) downloads: a catalog listing and a per-map
+  // presigned-URL mint. Both use the single 'offline_maps:read' identifier,
+  // granted to EVERY authenticated user (roleDefaults.authenticated_user
+  // below). Safe as a static grant because the subject is caller-fixed: the
+  // maps are globally shared, there is no per-user/per-row scoping, and the
+  // client can only ever name a catalog id (never a raw S3 key), so there is
+  // no resolver to bypass. The whole router is feature-gated at mount time
+  // (OFFLINE_MAPS_ENABLED); the client discovers the feature by probing the
+  // list route (200 vs 404), not by reading any config flag.
+  'GET /api/offline-maps': ['offline_maps:read'],
+  'GET /api/offline-maps/:id/url': ['offline_maps:read']
 };
 
 // Role-based default permission sets.
@@ -634,7 +647,14 @@ const roleDefaults = {
     // capabilities inseparable, so an operator could not grant a member
     // the ability to enroll their own phone without also granting them
     // the ability to create device accounts on their team.
-    'enrollment:self'
+    'enrollment:self',
+    // Offline map downloads (server/routes/offlineMaps.js): the catalog
+    // listing and the presigned-URL mint. Granted to every authenticated
+    // user. A static grant is safe here because the subject is caller-fixed:
+    // the maps are globally shared with no per-user scoping, and a caller can
+    // only name a catalog id (never a raw S3 key), so there is no row-scoped
+    // resolver a static grant could bypass.
+    'offline_maps:read'
   ]
 };
 

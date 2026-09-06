@@ -389,6 +389,15 @@ export const configAPI = {
   update: (key, data) => api.put(`/config/${key}`, data),
 };
 
+// Offline map downloads (server/routes/offlineMaps.js). `list()` is also the
+// feature-reachability probe: a 200 with { maps } means the feature is on and
+// permitted, a 404 means it's off (router not mounted). `getUrl(id)` mints a
+// short-lived presigned S3 download URL for one catalog id.
+export const offlineMapsAPI = {
+  list: () => api.get('/offline-maps'),
+  getUrl: (id) => api.get(`/offline-maps/${encodeURIComponent(id)}/url`),
+};
+
 // GET /api (bare root, server/routes/version.js): the running version,
 // shown at the bottom of the left-hand nav (Layout.jsx).
 export const versionAPI = {

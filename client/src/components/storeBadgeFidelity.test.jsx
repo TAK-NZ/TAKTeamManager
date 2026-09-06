@@ -16,8 +16,24 @@ import { configAPI } from '../services/api'
 // effect fires a REAL, unmocked network request in jsdom; nothing here
 // should depend on whether something happens to be listening on
 // `localhost:3000` in the environment the suite runs in.
+// Downloads.jsx also probes offlineMapsAPI.list() on mount for its Offline
+// Maps card. This guard measures only the FIXED client-download link/marker
+// set (Criterion 12.7), so the Offline Maps card must not render — a rejecting
+// probe (the 404 the server gives when the feature is off) keeps it hidden,
+// leaving the anchor set and marker count exactly what this guard expects. The
+// download handler surfaces failures via react-hot-toast, mocked so a missing
+// export isn't a load-time failure.
 vi.mock('../services/api', () => ({
   configAPI: { getPublic: vi.fn().mockResolvedValue({ data: { cloudtak_url: null } }) },
+  offlineMapsAPI: {
+    list: vi.fn().mockRejectedValue(new Error('feature off')),
+    getUrl: vi.fn(),
+  },
+}))
+
+vi.mock('react-hot-toast', () => ({
+  __esModule: true,
+  default: { success: vi.fn(), error: vi.fn() },
 }))
 
 // Validates: Requirements 12.3, 12.4, 12.5, 12.7, 12.8

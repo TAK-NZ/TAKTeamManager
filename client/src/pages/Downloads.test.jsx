@@ -6,7 +6,7 @@ import { MemoryRouter } from 'react-router-dom'
 import Downloads from './Downloads.jsx'
 import Layout from '../components/Layout.jsx'
 import { ThemeProvider } from '../contexts/ThemeContext.jsx'
-import { configAPI } from '../services/api'
+import { configAPI, offlineMapsAPI } from '../services/api'
 
 // takserver-enrollment task 10.5 -- client example tests for the
 // Downloads_Page and its reachability (Requirements 10.11, 12.1, 12.6, 12.9).
@@ -46,6 +46,21 @@ vi.mock('../services/api', () => ({
   // `mockResolvedValueOnce`/`mockRejectedValueOnce` before mounting --
   // consumed once, so they never leak into a later test.
   configAPI: { getPublic: vi.fn().mockResolvedValue({ data: { cloudtak_url: null } }) },
+  // Downloads.jsx's Offline Maps card probes this on mount. Defaulted to
+  // "feature off" (a rejected list, i.e. the 404 the server gives when the
+  // router isn't mounted) so tests that don't care about offline maps get a
+  // hidden card and need no setup. Tests that DO care override with
+  // `mockResolvedValueOnce` before mounting.
+  offlineMapsAPI: {
+    list: vi.fn().mockRejectedValue(new Error('feature off')),
+    getUrl: vi.fn(),
+  },
+}))
+
+// Downloads.jsx's Offline Maps download handler surfaces failures via toast.
+vi.mock('react-hot-toast', () => ({
+  __esModule: true,
+  default: { success: vi.fn(), error: vi.fn() },
 }))
 
 // Vitest compiles this JSX with esbuild's classic transform, and the
@@ -116,6 +131,10 @@ describe('Downloads reachability for a user with no team membership and no admin
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     vi.clearAllMocks()
     configAPI.getPublic.mockResolvedValue({ data: { cloudtak_url: null } })
+    // Offline maps default OFF (probe rejects) for these blocks; the tests
+    // here concern the client-download grid + CloudTAK row, not offline maps.
+    // Re-set here because vi.clearAllMocks() wipes the factory implementation.
+    offlineMapsAPI.list.mockRejectedValue(new Error('feature off'))
     vi.spyOn(console, 'error').mockImplementation(() => {})
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -193,13 +212,43 @@ describe('Downloads reachability for a user with no team membership and no admin
     // Downloads_Page"). Mounting it standalone, with no user context at
     // all, is therefore a faithful check of what the `/downloads` route
     // renders for the plain user above.
+    // Offline maps ON for this test: the probe resolves with a maps list, so
+    // the Offline Maps card renders. (Default mock has it rejecting = hidden.)
+    offlineMapsAPI.list.mockResolvedValueOnce({
+      data: {
+        maps: [
+          { id: 'regional-otago', group: 'south-island', category: 'regional', label: 'Otago', apps: ['atak', 'takaware'], sizeBytes: 694591488, available: true },
+        ],
+      },
+    })
+
     await mount(<Downloads />)
     await flushEffects()
 
-    expect(container.textContent).toContain('Download a TAK Client')
+    // H1 is now the broader "Downloads" (the page covers both client
+    // downloads and offline maps since the offline-maps section was added),
+    // not the old client-only "Download a TAK Client" heading.
+    expect(container.textContent).toContain('Downloads')
+    // The Offline Maps section renders when the probe returns a list.
+    expect(container.textContent).toContain('Offline Maps')
+    expect(container.textContent).toContain('Otago')
     // Anti-vacuity: the page actually rendered download links, not an empty
     // shell.
     expect(container.querySelectorAll('a').length).toBeGreaterThan(0)
+  })
+
+  it('hides the Offline Maps card entirely when the feature probe fails (feature off / not permitted)', async () => {
+    // Default mock: offlineMapsAPI.list rejects. The card must not render —
+    // no heading, no empty state, no spinner (fail-closed like the CloudTAK row).
+    offlineMapsAPI.list.mockRejectedValueOnce(new Error('feature off'))
+
+    await mount(<Downloads />)
+    await flushEffects()
+
+    // Client-download content still renders...
+    expect(container.textContent).toContain('Downloads')
+    // ...but the Offline Maps card is absent.
+    expect(container.textContent).not.toContain('Offline Maps')
   })
 })
 
@@ -210,6 +259,10 @@ describe("Recommended_Option_Marker's accessible name is queryable as text, not 
   beforeEach(async () => {
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     configAPI.getPublic.mockResolvedValue({ data: { cloudtak_url: null } })
+    // Offline maps default OFF (probe rejects) for these blocks; the tests
+    // here concern the client-download grid + CloudTAK row, not offline maps.
+    // Re-set here because vi.clearAllMocks() wipes the factory implementation.
+    offlineMapsAPI.list.mockRejectedValue(new Error('feature off'))
     container = document.createElement('div')
     document.body.appendChild(container)
     root = createRoot(container)
@@ -276,6 +329,10 @@ describe('The app-store badges live on Downloads.jsx (positive control, Criteria
   beforeEach(async () => {
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     configAPI.getPublic.mockResolvedValue({ data: { cloudtak_url: null } })
+    // Offline maps default OFF (probe rejects) for these blocks; the tests
+    // here concern the client-download grid + CloudTAK row, not offline maps.
+    // Re-set here because vi.clearAllMocks() wipes the factory implementation.
+    offlineMapsAPI.list.mockRejectedValue(new Error('feature off'))
     container = document.createElement('div')
     document.body.appendChild(container)
     root = createRoot(container)
@@ -321,6 +378,10 @@ describe('Downloads_Page OS_Section content and structure (downloads-page-os-sec
   beforeEach(async () => {
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     configAPI.getPublic.mockResolvedValue({ data: { cloudtak_url: null } })
+    // Offline maps default OFF (probe rejects) for these blocks; the tests
+    // here concern the client-download grid + CloudTAK row, not offline maps.
+    // Re-set here because vi.clearAllMocks() wipes the factory implementation.
+    offlineMapsAPI.list.mockRejectedValue(new Error('feature off'))
     container = document.createElement('div')
     document.body.appendChild(container)
     root = createRoot(container)
@@ -425,6 +486,10 @@ describe('Downloads_Page CloudTAK_Row (downloads-page-os-sections Requirement 4)
   beforeEach(() => {
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     vi.spyOn(console, 'error').mockImplementation(() => {})
+    // Offline maps default OFF: the mount effect also probes offlineMapsAPI.list;
+    // an earlier block's vi.clearAllMocks() wiped the factory implementation, so
+    // restore a rejecting default here (these tests concern the CloudTAK row).
+    offlineMapsAPI.list.mockRejectedValue(new Error('feature off'))
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -516,6 +581,9 @@ describe('Downloads_Page cross-cutting behavior preserved after restructuring (R
 
   beforeEach(() => {
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    // Offline maps default OFF: the mount effect probes offlineMapsAPI.list;
+    // restore a rejecting default (an earlier block's clearAllMocks wiped it).
+    offlineMapsAPI.list.mockRejectedValue(new Error('feature off'))
     container = document.createElement('div')
     document.body.appendChild(container)
   })

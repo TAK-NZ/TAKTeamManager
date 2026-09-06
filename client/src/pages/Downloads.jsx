@@ -1,7 +1,9 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, Fragment } from 'react'
+import { XMarkIcon, MagnifyingGlassPlusIcon } from '@heroicons/react/24/outline'
 import { GooglePlayBadge, AppleAppStoreBadge, TakGovBadge, RecommendedOptionMarker, RecommendedOptionGlyph } from '../components/StoreBadges'
 import { AndroidPlatformLogo, ApplePlatformLogo, WindowsPlatformLogo } from '../components/PlatformLogos'
-import { configAPI } from '../services/api'
+import toast from 'react-hot-toast'
+import { configAPI, offlineMapsAPI } from '../services/api'
 
 /**
  * Downloads_Page (downloads-page-os-sections spec; supersedes the
@@ -104,6 +106,531 @@ const WINDOWS_ROUTES = [
   },
 ]
 
+// ---------------------------------------------------------------------------
+// OFFLINE MAPS — LAYOUT MOCK (offline-maps-download-design.md)
+//
+// This whole block is a PRESENTATION-ONLY mock so we can iterate on the
+// layout. It uses hardcoded DUMMY data, renders NO real download, and talks
+// to NO server. When the real feature lands, this dummy catalog is replaced
+// by the `GET /api/offline-maps` response (catalog + live sizes) and each
+// Download button will fetch a presigned URL from `GET /api/offline-maps/:id/url`.
+// Ordering here is authoritative-by-array-position, matching the design doc:
+// North Island (N->S), South Island (N->S), Chatham Islands, Marine, Vector.
+// ---------------------------------------------------------------------------
+
+const MB = 1024 * 1024
+const GB = 1024 * MB
+
+// Static PRESENTATION metadata per group (heading, app-compatibility text, and
+// the per-section preview image). The map ROWS and their SIZES come from the
+// server (`GET /api/offline-maps`, live from S3) and are merged into these
+// groups by the server's `group` key. Array order here IS display order:
+// North Island, South Island, Chatham Islands, Marine, Vector.
+const OFFLINE_MAP_GROUP_META = [
+  {
+    key: 'north-island',
+    heading: 'North Island',
+    // The three topographic groups + Marine are usable in both apps.
+    compatibility: 'Topographic · ATAK + TAK Aware',
+    // One representative topographic preview per island (the topo style is the
+    // same LINZ Topo50 look everywhere, but a per-island sample reads as more
+    // relevant than one shared image). Still one image per SECTION, never per
+    // file.
+    previewSrc: '/assets/maps/topographic-north-island.png',
+    previewAlt: 'Example North Island topographic map: LINZ Topo50 with relief shading',
+  },
+  {
+    key: 'south-island',
+    heading: 'South Island',
+    compatibility: 'Topographic · ATAK + TAK Aware',
+    previewSrc: '/assets/maps/topographic-south-island.png',
+    previewAlt: 'Example South Island topographic map: LINZ Topo50 with relief shading',
+  },
+  {
+    key: 'chatham-islands',
+    heading: 'Chatham Islands',
+    compatibility: 'Topographic · ATAK + TAK Aware',
+    previewSrc: '/assets/maps/topographic-chatham-islands.png',
+    previewAlt: 'Example Chatham Islands topographic map: LINZ Topo50 with relief shading',
+  },
+  {
+    key: 'marine',
+    heading: 'Marine',
+    compatibility: 'Charts · ATAK + TAK Aware',
+    previewSrc: '/assets/maps/marine-example.png',
+    previewAlt: 'Example marine chart: LINZ nautical charts',
+  },
+  {
+    key: 'vector',
+    heading: 'Vector Basemaps',
+    // Vector is the one ATAK-only group.
+    compatibility: 'Basemap · ATAK only',
+  },
+]
+
+/**
+ * Merge the server's flat maps list into ordered display groups.
+ *
+ * The server returns maps in catalog order, each carrying its `group` key. We
+ * bucket them by group, preserving the server's order within a group and the
+ * fixed group order above. A group with no maps at all (e.g. Vector before its
+ * files are uploaded) is dropped, so the section only appears once it has
+ * something to show. A map whose object isn't in S3 yet arrives with
+ * `available: false` and is rendered as unavailable rather than omitted.
+ *
+ * @param {Array<{id,group,label,sizeBytes,available}>} maps
+ * @returns {Array<{key,heading,compatibility,previewSrc,previewAlt,maps}>}
+ */
+function buildGroups(maps) {
+  return OFFLINE_MAP_GROUP_META
+    .map((meta) => ({
+      ...meta,
+      maps: maps.filter((m) => m.group === meta.key),
+    }))
+    .filter((group) => group.maps.length > 0)
+}
+
+/**
+ * formatBytes: compact, human-readable size label. `null` (an object not yet
+ * uploaded to S3) has no size to show.
+ */
+function formatBytes(bytes) {
+  if (bytes === null || bytes === undefined) return null
+  if (bytes >= GB) return `${(bytes / GB).toFixed(1)} GB`
+  return `${Math.round(bytes / MB)} MB`
+}
+
+/**
+ * Token: a styled inline literal used in the install notes to set concrete,
+ * copy/tap-this values -- a file path, a file extension, or a named UI action
+ * ("Files", "Share", "TAK Aware") -- apart from the surrounding prose, so a
+ * user can pick them out at a glance. A `<code>` element in a subtle rounded
+ * pill; `whitespace-nowrap` keeps a path or two-word action from wrapping
+ * mid-token.
+ */
+function Token({ children }) {
+  return (
+    <code className="whitespace-nowrap rounded bg-gray-100 dark:bg-gray-700/60 px-1.5 py-0.5 text-xs font-mono text-gray-800 dark:text-gray-200">
+      {children}
+    </code>
+  )
+}
+
+/**
+ * MapTypePreview: a small representative thumbnail for a map TYPE, shown beside
+ * a section heading. One image per type (topographic per island, marine) reused
+ * across all sections of that type -- never a per-file thumbnail. Renders
+ * nothing when a group has no `previewSrc` (the vector basemap, omitted for now).
+ *
+ * When `onEnlarge` is supplied (desktop only -- see OfflineMapsTable), the
+ * thumbnail is a button that opens a larger preview in a modal, with a small
+ * magnifier affordance on hover so the click target reads as interactive.
+ * Without it (mobile), it is a plain, non-interactive image -- enlarging a
+ * 256px tile into a modal on a phone adds little and keeps mobile lean.
+ *
+ * `loading="lazy"` keeps these off the initial paint. A subtle ring frames the
+ * (bright) map tile so it doesn't glare against a dark card.
+ */
+function MapTypePreview({ src, alt, onEnlarge }) {
+  if (!src) return null
+
+  const img = (
+    <img
+      src={src}
+      alt={alt}
+      loading="lazy"
+      className="h-12 w-12 flex-shrink-0 rounded object-cover ring-1 ring-gray-200 dark:ring-gray-700"
+    />
+  )
+
+  if (!onEnlarge) return img
+
+  return (
+    <button
+      type="button"
+      onClick={onEnlarge}
+      aria-label={`Enlarge preview: ${alt}`}
+      className="group relative flex-shrink-0 rounded focus:outline-none focus:ring-2 focus:ring-primary-500"
+    >
+      {img}
+      {/* Decorative hover affordance; the accessible name is on the button. */}
+      <span
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 flex items-center justify-center rounded bg-black/0 text-white/0 transition group-hover:bg-black/40 group-hover:text-white/90 group-focus:bg-black/40 group-focus:text-white/90"
+      >
+        <MagnifyingGlassPlusIcon className="h-5 w-5" />
+      </span>
+    </button>
+  )
+}
+
+/**
+ * MapPreviewModal: a desktop-only lightbox showing the enlarged map-type
+ * preview. Mirrors the app's modal convention (role="dialog" aria-modal,
+ * Escape closes, backdrop click closes, XMark close button). Gated
+ * `hidden sm:flex` so it never appears on a phone -- the enlarge affordance is
+ * a non-mobile feature (a phone user is already on the device they'd download
+ * to, and a 256px tile doesn't warrant a mobile lightbox).
+ */
+function MapPreviewModal({ src, alt, heading, onClose }) {
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') onClose()
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [onClose])
+
+  return (
+    <div
+      className="fixed inset-0 z-50 hidden sm:flex items-center justify-center bg-black bg-opacity-50 p-4"
+      onClick={onClose}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Preview: ${heading}`}
+        className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-lg w-full overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">{heading} — preview</h3>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close preview"
+            className="p-2 rounded-lg text-gray-400 hover:text-gray-500 hover:bg-gray-100 dark:hover:text-gray-300 dark:hover:bg-gray-700"
+          >
+            <XMarkIcon className="h-6 w-6" />
+          </button>
+        </div>
+        <div className="p-4">
+          {/* The tiles are 256px square; render at a comfortable size, pixelated
+              scaling avoided by letting the browser smooth it. Caption carries
+              the descriptive text so the meaning isn't image-only. */}
+          <img src={src} alt={alt} className="mx-auto w-full max-w-sm rounded ring-1 ring-gray-200 dark:ring-gray-700" />
+          <p className="mt-3 text-center text-sm text-gray-500 dark:text-gray-400">{alt}</p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * DownloadButton: the per-map action, shared by the mobile card list and the
+ * desktop table so the two never diverge. Disabled (with a distinct label)
+ * when the object isn't in S3 yet (`available: false`) or while a presign is
+ * in flight. On click it delegates to `onDownload(map)`, which fetches a
+ * presigned URL and navigates the browser to it.
+ */
+function DownloadButton({ map, onDownload, pending, className = '' }) {
+  if (!map.available) {
+    return (
+      <button
+        type="button"
+        disabled
+        className={`btn-secondary px-3 py-2 text-sm opacity-50 cursor-not-allowed ${className}`}
+      >
+        Unavailable
+      </button>
+    )
+  }
+  return (
+    <button
+      type="button"
+      onClick={() => onDownload(map)}
+      disabled={pending}
+      className={`btn-secondary px-3 py-2 text-sm ${pending ? 'opacity-50 cursor-wait' : ''} ${className}`}
+    >
+      {pending ? 'Preparing…' : 'Download'}
+    </button>
+  )
+}
+
+/**
+ * OfflineMapsMobileGroup: one island/standalone section as a stacked card
+ * list, shown only below `sm:`. Column alignment across sections is not a
+ * concern for stacked cards (each row is a flex row, value beside label), so
+ * the mobile rendering stays per-group.
+ */
+function OfflineMapsMobileGroup({ heading, compatibility, previewSrc, previewAlt, maps, onDownload, pendingIds }) {
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-3">
+        <MapTypePreview src={previewSrc} alt={previewAlt} />
+        <div className="min-w-0 flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+          <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">{heading}</h3>
+          {/* App compatibility as visible text, not colour (accessibility rule). */}
+          <span className="text-xs text-gray-500 dark:text-gray-400">{compatibility}</span>
+        </div>
+      </div>
+      <ul className="divide-y divide-gray-200 dark:divide-gray-700 border-y border-gray-200 dark:border-gray-700">
+        {maps.map((map) => (
+          <li key={map.id} className="flex items-center justify-between gap-3 py-3">
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium text-gray-900 dark:text-gray-100">{map.label}</p>
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                {map.available ? formatBytes(map.sizeBytes) : 'Currently unavailable'}
+              </p>
+            </div>
+            <DownloadButton map={map} onDownload={onDownload} pending={pendingIds.has(map.id)} className="flex-shrink-0" />
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+/**
+ * OfflineMapsTable: the desktop (`sm:` and up) rendering of ALL groups as a
+ * SINGLE `table-fixed` table. Because it is one table with one `<colgroup>`,
+ * the Map / Size / Download columns line up across every section -- the
+ * previous per-group tables each sized their own columns, so they didn't
+ * align. Section headings are rendered as full-width heading rows (a single
+ * `colSpan` cell) inside the same table body, keeping the shared column grid.
+ */
+function OfflineMapsTable({ groups, onDownload, onEnlarge, pendingIds }) {
+  return (
+    <table className="w-full table-fixed text-sm">
+      {/* Fixed column widths make alignment deterministic across sections;
+          the Map column takes the remaining space. */}
+      <colgroup>
+        <col />
+        <col className="w-28" />
+        <col className="w-36" />
+      </colgroup>
+      <thead>
+        <tr className="text-left text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
+          <th className="pb-2 font-medium">Map</th>
+          <th className="pb-2 font-medium">Size</th>
+          <th className="pb-2 font-medium sr-only">Download</th>
+        </tr>
+      </thead>
+      <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
+        {groups.map((group) => (
+          <Fragment key={group.key}>
+            {/* Section heading row: full width, so every data row below it
+                still shares the table's single column layout. */}
+            <tr>
+              <td colSpan={3} className="pt-6 pb-2">
+                <div className="flex items-center gap-3">
+                  <MapTypePreview
+                    src={group.previewSrc}
+                    alt={group.previewAlt}
+                    onEnlarge={group.previewSrc ? () => onEnlarge(group) : undefined}
+                  />
+                  <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+                    <span className="text-sm font-semibold text-gray-900 dark:text-gray-100">{group.heading}</span>
+                    <span className="text-xs font-normal normal-case tracking-normal text-gray-500 dark:text-gray-400">
+                      {group.compatibility}
+                    </span>
+                  </div>
+                </div>
+              </td>
+            </tr>
+            {group.maps.map((map) => (
+              <tr key={map.id}>
+                <td className="py-2 pr-4 font-medium text-gray-900 dark:text-gray-100 truncate">{map.label}</td>
+                <td className="py-2 pr-4 text-gray-500 dark:text-gray-400 whitespace-nowrap">
+                  {map.available ? formatBytes(map.sizeBytes) : 'Currently unavailable'}
+                </td>
+                <td className="py-2 text-right">
+                  <DownloadButton map={map} onDownload={onDownload} pending={pendingIds.has(map.id)} />
+                </td>
+              </tr>
+            ))}
+          </Fragment>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
+/**
+ * OfflineMapsCard: the whole "Offline Maps" area (Card 2). Mock only.
+ *
+ * In the real feature this renders only when `GET /api/offline-maps` returns a
+ * list (the reachability probe); here it always renders with dummy data so we
+ * can see the layout. Contains the intro copy, the app-compatibility legend,
+ * the desktop->phone QR affordance, the grouped map lists, and per-app install
+ * notes.
+ */
+function OfflineMapsCard() {
+  // The catalog fetched from the server. `null` = not-yet-known / feature off:
+  // the card renders nothing until a successful list arrives. A 404 (feature
+  // off or not permitted) leaves it null, so the card stays hidden — the same
+  // fail-closed treatment the CloudTAK row uses.
+  const [groups, setGroups] = useState(null)
+  // The map-type preview currently enlarged in the desktop lightbox (or null).
+  const [preview, setPreview] = useState(null)
+  // Ids with a presign request in flight, so the button shows a pending state.
+  const [pendingIds, setPendingIds] = useState(() => new Set())
+
+  useEffect(() => {
+    let cancelled = false
+    offlineMapsAPI.list()
+      .then((response) => {
+        if (cancelled) return
+        const maps = response.data?.maps ?? []
+        setGroups(buildGroups(maps))
+      })
+      .catch(() => {
+        // Fail closed: a 404 (feature off / not permitted) or any error leaves
+        // `groups` null, so the whole card stays hidden. No error surfaced —
+        // the feature simply isn't offered.
+      })
+    return () => { cancelled = true }
+  }, [])
+
+  const handleDownload = async (map) => {
+    if (!map.available) return
+    setPendingIds((prev) => new Set(prev).add(map.id))
+    try {
+      const response = await offlineMapsAPI.getUrl(map.id)
+      const url = response.data?.url
+      if (url) {
+        // Navigate the browser directly to the presigned S3 URL; the
+        // Content-Disposition on the object makes it download rather than open.
+        window.location.href = url
+      } else {
+        toast.error('Could not prepare the download. Please try again.')
+      }
+    } catch {
+      // A failed presign must not clear the rendered list — just report it.
+      toast.error('Could not prepare the download. Please try again.')
+    } finally {
+      setPendingIds((prev) => {
+        const next = new Set(prev)
+        next.delete(map.id)
+        return next
+      })
+    }
+  }
+
+  // Feature off / not permitted / not yet loaded: render nothing at all (no
+  // empty state, no spinner), exactly like the CloudTAK row when its URL is null.
+  if (!groups || groups.length === 0) return null
+
+  return (
+    <div className="card space-y-8">
+      <div className="space-y-2">
+        <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Offline Maps</h2>
+        <p className="text-sm text-gray-500 dark:text-gray-400">
+          Download offline map files (.mbtiles) to your phone and load them into ATAK or
+          TAK Aware. These are large files — download over Wi-Fi where you can.
+        </p>
+        {/* App-compatibility legend, stated in text (never colour alone). */}
+        <p className="text-sm text-gray-500 dark:text-gray-400">
+          ATAK supports all maps. TAK Aware supports the topographic and marine maps only —
+          the vector basemaps are ATAK-only.
+        </p>
+      </div>
+
+      <QrHandoff />
+
+      {/* Mobile (below sm:): per-group stacked card lists. */}
+      <div className="sm:hidden space-y-8">
+        {groups.map((group) => (
+          <OfflineMapsMobileGroup
+            key={group.key}
+            heading={group.heading}
+            compatibility={group.compatibility}
+            previewSrc={group.previewSrc}
+            previewAlt={group.previewAlt}
+            maps={group.maps}
+            onDownload={handleDownload}
+            pendingIds={pendingIds}
+          />
+        ))}
+      </div>
+
+      {/* Desktop (sm: and up): ONE table so columns align across sections. */}
+      <div className="hidden sm:block">
+        <OfflineMapsTable
+          groups={groups}
+          onDownload={handleDownload}
+          onEnlarge={setPreview}
+          pendingIds={pendingIds}
+        />
+      </div>
+
+      {/* Desktop-only enlarged preview lightbox. */}
+      {preview && (
+        <MapPreviewModal
+          src={preview.previewSrc}
+          alt={preview.previewAlt}
+          heading={preview.heading}
+          onClose={() => setPreview(null)}
+        />
+      )}
+
+      {/* Per-app install notes (short; deeper detail belongs in ATAK-facing docs). */}
+      <div className="pt-6 border-t border-gray-200 dark:border-gray-700 space-y-3 text-sm text-gray-500 dark:text-gray-400">
+        <p className="font-medium text-gray-900 dark:text-gray-100">Installing on your device</p>
+        <p>
+          <span className="font-medium text-gray-700 dark:text-gray-300">ATAK (Android):</span>{' '}
+          download the <Token>.mbtiles</Token> file to the device, then place it in{' '}
+          <Token>atak/imagery/mobile/</Token>.
+        </p>
+        <p>
+          <span className="font-medium text-gray-700 dark:text-gray-300">TAK Aware (iOS):</span>{' '}
+          download the file, open the <Token>Files</Token> app, long-press the{' '}
+          <Token>.mbtiles</Token> file, tap <Token>Share</Token>, and choose{' '}
+          <Token>TAK Aware</Token>.
+        </p>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * QrHandoff: the desktop -> phone handoff (design.md §4.7). A single
+ * page-level QR for /downloads, collapsed by default and shown only at `sm:`
+ * and up (a phone user scanning with the same phone is pointless).
+ *
+ * MOCK: the QR image is a placeholder box, not a generated code -- rendering a
+ * real QR needs a new client dependency, deferred until the feature is built.
+ * The target URL uses `window.location.origin` here; the real version will
+ * encode the canonical configured hostname from public config.
+ */
+function QrHandoff() {
+  const [open, setOpen] = useState(false)
+  const pageUrl = (typeof window !== 'undefined' ? window.location.origin : '') + '/downloads'
+
+  return (
+    <div className="hidden sm:block rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="text-sm font-medium text-primary-600 dark:text-primary-500"
+        aria-expanded={open}
+      >
+        {open ? 'Hide QR code' : 'On a computer? Show a QR code to open this page on your phone'}
+      </button>
+      {open && (
+        <div className="mt-4 flex items-center gap-4">
+          {/* Placeholder QR box (mock). aria-hidden -- the URL text beside it
+              is the real, accessible information. */}
+          <div
+            className="flex h-32 w-32 flex-shrink-0 items-center justify-center rounded border border-dashed border-gray-300 dark:border-gray-600 text-xs text-gray-400 dark:text-gray-500 text-center"
+            aria-hidden="true"
+          >
+            QR code
+            <br />
+            (placeholder)
+          </div>
+          <div className="min-w-0 space-y-1">
+            <p className="text-sm text-gray-700 dark:text-gray-300">
+              Scan to open this page on your phone, then download the files there.
+            </p>
+            <p className="truncate text-sm text-primary-600 dark:text-primary-500">{pageUrl}</p>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 /**
  * OsSection (downloads-page-os-sections design.md, "Downloads.jsx
  * (restructured)"): one Android_Section/iOS_Section/Windows_Section column.
@@ -189,13 +716,22 @@ export default function Downloads() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Download a TAK Client</h1>
+        <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Downloads</h1>
         <p className="text-sm text-gray-500 dark:text-gray-400">
-          Install one of the TAK clients below, then enroll it from the Enrollment page.
+          Get the TAK client apps and offline map files for your devices.
         </p>
       </div>
 
-      <div className="card">
+      <div className="card space-y-6">
+        {/* Section heading, matching the Offline Maps card's heading style, so
+            the two sections read as peers ("get the app" then "get the maps"). */}
+        <div className="space-y-2">
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">TAK Clients</h2>
+          <p className="text-sm text-gray-500 dark:text-gray-400">
+            Install one of the TAK clients below, then enroll it from the Enrollment page.
+          </p>
+        </div>
+
         {/* `sm:grid-cols-2 md:grid-cols-3` (rather than jumping straight
             from 1 to 3 columns at `sm:`) gives a landscape phone or small
             tablet (~640-767px) a 2-up layout instead of a cramped 3-up
@@ -265,6 +801,12 @@ export default function Downloads() {
           <span>Recommended option</span>
         </p>
       </div>
+
+      {/* Card 2: Offline Maps (offline-maps-download-design.md §4). LAYOUT
+          MOCK with dummy data -- always rendered here so we can see the
+          layout; in the real feature it renders only when the offline-maps
+          reachability probe returns a list. */}
+      <OfflineMapsCard />
     </div>
   )
 }

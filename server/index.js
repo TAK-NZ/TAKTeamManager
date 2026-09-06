@@ -14,6 +14,7 @@ const pool = require('./config/database');
 const { createGracefulShutdown } = require('./utils/gracefulShutdown');
 const { validateConfig, assertAuthRouteMounted } = require('./config/configValidator');
 const { isDeviceMgmtEnabled } = require('./config/deviceMgmt');
+const { isOfflineMapsEnabled } = require('./config/offlineMaps');
 const { getTrustProxyHops } = require('./config/trustProxy');
 
 const app = express();
@@ -194,6 +195,15 @@ app.set('trust proxy', getTrustProxyHops());
   // authentication.
   if (isDeviceMgmtEnabled()) {
     app.use('/api/device-management', require('./routes/deviceManagement'));
+  }
+
+  // Offline map downloads: mounted ONLY while OFFLINE_MAPS_ENABLED is true, so
+  // while the feature is off none of its routes exist and the app's catch-all
+  // answers them 404 — which is also how the client discovers the feature (it
+  // probes GET /api/offline-maps). Both routes require authentication and are
+  // tracked in permissions.registry.js, never publicRoutes.js.
+  if (isOfflineMapsEnabled()) {
+    app.use('/api/offline-maps', require('./routes/offlineMaps'));
   }
 
   // Health check (Requirement 14.1/14.2): GET /health verifies Database

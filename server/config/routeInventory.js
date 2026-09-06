@@ -116,6 +116,13 @@ function buildTestApp() {
   // just to require() and mount the router.
   app.use('/api/device-management', require('../routes/deviceManagement'));
 
+  // Mounted unconditionally for inventory-completeness — same rationale as
+  // device-management above. `offlineMaps.js` reads its feature flag only via
+  // its own require of `../config/offlineMaps` for the runtime mount decision
+  // in `server/index.js`; requiring and mounting the router here has no
+  // dependency on OFFLINE_MAPS_ENABLED, so both its routes are always walked.
+  app.use('/api/offline-maps', require('../routes/offlineMaps'));
+
   app.use('/health', require('../routes/health'));
 
   return app;
