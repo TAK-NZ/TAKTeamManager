@@ -13,6 +13,14 @@ const { TAK_ROLE_VALUES } = require('./settings');
 const { checkCallsignSuffixUniqueness, CallsignSuffixConflictError } = require('../services/CallsignSuffixUniquenessService');
 const TeamVisibilityService = require('../services/TeamVisibilityService');
 const EventPublisher = require('../services/EventPublisher');
+// Authentik scaling (Phase 3): when the reconciler is enabled, an
+// Organisation tier-flag flip enqueues one region reconcile per active
+// region channel of that tier (O(groups)) instead of
+// resync_org_channel_tier_access fanning out one
+// assign_user_to_global_channels per user (O(users)).
+const { isBulkGroupReconcileEnabled } = require('../config/bulkGroupReconcile');
+const { enqueueRegionTierReconciles } = require('../services/OwnedGroupReconcileEnqueuer');
+
 const router = express.Router();
 
 // Get joinable teams (public endpoint)
@@ -666,19 +674,29 @@ router.put('/:teamId/channel-access', authenticateToken, authorize, [
     // update_cloudtak_group -- a transient enqueue failure must not fail
     // the flag update itself, since the flag is the source of truth and a
     // missed reconciliation is self-healed by the next explicit sync.
+    const reconcileEnabled = isBulkGroupReconcileEnabled();
     for (const tier of ['response', 'support']) {
       const changed = tier === 'response' ? responseChanged : supportChanged;
       if (!changed) continue;
       try {
-        await EventPublisher.publishOperation(
-          'resync_org_channel_tier_access',
-          { organisation_id: parseInt(req.params.teamId, 10), tier },
-          req.user.userId
-        );
+        if (reconcileEnabled) {
+          // Group-authoritative: one region reconcile per active region
+          // channel of this tier. Each recomputes its full membership
+          // (gated on every org's tier flag), so this org's flip is
+          // reflected without a per-user fan-out. Non-transactional (this
+          // route runs no transaction), matching the old enqueue.
+          await enqueueRegionTierReconciles(tier, req.user.userId);
+        } else {
+          await EventPublisher.publishOperation(
+            'resync_org_channel_tier_access',
+            { organisation_id: parseInt(req.params.teamId, 10), tier },
+            req.user.userId
+          );
+        }
       } catch (enqueueError) {
         getLogger().error(
           { err: enqueueError, teamId: req.params.teamId, tier },
-          'Error enqueuing resync_org_channel_tier_access'
+          'Error enqueuing channel-access reconciliation'
         );
       }
     }
