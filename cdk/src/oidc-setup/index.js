@@ -11,7 +11,8 @@
  *   3. creates/updates the OAuth2 provider (confidential client, the app's
  *      two redirect URIs — the primary and silent callbacks),
  *   4. creates/updates the "Team Manager" application (slug team-manager),
- *   5. uploads the application icon,
+ *   5. uploads the bundled icon to Authentik media (idempotent) and assigns it
+ *      to the application via `meta_icon`,
  *   6. assigns the application to the "Team Awareness Kit" group,
  *   7. returns the client id/secret and the resolved OIDC endpoints.
  *
@@ -68,12 +69,29 @@ exports.handler = async (event) => {
       matching_mode: 'strict'
     }));
 
+    // Resolve an RSA signing keypair so id_tokens are signed (and the
+    // provider's OIDC discovery advertises a JWKS). Without a signing_key the
+    // provider still works for the plain authorization_code flow, but hybrid/
+    // implicit id_tokens are unsigned; matching the working reference provider
+    // means always assigning one. Falls back to null (unsigned) only if the
+    // instance genuinely has no RSA keypair, rather than failing the deploy.
+    const signingKey = await getSigningKey(api);
+
     const provider = await createOrUpdateProvider(api, {
       name: process.env.PROVIDER_NAME,
       authorization_flow: authorizationFlow.pk,
       invalidation_flow: invalidationFlow.pk,
       redirect_uris: redirectUris,
       client_type: 'confidential',
+      // REQUIRED. Authentik defaults `grant_types` to an EMPTY array when it
+      // is omitted from the create/update payload, and a provider with no
+      // grant types rejects every authorize request with `invalid_request`
+      // ("The request is otherwise malformed") and issues no code -- the
+      // callback then sees no `code` and redirects to `?error=no_code`. These
+      // three match the reference provider and cover the standard OIDC flows
+      // this app (authorization_code) and any hybrid/implicit consumer use.
+      grant_types: ['authorization_code', 'implicit', 'hybrid'],
+      signing_key: signingKey,
       include_claims_in_id_token: true,
       access_code_validity: 'minutes=1',
       access_token_validity: 'minutes=5',
@@ -91,7 +109,7 @@ exports.handler = async (event) => {
       open_in_new_tab: false
     });
 
-    await uploadApplicationIcon(api, application.slug);
+    await assignApplicationIcon(api, application.slug);
 
     if (process.env.GROUP_NAME) {
       await assignGroupToApplication(api, application.slug, process.env.GROUP_NAME);
@@ -129,6 +147,27 @@ async function getFlowByName(api, slug) {
   throw new Error(`Flow not found: ${slug}`);
 }
 
+// Resolve an RSA signing keypair (a `crypto-certificates` keypair that has a
+// private key) to sign the provider's id_tokens. Prefers Authentik's built-in
+// "authentik Self-signed Certificate", falling back to the first keypair that
+// carries a private key. Returns its pk, or null when the instance has no
+// usable keypair (the provider is still created, just without id_token
+// signing) so a missing key never fails the whole deploy.
+async function getSigningKey(api) {
+  try {
+    const res = await api.get('/api/v3/crypto/certificatekeypairs/', {
+      params: { has_key: true }
+    });
+    const results = (res.data && res.data.results) || [];
+    if (results.length === 0) return null;
+    const preferred = results.find((k) => /self-signed/i.test(k.name || ''));
+    return (preferred || results[0]).pk;
+  } catch (error) {
+    console.warn('Could not resolve a signing key; provider will be created without one:', error.message);
+    return null;
+  }
+}
+
 async function createOrUpdateProvider(api, providerData) {
   const existing = await api.get('/api/v3/providers/oauth2/', { params: { name: providerData.name } });
   let provider;
@@ -164,27 +203,63 @@ async function assignGroupToApplication(api, appSlug, groupName) {
   }
 }
 
-async function uploadApplicationIcon(api, appSlug) {
+// Upload the bundled PNG into Authentik's media storage under a STABLE name,
+// then point the application's `meta_icon` at that same media path.
+//
+// Both steps and their exact shapes were verified live against Authentik
+// 2026.8.1:
+//   - Upload: POST multipart to /api/v3/admin/file/ with `file` + `name`.
+//     This endpoint is NOT idempotent — re-uploading an existing name returns
+//     `400 {"name":["A file with this name already exists."]}`, which we treat
+//     as success (the file we need is already there). It also returns an EMPTY
+//     body on success (>= 2025.12), so there is NO URL to read back.
+//   - Assign: `meta_icon` on the application is a plain writable STRING in the
+//     API schema (PatchedApplicationRequest.meta_icon: string), so a JSON
+//     `PATCH { meta_icon: '<media name>' }` is the correct call. The earlier
+//     bug set `meta_icon` to the (empty) upload response `.url`, which PATCHed
+//     `undefined` and left the icon blank. Setting it to the media NAME we
+//     uploaded under is what makes `meta_icon_url` resolve to
+//     /files/media/public/<name>. `meta_icon_url` itself is read-only.
+const APPLICATION_ICON_MEDIA_NAME = 'application-icons/ManageMyTeam.png';
+
+async function assignApplicationIcon(api, appSlug) {
   try {
-    const current = await api.get(`/api/v3/core/applications/${appSlug}/`);
-    if (current.data.meta_icon) {
-      console.log('Application already has an icon; leaving it in place');
-      return;
-    }
+    // Step 1: ensure the file is in media storage under the stable name.
     const iconPath = path.join(__dirname, 'ManageMyTeam.png');
     if (!fs.existsSync(iconPath)) {
-      console.warn('Icon file not found at', iconPath);
+      console.warn('Icon file not found at', iconPath, '- skipping icon assignment');
       return;
     }
     const form = new FormData();
     form.append('file', fs.createReadStream(iconPath), 'ManageMyTeam.png');
-    const uploadResponse = await axios.post(`${api.defaults.baseURL}/api/v3/admin/file/`, form, {
-      headers: { Authorization: api.defaults.headers.Authorization, ...form.getHeaders() }
-    });
-    await api.patch(`/api/v3/core/applications/${appSlug}/`, { meta_icon: uploadResponse.data.url });
-    console.log('Icon uploaded successfully');
+    form.append('name', APPLICATION_ICON_MEDIA_NAME);
+    try {
+      await axios.post(`${api.defaults.baseURL}/api/v3/admin/file/`, form, {
+        headers: { Authorization: api.defaults.headers.Authorization, ...form.getHeaders() }
+      });
+      console.log(`Icon uploaded to media storage as: ${APPLICATION_ICON_MEDIA_NAME}`);
+    } catch (uploadError) {
+      const status = uploadError.response && uploadError.response.status;
+      const detail = JSON.stringify((uploadError.response && uploadError.response.data) || '');
+      if (status === 400 && detail.includes('already exists')) {
+        console.log(`Icon ${APPLICATION_ICON_MEDIA_NAME} already present in media storage; reusing it`);
+      } else {
+        throw uploadError;
+      }
+    }
+
+    // Step 2: point the application at that media path (idempotent). `meta_icon`
+    // is a plain string field — a JSON PATCH is the verified-correct call.
+    const current = await api.get(`/api/v3/core/applications/${appSlug}/`);
+    if (current.data.meta_icon === APPLICATION_ICON_MEDIA_NAME) {
+      console.log('Application already points at the expected icon; nothing to do');
+      return;
+    }
+    await api.patch(`/api/v3/core/applications/${appSlug}/`, { meta_icon: APPLICATION_ICON_MEDIA_NAME });
+    console.log(`Icon assigned to application ${appSlug}: ${APPLICATION_ICON_MEDIA_NAME}`);
   } catch (error) {
-    console.warn('Failed to upload icon:', error.message);
+    // Non-fatal: a missing/failed icon must not fail the whole OIDC provisioning.
+    console.warn('Failed to assign application icon:', error.response ? JSON.stringify(error.response.data) : error.message);
   }
 }
 
