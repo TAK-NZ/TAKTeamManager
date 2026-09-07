@@ -4,7 +4,7 @@ import { createRoot } from 'react-dom/client'
 import { MemoryRouter } from 'react-router-dom'
 
 import App from './App.jsx'
-import { authAPI, configAPI, requestsAPI, versionAPI } from './services/api'
+import { authAPI, configAPI, requestsAPI, versionAPI, deviceManagementAPI, offlineMapsAPI } from './services/api'
 import {
   getDisplayTimezone,
   setDisplayTimezone,
@@ -64,6 +64,14 @@ import {
 vi.mock('./services/api', () => ({
   authAPI: { getProfile: vi.fn(), login: vi.fn(), logout: vi.fn() },
   configAPI: { getPublic: vi.fn() },
+  // The Downloads page (reached by the post-login return-path test that lands
+  // on /downloads) calls these on mount. Resolvable defaults: an empty catalog
+  // means the offline-maps card simply renders nothing, which is fine here.
+  offlineMapsAPI: {
+    list: vi.fn().mockResolvedValue({ data: { maps: [] } }),
+    getQr: vi.fn().mockResolvedValue({ data: {} }),
+    getUrl: vi.fn().mockResolvedValue({ data: {} })
+  },
   // `Login.jsx` and the rest of the router's module graph import these. A
   // named import of a missing export from a mocked ES module is a load-time
   // failure, so every one any imported module names is present.
@@ -87,7 +95,17 @@ vi.mock('./services/api', () => ({
   // Layout.jsx's outstanding-task-count effect calls this for EVERY user
   // (own certificate renewals feed the nav badge), so it needs a resolvable
   // default here or the mount effect rejects unhandled. No devices -> zero.
-  deviceManagementAPI: { getMyDevices: vi.fn().mockResolvedValue({ data: { devices: [] } }) },
+  // getMyDevices feeds Layout's task badge; probeEnabled is the
+  // DEVICE_MGMT_ENABLED reachability probe now consulted by Layout (nav
+  // gating via useDeviceManagementEnabled) AND by DeviceMgmtGate (the
+  // /enrollment and /devices route wrappers). Default it to disabled here:
+  // these App-startup tests are about the auth/redirect flow, not device
+  // management, and a signed-in mount lands on the router where Layout reads
+  // it -- a resolvable value is required either way.
+  deviceManagementAPI: {
+    getMyDevices: vi.fn().mockResolvedValue({ data: { devices: [] } }),
+    probeEnabled: vi.fn().mockResolvedValue({ enabled: false })
+  },
   default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() }
 }))
 
@@ -110,6 +128,12 @@ describe('App startup installs the presentation config (Requirements 18.7, 18.11
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     vi.clearAllMocks()
     vi.spyOn(console, 'error').mockImplementation(() => {})
+    // clearAllMocks wipes the factory defaults for the device-mgmt mocks that
+    // Layout (task badge) and Layout's nav gate / DeviceMgmtGate (probe) call
+    // on a signed-in mount. Re-establish resolvable defaults; feature OFF is
+    // fine for these auth-flow tests.
+    deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false })
     container = document.createElement('div')
     document.body.appendChild(container)
     // jsdom implements no `window.matchMedia`; `Login` renders inside
@@ -279,6 +303,12 @@ describe('App startup honours force_sso_login from the public config', () => {
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     vi.clearAllMocks()
     vi.spyOn(console, 'error').mockImplementation(() => {})
+    // clearAllMocks wipes the factory defaults for the device-mgmt mocks that
+    // Layout (task badge) and Layout's nav gate / DeviceMgmtGate (probe) call
+    // on a signed-in mount. Re-establish resolvable defaults; feature OFF is
+    // fine for these auth-flow tests.
+    deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false })
     container = document.createElement('div')
     document.body.appendChild(container)
     if (typeof window.matchMedia !== 'function') {
@@ -435,6 +465,12 @@ describe('App startup does not auto-login on an ?error= return (429 loop-guard)'
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     vi.clearAllMocks()
     vi.spyOn(console, 'error').mockImplementation(() => {})
+    // clearAllMocks wipes the factory defaults for the device-mgmt mocks that
+    // Layout (task badge) and Layout's nav gate / DeviceMgmtGate (probe) call
+    // on a signed-in mount. Re-establish resolvable defaults; feature OFF is
+    // fine for these auth-flow tests.
+    deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false })
     container = document.createElement('div')
     document.body.appendChild(container)
     if (typeof window.matchMedia !== 'function') {
@@ -538,6 +574,125 @@ describe('App startup does not auto-login on an ?error= return (429 loop-guard)'
   })
 })
 
+// Post-login return path: when a deep link (e.g. the Downloads QR -> /downloads)
+// sends an unauthenticated user through login, the server callback lands them
+// on its fixed /dashboard. App reads the return path stored by authAPI.login()
+// (utils/returnPath.js) once the session is established and navigates there.
+// Simulated here by seeding sessionStorage with the stored path and mounting a
+// signed-in session at /dashboard (where the callback drops the user).
+describe('App post-login return path (QR deep link returns to /downloads, not /dashboard)', () => {
+  let container
+  let root
+  let matchMediaStubbed = false
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    vi.clearAllMocks()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    // clearAllMocks wipes the factory defaults for the device-mgmt mocks that
+    // Layout (task badge) and Layout's nav gate / DeviceMgmtGate (probe) call
+    // on a signed-in mount. Re-establish resolvable defaults; feature OFF is
+    // fine for these auth-flow tests.
+    deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false })
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    if (typeof window.matchMedia !== 'function') {
+      window.matchMedia = () => ({
+        matches: false,
+        addEventListener() {},
+        removeEventListener() {},
+        addListener() {},
+        removeListener() {}
+      })
+      matchMediaStubbed = true
+    }
+    // A signed-in session so the getProfile() success branch (which consumes
+    // the return path) runs and the full router mounts.
+    authAPI.getProfile.mockResolvedValue({
+      data: { user: { id: 7, email: 'ada@example.com', is_global_manager: false } }
+    })
+    configAPI.getPublic.mockResolvedValue({ data: {} })
+    requestsAPI.getPending.mockResolvedValue({ data: { requests: [] } })
+    versionAPI.get.mockResolvedValue({ data: { version: '2026.9.0' } })
+    // The /downloads return-path case mounts the Downloads page, which lists
+    // the offline-map catalog on mount; re-establish the resolvable default
+    // clearAllMocks wiped so its effect doesn't throw.
+    offlineMapsAPI.list.mockResolvedValue({ data: { maps: [] } })
+    offlineMapsAPI.getQr.mockResolvedValue({ data: {} })
+    sessionStorage.clear()
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => { root.unmount() })
+      root = null
+    }
+    container.remove()
+    if (matchMediaStubbed) {
+      delete window.matchMedia
+      matchMediaStubbed = false
+    }
+    localStorage.removeItem('theme')
+    sessionStorage.clear()
+    vi.restoreAllMocks()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  const mountAt = async (initialPath) => {
+    root = createRoot(container)
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={[initialPath]}>
+          <App />
+        </MemoryRouter>
+      )
+    })
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+  }
+
+  const activeNavLabel = () => {
+    const activeLink = Array.from(container.querySelectorAll('a')).find((a) =>
+      a.className.includes('bg-primary-100')
+    )
+    return activeLink?.textContent.trim()
+  }
+
+  it('navigates to the stored return path after login lands on /dashboard', async () => {
+    // authAPI.login() would have stored this before the round trip.
+    sessionStorage.setItem('tak_post_login_return_path', '/downloads')
+
+    await mountAt('/dashboard')
+
+    // The active nav item is now Downloads, not Dashboard -- App consumed the
+    // stored path and navigated there.
+    expect(activeNavLabel()).toContain('Downloads')
+    // And the stored path was cleared so it can't re-fire.
+    expect(sessionStorage.getItem('tak_post_login_return_path')).toBeNull()
+  })
+
+  it('stays on /dashboard when there is no stored return path (normal login)', async () => {
+    await mountAt('/dashboard')
+
+    expect(activeNavLabel()).toContain('Dashboard')
+  })
+
+  it('ignores a non-returnable stored path and stays on /dashboard', async () => {
+    // A tampered/loop-prone value must not redirect anywhere.
+    sessionStorage.setItem('tak_post_login_return_path', 'https://evil.com')
+
+    await mountAt('/dashboard')
+
+    expect(activeNavLabel()).toContain('Dashboard')
+    // Cleared regardless, so it can't linger.
+    expect(sessionStorage.getItem('tak_post_login_return_path')).toBeNull()
+  })
+})
+
 // cert-expiry-notifications Requirement 7.1: /requests stays reachable via a
 // redirect to /tasks, rather than becoming a broken link, for any existing
 // bookmark. Mounted the same way as the "renders a signed-in session"
@@ -552,6 +707,12 @@ describe('cert-expiry-notifications: /requests redirects to /tasks (Requirement 
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     vi.clearAllMocks()
     vi.spyOn(console, 'error').mockImplementation(() => {})
+    // clearAllMocks wipes the factory defaults for the device-mgmt mocks that
+    // Layout (task badge) and Layout's nav gate / DeviceMgmtGate (probe) call
+    // on a signed-in mount. Re-establish resolvable defaults; feature OFF is
+    // fine for these auth-flow tests.
+    deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false })
     container = document.createElement('div')
     document.body.appendChild(container)
     if (typeof window.matchMedia !== 'function') {

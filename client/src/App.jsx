@@ -1,8 +1,9 @@
-import { Routes, Route, Navigate } from 'react-router-dom'
+import { Routes, Route, Navigate, useNavigate } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import { authAPI, configAPI } from './services/api'
 import { isPublicOnlyPath } from './utils/publicPaths'
 import { recordAutoLoginAttemptAndCheckLoop, clearAutoLoginAttempts } from './utils/autoLoginGuard'
+import { consumeReturnPath } from './utils/returnPath'
 import { setDisplayTimezone, setDisplayLocale } from './utils/dateFormat'
 import { setExpiryWarningDays } from './utils/expiryWarning'
 import { ThemeProvider } from './contexts/ThemeContext'
@@ -19,11 +20,13 @@ import Login from './pages/Login'
 import Admin from './pages/Admin'
 import AuditLogs from './pages/AuditLogs'
 import EnrollmentView from './pages/EnrollmentView'
+import DeviceMgmtGate from './components/DeviceMgmtGate'
 import Downloads from './pages/Downloads'
 
 function App() {
   const [user, setUser] = useState(null)
   const [loading, setLoading] = useState(true)
+  const navigate = useNavigate()
 
   const refreshUser = async () => {
     try {
@@ -127,6 +130,18 @@ function App() {
         // A session was established -- reset the loop counter so a later,
         // unrelated logout->login does not start part-way to the threshold.
         clearAutoLoginAttempts()
+        // Post-login return path: if the user was sent to login from a deep
+        // link (e.g. the Downloads QR opens /downloads, which auto-logins),
+        // the server callback landed them on its fixed /dashboard. Send them
+        // on to where they were actually headed. consumeReturnPath reads and
+        // clears the stored path and returns null when there's nothing to do
+        // (or the stored value isn't a safe in-app destination), so a normal
+        // login stays on /dashboard. `replace` keeps the intermediate
+        // /dashboard out of history so Back doesn't bounce there.
+        const returnPath = consumeReturnPath()
+        if (returnPath) {
+          navigate(returnPath, { replace: true })
+        }
         setUser(response.data.user)
         setLoading(false)
       })
@@ -191,7 +206,10 @@ function App() {
           })
           .catch(() => setLoading(false))
       })
-  }, [])
+    // `navigate` (from useNavigate) is stable across renders, so listing it
+    // does not cause this mount-only effect to re-run; it satisfies
+    // exhaustive-deps for the post-login return-path navigation above.
+  }, [navigate])
 
   if (loading) {
     return (
@@ -219,7 +237,14 @@ function App() {
           <Route path="/teams" element={<Teams user={user} />} />
           <Route path="/teams/:teamId" element={<TeamDetail user={user} refreshUser={refreshUser} />} />
           <Route path="/users" element={<Users user={user} />} />
-          <Route path="/devices" element={<Devices user={user} />} />
+          {/* /devices and /enrollment are gated on the DEVICE_MGMT_ENABLED
+              probe: both surfaces depend on TAK Server being configured, so a
+              device-management-off deployment renders a clean "not available"
+              panel instead of the raw TAK_SERVER_ENROLLMENT_URL error. The nav
+              already hides these entries when off (Layout.jsx), but a direct
+              URL -- a bookmark, or the Downloads QR that lands on /downloads
+              then here -- must be handled at the route too. */}
+          <Route path="/devices" element={<DeviceMgmtGate><Devices user={user} /></DeviceMgmtGate>} />
           {/* cert-expiry-notifications Requirement 7.1: renamed from
               /requests to /tasks (the page now also lists certificate
               renewals, not just access requests). /requests stays
@@ -230,7 +255,7 @@ function App() {
           <Route path="/global-channels" element={<GlobalChannels user={user} />} />
           <Route path="/admin" element={<Admin user={user} />} />
           <Route path="/audit-logs" element={<AuditLogs user={user} />} />
-          <Route path="/enrollment" element={<EnrollmentView />} />
+          <Route path="/enrollment" element={<DeviceMgmtGate><EnrollmentView /></DeviceMgmtGate>} />
           <Route path="/downloads" element={<Downloads />} />
           {/* Catch-all: an unknown path would otherwise render the Layout
               with no page content at all (an empty shell with just the

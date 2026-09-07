@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { isPublicOnlyPath } from '../utils/publicPaths';
+import { captureReturnPath } from '../utils/returnPath';
 
 // --- Backend base URL configuration (Requirements 2.1, 2.2, 2.3, 2.7, 2.8) ---
 //
@@ -123,6 +124,16 @@ api.interceptors.response.use(
 
 export const authAPI = {
   login: () => {
+    // Capture where the user currently is BEFORE leaving for Authentik, so a
+    // deep link (e.g. the Downloads QR that opens /downloads) returns there
+    // after login instead of the server callback's fixed /dashboard. The
+    // server callback can't know the intended path; App.jsx reads this back
+    // once a session is established (see consumeReturnPath). captureReturnPath
+    // itself ignores non-returnable locations (/dashboard, /login, ...), so
+    // this is safe to call unconditionally here.
+    if (typeof window !== 'undefined') {
+      captureReturnPath(window.location.pathname + window.location.search);
+    }
     window.open(joinBaseAndPath(validatedBase, '/api/auth/login'), '_self');
   },
   silentLogin: () => {
