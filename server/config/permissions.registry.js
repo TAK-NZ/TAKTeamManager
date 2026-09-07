@@ -588,6 +588,7 @@ const routes = {
   // (OFFLINE_MAPS_ENABLED); the client discovers the feature by probing the
   // list route (200 vs 404), not by reading any config flag.
   'GET /api/offline-maps': ['offline_maps:read'],
+  'GET /api/offline-maps/qr': ['offline_maps:read'],
   'GET /api/offline-maps/:id/url': ['offline_maps:read']
 };
 

@@ -1,5 +1,6 @@
 const express = require('express');
 const { param, validationResult } = require('express-validator');
+const QRCode = require('qrcode');
 const { authenticateToken } = require('../middleware/auth');
 const authorize = require('../middleware/authorize');
 const { getLogger } = require('../middleware/requestContext');
@@ -30,6 +31,34 @@ router.get('/', authenticateToken, authorize, async (req, res) => {
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to list offline maps');
     res.status(500).json({ error: 'Failed to list offline maps' });
+  }
+});
+
+// Desktop -> phone handoff QR code (design §4.7): a QR encoding this app's
+// /downloads page URL, so a user browsing on a PC can jump to the same page
+// on their phone (where the maps actually need to land). The QR is generated
+// SERVER-SIDE as a data URL via `qrcode` — the SAME pattern the enrollment
+// surface uses (`DeviceEnrollmentService.renderQrDataUrl` -> `<img src>`),
+// so no client QR dependency is needed. The encoded URL uses the canonical
+// APP_URL origin (e.g. https://team.tak.nz), NOT the browser's own host, so
+// the code always points at the real public page rather than whatever
+// internal host/port the desktop happened to reach. Placed before the
+// `/:id/url` route so the literal `/qr` path is matched before the `:id` param.
+router.get('/qr', authenticateToken, authorize, async (req, res) => {
+  try {
+    const appUrl = (process.env.APP_URL || '').replace(/\/+$/, '');
+    if (!appUrl) {
+      // APP_URL is a required, validated config var; treat absence as a
+      // misconfiguration rather than encoding a bogus URL.
+      getLogger().error('APP_URL is not configured; cannot build the /downloads QR code');
+      return res.status(503).json({ error: 'Offline maps QR code is not available' });
+    }
+    const url = `${appUrl}/downloads`;
+    const qrCodeDataUrl = await QRCode.toDataURL(url);
+    res.json({ url, qrCodeDataUrl });
+  } catch (error) {
+    getLogger().error({ err: error }, 'Failed to generate offline maps QR code');
+    res.status(500).json({ error: 'Failed to generate QR code' });
   }
 });
 

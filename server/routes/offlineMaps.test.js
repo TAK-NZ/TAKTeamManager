@@ -17,6 +17,12 @@ jest.mock('../middleware/auth', () => ({
   }
 }));
 
+// Mock qrcode so the /qr route is deterministic and offline.
+jest.mock('qrcode', () => ({
+  toDataURL: jest.fn().mockResolvedValue('data:image/png;base64,MOCKQR')
+}));
+const QRCode = require('qrcode');
+
 // Mock the service module: the router does `new OfflineMapService()`, so the
 // mock is a constructor returning a shared spy object we can program per test.
 const mockServiceInstance = {
@@ -126,5 +132,63 @@ describe('GET /api/offline-maps/:id/url', () => {
     const res = await request(app).get('/api/offline-maps/regional-otago/url');
 
     expect(res.status).toBe(500);
+  });
+});
+
+describe('GET /api/offline-maps/qr', () => {
+  const originalAppUrl = process.env.APP_URL;
+
+  afterEach(() => {
+    if (originalAppUrl === undefined) delete process.env.APP_URL;
+    else process.env.APP_URL = originalAppUrl;
+  });
+
+  it('returns a server-generated QR data URL encoding APP_URL + /downloads (200)', async () => {
+    process.env.APP_URL = 'https://team.tak.nz';
+
+    const res = await request(app).get('/api/offline-maps/qr');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      url: 'https://team.tak.nz/downloads',
+      qrCodeDataUrl: 'data:image/png;base64,MOCKQR'
+    });
+    // The QR encodes the canonical page URL, not the browser's host.
+    expect(QRCode.toDataURL).toHaveBeenCalledWith('https://team.tak.nz/downloads');
+  });
+
+  it('strips a trailing slash on APP_URL before appending /downloads', async () => {
+    process.env.APP_URL = 'https://team.tak.nz/';
+
+    await request(app).get('/api/offline-maps/qr');
+
+    expect(QRCode.toDataURL).toHaveBeenCalledWith('https://team.tak.nz/downloads');
+  });
+
+  it('returns 503 when APP_URL is not configured', async () => {
+    delete process.env.APP_URL;
+
+    const res = await request(app).get('/api/offline-maps/qr');
+
+    expect(res.status).toBe(503);
+    expect(QRCode.toDataURL).not.toHaveBeenCalled();
+  });
+
+  it('returns 500 when QR generation throws', async () => {
+    process.env.APP_URL = 'https://team.tak.nz';
+    QRCode.toDataURL.mockRejectedValueOnce(new Error('qr boom'));
+
+    const res = await request(app).get('/api/offline-maps/qr');
+
+    expect(res.status).toBe(500);
+  });
+
+  it('is reachable by a plain authenticated user (offline_maps:read grant, not 403)', async () => {
+    process.env.APP_URL = 'https://team.tak.nz';
+    mockUser = { id: 'authentik-2', userId: 2, is_global_manager: false };
+
+    const res = await request(app).get('/api/offline-maps/qr');
+
+    expect(res.status).toBe(200);
   });
 });

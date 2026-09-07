@@ -396,6 +396,10 @@ export const configAPI = {
 export const offlineMapsAPI = {
   list: () => api.get('/offline-maps'),
   getUrl: (id) => api.get(`/offline-maps/${encodeURIComponent(id)}/url`),
+  // Desktop->phone handoff: a server-generated QR (data URL) encoding the
+  // canonical /downloads page URL. Fetched lazily when the user opens the
+  // QR panel, so it isn't generated on every catalog list.
+  getQr: () => api.get('/offline-maps/qr'),
 };
 
 // GET /api (bare root, server/routes/version.js): the running version,

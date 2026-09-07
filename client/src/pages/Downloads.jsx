@@ -584,18 +584,41 @@ function OfflineMapsCard() {
 }
 
 /**
+/**
  * QrHandoff: the desktop -> phone handoff (design.md §4.7). A single
  * page-level QR for /downloads, collapsed by default and shown only at `sm:`
  * and up (a phone user scanning with the same phone is pointless).
  *
- * MOCK: the QR image is a placeholder box, not a generated code -- rendering a
- * real QR needs a new client dependency, deferred until the feature is built.
- * The target URL uses `window.location.origin` here; the real version will
- * encode the canonical configured hostname from public config.
+ * The QR is generated SERVER-SIDE (`GET /api/offline-maps/qr` -> a PNG data
+ * URL), the same pattern the enrollment surface uses -- so there is no client
+ * QR dependency, and the code encodes the canonical APP_URL origin (e.g.
+ * https://team.tak.nz/downloads), not the browser's own host. Fetched lazily
+ * the first time the panel opens. The visible URL text beside the image is the
+ * real accessible information and also the fallback if generation fails.
  */
 function QrHandoff() {
   const [open, setOpen] = useState(false)
-  const pageUrl = (typeof window !== 'undefined' ? window.location.origin : '') + '/downloads'
+  // { url, qrCodeDataUrl } once fetched; null until then.
+  const [qr, setQr] = useState(null)
+  const [error, setError] = useState(false)
+
+  useEffect(() => {
+    if (!open || qr) return
+    let cancelled = false
+    offlineMapsAPI.getQr()
+      .then((response) => {
+        if (cancelled) return
+        if (response.data?.qrCodeDataUrl) {
+          setQr(response.data)
+        } else {
+          setError(true)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setError(true)
+      })
+    return () => { cancelled = true }
+  }, [open, qr])
 
   return (
     <div className="hidden sm:block rounded-lg border border-gray-200 dark:border-gray-700 p-4">
@@ -609,21 +632,32 @@ function QrHandoff() {
       </button>
       {open && (
         <div className="mt-4 flex items-center gap-4">
-          {/* Placeholder QR box (mock). aria-hidden -- the URL text beside it
-              is the real, accessible information. */}
-          <div
-            className="flex h-32 w-32 flex-shrink-0 items-center justify-center rounded border border-dashed border-gray-300 dark:border-gray-600 text-xs text-gray-400 dark:text-gray-500 text-center"
-            aria-hidden="true"
-          >
-            QR code
-            <br />
-            (placeholder)
-          </div>
+          {qr?.qrCodeDataUrl ? (
+            // Server-generated QR (PNG data URL). aria-hidden -- the URL text
+            // beside it is the real, accessible information.
+            <img
+              src={qr.qrCodeDataUrl}
+              alt=""
+              aria-hidden="true"
+              className="h-32 w-32 flex-shrink-0 rounded border border-gray-200 dark:border-gray-700"
+            />
+          ) : (
+            // Loading / failed: a neutral box, no broken-image icon. The URL
+            // text still lets a user reach the page manually.
+            <div
+              className="flex h-32 w-32 flex-shrink-0 items-center justify-center rounded border border-dashed border-gray-300 dark:border-gray-600 text-xs text-gray-400 dark:text-gray-500 text-center"
+              aria-hidden="true"
+            >
+              {error ? 'QR unavailable' : 'Loading…'}
+            </div>
+          )}
           <div className="min-w-0 space-y-1">
             <p className="text-sm text-gray-700 dark:text-gray-300">
               Scan to open this page on your phone, then download the files there.
             </p>
-            <p className="truncate text-sm text-primary-600 dark:text-primary-500">{pageUrl}</p>
+            {qr?.url && (
+              <p className="truncate text-sm text-primary-600 dark:text-primary-500">{qr.url}</p>
+            )}
           </div>
         </div>
       )}

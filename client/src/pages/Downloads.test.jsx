@@ -54,6 +54,7 @@ vi.mock('../services/api', () => ({
   offlineMapsAPI: {
     list: vi.fn().mockRejectedValue(new Error('feature off')),
     getUrl: vi.fn(),
+    getQr: vi.fn().mockResolvedValue({ data: { url: 'https://team.tak.nz/downloads', qrCodeDataUrl: 'data:image/png;base64,MOCKQR' } }),
   },
 }))
 
