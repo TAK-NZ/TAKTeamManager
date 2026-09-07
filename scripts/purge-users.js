@@ -118,6 +118,83 @@ async function resolveRowByEmail(email) {
  * Faithful copy of server/routes/users.js's human-member delete ordering.
  * Returns a short outcome string for the audit line.
  */
+/** Sleep helper for backoff. */
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * How many times to retry a single Authentik DELETE that fails with
+ * backpressure (503) or another transient/network error, and the base delay
+ * for the exponential backoff (capped). Authentik under a large purge does not
+ * return 429 -- it degrades into latency and 503s once its workers saturate
+ * (see the Authentik-scaling notes) -- so a transient 503 here means "busy,
+ * come back", not "this delete is impossible". Retrying with backoff is what
+ * lets a re-run actually finish instead of failing thousands of rows the
+ * moment Authentik gets busy.
+ */
+const AUTHENTIK_DELETE_MAX_ATTEMPTS = 6;
+const AUTHENTIK_DELETE_BASE_DELAY_MS = 500;
+const AUTHENTIK_DELETE_MAX_DELAY_MS = 15000;
+
+/**
+ * DELETE an Authentik user, retrying on transient failure. Returns an outcome
+ * string ('deleted' | 'already_absent'); throws only when the delete is
+ * PERMANENTLY un-completable (a 4xx that is not 404, e.g. 401/403), or when
+ * every retry of a transient failure is exhausted -- either way the caller
+ * treats it as a failed row and leaves the local rows in place, so a federated
+ * account is never orphaned by dropping its local record.
+ *
+ * Retryable: a 503 (backpressure), any other 5xx, and a thrown network/timeout
+ * error. Terminal-success: 2xx and 404 (already gone). Terminal-failure: any
+ * other 4xx.
+ */
+async function deleteAuthentikUserWithRetry(authentikUserId) {
+  let lastReason = null;
+  for (let attempt = 1; attempt <= AUTHENTIK_DELETE_MAX_ATTEMPTS; attempt++) {
+    let response;
+    try {
+      response = await fetchWithTimeout(
+        `${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`,
+        { method: 'DELETE', headers: { Authorization: `Bearer ${process.env.AUTHENTIK_API_TOKEN}` } }
+      );
+    } catch (networkErr) {
+      // A thrown error is a transport/timeout failure -- always transient.
+      lastReason = networkErr.message;
+      response = null;
+    }
+
+    if (response) {
+      if (response.ok) return 'deleted';
+      if (response.status === 404) return 'already_absent';
+      // A 4xx other than 404 is permanent (auth/permission/bad request):
+      // retrying cannot help, so fail immediately rather than hammering.
+      if (response.status >= 400 && response.status < 500 && response.status !== 429) {
+        throw new Error(`Authentik DELETE responded ${response.status} for pk ${authentikUserId}`);
+      }
+      // 5xx (incl. 503) and 429 fall through to the backoff/retry below.
+      lastReason = `status ${response.status}`;
+    }
+
+    if (attempt < AUTHENTIK_DELETE_MAX_ATTEMPTS) {
+      // Exponential backoff with a cap, plus a little jitter so many
+      // concurrent workers don't all retry on the same beat.
+      const delay = Math.min(
+        AUTHENTIK_DELETE_MAX_DELAY_MS,
+        AUTHENTIK_DELETE_BASE_DELAY_MS * 2 ** (attempt - 1)
+      ) + Math.floor(Math.random() * 250);
+      logger.warn(
+        { authentikUserId, attempt, nextDelayMs: delay, reason: lastReason },
+        'purge-users: transient Authentik DELETE failure; backing off and retrying'
+      );
+      await sleep(delay);
+    }
+  }
+  throw new Error(
+    `Authentik DELETE failed after ${AUTHENTIK_DELETE_MAX_ATTEMPTS} attempts for pk ${authentikUserId} (last: ${lastReason})`
+  );
+}
+
 async function destroyUser({ id, authentik_user_id }) {
   // 1. Memberships + revoke_tak_certificates enqueue (unconditional full removal).
   await TeamMembershipService.removeUserFromTeam(id, null);
@@ -132,21 +209,12 @@ async function destroyUser({ id, authentik_user_id }) {
         'purge-users: clearUserAttributes failed; continuing to delete');
     }
 
-    // 3. DELETE the federated Authentik account. 404 == already gone == success.
-    const deleteResponse = await fetchWithTimeout(
-      `${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentik_user_id}/`,
-      { method: 'DELETE', headers: { Authorization: `Bearer ${process.env.AUTHENTIK_API_TOKEN}` } }
-    );
-    if (deleteResponse.ok) {
-      authentikOutcome = 'deleted';
-    } else if (deleteResponse.status === 404) {
-      authentikOutcome = 'already_absent';
-    } else {
-      // Surface it — do NOT silently drop the local rows for a user whose
-      // Authentik account we failed to remove (that would leak a federated
-      // account with no local record).
-      throw new Error(`Authentik DELETE responded ${deleteResponse.status} for pk ${authentik_user_id}`);
-    }
+    // 3. DELETE the federated Authentik account, retrying on 503/5xx/network
+    // (Authentik backpressure during a large purge). 404 == already gone ==
+    // success. A throw here (permanent 4xx, or retries exhausted) is caught by
+    // the caller and recorded as a failed row, leaving the local rows in place
+    // so a federated account is never orphaned by dropping its local record.
+    authentikOutcome = await deleteAuthentikUserWithRetry(authentik_user_id);
   }
 
   // 4 + 5. Remove the local rows.
