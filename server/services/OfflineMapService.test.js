@@ -34,7 +34,12 @@ function buildMockS3Client(objectsByPrefix) {
   return {
     send: jest.fn(async (command) => {
       const prefix = command.input.Prefix;
-      const contents = (objectsByPrefix[prefix] || []).map((o) => ({ Key: o.key, Size: o.size }));
+      const contents = (objectsByPrefix[prefix] || []).map((o) => ({
+        Key: o.key,
+        Size: o.size,
+        // Mirror the AWS SDK, which returns LastModified as a Date object.
+        LastModified: o.lastModified !== undefined ? o.lastModified : undefined
+      }));
       return { Contents: contents, IsTruncated: false };
     })
   };
@@ -85,10 +90,12 @@ describe('isConfigured', () => {
 describe('listAvailableMaps', () => {
   it('merges live sizes onto the catalog and preserves order; missing objects are unavailable', async () => {
     // Only two regionals present; marine + vector absent (not yet uploaded).
+    const otagoModified = new Date('2026-01-15T03:04:05.000Z');
+    const northlandModified = new Date('2025-11-30T22:00:00.000Z');
     const service = buildService({
       'regional/': [
-        { key: 'regional/otago-topo.mbtiles', size: 694591488 },
-        { key: 'regional/northland-topo.mbtiles', size: 119783424 }
+        { key: 'regional/otago-topo.mbtiles', size: 694591488, lastModified: otagoModified },
+        { key: 'regional/northland-topo.mbtiles', size: 119783424, lastModified: northlandModified }
       ],
       'marine/': [],
       'vector/': []
@@ -105,11 +112,20 @@ describe('listAvailableMaps', () => {
     const waikato = maps.find((m) => m.id === 'regional-waikato');
     const marine = maps.find((m) => m.id === 'marine-charts');
 
-    expect(northland).toMatchObject({ sizeBytes: 119783424, available: true });
-    expect(otago).toMatchObject({ sizeBytes: 694591488, available: true });
-    // Present in the catalog but not in S3 yet -> unavailable, null size.
-    expect(waikato).toMatchObject({ sizeBytes: null, available: false });
-    expect(marine).toMatchObject({ sizeBytes: null, available: false });
+    // lastModified surfaced as an ISO-8601 string for present objects.
+    expect(northland).toMatchObject({
+      sizeBytes: 119783424,
+      available: true,
+      lastModified: northlandModified.toISOString()
+    });
+    expect(otago).toMatchObject({
+      sizeBytes: 694591488,
+      available: true,
+      lastModified: otagoModified.toISOString()
+    });
+    // Present in the catalog but not in S3 yet -> unavailable, null size, null date.
+    expect(waikato).toMatchObject({ sizeBytes: null, available: false, lastModified: null });
+    expect(marine).toMatchObject({ sizeBytes: null, available: false, lastModified: null });
 
     // Never returns a URL from the listing.
     expect(maps.every((m) => !('url' in m))).toBe(true);

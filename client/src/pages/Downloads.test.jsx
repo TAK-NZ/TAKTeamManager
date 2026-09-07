@@ -36,6 +36,12 @@ vi.mock('../services/api', () => ({
   // are present regardless.
   authAPI: { logout: vi.fn() },
   requestsAPI: { getPending: vi.fn().mockResolvedValue({ data: { requests: [] } }) },
+  adminAPI: { getOrgInterest: vi.fn().mockResolvedValue({ data: { requests: [] } }) },
+  // Layout.jsx's outstanding-task-count effect now calls this for EVERY user
+  // (a member's own certificate renewals feed the nav badge / mobile bell),
+  // so a resolvable default is required even for the plain user below, or the
+  // effect's promise rejects unhandled. No devices -> zero renewals.
+  deviceManagementAPI: { getMyDevices: vi.fn().mockResolvedValue({ data: { devices: [] } }) },
   // Layout.jsx's own version-display mount effect calls this too.
   versionAPI: { get: vi.fn().mockResolvedValue({ data: { version: '2026.9.0' } }) },
   // Downloads.jsx's mount effect calls this directly. Defaulted to
@@ -218,7 +224,7 @@ describe('Downloads reachability for a user with no team membership and no admin
     offlineMapsAPI.list.mockResolvedValueOnce({
       data: {
         maps: [
-          { id: 'regional-otago', group: 'south-island', category: 'regional', label: 'Otago', apps: ['atak', 'takaware'], sizeBytes: 694591488, available: true },
+          { id: 'regional-otago', group: 'south-island', category: 'regional', label: 'Otago', apps: ['atak', 'takaware'], sizeBytes: 694591488, lastModified: '2026-06-15T03:04:05.000Z', available: true },
         ],
       },
     })
@@ -233,6 +239,12 @@ describe('Downloads reachability for a user with no team membership and no admin
     // The Offline Maps section renders when the probe returns a list.
     expect(container.textContent).toContain('Offline Maps')
     expect(container.textContent).toContain('Otago')
+    // The S3 last-modified date is surfaced (rendered via FormattedDate). A
+    // mid-year UTC instant renders in the same calendar year in the resolved
+    // display timezone regardless of a small offset, so the year is a stable
+    // anchor; the "Updated" label appears alongside it.
+    expect(container.textContent).toContain('Updated')
+    expect(container.textContent).toContain('2026')
     // Anti-vacuity: the page actually rendered download links, not an empty
     // shell.
     expect(container.querySelectorAll('a').length).toBeGreaterThan(0)
@@ -250,6 +262,32 @@ describe('Downloads reachability for a user with no team membership and no admin
     expect(container.textContent).toContain('Downloads')
     // ...but the Offline Maps card is absent.
     expect(container.textContent).not.toContain('Offline Maps')
+  })
+
+  it('shows a not-yet-uploaded map as unavailable with no update date', async () => {
+    // A catalog entry whose object is not in S3 yet: available:false, and the
+    // server sends lastModified:null. The row must render as unavailable and
+    // must NOT show an "Updated" date for that entry.
+    offlineMapsAPI.list.mockResolvedValueOnce({
+      data: {
+        maps: [
+          { id: 'marine-charts', group: 'marine', category: 'marine', label: 'NZ Marine Charts', apps: ['atak', 'takaware'], sizeBytes: null, lastModified: null, available: false },
+        ],
+      },
+    })
+
+    await mount(<Downloads />)
+    await flushEffects()
+
+    expect(container.textContent).toContain('Offline Maps')
+    expect(container.textContent).toContain('NZ Marine Charts')
+    // Unavailable treatment is present; the only map has no date, so no
+    // "Updated " label is rendered anywhere in the card.
+    expect(container.textContent).toContain('Currently unavailable')
+    // The desktop table always renders an "Updated" column HEADER, but no ROW
+    // should carry the mobile inline "· Updated " date label for an entry
+    // with no lastModified.
+    expect(container.textContent).not.toContain('· Updated')
   })
 })
 

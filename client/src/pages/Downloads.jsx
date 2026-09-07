@@ -2,6 +2,7 @@ import { useState, useEffect, Fragment } from 'react'
 import { XMarkIcon, MagnifyingGlassPlusIcon } from '@heroicons/react/24/outline'
 import { GooglePlayBadge, AppleAppStoreBadge, TakGovBadge, RecommendedOptionMarker, RecommendedOptionGlyph } from '../components/StoreBadges'
 import { AndroidPlatformLogo, ApplePlatformLogo, WindowsPlatformLogo } from '../components/PlatformLogos'
+import FormattedDate, { DATE_PRECISION } from '../components/FormattedDate'
 import toast from 'react-hot-toast'
 import { configAPI, offlineMapsAPI } from '../services/api'
 
@@ -370,7 +371,19 @@ function OfflineMapsMobileGroup({ heading, compatibility, previewSrc, previewAlt
             <div className="min-w-0">
               <p className="truncate text-sm font-medium text-gray-900 dark:text-gray-100">{map.label}</p>
               <p className="text-xs text-gray-500 dark:text-gray-400">
-                {map.available ? formatBytes(map.sizeBytes) : 'Currently unavailable'}
+                {map.available ? (
+                  <>
+                    {formatBytes(map.sizeBytes)}
+                    {map.lastModified && (
+                      <>
+                        {' · Updated '}
+                        <FormattedDate value={map.lastModified} precision={DATE_PRECISION.DATE} />
+                      </>
+                    )}
+                  </>
+                ) : (
+                  'Currently unavailable'
+                )}
               </p>
             </div>
             <DownloadButton map={map} onDownload={onDownload} pending={pendingIds.has(map.id)} className="flex-shrink-0" />
@@ -396,13 +409,15 @@ function OfflineMapsTable({ groups, onDownload, onEnlarge, pendingIds }) {
           the Map column takes the remaining space. */}
       <colgroup>
         <col />
-        <col className="w-28" />
+        <col className="w-24" />
+        <col className="w-32" />
         <col className="w-36" />
       </colgroup>
       <thead>
         <tr className="text-left text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
           <th className="pb-2 font-medium">Map</th>
           <th className="pb-2 font-medium">Size</th>
+          <th className="pb-2 font-medium">Updated</th>
           <th className="pb-2 font-medium sr-only">Download</th>
         </tr>
       </thead>
@@ -412,7 +427,7 @@ function OfflineMapsTable({ groups, onDownload, onEnlarge, pendingIds }) {
             {/* Section heading row: full width, so every data row below it
                 still shares the table's single column layout. */}
             <tr>
-              <td colSpan={3} className="pt-6 pb-2">
+              <td colSpan={4} className="pt-6 pb-2">
                 <div className="flex items-center gap-3">
                   <MapTypePreview
                     src={group.previewSrc}
@@ -433,6 +448,16 @@ function OfflineMapsTable({ groups, onDownload, onEnlarge, pendingIds }) {
                 <td className="py-2 pr-4 font-medium text-gray-900 dark:text-gray-100 truncate">{map.label}</td>
                 <td className="py-2 pr-4 text-gray-500 dark:text-gray-400 whitespace-nowrap">
                   {map.available ? formatBytes(map.sizeBytes) : 'Currently unavailable'}
+                </td>
+                <td className="py-2 pr-4 text-gray-500 dark:text-gray-400 whitespace-nowrap">
+                  {/* Live S3 last-modified date; date-only precision (an annual
+                      map refresh makes the day the meaningful unit). Absent for
+                      a not-yet-uploaded object, rendered as an em dash. */}
+                  {map.available && map.lastModified ? (
+                    <FormattedDate value={map.lastModified} precision={DATE_PRECISION.DATE} />
+                  ) : (
+                    '—'
+                  )}
                 </td>
                 <td className="py-2 text-right">
                   <DownloadButton map={map} onDownload={onDownload} pending={pendingIds.has(map.id)} />

@@ -13,9 +13,10 @@ const {
  * The catalog is STATIC and code-defined (below). The bucket has a fixed,
  * known key layout that changes only via a manually-triggered, roughly-annual
  * batch job that overwrites the objects in place, so a DB-backed catalog would
- * be overkill and would drift from the generator. File SIZES are NOT hardcoded:
- * they are read live from S3 at list time, so a not-yet-uploaded object is
- * simply reported as unavailable rather than offered as a dead link — the
+ * be overkill and would drift from the generator. File SIZES and last-modified
+ * timestamps are NOT hardcoded: both are read live from S3 at list time (they
+ * ride along in the same ListObjectsV2 response), so a not-yet-uploaded object
+ * is simply reported as unavailable rather than offered as a dead link — the
  * marine and vector files land later and will appear automatically once their
  * objects exist, with no code change.
  *
@@ -136,7 +137,7 @@ class OfflineMapService {
    * `available` (boolean). Never returns a URL — minting one is a separate,
    * per-object call (`getPresignedUrl`). Preserves catalog (display) order.
    *
-   * @returns {Promise<Array<{id:string,group:string,category:string,label:string,apps:string[],sizeBytes:(number|null),available:boolean}>>}
+   * @returns {Promise<Array<{id:string,group:string,category:string,label:string,apps:string[],sizeBytes:(number|null),lastModified:(string|null),available:boolean}>>}
    * @throws if the bucket is not configured, or if the S3 listing fails.
    */
   async listAvailableMaps() {
@@ -144,8 +145,11 @@ class OfflineMapService {
       throw new Error('OfflineMapService: no bucket configured (OFFLINE_MAPS_S3_BUCKET unset)');
     }
 
-    // key -> size in bytes, for every object found under the catalog prefixes.
-    const sizeByKey = new Map();
+    // key -> { size in bytes, lastModified }, for every object found under the
+    // catalog prefixes. `LastModified` rides along in the SAME ListObjectsV2
+    // response as `Size` (an S3 object's own last-write timestamp), so
+    // surfacing it costs no extra call and no extra permission.
+    const metaByKey = new Map();
     for (const prefix of CATALOG_PREFIXES) {
       let continuationToken;
       do {
@@ -155,14 +159,22 @@ class OfflineMapService {
           ContinuationToken: continuationToken
         }));
         for (const object of response.Contents || []) {
-          sizeByKey.set(object.Key, object.Size);
+          metaByKey.set(object.Key, { size: object.Size, lastModified: object.LastModified });
         }
         continuationToken = response.IsTruncated ? response.NextContinuationToken : undefined;
       } while (continuationToken);
     }
 
     return OFFLINE_MAP_CATALOG.map((entry) => {
-      const sizeBytes = sizeByKey.has(entry.key) ? sizeByKey.get(entry.key) : null;
+      const meta = metaByKey.get(entry.key) || null;
+      const sizeBytes = meta ? meta.size : null;
+      // Normalise the AWS SDK's `Date` to an ISO-8601 string (or null when the
+      // object isn't in S3 yet). The client renders it through FormattedDate,
+      // which accepts an ISO string; a not-yet-uploaded object carries null and
+      // is rendered as unavailable, exactly as `sizeBytes`/`available` are.
+      const lastModified = meta && meta.lastModified
+        ? new Date(meta.lastModified).toISOString()
+        : null;
       return {
         id: entry.id,
         group: entry.group,
@@ -170,6 +182,7 @@ class OfflineMapService {
         label: entry.label,
         apps: [...entry.apps],
         sizeBytes,
+        lastModified,
         available: sizeBytes !== null
       };
     });
