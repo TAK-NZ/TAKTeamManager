@@ -364,6 +364,129 @@ describe('App startup honours force_sso_login from the public config', () => {
   })
 })
 
+// Loop-guard: an unauthenticated mount that lands carrying an `?error=` in
+// the URL (the OAuth2 callback redirects to `${FRONTEND_URL}?error=...` on any
+// token-exchange/userinfo failure -- server/routes/auth.js) must NOT auto-fire
+// `authAPI.login()`. Re-firing bounces back to Authentik, which returns the
+// same error, which lands here again -- an infinite redirect loop, and every
+// hop is a request against the per-IP `/api/auth/*` limiter (20/15min), so the
+// loop burns the whole budget and every subsequent request from that IP --
+// including a fresh incognito window -- gets a 429 for the rest of the window.
+// The guard outranks EVERY auto-login trigger (auto_login, Authentik referrer,
+// force_sso_login) and renders the Login page instead so the user controls the
+// retry timing.
+describe('App startup does not auto-login on an ?error= return (429 loop-guard)', () => {
+  let container
+  let root
+  let matchMediaStubbed = false
+  let originalSearch
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    vi.clearAllMocks()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    if (typeof window.matchMedia !== 'function') {
+      window.matchMedia = () => ({
+        matches: false,
+        addEventListener() {},
+        removeEventListener() {},
+        addListener() {},
+        removeListener() {}
+      })
+      matchMediaStubbed = true
+    }
+    authAPI.getProfile.mockRejectedValue(new Error('no session'))
+    requestsAPI.getPending.mockResolvedValue({ data: { requests: [] } })
+    versionAPI.get.mockResolvedValue({ data: { version: '2026.9.0' } })
+    // The guard reads `window.location.search` directly (not React Router's
+    // location), so drive it via jsdom's URL. Saved and restored per test so
+    // one case's `?error=` does not leak into the next.
+    originalSearch = window.location.search
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    if (matchMediaStubbed) {
+      delete window.matchMedia
+      matchMediaStubbed = false
+    }
+    localStorage.removeItem('theme')
+    // Reset the URL search back to whatever it was, and clear any referrer a
+    // test installed.
+    window.history.replaceState({}, '', `${window.location.pathname}${originalSearch}`)
+    Object.defineProperty(document, 'referrer', { value: '', configurable: true })
+    vi.restoreAllMocks()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  const mountAppWithSearch = async (search) => {
+    window.history.replaceState({}, '', `/${search}`)
+    root = createRoot(container)
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={['/']}>
+          <App />
+        </MemoryRouter>
+      )
+    })
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+  }
+
+  it('does NOT auto-login when ?error= is present even with auto_login=true', async () => {
+    configAPI.getPublic.mockResolvedValue({ data: {} })
+
+    await mountAppWithSearch('?error=auth_failed&auto_login=true')
+
+    expect(authAPI.login).not.toHaveBeenCalled()
+    // Past the spinner, on the Login page.
+    expect(container.querySelector('.animate-spin')).toBeNull()
+    expect(container.textContent).toContain('Sign in')
+  })
+
+  it('does NOT auto-login when ?error= is present even with an Authentik-origin referrer', async () => {
+    Object.defineProperty(document, 'referrer', {
+      value: 'https://auth.example.test/some/path',
+      configurable: true
+    })
+    configAPI.getPublic.mockResolvedValue({ data: { authentik_origin: 'https://auth.example.test' } })
+
+    await mountAppWithSearch('?error=auth_failed')
+
+    expect(authAPI.login).not.toHaveBeenCalled()
+    expect(container.querySelector('.animate-spin')).toBeNull()
+    expect(container.textContent).toContain('Sign in')
+  })
+
+  it('does NOT auto-login when ?error= is present even with force_sso_login: true', async () => {
+    configAPI.getPublic.mockResolvedValue({ data: { force_sso_login: true } })
+
+    await mountAppWithSearch('?error=auth_failed')
+
+    expect(authAPI.login).not.toHaveBeenCalled()
+    expect(container.querySelector('.animate-spin')).toBeNull()
+    expect(container.textContent).toContain('Sign in')
+  })
+
+  it('still auto-logins on force_sso_login when there is no ?error= (guard is scoped to the error case)', async () => {
+    configAPI.getPublic.mockResolvedValue({ data: { force_sso_login: true } })
+
+    await mountAppWithSearch('')
+
+    expect(authAPI.login).toHaveBeenCalledTimes(1)
+  })
+})
+
 // cert-expiry-notifications Requirement 7.1: /requests stays reachable via a
 // redirect to /tasks, rather than becoming a broken link, for any existing
 // bookmark. Mounted the same way as the "renders a signed-in session"

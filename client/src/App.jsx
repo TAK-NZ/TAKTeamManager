@@ -119,6 +119,26 @@ function App() {
         const referrer = document.referrer
         const autoLogin = urlParams.get('auto_login')
 
+        // Loop-guard: if we've landed back here carrying an `?error=` (the
+        // OAuth2 callback redirects to `${FRONTEND_URL}?error=...` on any
+        // token-exchange/userinfo failure -- see server/routes/auth.js), we
+        // must NOT auto-fire another `authAPI.login()`. Doing so bounces
+        // straight back to Authentik, which returns the same error, which
+        // lands here again -- an infinite redirect loop. Every hop is a
+        // request against the per-IP `/api/auth/*` limiter (20 / 15 min,
+        // server/middleware/rateLimiters.js), so the loop silently burns the
+        // whole budget in seconds and every subsequent request from that IP
+        // -- including a fresh browser/incognito window, since the limiter is
+        // keyed on IP, not cookies -- gets a 429 for the rest of the window.
+        // Instead, stop and render the Login page, which can surface the
+        // error and offer a manual "Sign in" the user controls the timing of.
+        // This applies regardless of auto_login / referrer / force_sso_login:
+        // an error return outranks every auto-login trigger.
+        if (urlParams.get('error')) {
+          setLoading(false)
+          return
+        }
+
         if (autoLogin === 'true') {
           authAPI.login()
           return
