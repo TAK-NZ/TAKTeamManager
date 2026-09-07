@@ -41,7 +41,14 @@ vi.mock('../services/api', () => ({
   // (a member's own certificate renewals feed the nav badge / mobile bell),
   // so a resolvable default is required even for the plain user below, or the
   // effect's promise rejects unhandled. No devices -> zero renewals.
-  deviceManagementAPI: { getMyDevices: vi.fn().mockResolvedValue({ data: { devices: [] } }) },
+  // probeEnabled is the DEVICE_MGMT_ENABLED reachability probe Layout now runs
+  // to gate the Enrollment/Devices nav items; a resolvable default is required
+  // or Layout's mount effect rejects unhandled. Feature-off is fine -- this
+  // file asserts the ungated Downloads nav item, not Enrollment/Devices.
+  deviceManagementAPI: {
+    getMyDevices: vi.fn().mockResolvedValue({ data: { devices: [] } }),
+    probeEnabled: vi.fn().mockResolvedValue({ enabled: false })
+  },
   // Layout.jsx's own version-display mount effect calls this too.
   versionAPI: { get: vi.fn().mockResolvedValue({ data: { version: '2026.9.0' } }) },
   // Downloads.jsx's mount effect calls this directly. Defaulted to

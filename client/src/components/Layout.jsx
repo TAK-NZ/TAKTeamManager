@@ -20,9 +20,20 @@ import {
 } from '@heroicons/react/24/outline'
 import { authAPI, requestsAPI, adminAPI, versionAPI, deviceManagementAPI } from '../services/api'
 import { filterDevicesNeedingRenewal } from '../utils/expiryWarning'
+import { useDeviceManagementEnabled } from './UserDevicesModal'
 import { useTheme } from '../contexts/ThemeContext'
 
-const getNavigation = (user) => {
+// `deviceMgmtEnabled` is the runtime DEVICE_MGMT_ENABLED probe result (see
+// useDeviceManagementEnabled in UserDevicesModal.jsx): true only once the
+// self-view probe has confirmed the feature is live, false while the feature
+// is off OR before the probe resolves. Nav items whose page can only work
+// when device management is on are hidden until it flips true, so a
+// deployment with the feature off shows no dead menu items and no broken
+// pages. It starts false, so those items are briefly absent on first paint
+// and appear once the probe returns 200 -- acceptable for an optional
+// affordance, and the same fail-closed stance the device-action buttons on
+// the Users/Team pages already take.
+const getNavigation = (user, deviceMgmtEnabled) => {
   const baseNavigation = [
     { name: 'Dashboard', href: '/dashboard', icon: HomeIcon },
     // Downloads comes before Enrollment: the workflow only runs in one
@@ -32,15 +43,24 @@ const getNavigation = (user) => {
     // yet been placed in a Team is exactly the user installing a client for
     // the first time (takserver-enrollment Criterion 12.9).
     { name: 'Downloads', href: '/downloads', icon: ArrowDownTrayIcon },
-    // Enrollment carries no permission identifier and no role gate either,
-    // for the same reason as Downloads above: every signed-in user must see
-    // it regardless of team membership, because a user with no team
-    // membership at all is exactly the user who needs to self-enroll a
-    // device (takserver-enrollment Criterion 15.2). The authorization
-    // decision happens on the API call, not on nav visibility.
-    { name: 'Enrollment', href: '/enrollment', icon: QrCodeIcon },
     { name: 'Orgs & Teams', href: '/teams', icon: UserGroupIcon },
   ]
+
+  // Enrollment carries no permission identifier and no role gate -- every
+  // signed-in user must see it regardless of team membership, because a user
+  // with no team membership at all is exactly the user who needs to
+  // self-enroll a device (takserver-enrollment Criterion 15.2); the
+  // authorization decision happens on the API call, not on nav visibility.
+  // BUT it is gated on the DEVICE_MGMT_ENABLED feature probe: with device
+  // management off, /enrollment can only ever show the
+  // "TAK_SERVER_ENROLLMENT_URL must be configured" error, so a dead menu item
+  // and a broken page are worse than hiding it. Inserted right after Downloads
+  // (its natural workflow position: install the client, then enroll it) via
+  // splice rather than a push so the ordering is preserved when it IS shown.
+  if (deviceMgmtEnabled) {
+    const downloadsIndex = baseNavigation.findIndex((item) => item.href === '/downloads')
+    baseNavigation.splice(downloadsIndex + 1, 0, { name: 'Enrollment', href: '/enrollment', icon: QrCodeIcon })
+  }
 
   // cert-expiry-notifications Requirement 7.2: renamed from "Requests" to
   // "Tasks" (the page now also lists certificate renewals due for the
@@ -60,15 +80,19 @@ const getNavigation = (user) => {
   // nav. isTeamAdmin is added here to match.
   if (user?.isAdmin || user?.is_global_manager || user?.isTeamAdmin) {
     baseNavigation.push({ name: 'Users', href: '/users', icon: UsersIcon })
-    // Placed directly beneath Users, same role gate: the org-wide
-    // Team_Owned_Device listing (GET /api/devices, 'device:read:org') is
-    // authorized by the SAME "Global_Manager, or a Team_Admin of ANY
-    // team" rule 'user:read:team_admin' already uses for Users -- there
-    // is no separate feature flag gating this nav entry (unlike the
-    // View-Devices action on a /users row, which is gated behind
-    // DEVICE_MGMT_ENABLED via useDeviceManagementEnabled -- a different
-    // feature: TAK Server certificates, not Team_Owned_Device accounts).
-    baseNavigation.push({ name: 'Devices', href: '/devices', icon: DeviceTabletIcon })
+    // The org-wide Team_Owned_Device listing (/devices, GET /api/devices,
+    // 'device:read:org') keeps its "Global_Manager, or a Team_Admin of ANY
+    // team" ROLE gate (shared with Users), AND is now additionally gated on
+    // the DEVICE_MGMT_ENABLED feature probe. Team_Owned_Devices are TAK Server
+    // client certificates: the whole page (listing, add-device, per-row QR
+    // mint) depends on TAK Server being configured (TAK_SERVER_ENROLLMENT_URL
+    // et al.), which is exactly what the feature flag provisions. With the
+    // feature off the page can only error, so hide the nav entry -- matching
+    // Enrollment above and the device-action buttons on the Users/Team pages,
+    // all of which already gate on this same probe.
+    if (deviceMgmtEnabled) {
+      baseNavigation.push({ name: 'Devices', href: '/devices', icon: DeviceTabletIcon })
+    }
   }
 
   if (user?.is_global_manager) {
@@ -120,7 +144,11 @@ export default function Layout({ children, user }) {
   // around the menu below); this state has no effect at `lg:` and up.
   const [userMenuOpen, setUserMenuOpen] = useState(false)
   const location = useLocation()
-  const navigation = getNavigation(user)
+  // Runtime DEVICE_MGMT_ENABLED probe (self-view route, 200 vs 404). Gates
+  // the Enrollment and Devices nav entries so a device-management-off
+  // deployment shows neither a dead menu item nor a broken page.
+  const deviceMgmtEnabled = useDeviceManagementEnabled()
+  const navigation = getNavigation(user, deviceMgmtEnabled)
   const { theme, toggleTheme } = useTheme()
 
   // The count shown on the "Tasks" nav badge and the mobile notification

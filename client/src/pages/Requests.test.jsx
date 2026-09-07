@@ -51,7 +51,12 @@ vi.mock('../services/api', () => ({
   },
   // cert-expiry-notifications Requirement 7.3: the two new renewal-section
   // data sources this page now also fetches.
-  deviceManagementAPI: { getMyDevices: vi.fn() },
+  // getMyDevices feeds the renewal section + Layout's badge; probeEnabled is
+  // the DEVICE_MGMT_ENABLED reachability probe Layout now runs to gate the
+  // Enrollment/Devices nav items (via useDeviceManagementEnabled). A
+  // resolvable default is required or Layout's mount effect rejects unhandled;
+  // feature-off is irrelevant to this page's assertions.
+  deviceManagementAPI: { getMyDevices: vi.fn(), probeEnabled: vi.fn().mockResolvedValue({ enabled: false }) },
   devicesAPI: {
     getAll: vi.fn(),
     generateQrCode: vi.fn(),
@@ -254,6 +259,9 @@ describe('Requests page team_change card (mounted)', () => {
     // file (written before these sections existed) sees them render
     // nothing, matching its original assumptions.
     deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    // Layout's nav gate calls the DEVICE_MGMT_ENABLED probe on mount; re-set
+    // its default (clearAllMocks wiped it). Feature-off is fine here.
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false })
     devicesAPI.getAll.mockResolvedValue({ data: { devices: [], pagination: { page: 1, pageSize: 200, total: 0 } } })
     // vi.clearAllMocks() above also clears the module-level default this
     // mock was given at definition time -- re-set it here, since Layout.jsx
@@ -785,6 +793,9 @@ describe('Requests page renewal sections (cert-expiry-notifications 7.3, 7.4, 7.
     }
     requestsAPI.getPending.mockResolvedValue({ data: { requests: [] } })
     deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    // Layout's nav gate calls the DEVICE_MGMT_ENABLED probe on mount; re-set
+    // its default (clearAllMocks wiped it). Feature-off is fine here.
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false })
     devicesAPI.getAll.mockResolvedValue({ data: { devices: [], pagination: { page: 1, pageSize: 200, total: 0 } } })
     // vi.clearAllMocks() above also clears the module-level default this
     // mock was given at definition time -- re-set it here, since the

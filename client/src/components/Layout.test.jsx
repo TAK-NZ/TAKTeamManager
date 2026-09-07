@@ -6,6 +6,9 @@ import { MemoryRouter } from 'react-router-dom'
 import Layout from './Layout.jsx'
 import { ThemeProvider } from '../contexts/ThemeContext.jsx'
 import { requestsAPI, adminAPI, versionAPI, deviceManagementAPI } from '../services/api'
+// Extend each suite's clearAllMocks re-setup: probeEnabled must default to
+// enabled so pre-existing nav-visibility tests keep seeing Devices. The
+// device-mgmt-gating describe block below overrides it per test.
 import { setExpiryWarningDays, DEFAULT_EXPIRY_WARNING_DAYS } from '../utils/expiryWarning'
 
 // Bugfix (pending-requests-badge): the nav "Tasks" badge (renamed from
@@ -34,7 +37,17 @@ vi.mock('../services/api', () => ({
   // resolvable default is required for every mount, even the plain-user ones
   // that don't otherwise care about devices. Default: no devices -> zero
   // renewals, so it never contributes a badge unless a test says so.
-  deviceManagementAPI: { getMyDevices: vi.fn().mockResolvedValue({ data: { devices: [] } }) },
+  // getMyDevices feeds the outstanding-task badge; probeEnabled is the
+  // DEVICE_MGMT_ENABLED reachability probe that useDeviceManagementEnabled
+  // (UserDevicesModal.jsx) runs -- Layout now consults it to gate the
+  // Enrollment and Devices nav items. Default it to ENABLED so the existing
+  // nav-visibility tests (which predate this gate and assume the feature is
+  // on) keep asserting the same thing; the feature-off describe block below
+  // overrides it to { enabled: false }.
+  deviceManagementAPI: {
+    getMyDevices: vi.fn().mockResolvedValue({ data: { devices: [] } }),
+    probeEnabled: vi.fn().mockResolvedValue({ enabled: true })
+  },
   // The version-display mount effect (Layout.jsx) always calls this; a
   // bare `vi.fn()` with no resolved value returns `undefined`, and
   // `undefined.then` throws, so every test in this file needs a
@@ -138,6 +151,7 @@ describe('Layout "Tasks" nav badge (bugfix: pending-requests-badge; renamed by c
     // now-always-called getMyDevices default (no devices -> zero renewals) and
     // a known expiry-warning threshold (module state shared across files).
     deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: true })
     setExpiryWarningDays(DEFAULT_EXPIRY_WARNING_DAYS)
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -279,6 +293,7 @@ describe('Layout "Tasks" nav item visibility and badge-fetch gating (cert-expiry
     // now-always-called getMyDevices default (no devices -> zero renewals) and
     // a known expiry-warning threshold (module state shared across files).
     deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: true })
     setExpiryWarningDays(DEFAULT_EXPIRY_WARNING_DAYS)
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -386,6 +401,10 @@ describe('Layout "Users"/"Devices" nav item visibility (bugfix: Team_Admin was m
     vi.clearAllMocks()
     requestsAPI.getPending.mockResolvedValue({ data: { requests: [] } })
     adminAPI.getOrgInterest.mockResolvedValue({ data: { requests: [] } })
+    deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    // Default: device management ON, so the pre-existing Devices-visible
+    // assertions in this block hold. clearAllMocks wiped the factory default.
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: true })
     container = document.createElement('div')
     document.body.appendChild(container)
     if (typeof window.matchMedia !== 'function') {
@@ -461,6 +480,128 @@ describe('Layout "Users"/"Devices" nav item visibility (bugfix: Team_Admin was m
   })
 })
 
+/**
+ * DEVICE_MGMT_ENABLED nav gating: the Enrollment nav item (every signed-in
+ * user) and the Devices nav item (admins) are hidden when the device-mgmt
+ * reachability probe (deviceManagementAPI.probeEnabled, via
+ * useDeviceManagementEnabled) reports the feature OFF -- so a deployment
+ * without TAK Server device management shows no dead menu items whose pages
+ * can only error. When ON, both appear as before.
+ */
+describe('Layout Enrollment/Devices nav gating on the DEVICE_MGMT_ENABLED probe', () => {
+  let container
+  let root
+  let matchMediaStubbed = false
+
+  const PLAIN_USER = { userId: 99, isAdmin: false, isTeamAdmin: false, is_global_manager: false }
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    vi.clearAllMocks()
+    requestsAPI.getPending.mockResolvedValue({ data: { requests: [] } })
+    adminAPI.getOrgInterest.mockResolvedValue({ data: { requests: [] } })
+    deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    if (typeof window.matchMedia !== 'function') {
+      window.matchMedia = () => ({
+        matches: false,
+        addEventListener() {},
+        removeEventListener() {},
+        addListener() {},
+        removeListener() {}
+      })
+      matchMediaStubbed = true
+    }
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => { root.unmount() })
+      root = null
+    }
+    container.remove()
+    if (matchMediaStubbed) {
+      delete window.matchMedia
+      matchMediaStubbed = false
+    }
+    localStorage.removeItem('theme')
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  const mount = async (user) => {
+    root = createRoot(container)
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={['/dashboard']}>
+          <ThemeProvider>
+            <Layout user={user}>
+              <div />
+            </Layout>
+          </ThemeProvider>
+        </MemoryRouter>
+      )
+    })
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+  }
+
+  const navLink = (label) =>
+    Array.from(container.querySelectorAll('a')).find((a) => a.textContent.trim().endsWith(label))
+
+  it('HIDES Enrollment (and Devices) when the probe reports the feature OFF', async () => {
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false })
+
+    await mount(GLOBAL_MANAGER)
+
+    expect(navLink('Enrollment')).toBeUndefined()
+    expect(navLink('Devices')).toBeUndefined()
+    // Downloads (ungated) is still there, proving nav rendered fine.
+    expect(navLink('Downloads')?.getAttribute('href')).toBe('/downloads')
+  })
+
+  it('HIDES Enrollment for a plain user when the feature is OFF', async () => {
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false })
+
+    await mount(PLAIN_USER)
+
+    expect(navLink('Enrollment')).toBeUndefined()
+    // Downloads still present for a plain user.
+    expect(navLink('Downloads')?.getAttribute('href')).toBe('/downloads')
+  })
+
+  it('SHOWS Enrollment (and, for an admin, Devices) when the probe reports the feature ON', async () => {
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: true })
+
+    await mount(GLOBAL_MANAGER)
+
+    expect(navLink('Enrollment')?.getAttribute('href')).toBe('/enrollment')
+    expect(navLink('Devices')?.getAttribute('href')).toBe('/devices')
+  })
+
+  it('SHOWS Enrollment for a plain user when the feature is ON', async () => {
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: true })
+
+    await mount(PLAIN_USER)
+
+    expect(navLink('Enrollment')?.getAttribute('href')).toBe('/enrollment')
+    // Still no Devices for a non-admin (role gate unchanged).
+    expect(navLink('Devices')).toBeUndefined()
+  })
+
+  it('fails closed: HIDES Enrollment/Devices when the probe rejects', async () => {
+    deviceManagementAPI.probeEnabled.mockRejectedValue(new Error('network'))
+
+    await mount(GLOBAL_MANAGER)
+
+    expect(navLink('Enrollment')).toBeUndefined()
+    expect(navLink('Devices')).toBeUndefined()
+  })
+})
+
 // Version display at the bottom of the left-hand nav, sourced from
 // GET /api (server/routes/version.js).
 describe('Layout version display', () => {
@@ -477,6 +618,7 @@ describe('Layout version display', () => {
     // now-always-called getMyDevices default (no devices -> zero renewals) and
     // a known expiry-warning threshold (module state shared across files).
     deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: true })
     setExpiryWarningDays(DEFAULT_EXPIRY_WARNING_DAYS)
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -574,6 +716,7 @@ describe('Layout mobile notification bell (links to /tasks, count for all users)
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     vi.clearAllMocks()
     deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: true })
     setExpiryWarningDays(DEFAULT_EXPIRY_WARNING_DAYS)
     container = document.createElement('div')
     document.body.appendChild(container)
