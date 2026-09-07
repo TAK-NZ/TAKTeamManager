@@ -334,7 +334,10 @@ class GlobalChannelService {
         { groupsQueued, bchOps: bchOps.length, regionOps: regionOps.length },
         'Enqueued group-authoritative global-channel reconciles (replacing per-user fan-out)'
       );
-      return { groupsQueued };
+      // `mode` lets the route/UI report the group-axis result correctly
+      // ("N groups") rather than a stale `usersProcessed` (which is absent
+      // here and previously rendered as "undefined users").
+      return { mode: 'reconcile', groupsQueued };
     }
 
     // Get all active users
@@ -360,7 +363,7 @@ class GlobalChannelService {
       userIds.map((userId) => ({ target_user_id: userId, bulk_operation_id: bulkOpId }))
     );
 
-    return { usersProcessed: userIds.length, bulkOperationId: bulkOpId };
+    return { mode: 'per_user', usersProcessed: userIds.length, bulkOperationId: bulkOpId };
   }
 
   async getBchChannels() {

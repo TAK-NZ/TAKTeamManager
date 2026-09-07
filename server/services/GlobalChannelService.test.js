@@ -17,6 +17,14 @@ jest.mock('./CredentialEncryptionService', () => ({
 jest.mock('./authentik', () => ({
   getUserByUsername: jest.fn()
 }));
+// assignAllUsersToGlobalChannels forks on this flag: OFF -> legacy per-user
+// batch (the default here, matching an unset env), ON -> group-axis reconcile.
+jest.mock('../config/bulkGroupReconcile', () => ({
+  isBulkGroupReconcileEnabled: jest.fn(() => false)
+}));
+jest.mock('./OwnedGroupReconcileEnqueuer', () => ({
+  enqueueAllGlobalChannelReconciles: jest.fn()
+}));
 
 const mockLoggerInstance = { info: jest.fn(), error: jest.fn() };
 jest.mock('../config/logger', () => ({
@@ -27,6 +35,8 @@ const pool = require('../config/database');
 const EventPublisher = require('./EventPublisher');
 const CredentialEncryptionService = require('./CredentialEncryptionService');
 const authentikService = require('./authentik');
+const { isBulkGroupReconcileEnabled } = require('../config/bulkGroupReconcile');
+const { enqueueAllGlobalChannelReconciles } = require('./OwnedGroupReconcileEnqueuer');
 const GlobalChannelService = require('./GlobalChannelService');
 
 describe('GlobalChannelService.deleteGlobalChannel', () => {
@@ -1039,7 +1049,9 @@ describe('GlobalChannelService.assignAllUsersToGlobalChannels', () => {
       ]
     );
     expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
-    expect(result).toEqual({ usersProcessed: 3, bulkOperationId: 'bulk-op-99' });
+    // `mode: 'per_user'` lets the route/UI report "N users" for this legacy
+    // path (vs "N channel groups" for the group-axis reconcile path).
+    expect(result).toEqual({ mode: 'per_user', usersProcessed: 3, bulkOperationId: 'bulk-op-99' });
   });
 
   it('does nothing (no bulk op, no batch enqueue) when there are no active users', async () => {
@@ -1050,5 +1062,23 @@ describe('GlobalChannelService.assignAllUsersToGlobalChannels', () => {
     expect(EventPublisher.publishBulkOperation).not.toHaveBeenCalled();
     expect(EventPublisher.publishOperationsBatch).not.toHaveBeenCalled();
     expect(result).toEqual({ usersProcessed: 0 });
+  });
+
+  it('enqueues group-axis reconciles (O(groups)) and returns { mode: "reconcile", groupsQueued } when BULK_GROUP_RECONCILE_ENABLED is on', async () => {
+    isBulkGroupReconcileEnabled.mockReturnValue(true);
+    // 2 BCH channels -> 2 read + 2 write ops; 3 region channels -> 3 ops = 7.
+    enqueueAllGlobalChannelReconciles.mockResolvedValue({
+      bchOps: [1, 2, 3, 4],
+      regionOps: [5, 6, 7]
+    });
+
+    const result = await service.assignAllUsersToGlobalChannels();
+
+    expect(enqueueAllGlobalChannelReconciles).toHaveBeenCalledTimes(1);
+    // The group-axis path must NOT touch the legacy per-user batch machinery.
+    expect(EventPublisher.publishBulkOperation).not.toHaveBeenCalled();
+    expect(EventPublisher.publishOperationsBatch).not.toHaveBeenCalled();
+    expect(pool.query).not.toHaveBeenCalledWith('SELECT id FROM users WHERE is_active = true');
+    expect(result).toEqual({ mode: 'reconcile', groupsQueued: 7 });
   });
 });

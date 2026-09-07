@@ -377,10 +377,16 @@ export default function GlobalChannels({ user }) {
     setAssigningUsers(true);
     try {
       const response = await globalChannelsAPI.assignAllUsers();
-      toast.success(`Assignment queued for ${response.data.usersProcessed} users`);
+      // Report the figure that matches the sync mode: group-axis reconcile
+      // returns { groupsQueued }, the legacy per-user path { usersProcessed }.
+      const { groupsQueued, usersProcessed } = response.data ?? {};
+      const summary = typeof groupsQueued === 'number'
+        ? `${groupsQueued} channel group${groupsQueued === 1 ? '' : 's'}`
+        : `${usersProcessed} user${usersProcessed === 1 ? '' : 's'}`;
+      toast.success(`Reconcile queued for ${summary}`);
       setShowAssignDialog(false);
     } catch (error) {
-      toast.error('Failed to assign users to global channels');
+      toast.error('Failed to reconcile global channel membership');
     } finally {
       setAssigningUsers(false);
     }
@@ -851,7 +857,7 @@ export default function GlobalChannels({ user }) {
               onClick={() => setShowAssignDialog(true)}
               className="btn-primary"
             >
-              Assign All Users to Global Channels
+              Reconcile Global Channel Membership
             </button>
             {/* Bugfix: hidden once the standard set is fully seeded --
                 `regionSeedComplete === true` is the ONLY state that hides
@@ -868,7 +874,7 @@ export default function GlobalChannels({ user }) {
           </div>
           <div className="space-y-2 text-sm text-gray-600 dark:text-gray-400">
             <p>• <strong>Sync Existing Channels:</strong> Import BCH, Response and Support channels that already exist in Authentik</p>
-            <p>• <strong>Assign All Users:</strong> Ensure all existing users are added to all active global channels</p>
+            <p>• <strong>Reconcile Global Channel Membership:</strong> Force an immediate reconcile of every active global channel&apos;s membership against the current users. Runs automatically in the background; use this to apply changes now rather than waiting for the next sweep.</p>
             {regionSeedComplete !== true && (
               <p>• <strong>Seed Standard Region Channels:</strong> Create the standard set of Response/Support channels for every NZ region, Chatham Islands, and All of New Zealand (support only) -- safe to run again, only fills in any missing channels</p>
             )}
@@ -1002,7 +1008,7 @@ export default function GlobalChannels({ user }) {
         </div>
       )}
 
-      {/* Assign All Users Confirmation Dialog */}
+      {/* Reconcile Global Channel Membership Confirmation Dialog */}
       {showAssignDialog && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div
@@ -1013,10 +1019,10 @@ export default function GlobalChannels({ user }) {
           >
             <div className="p-6">
               <h3 id="assign-all-users-title" className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
-                Assign All Users to Global Channels
+                Reconcile Global Channel Membership
               </h3>
               <p className="text-gray-600 dark:text-gray-400 mb-6">
-                This will assign all users to global channels. Continue?
+                This queues an immediate membership reconcile for every active global channel. It runs in the background and is safe to run again. Continue?
               </p>
               <div className="flex justify-end space-x-3">
                 <button
@@ -1031,7 +1037,7 @@ export default function GlobalChannels({ user }) {
                   disabled={assigningUsers}
                   className="btn-primary"
                 >
-                  {assigningUsers ? 'Assigning...' : 'Assign Users'}
+                  {assigningUsers ? 'Queuing...' : 'Reconcile Now'}
                 </button>
               </div>
             </div>

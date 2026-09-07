@@ -332,20 +332,23 @@ router.delete('/bch/:channelId/service-account', authenticateToken, authorize, a
 router.post('/assign-all-users', authenticateToken, authorize, async (req, res) => {
   try {
     const result = await globalChannelService.assignAllUsersToGlobalChannels();
-    
+
     try {
       await pool.query(
         'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
-        [req.user.userId, 'global_channel.assign_all_users', 'global_channel', null, JSON.stringify({ usersProcessed: result.usersProcessed })]
+        [req.user.userId, 'global_channel.assign_all_users', 'global_channel', null, JSON.stringify(result)]
       );
     } catch (auditErr) {
       getLogger().error({ err: auditErr }, 'Failed to write audit log');
     }
 
+    // `result` carries `mode`: 'reconcile' (group-axis, { groupsQueued }) or
+    // 'per_user' (legacy fan-out, { usersProcessed, bulkOperationId }). The
+    // whole result is forwarded so the client can report the right figure
+    // rather than a stale/undefined `usersProcessed`.
     res.json({
-      message: 'Global channel assignment queued for all users',
-      usersProcessed: result.usersProcessed,
-      bulkOperationId: result.bulkOperationId
+      message: 'Global channel reconcile queued',
+      ...result
     });
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to assign users to global channels');
