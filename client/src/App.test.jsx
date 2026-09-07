@@ -145,6 +145,10 @@ describe('App startup installs the presentation config (Requirements 18.7, 18.11
       matchMediaStubbed = false
     }
     localStorage.removeItem('theme')
+    // The auto-login loop breaker (utils/autoLoginGuard.js) counts attempts
+    // in sessionStorage; clear it so one suite's auto-login mounts do not
+    // accumulate toward the loop threshold in the next.
+    sessionStorage.clear()
     vi.restoreAllMocks()
     globalThis.IS_REACT_ACT_ENVIRONMENT = false
     // Both installs are module state shared across this file's tests.
@@ -303,6 +307,10 @@ describe('App startup honours force_sso_login from the public config', () => {
       matchMediaStubbed = false
     }
     localStorage.removeItem('theme')
+    // The auto-login loop breaker (utils/autoLoginGuard.js) counts attempts
+    // in sessionStorage; clear it so one suite's auto-login mounts do not
+    // accumulate toward the loop threshold in the next.
+    sessionStorage.clear()
     vi.restoreAllMocks()
     globalThis.IS_REACT_ACT_ENVIRONMENT = false
   })
@@ -345,6 +353,48 @@ describe('App startup honours force_sso_login from the public config', () => {
     await mountApp()
 
     expect(authAPI.login).not.toHaveBeenCalled()
+  })
+
+  it('stops auto-firing login once repeated attempts trip the loop breaker (no ?error= needed)', async () => {
+    // The silent loop variant: FORCE_SSO_LOGIN re-fires on every
+    // unauthenticated load and the round-trip never establishes a session,
+    // so there is no ?error= to key off. The sessionStorage-backed loop
+    // breaker (utils/autoLoginGuard.js) must eventually stop auto-firing and
+    // let the manual Login page render instead. Re-mounting the app N times
+    // (each a fresh unauthenticated load, sharing jsdom's sessionStorage)
+    // simulates the loop's repeated auto-login attempts.
+    configAPI.getPublic.mockResolvedValue({ data: { force_sso_login: true } })
+
+    let tripped = false
+    for (let i = 0; i < 5; i++) {
+      root = createRoot(container)
+      await act(async () => {
+        root.render(
+          <MemoryRouter initialEntries={['/']}>
+            <App />
+          </MemoryRouter>
+        )
+      })
+      await act(async () => {
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      // Once the breaker trips, the app renders Login (a "Sign in" button)
+      // instead of firing another redirect.
+      if (container.querySelector('.animate-spin') === null && container.textContent.includes('Sign in')) {
+        tripped = true
+      }
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+
+    // login() fired for the first attempts but not indefinitely: it was
+    // called fewer times than the number of mounts, and the Login page
+    // eventually rendered.
+    expect(tripped).toBe(true)
+    expect(authAPI.login.mock.calls.length).toBeLessThan(5)
   })
 
   it('defers to the more specific Authentik-referrer auto-login check, without calling login() twice', async () => {
@@ -419,6 +469,7 @@ describe('App startup does not auto-login on an ?error= return (429 loop-guard)'
       matchMediaStubbed = false
     }
     localStorage.removeItem('theme')
+    sessionStorage.clear()
     // Reset the URL search back to whatever it was, and clear any referrer a
     // test installed.
     window.history.replaceState({}, '', `${window.location.pathname}${originalSearch}`)
@@ -537,6 +588,10 @@ describe('cert-expiry-notifications: /requests redirects to /tasks (Requirement 
       matchMediaStubbed = false
     }
     localStorage.removeItem('theme')
+    // The auto-login loop breaker (utils/autoLoginGuard.js) counts attempts
+    // in sessionStorage; clear it so one suite's auto-login mounts do not
+    // accumulate toward the loop threshold in the next.
+    sessionStorage.clear()
     vi.restoreAllMocks()
     globalThis.IS_REACT_ACT_ENVIRONMENT = false
   })

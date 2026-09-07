@@ -2,6 +2,7 @@ import { Routes, Route, Navigate } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import { authAPI, configAPI } from './services/api'
 import { isPublicOnlyPath } from './utils/publicPaths'
+import { recordAutoLoginAttemptAndCheckLoop, clearAutoLoginAttempts } from './utils/autoLoginGuard'
 import { setDisplayTimezone, setDisplayLocale } from './utils/dateFormat'
 import { setExpiryWarningDays } from './utils/expiryWarning'
 import { ThemeProvider } from './contexts/ThemeContext'
@@ -105,8 +106,27 @@ function App() {
     // localStorage, so we check for an existing session directly instead of
     // gating on that dead condition. The cookie is sent automatically by the
     // axios instance's `withCredentials: true`.
+    // Fire an auto-login redirect, but only if we are not already caught in
+    // a redirect loop. `recordAutoLoginAttemptAndCheckLoop` counts recent
+    // auto-login attempts in sessionStorage; once too many fire in too short
+    // a window (the signature of a loop where no session cookie ever sticks),
+    // it returns true and we render the manual Login page instead of firing
+    // yet another redirect. This is the loop breaker for the variant that
+    // carries no `?error=` -- e.g. FORCE_SSO_LOGIN re-firing on every
+    // unauthenticated load when the round-trip never establishes a session.
+    const autoLoginOrBreakLoop = () => {
+      if (recordAutoLoginAttemptAndCheckLoop()) {
+        setLoading(false)
+        return
+      }
+      authAPI.login()
+    }
+
     authAPI.getProfile()
       .then((response) => {
+        // A session was established -- reset the loop counter so a later,
+        // unrelated logout->login does not start part-way to the threshold.
+        clearAutoLoginAttempts()
         setUser(response.data.user)
         setLoading(false)
       })
@@ -140,7 +160,7 @@ function App() {
         }
 
         if (autoLogin === 'true') {
-          authAPI.login()
+          autoLoginOrBreakLoop()
           return
         }
 
@@ -152,7 +172,7 @@ function App() {
             const authentikOrigin = response.data?.authentik_origin
             if (referrer && authentikOrigin && referrer.startsWith(authentikOrigin)) {
               // User came from Authentik, automatically start OAuth flow
-              authAPI.login()
+              autoLoginOrBreakLoop()
               return
             }
             // FORCE_SSO_LOGIN (server/config/forceSso.js): skip the manual
@@ -164,7 +184,7 @@ function App() {
             // referrer-based reason first matches its existing precedence
             // over the blanket flag.
             if (response.data?.force_sso_login) {
-              authAPI.login()
+              autoLoginOrBreakLoop()
               return
             }
             setLoading(false)
