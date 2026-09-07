@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { UserGroupIcon, UsersIcon, CogIcon, CheckIcon, ArrowUpTrayIcon, ArrowDownTrayIcon, DocumentTextIcon, EnvelopeIcon, NoSymbolIcon, ArrowsRightLeftIcon, DevicePhoneMobileIcon, SignalIcon } from '@heroicons/react/24/outline'
+import toast from 'react-hot-toast'
 import { configAPI, usersAPI, teamsAPI, syncAPI, bulkImportAPI, communicationsAPI, settingsAPI, adminAPI } from '../services/api'
 import FormattedDate, { DATE_PRECISION, TOOLTIP_SIDES } from '../components/FormattedDate'
 import { getVariableHints } from '../utils/templateVariableHints'
@@ -19,6 +20,9 @@ export default function Admin({ user }) {
   const [stats, setStats] = useState({ totalUsers: 0, totalTeams: 0, totalDevices: 0, totalChannels: 0 })
   const [syncStatus, setSyncStatus] = useState(null)
   const [syncing, setSyncing] = useState(false)
+  // Tracks whether the component is still mounted, so the User Sync polling
+  // loop below never calls setState after unmount (it can run for up to ~2min).
+  const isMountedRef = useRef(true)
   // Background-process health for the "Background Sync" card (queue backlog
   // depth + oldest-pending age, the user_sync row, worker heartbeat liveness).
   // Auto-refreshed alongside the stat cards; never cleared on a failed refresh.
@@ -218,6 +222,12 @@ export default function Admin({ user }) {
     }
     return startVisibilityPausedRefresh(refresh)
   }, [fetchStats, fetchSyncStatus, fetchSyncHealth])
+
+  // Keep the mounted flag honest for the async User Sync polling loop.
+  useEffect(() => {
+    isMountedRef.current = true
+    return () => { isMountedRef.current = false }
+  }, [])
 
   const [activeTab, setActiveTab] = useState('site')
 
@@ -472,17 +482,75 @@ export default function Admin({ user }) {
 
   const triggerManualSync = async () => {
     setSyncing(true)
+    let triggerResponse
     try {
-      await syncAPI.triggerUserSync()
-      // Refresh sync status after a short delay
-      setTimeout(async () => {
-        const response = await syncAPI.getStatus()
-        setSyncStatus(response.data)
-        setSyncing(false)
-      }, 2000)
+      triggerResponse = await syncAPI.triggerUserSync()
     } catch (error) {
       console.error('Failed to trigger sync:', error)
+      toast.error('Failed to start user sync')
       setSyncing(false)
+      return
+    }
+
+    // The server reports whether a run actually started or one was already in
+    // flight (the service no-ops a concurrent trigger). Surface that honestly
+    // rather than showing a fresh-sync result for a click that did nothing.
+    const alreadyRunning = triggerResponse?.data?.alreadyRunning === true
+    if (alreadyRunning) {
+      toast('A user sync is already running')
+    } else {
+      toast.success('User sync started')
+    }
+
+    // Poll the sync_status row until the run leaves the 'running' state (or a
+    // safety timeout), so the card + toast reflect the ACTUAL outcome instead
+    // of a fixed 2-second guess. `getStatus` returns the user_sync row
+    // ({ status, last_sync, records_synced, error_message }).
+    const POLL_INTERVAL_MS = 2000
+    const MAX_ATTEMPTS = 60 // ~2 minutes ceiling; a longer run just stops being polled
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
+      await sleep(POLL_INTERVAL_MS)
+      if (!isMountedRef.current) return
+      let statusResponse
+      try {
+        statusResponse = await syncAPI.getStatus()
+      } catch {
+        // A transient status-read failure shouldn't abort the whole poll;
+        // try again on the next tick.
+        continue
+      }
+      if (!isMountedRef.current) return
+      const status = statusResponse.data
+      setSyncStatus(status)
+
+      if (status?.status && status.status !== 'running') {
+        setSyncing(false)
+        if (status.status === 'success') {
+          // error_message is reused to carry a non-fatal skip note (e.g. the
+          // reconciliation sweep was skipped for an incomplete fetch), so
+          // surface it as a warning-ish toast rather than a plain success.
+          if (status.error_message) {
+            toast(`User sync finished: ${status.error_message}`)
+          } else {
+            const n = status.records_synced
+            toast.success(
+              typeof n === 'number' ? `User sync complete (${n} users)` : 'User sync complete'
+            )
+          }
+        } else if (status.status === 'error') {
+          toast.error(`User sync failed: ${status.error_message || 'unknown error'}`)
+        }
+        return
+      }
+    }
+
+    // Timed out waiting: stop the spinner but don't claim success/failure —
+    // the run may still be going; the auto-refresh will catch up.
+    if (isMountedRef.current) {
+      setSyncing(false)
+      toast('User sync is taking a while; check back shortly')
     }
   }
 
@@ -739,6 +807,13 @@ export default function Admin({ user }) {
               </div>
               <div className="ml-4">
                 <p className="text-sm font-medium text-gray-500 dark:text-gray-400">User Sync</p>
+                {/* Clarify scope: this is the user/identity pull+push from
+                    Authentik (new/edited accounts, attributes, orphan sweep),
+                    NOT the channel/group-membership reconcile (that runs on its
+                    own background sweep and via the Global Channels page). */}
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  Pulls users from Authentik and pushes profile changes back. Not channel membership.
+                </p>
                 <div className="flex items-center space-x-2">
                   <p className={`text-sm font-bold ${
                     syncStatus?.status === 'success' ? 'text-green-600' :

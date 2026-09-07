@@ -13,9 +13,19 @@ router.post('/users', authenticateToken, authorize, async (req, res) => {
       return res.status(403).json({ error: 'Admin access required' });
     }
 
-    // Trigger sync
+    // A sync (manual or the periodic timer) may already be in flight. The
+    // service's own `isRunning` guard would silently no-op a second call, so
+    // report that back to the caller rather than pretending a new run started
+    // — the client uses this to tell the operator "already running" instead of
+    // showing a misleading fresh-sync result.
+    if (authentikSync.isRunning) {
+      return res.json({ started: false, alreadyRunning: true, message: 'A user sync is already running' });
+    }
+
+    // Trigger sync (fire-and-forget: the run reports its outcome via the
+    // sync_status row, which the client polls through GET /sync/status).
     authentikSync.syncUsers().catch((err) => getLogger().error({ err }, 'Manual sync error'));
-    
+
     try {
       await pool.query(
         'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
@@ -25,7 +35,7 @@ router.post('/users', authenticateToken, authorize, async (req, res) => {
       getLogger().error({ err: auditErr }, 'Failed to write audit log');
     }
 
-    res.json({ message: 'User sync started' });
+    res.json({ started: true, alreadyRunning: false, message: 'User sync started' });
   } catch (error) {
     getLogger().error({ err: error }, 'Manual sync error');
     res.status(500).json({ error: 'Failed to start sync' });
