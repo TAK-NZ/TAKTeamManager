@@ -5,6 +5,7 @@ const authorize = require('../middleware/authorize');
 const { getLogger } = require('../middleware/requestContext');
 const SignupCodeService = require('../services/SignupCodeService');
 const Team = require('../models/Team');
+const { writeAuditLog } = require('../utils/auditLog');
 
 const router = express.Router();
 const signupCodeService = new SignupCodeService();
@@ -21,6 +22,15 @@ router.post('/generate', authenticateToken, authorize, [
   try {
     const { teamId } = req.body;
     const code = await signupCodeService.generateCode(teamId, req.user.userId);
+
+    await writeAuditLog({
+      userId: req.user.userId,
+      action: 'signup_code.generate',
+      resourceType: 'team',
+      resourceId: parseInt(teamId, 10),
+      details: null
+    });
+
     res.json(code);
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to generate signup code');
@@ -63,6 +73,15 @@ router.delete('/:teamId', authenticateToken, authorize, [
 
   try {
     await signupCodeService.revokeCode(req.params.teamId);
+
+    await writeAuditLog({
+      userId: req.user.userId,
+      action: 'signup_code.revoke',
+      resourceType: 'team',
+      resourceId: parseInt(req.params.teamId, 10),
+      details: null
+    });
+
     res.json({ success: true });
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to revoke signup code');

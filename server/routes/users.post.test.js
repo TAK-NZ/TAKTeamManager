@@ -177,8 +177,21 @@ describe('POST /api/users identity resolution (takserver-enrollment task 5.3)', 
       expect.objectContaining({ username: 'jdoe', callsign_suffix: 'J.Doe' })
     );
     expect(authentikService.createUser).toHaveBeenCalledTimes(1);
-    // No Claim_Row adoption on this path.
-    expect(pool.query).not.toHaveBeenCalled();
+    // No Claim_Row adoption on this path: no `UPDATE users ... WHERE id`
+    // adoption query is issued (the route uses User.create instead). The
+    // route DOES now issue one pool.query -- the best-effort 'user.create'
+    // audit_logs INSERT -- so this asserts specifically on the adoption
+    // statement's absence rather than on pool.query never being called.
+    const adoptionCall = pool.query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('UPDATE users SET authentik_user_id')
+    );
+    expect(adoptionCall).toBeUndefined();
+    // And the one query it does make is the audit row (not provisioning).
+    const auditCall = pool.query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO audit_logs')
+    );
+    expect(auditCall).toBeDefined();
+    expect(auditCall[1]).toEqual([1, 'user.create', 'user', 1, JSON.stringify({ email: 'jdoe@example.com', teamId: 7, username: 'jdoe' })]);
   });
 
   it("uses the resolved (minted) username for the Authentik call and adopts the Claim_Row instead of calling User.create, for a pseudonymous Organisation", async () => {

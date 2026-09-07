@@ -124,6 +124,13 @@ describe('orgDomains routes (Task 9.2)', () => {
       expect(res.body.success).toBe(true);
       expect(mockClient.query).toHaveBeenCalledWith('BEGIN');
       expect(mockClient.query).toHaveBeenCalledWith('COMMIT');
+      // The change is audited.
+      const auditCall = pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO audit_logs')
+      );
+      expect(auditCall).toBeDefined();
+      expect(auditCall[1][1]).toBe('org_domains.update');
+      expect(auditCall[1][2]).toBe('team');
     });
 
     it('returns 400 for missing domains array', async () => {
@@ -173,6 +180,12 @@ describe('orgDomains routes (Task 9.2)', () => {
         expect.stringContaining('INSERT INTO system_config'),
         ['excluded_email_domains', JSON.stringify(['gmail.com', 'yahoo.com'])]
       );
+      // And the change is audited.
+      const auditCall = pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO audit_logs')
+      );
+      expect(auditCall).toBeDefined();
+      expect(auditCall[1][1]).toBe('excluded_domains.update');
     });
 
     it('returns 400 for missing domains array', async () => {

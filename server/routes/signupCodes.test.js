@@ -56,6 +56,7 @@ jest.mock('../models/Team', () => ({
 
 const express = require('express');
 const request = require('supertest');
+const pool = require('../config/database');
 
 function buildApp() {
   const app = express();
@@ -143,6 +144,13 @@ describe('signupCodes routes (Task 7.3)', () => {
       expect(res.status).toBe(200);
       expect(res.body.code).toBe('ABCD5678');
       expect(res.body.formatted).toBe('ABCD-5678');
+      // The generation is audited.
+      const auditCall = pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO audit_logs')
+      );
+      expect(auditCall).toBeDefined();
+      expect(auditCall[1][1]).toBe('signup_code.generate');
+      expect(auditCall[1][2]).toBe('team');
     });
   });
 
@@ -178,6 +186,12 @@ describe('signupCodes routes (Task 7.3)', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
+      // The revocation is audited.
+      const auditCall = pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO audit_logs')
+      );
+      expect(auditCall).toBeDefined();
+      expect(auditCall[1][1]).toBe('signup_code.revoke');
     });
   });
 

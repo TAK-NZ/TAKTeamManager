@@ -41,6 +41,7 @@ const {
 const { isCloudTakEnabled } = require('../config/cloudtak');
 const { isDeviceMgmtRevokeEnabled } = require('../config/deviceMgmt');
 const pool = require('../config/database');
+const { writeAuditLog } = require('../utils/auditLog');
 const { getLogger } = require('../middleware/requestContext');
 const router = express.Router();
 
@@ -549,6 +550,16 @@ router.post('/', authenticateToken, authorize, [
 
     // Add to team
     await Team.addMember(teamId, localUser.id, 'member');
+
+    // Audit the account creation. Best-effort (the account already exists);
+    // resource is the new local users.id, details name the team + email.
+    await writeAuditLog({
+      userId: req.user.userId,
+      action: 'user.create',
+      resourceType: 'user',
+      resourceId: localUser.id,
+      details: { email, teamId, username: resolvedUsername }
+    });
 
     res.status(201).json({ 
       user: localUser,
@@ -1295,6 +1306,17 @@ router.post('/create-and-add', authenticateToken, authorize, [
     getLogger().error({ err: emailErr }, 'Failed to send welcome email to new user');
     welcomeEmailSent = false;
   }
+
+  // Audit the account creation (the primary UI create-user path). Best-effort;
+  // the account is already fully created by this point. resource_id is the
+  // LOCAL users.id (matching POST /'s own audit row), not the Authentik pk.
+  await writeAuditLog({
+    userId: req.user?.userId ?? null,
+    action: 'user.create',
+    resourceType: 'user',
+    resourceId: localUserId,
+    details: { email, teamId, username: resolvedUsername }
+  });
 
   res.status(201).json({
     user: {

@@ -6,6 +6,7 @@ const { getLogger } = require('../middleware/requestContext');
 const { isDeviceMgmtEnabled, isDeviceMgmtRevokeEnabled } = require('../config/deviceMgmt');
 const EventPublisher = require('../services/EventPublisher');
 const DeviceManagementService = require('../services/DeviceManagementService');
+const { writeAuditLog } = require('../utils/auditLog');
 
 const router = express.Router();
 
@@ -332,6 +333,19 @@ async function enqueueRevocation(req, res, { ownerUserId, clientUid }) {
     { clientUid, targetUserId: ownerUserId, actorId: req.user && req.user.userId },
     'Enqueued revoke_tak_certificates operation for a device revocation'
   );
+
+  // Audit the revocation REQUEST (the admin action of enqueueing it); the
+  // worker separately writes its own revoke_audit/revoke_audit_result records
+  // for the EXECUTION per the certificate-revocation safety rails. resource is
+  // the target user (a Device has no audit_logs-FK id of its own); the device
+  // UID rides in details. Ids/UID only -- no cert material.
+  await writeAuditLog({
+    userId: req.user && req.user.userId,
+    action: 'device.revoke_requested',
+    resourceType: 'user',
+    resourceId: Number.isInteger(targetUserId) ? targetUserId : null,
+    details: { clientUid }
+  });
 
   return res.status(202).json({ enqueued: true });
 }

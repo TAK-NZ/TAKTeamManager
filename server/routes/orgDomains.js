@@ -4,6 +4,7 @@ const { authenticateToken } = require('../middleware/auth');
 const authorize = require('../middleware/authorize');
 const { getLogger } = require('../middleware/requestContext');
 const pool = require('../config/database');
+const { writeAuditLog } = require('../utils/auditLog');
 const OrgInterestService = require('../services/OrgInterestService');
 
 const router = express.Router();
@@ -81,6 +82,14 @@ router.put('/orgs/:orgId/domains', authenticateToken, authorize, [
       client.release();
     }
 
+    await writeAuditLog({
+      userId: req.user.userId,
+      action: 'org_domains.update',
+      resourceType: 'team',
+      resourceId: parseInt(orgId, 10),
+      details: { domainCount: Array.isArray(domains) ? domains.length : 0 }
+    });
+
     res.json({ success: true });
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to update org domains');
@@ -133,6 +142,14 @@ router.put('/admin/excluded-domains', authenticateToken, authorize, [
       ['excluded_email_domains', value]
     );
 
+    await writeAuditLog({
+      userId: req.user.userId,
+      action: 'excluded_domains.update',
+      resourceType: 'system_config',
+      resourceId: null,
+      details: { domainCount: Array.isArray(domains) ? domains.length : 0 }
+    });
+
     res.json({ success: true });
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to update excluded domains');
@@ -163,6 +180,15 @@ router.patch('/admin/org-interest/:id', authenticateToken, authorize, [
 
   try {
     await orgInterestService.updateStatus(req.params.id, req.body.status);
+
+    await writeAuditLog({
+      userId: req.user.userId,
+      action: 'org_interest.update_status',
+      resourceType: 'org_interest_request',
+      resourceId: parseInt(req.params.id, 10),
+      details: { status: req.body.status }
+    });
+
     res.json({ success: true });
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to update org interest request');

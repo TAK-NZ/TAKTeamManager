@@ -43,8 +43,11 @@
  */
 
 // The routes no longer read `users` at all (task 19.4 dropped the username
-// lookup the user-scoped payload needed), so this mock is kept purely as the
-// observable for that: `pool.query` must never be called from a revoke.
+// lookup the user-scoped payload needed). The revoke path DOES now write a
+// best-effort `device.revoke_requested` audit_logs row via writeAuditLog, so
+// `pool.query` is called once (that INSERT) -- the invariant these tests
+// protect is narrower: no query against the `users` TABLE is issued. See the
+// `usersTableQueried` helper below.
 jest.mock('../../config/database', () => ({
   query: jest.fn()
 }));
@@ -99,6 +102,16 @@ const EventPublisher = require('../../services/EventPublisher');
 const DeviceManagementService = require('../../services/DeviceManagementService');
 
 const { NotManagedUserError, DeviceNotOwnedError } = DeviceManagementService;
+
+// True iff any pool.query call touched the `users` table. The revoke path must
+// stay device-scoped (keyed on client_uid) and never consult `users`; it may,
+// however, INSERT INTO audit_logs. This lets the "no users read" invariant be
+// asserted without also forbidding the (allowed) audit write.
+function usersTableQueried() {
+  return pool.query.mock.calls.some(
+    ([sql]) => typeof sql === 'string' && /\busers\b/.test(sql) && !/audit_logs/.test(sql)
+  );
+}
 
 const originalFlag = process.env.DEVICE_MGMT_ENABLED;
 const originalRevokeFlag = process.env.DEVICE_MGMT_REVOKE_ENABLED;
@@ -376,8 +389,20 @@ describe('device-management routes', () => {
         { client_uid: 'UID-OWN', target_user_id: 7 },
         7
       );
-      // No username resolution happens any more -- `client_uid` is the key.
-      expect(pool.query).not.toHaveBeenCalled();
+      // No username resolution happens any more -- `client_uid` is the key --
+      // so the revoke path issues no `users`-table query. It DOES now write a
+      // best-effort 'device.revoke_requested' audit_logs row, so assert on the
+      // absence of a users read specifically rather than on pool.query never
+      // being called.
+      expect(usersTableQueried()).toBe(false);
+      // The revocation REQUEST is audited (resource = target user, device UID
+      // in details; no cert material). The worker writes its own
+      // revoke_audit/result records for the execution separately.
+      const auditCall = pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO audit_logs')
+      );
+      expect(auditCall).toBeDefined();
+      expect(auditCall[1]).toEqual([7, 'device.revoke_requested', 'user', 7, JSON.stringify({ clientUid: 'UID-OWN' })]);
     });
 
     // Requirement 7.3: strict equality -- no trimming, no case folding, and a
@@ -436,13 +461,21 @@ describe('device-management routes', () => {
     // absence of the lookup load-bearing rather than incidental -- any
     // reintroduced `users` read would surface as a 500 here.
     it('enqueues without reading the users table at all', async () => {
-      pool.query.mockRejectedValue(new Error('the users table must not be consulted'));
+      // Reject ONLY a `users`-table query (not the allowed audit_logs INSERT),
+      // so any reintroduced `users` read surfaces here while the best-effort
+      // audit write is permitted. The audit INSERT resolves normally.
+      pool.query.mockImplementation((sql) => {
+        if (typeof sql === 'string' && /\busers\b/.test(sql) && !/audit_logs/.test(sql)) {
+          return Promise.reject(new Error('the users table must not be consulted'));
+        }
+        return Promise.resolve({ rows: [] });
+      });
 
       const res = await revoke({ confirmation: 'REVOKE' });
 
       expect(res.status).toBe(202);
       expect(res.body).toEqual({ enqueued: true });
-      expect(pool.query).not.toHaveBeenCalled();
+      expect(usersTableQueried()).toBe(false);
       expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
         'revoke_tak_certificates',
         { client_uid: 'UID-OWN', target_user_id: 7 },
@@ -463,7 +496,7 @@ describe('device-management routes', () => {
       expect(res.status).toBe(202);
       expect(res.body).toEqual({ enqueued: true });
       expect(DeviceManagementService.assertCanRevokeManaged).toHaveBeenCalledWith(mockUser, '9', 'UID-MANAGED');
-      expect(pool.query).not.toHaveBeenCalled();
+      expect(usersTableQueried()).toBe(false);
       expect(EventPublisher.publishOperation).toHaveBeenCalledTimes(1);
       // Requirements 8.4, 12.1: the admin's device-scoped payload names the
       // TARGET's device and the TARGET's user id, while the acting admin is
@@ -583,8 +616,10 @@ describe('device-management routes', () => {
       expect(Object.keys(payload).filter((key) => /user_?name/i.test(key))).toEqual([]);
       // The acting user is attribution (`created_by`), never the scope.
       expect(createdBy).toBe(7);
-      // And no username was even looked up to arrive at that payload.
-      expect(pool.query).not.toHaveBeenCalled();
+      // And no username was even looked up to arrive at that payload -- the
+      // only pool.query the route makes is the best-effort audit_logs INSERT,
+      // never a `users` read.
+      expect(usersTableQueried()).toBe(false);
     });
   });
 });

@@ -455,6 +455,15 @@ describe('POST /api/users/create-and-add callsign_suffix resolution (task 22.2)'
       expect.stringContaining('INSERT INTO user_cache'),
       expect.arrayContaining(['J.Doe'])
     );
+    // The account creation is audited as 'user.create' (resource 'user',
+    // details naming the email/team) -- the gap this whole change closes.
+    const auditCall = pool.query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO audit_logs')
+    );
+    expect(auditCall).toBeDefined();
+    expect(auditCall[1][1]).toBe('user.create');
+    expect(auditCall[1][2]).toBe('user');
+    expect(JSON.parse(auditCall[1][4])).toMatchObject({ email: 'newuser@example.com', teamId: 7 });
   });
 
   it("uses the resolved (minted) username for the Authentik create-user call, and passes claimId through to createAndAddUser, for a pseudonymous Organisation", async () => {
