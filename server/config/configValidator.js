@@ -92,12 +92,28 @@ const PRODUCTION_SECRET_VARS = [
 ];
 
 // Requirement 26.1: WHERE TAK_SERVER_URL is configured, the App/Sync_Worker
-// must additionally require mutual TLS client credentials for TAK Server,
-// expressed as one of two credential pairs. `TAK_CA_PATH` is optional in
-// both cases (Criterion 26.1 "MAY additionally read an optional
-// `TAK_CA_PATH`") and is therefore never required here.
+// must additionally have a TAK Server admin mutual-TLS credential available,
+// which can be supplied one of THREE ways:
+//   (a) a PKCS#12 bundle on disk: TAK_API_P12_PATH + TAK_API_P12_PASSPHRASE
+//   (b) a cert/key pair on disk:  TAK_API_CERT_PATH + TAK_API_KEY_PATH
+//   (c) a P12 in Secrets Manager: TAK_ADMIN_CERT_SOURCE=secrets-manager plus a
+//       non-empty TAK_ADMIN_CERT_SECRET_ARN (the P12 passphrase defaults to
+//       the well-known TAK value when TAK_ADMIN_CERT_PASSPHRASE is unset --
+//       see AdminCredentialLoader), so no passphrase var is required here.
+// `TAK_CA_PATH` is optional in every case (Criterion 26.1 "MAY additionally
+// read an optional `TAK_CA_PATH`") and is therefore never required.
+//
+// Case (c) is what the CDK deployment uses: app-service.ts sets
+// TAK_ADMIN_CERT_SOURCE=secrets-manager and TAK_ADMIN_CERT_SECRET_ARN and
+// grants the task role read on the admin-cert secret, injecting NEITHER
+// file-path pair. Before this case was recognised, enabling device management
+// in the CDK deployment failed startup here ("no complete mutual TLS client
+// credential pair was found") even though AdminCredentialLoader could load the
+// credential perfectly well from Secrets Manager -- the validator gate had
+// simply never been taught about the secrets-manager source.
 const TAK_SERVER_P12_CREDENTIAL_VARS = ['TAK_API_P12_PATH', 'TAK_API_P12_PASSPHRASE'];
 const TAK_SERVER_CERT_KEY_CREDENTIAL_VARS = ['TAK_API_CERT_PATH', 'TAK_API_KEY_PATH'];
+const TAK_ADMIN_CERT_SECRETS_MANAGER_SOURCE = 'secrets-manager';
 
 // Requirement 25.1/25.4: default retention thresholds (in days) for
 // `sync_operations` and `audit_logs` rows respectively, consumed here and
@@ -298,14 +314,38 @@ function collectTakServerConfigIssues(env) {
 
   const hasP12Pair = missingP12.length === 0;
   const hasCertKeyPair = missingCertKey.length === 0;
+  // Case (c): the credential comes from Secrets Manager. AdminCredentialLoader
+  // requires only a non-empty TAK_ADMIN_CERT_SECRET_ARN when the source is
+  // 'secrets-manager' (the passphrase defaults), and NEVER consults the
+  // file-path vars in that mode -- so their absence is expected and correct
+  // here, not a misconfiguration.
+  const adminCertSource = typeof env.TAK_ADMIN_CERT_SOURCE === 'string'
+    ? env.TAK_ADMIN_CERT_SOURCE.trim()
+    : '';
+  const secretArn = typeof env.TAK_ADMIN_CERT_SECRET_ARN === 'string'
+    ? env.TAK_ADMIN_CERT_SECRET_ARN.trim()
+    : '';
+  const hasSecretsManagerCredential =
+    adminCertSource === TAK_ADMIN_CERT_SECRETS_MANAGER_SOURCE && secretArn.length > 0;
 
-  if (!hasP12Pair && !hasCertKeyPair) {
+  // A common misconfiguration worth its own message: the source is set to
+  // secrets-manager but the ARN is missing/empty. Without this, such a setup
+  // would fall through to the generic "no credential pair" message, which
+  // points only at the file-path vars and never mentions the ARN the operator
+  // actually needs to set.
+  if (adminCertSource === TAK_ADMIN_CERT_SECRETS_MANAGER_SOURCE && secretArn.length === 0) {
     issues.push(
-      'TAK_SERVER_URL is configured but no complete mutual TLS client credential pair was found: ' +
+      'TAK_SERVER_URL is configured and TAK_ADMIN_CERT_SOURCE is "secrets-manager", ' +
+        'but TAK_ADMIN_CERT_SECRET_ARN is missing/empty'
+    );
+  } else if (!hasP12Pair && !hasCertKeyPair && !hasSecretsManagerCredential) {
+    issues.push(
+      'TAK_SERVER_URL is configured but no TAK Server admin mutual TLS credential was found: ' +
         `provide either both ${TAK_SERVER_P12_CREDENTIAL_VARS.join(' and ')} ` +
         `(missing/empty: ${missingP12.join(', ')}), ` +
         `or both ${TAK_SERVER_CERT_KEY_CREDENTIAL_VARS.join(' and ')} ` +
-        `(missing/empty: ${missingCertKey.join(', ')})`
+        `(missing/empty: ${missingCertKey.join(', ')}), ` +
+        'or TAK_ADMIN_CERT_SOURCE="secrets-manager" with a non-empty TAK_ADMIN_CERT_SECRET_ARN'
     );
   }
 

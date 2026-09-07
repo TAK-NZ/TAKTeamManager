@@ -182,13 +182,15 @@ describe('collectTakServerConfigIssues', () => {
     expect(issues).toEqual([]);
   });
 
-  it('reports an issue when TAK_SERVER_URL is set but no credential pair is present at all', () => {
+  it('reports an issue when TAK_SERVER_URL is set but no credential is present at all', () => {
     const env = buildValidBaseEnv({ TAK_SERVER_URL: 'https://tak.example.com:8443' });
     const issues = collectTakServerConfigIssues(env);
     expect(issues).toHaveLength(1);
-    expect(issues[0]).toMatch(/mutual TLS client credential pair/);
+    expect(issues[0]).toMatch(/mutual TLS credential/);
     expect(issues[0]).toMatch(/TAK_API_P12_PATH/);
     expect(issues[0]).toMatch(/TAK_API_CERT_PATH/);
+    // The message now also names the third (secrets-manager) option.
+    expect(issues[0]).toMatch(/TAK_ADMIN_CERT_SECRET_ARN/);
   });
 
   it('reports an issue when only one half of the P12 pair is present', () => {
@@ -199,7 +201,7 @@ describe('collectTakServerConfigIssues', () => {
     });
     const issues = collectTakServerConfigIssues(env);
     expect(issues).toHaveLength(1);
-    expect(issues[0]).toMatch(/mutual TLS client credential pair/);
+    expect(issues[0]).toMatch(/mutual TLS credential/);
   });
 
   it('reports an issue when only one half of the cert/key pair is present', () => {
@@ -210,7 +212,45 @@ describe('collectTakServerConfigIssues', () => {
     });
     const issues = collectTakServerConfigIssues(env);
     expect(issues).toHaveLength(1);
-    expect(issues[0]).toMatch(/mutual TLS client credential pair/);
+    expect(issues[0]).toMatch(/mutual TLS credential/);
+  });
+
+  // Credential option (c): the P12 comes from Secrets Manager. This is what
+  // the CDK deployment wires (TAK_ADMIN_CERT_SOURCE=secrets-manager +
+  // TAK_ADMIN_CERT_SECRET_ARN, and NEITHER file-path pair). Enabling device
+  // management there used to fail startup here before this option was
+  // recognised.
+  it('reports NO issues when the credential is supplied via TAK_ADMIN_CERT_SOURCE=secrets-manager + ARN (no file-path pair)', () => {
+    const env = buildValidBaseEnv({
+      TAK_SERVER_URL: 'https://tak.example.com:8443',
+      TAK_ADMIN_CERT_SOURCE: 'secrets-manager',
+      TAK_ADMIN_CERT_SECRET_ARN: 'arn:aws:secretsmanager:us-west-2:123456789012:secret:tak-admin-cert-abc123'
+      // deliberately NO TAK_API_* file-path vars, matching the CDK deployment
+    });
+    const issues = collectTakServerConfigIssues(env);
+    expect(issues).toEqual([]);
+  });
+
+  it('reports a targeted issue when the source is secrets-manager but the ARN is missing/empty', () => {
+    const env = buildValidBaseEnv({
+      TAK_SERVER_URL: 'https://tak.example.com:8443',
+      TAK_ADMIN_CERT_SOURCE: 'secrets-manager',
+      TAK_ADMIN_CERT_SECRET_ARN: '   '
+    });
+    const issues = collectTakServerConfigIssues(env);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatch(/TAK_ADMIN_CERT_SECRET_ARN is missing\/empty/);
+  });
+
+  it('does NOT accept secrets-manager source with an empty ARN as a valid credential (falls to the targeted message, not silent pass)', () => {
+    const env = buildValidBaseEnv({
+      TAK_SERVER_URL: 'https://tak.example.com:8443',
+      TAK_ADMIN_CERT_SOURCE: 'secrets-manager'
+      // ARN entirely omitted
+    });
+    const issues = collectTakServerConfigIssues(env);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatch(/TAK_ADMIN_CERT_SECRET_ARN is missing\/empty/);
   });
 
   it('reports a malformed-URL issue when TAK_SERVER_URL is not a well-formed URL, independent of credentials', () => {
@@ -229,7 +269,7 @@ describe('collectTakServerConfigIssues', () => {
     const issues = collectTakServerConfigIssues(env);
     expect(issues).toHaveLength(2);
     expect(issues.some((issue) => issue.match(/not a well-formed URL/))).toBe(true);
-    expect(issues.some((issue) => issue.match(/mutual TLS client credential pair/))).toBe(true);
+    expect(issues.some((issue) => issue.match(/mutual TLS credential/))).toBe(true);
   });
 });
 
