@@ -5,7 +5,8 @@ import { MemoryRouter } from 'react-router-dom'
 
 import Layout from './Layout.jsx'
 import { ThemeProvider } from '../contexts/ThemeContext.jsx'
-import { requestsAPI, adminAPI, versionAPI } from '../services/api'
+import { requestsAPI, adminAPI, versionAPI, deviceManagementAPI } from '../services/api'
+import { setExpiryWarningDays, DEFAULT_EXPIRY_WARNING_DAYS } from '../utils/expiryWarning'
 
 // Bugfix (pending-requests-badge): the nav "Tasks" badge (renamed from
 // "Requests" by cert-expiry-notifications Requirement 7.2 -- see the
@@ -27,6 +28,13 @@ vi.mock('../services/api', () => ({
   authAPI: { logout: vi.fn() },
   requestsAPI: { getPending: vi.fn() },
   adminAPI: { getOrgInterest: vi.fn() },
+  // The outstanding-task count effect (Layout.jsx) now calls this for EVERY
+  // user (a member's own certificate renewals feed the same badge/bell). A
+  // bare vi.fn() returns undefined and `undefined` has no `.data`, so a
+  // resolvable default is required for every mount, even the plain-user ones
+  // that don't otherwise care about devices. Default: no devices -> zero
+  // renewals, so it never contributes a badge unless a test says so.
+  deviceManagementAPI: { getMyDevices: vi.fn().mockResolvedValue({ data: { devices: [] } }) },
   // The version-display mount effect (Layout.jsx) always calls this; a
   // bare `vi.fn()` with no resolved value returns `undefined`, and
   // `undefined.then` throws, so every test in this file needs a
@@ -126,6 +134,11 @@ describe('Layout "Tasks" nav badge (bugfix: pending-requests-badge; renamed by c
   beforeEach(() => {
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     vi.clearAllMocks()
+    // clearAllMocks wipes the factory default, so re-establish the
+    // now-always-called getMyDevices default (no devices -> zero renewals) and
+    // a known expiry-warning threshold (module state shared across files).
+    deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    setExpiryWarningDays(DEFAULT_EXPIRY_WARNING_DAYS)
     container = document.createElement('div')
     document.body.appendChild(container)
     // jsdom implements no `window.matchMedia`; `ThemeProvider` reads it to
@@ -262,6 +275,11 @@ describe('Layout "Tasks" nav item visibility and badge-fetch gating (cert-expiry
   beforeEach(() => {
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     vi.clearAllMocks()
+    // clearAllMocks wipes the factory default, so re-establish the
+    // now-always-called getMyDevices default (no devices -> zero renewals) and
+    // a known expiry-warning threshold (module state shared across files).
+    deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    setExpiryWarningDays(DEFAULT_EXPIRY_WARNING_DAYS)
     container = document.createElement('div')
     document.body.appendChild(container)
     if (typeof window.matchMedia !== 'function') {
@@ -455,6 +473,11 @@ describe('Layout version display', () => {
   beforeEach(() => {
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     vi.clearAllMocks()
+    // clearAllMocks wipes the factory default, so re-establish the
+    // now-always-called getMyDevices default (no devices -> zero renewals) and
+    // a known expiry-warning threshold (module state shared across files).
+    deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    setExpiryWarningDays(DEFAULT_EXPIRY_WARNING_DAYS)
     container = document.createElement('div')
     document.body.appendChild(container)
     if (typeof window.matchMedia !== 'function') {
@@ -527,5 +550,151 @@ describe('Layout version display', () => {
 
     expect(container.textContent).not.toContain('Version 2026.9.0')
     expect(container.textContent).not.toMatch(/Version \d/)
+  })
+})
+
+/**
+ * Mobile notification bell: the sidebar (and its "Tasks" badge) is an
+ * off-canvas drawer on a phone, invisible until opened, so the top row
+ * carries a bell that surfaces the SAME outstanding-task count and links to
+ * /tasks. Shown for EVERY user -- a plain member's count is their own
+ * certificate renewals (deviceManagementAPI.getMyDevices, filtered to
+ * imminent/expired), an admin's also includes pending requests. jsdom applies
+ * no CSS, so the `lg:hidden`/`lg:flex` breakpoint split is not exercised here;
+ * these assert presence, target, count, and the accessible name.
+ */
+describe('Layout mobile notification bell (links to /tasks, count for all users)', () => {
+  let container
+  let root
+  let matchMediaStubbed = false
+
+  const PLAIN_USER = { userId: 99, isAdmin: false, isTeamAdmin: false, is_global_manager: false }
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    vi.clearAllMocks()
+    deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    setExpiryWarningDays(DEFAULT_EXPIRY_WARNING_DAYS)
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    if (typeof window.matchMedia !== 'function') {
+      window.matchMedia = () => ({
+        matches: false,
+        addEventListener() {},
+        removeEventListener() {},
+        addListener() {},
+        removeListener() {}
+      })
+      matchMediaStubbed = true
+    }
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    if (matchMediaStubbed) {
+      delete window.matchMedia
+      matchMediaStubbed = false
+    }
+    localStorage.removeItem('theme')
+    setExpiryWarningDays(DEFAULT_EXPIRY_WARNING_DAYS)
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  const mount = async (user) => {
+    root = createRoot(container)
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={['/dashboard']}>
+          <ThemeProvider>
+            <Layout user={user}>
+              <div />
+            </Layout>
+          </ThemeProvider>
+        </MemoryRouter>
+      )
+    })
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+  }
+
+  // The bell is the /tasks link whose accessible name starts with "Tasks"
+  // (the nav item's own /tasks link has visible text "Tasks", so match the
+  // bell by its aria-label + absence of the "Tasks" text node instead).
+  const bellLink = () =>
+    Array.from(container.querySelectorAll('a[href="/tasks"]')).find((a) =>
+      (a.getAttribute('aria-label') || '').startsWith('Tasks')
+    )
+
+  const bellBadgeText = () => {
+    const badge = bellLink()?.querySelector('span.bg-red-600')
+    return badge ? badge.textContent.trim() : null
+  }
+
+  it('renders a bell linking to /tasks for a plain, non-admin user', async () => {
+    await mount(PLAIN_USER)
+
+    const bell = bellLink()
+    expect(bell).not.toBeUndefined()
+    expect(bell.getAttribute('href')).toBe('/tasks')
+    // No outstanding tasks -> no badge, and the accessible name is the bare
+    // "Tasks" (state carried in text, not colour).
+    expect(bell.getAttribute('aria-label')).toBe('Tasks')
+    expect(bellBadgeText()).toBeNull()
+  })
+
+  it("counts a plain member's OWN certificate renewals (no admin requests involved)", async () => {
+    // Two of the member's devices are within the expiry window, one is fine.
+    const soon = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString()
+    const expired = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+    const fine = new Date(Date.now() + 500 * 24 * 60 * 60 * 1000).toISOString()
+    deviceManagementAPI.getMyDevices.mockResolvedValue({
+      data: {
+        devices: [
+          { clientUid: 'a', expiresAt: soon, clientType: 'android' },
+          { clientUid: 'b', expiresAt: expired, clientType: 'ios' },
+          { clientUid: 'c', expiresAt: fine, clientType: 'windows' }
+        ]
+      }
+    })
+
+    await mount(PLAIN_USER)
+
+    expect(bellBadgeText()).toBe('2')
+    expect(bellLink().getAttribute('aria-label')).toBe('Tasks, 2 outstanding')
+    // A plain member never triggers the admin request fetches.
+    expect(requestsAPI.getPending).not.toHaveBeenCalled()
+    expect(adminAPI.getOrgInterest).not.toHaveBeenCalled()
+  })
+
+  it("sums an admin's pending requests AND their own renewals into one count", async () => {
+    requestsAPI.getPending.mockResolvedValue({ data: { requests: [{ id: 1 }, { id: 2 }] } })
+    const soon = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString()
+    deviceManagementAPI.getMyDevices.mockResolvedValue({
+      data: { devices: [{ clientUid: 'a', expiresAt: soon, clientType: 'android' }] }
+    })
+
+    await mount(TEAM_ADMIN)
+
+    // 2 requests + 1 own renewal.
+    expect(bellBadgeText()).toBe('3')
+  })
+
+  it('treats a 404 from getMyDevices (device management off) as zero renewals, not an error', async () => {
+    deviceManagementAPI.getMyDevices.mockRejectedValue({ response: { status: 404 } })
+
+    await mount(PLAIN_USER)
+
+    // Bell still renders, just with no badge.
+    expect(bellLink()).not.toBeUndefined()
+    expect(bellBadgeText()).toBeNull()
   })
 })

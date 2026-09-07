@@ -83,8 +83,11 @@ vi.mock('./services/api', () => ({
   signupAPI: {},
   signupCodesAPI: {},
   orgDomainsAPI: {},
-  adminAPI: {},
-  deviceManagementAPI: {},
+  adminAPI: { getOrgInterest: vi.fn().mockResolvedValue({ data: { requests: [] } }) },
+  // Layout.jsx's outstanding-task-count effect calls this for EVERY user
+  // (own certificate renewals feed the nav badge), so it needs a resolvable
+  // default here or the mount effect rejects unhandled. No devices -> zero.
+  deviceManagementAPI: { getMyDevices: vi.fn().mockResolvedValue({ data: { devices: [] } }) },
   default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() }
 }))
 

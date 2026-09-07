@@ -4,8 +4,9 @@ import { CheckIcon, XMarkIcon, ClockIcon, InformationCircleIcon } from '@heroico
 import toast from 'react-hot-toast'
 import { requestsAPI, deviceManagementAPI, devicesAPI } from '../services/api'
 import OrgInterestRequests from '../components/OrgInterestRequests'
+import DeviceTypeIcon from '../components/DeviceTypeIcon'
 import FormattedDate, { DATE_PRECISION, TOOLTIP_SIDES } from '../components/FormattedDate'
-import { EXPIRY_STATES, classifyExpiry, getExpiryWarningDays } from '../utils/expiryWarning'
+import { filterDevicesNeedingRenewal } from '../utils/expiryWarning'
 import EnrollmentView from './EnrollmentView'
 
 // Requirement 11.11/11.12: pure helper computing the initial per-request
@@ -41,17 +42,13 @@ export function formatPersonName(firstName, lastName) {
   return [firstName, lastName].filter(Boolean).join(' ').trim()
 }
 
-// cert-expiry-notifications Requirement 7.3(a): filters a self-owned device
-// list down to only those whose live certificate classifies as imminent or
-// expired -- the SAME classification/threshold the Dashboard renew banner
-// and every device list's own highlighting already use. Extracted as a
-// standalone function so the filter rule is unit-testable without
-// rendering the component.
-export function filterDevicesNeedingRenewal(deviceList) {
-  return (deviceList || []).filter(
-    (device) => classifyExpiry(device.expiresAt, getExpiryWarningDays(), Date.now()) !== EXPIRY_STATES.NONE
-  )
-}
+// cert-expiry-notifications Requirement 7.3(a): the "needs renewal" filter now
+// lives in `client/src/utils/expiryWarning.js` (a pure, React-free util),
+// beside the `classifyExpiry`/`getExpiryWarningDays` it is built from, so that
+// BOTH this page and the Layout's outstanding-task badge derive the count from
+// one rule and can never disagree. Re-exported here so existing importers of
+// it from this module keep working.
+export { filterDevicesNeedingRenewal }
 
 export default function Requests({ user }) {
   const [requests, setRequests] = useState([])
@@ -263,15 +260,27 @@ export default function Requests({ user }) {
                 key={device.clientUid}
                 className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 py-3"
               >
-                <div className="text-sm text-gray-700 dark:text-gray-300">
-                  <span className="font-medium">{device.username}</span>
-                  {' -- expires '}
-                  <FormattedDate
-                    value={device.expiresAt}
-                    fallback="Unknown"
-                    precision={DATE_PRECISION.DATE}
-                    side={TOOLTIP_SIDES.RIGHT}
-                  />
+                {/* Bugfix: this row previously rendered `device.username`,
+                    which the self-view (deviceManagementAPI.getMyDevices ->
+                    DeviceManagementService.mapDevice) never returns -- a
+                    self-owned Device carries no username field -- so the label
+                    was always blank. Identify the device the SAME way every
+                    other self-owned-device surface does (DeviceListRow's
+                    Dashboard card and the user-details modal): its
+                    DeviceTypeIcon (platform glyph + accessible name) plus its
+                    stable clientUid. */}
+                <div className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300 min-w-0">
+                  <DeviceTypeIcon clientType={device.clientType} />
+                  <span className="min-w-0">
+                    <span className="font-medium break-all">{device.clientUid}</span>
+                    {' -- expires '}
+                    <FormattedDate
+                      value={device.expiresAt}
+                      fallback="Unknown"
+                      precision={DATE_PRECISION.DATE}
+                      side={TOOLTIP_SIDES.RIGHT}
+                    />
+                  </span>
                 </div>
                 {/* Requirement 6.2/7.4: no per-device mint action for a
                     self-owned device -- links to the SAME /enrollment flow

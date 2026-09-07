@@ -15,9 +15,11 @@ import {
   MoonIcon,
   QrCodeIcon,
   ArrowDownTrayIcon,
-  UserCircleIcon
+  UserCircleIcon,
+  BellIcon
 } from '@heroicons/react/24/outline'
-import { authAPI, requestsAPI, adminAPI, versionAPI } from '../services/api'
+import { authAPI, requestsAPI, adminAPI, versionAPI, deviceManagementAPI } from '../services/api'
+import { filterDevicesNeedingRenewal } from '../utils/expiryWarning'
 import { useTheme } from '../contexts/ThemeContext'
 
 const getNavigation = (user) => {
@@ -121,7 +123,14 @@ export default function Layout({ children, user }) {
   const navigation = getNavigation(user)
   const { theme, toggleTheme } = useTheme()
 
-  const [pendingRequestCount, setPendingRequestCount] = useState(0)
+  // The count shown on the "Tasks" nav badge and the mobile notification
+  // bell. It is the total of everything the viewer would see as outstanding
+  // on /tasks: for an admin, pending access requests (+ Org_Interest for a
+  // Global_Manager); for EVERY user, their own certificates needing renewal.
+  // One number, one source, so the desktop nav badge, the mobile-drawer nav
+  // badge, and the mobile bell can never disagree with each other or with the
+  // page.
+  const [outstandingTaskCount, setOutstandingTaskCount] = useState(0)
   // The running app version, shown at the bottom of the nav (both the
   // desktop sidebar and the mobile drawer). `null` while unresolved --
   // rendered as nothing rather than a placeholder, so an unreachable
@@ -138,63 +147,65 @@ export default function Layout({ children, user }) {
   }, [])
 
   useEffect(() => {
-    // cert-expiry-notifications Requirement 7.7: this gate now also
-    // covers `isTeamAdmin` (previously missing here -- `isAdmin` and
-    // `is_global_manager` are ALIASES of the same cached `is_admin`
-    // column per this app's own domain rules, so the pre-existing
-    // `!user?.isAdmin && !user?.is_global_manager` check tested the SAME
-    // flag twice and never excluded a plain Team_Admin, who could
-    // legitimately have a nonzero count too). Independent of the /tasks
-    // nav item's own visibility, which is now unconditional (Requirement
-    // 7.2) -- this is NOT a 403-avoidance fix (GET /api/requests/pending
-    // is not admin-scoped server-side), it exists so a plain member's
-    // Layout mount does not repeatedly poll an endpoint that can only
-    // ever resolve to a count of zero for them.
-    if (!user?.isAdmin && !user?.isTeamAdmin && !user?.is_global_manager) return
+    // This effect now runs for EVERY user, not just admins: a plain member
+    // has no access requests, but they DO have outstanding tasks of their own
+    // -- their certificates needing renewal (the "My certificates needing
+    // renewal" section on /tasks, visible to everyone). Before this change the
+    // badge early-returned for non-admins and so was always blank for a
+    // member, hiding a real task from them (and, on mobile, from the new
+    // notification bell). Whether the user is an admin now only decides
+    // WHICH calls run, not whether the effect runs at all.
+    const isManager = Boolean(user?.isAdmin || user?.isTeamAdmin || user?.is_global_manager)
 
-    const fetchPendingCount = async () => {
-      // Two independent request systems feed this one badge: the
-      // access_requests-backed team access/change/role/name requests
-      // (requestsAPI.getPending, visible to any admin) and, for a
-      // Global_Manager only, pending Org_Interest_Requests -- a separate
-      // table (`org_interest_requests`) surfaced today only via its own
-      // `OrgInterestRequests` panel on /requests. Without this, a
-      // Global_Manager could have a pending org interest lead and see no
-      // badge and a Dashboard reading "0 pending requests" at all, even
-      // though /requests visibly shows it.
+    const fetchOutstandingCount = async () => {
+      // Category 1 (admins only): access_requests-backed team
+      // access/change/role/name requests (requestsAPI.getPending) and, for a
+      // Global_Manager only, pending Org_Interest_Requests. These calls are
+      // gated to a manager so a plain member's Layout does not poll an
+      // endpoint that can only ever resolve to zero for them (the pre-existing
+      // reasoning). Category 2 (EVERY user): their own certificates needing
+      // renewal, from deviceManagementAPI.getMyDevices(), filtered by the
+      // SAME rule the /tasks page uses (filterDevicesNeedingRenewal), so the
+      // badge and the page's list always agree. A 404 there means device
+      // management is off -> a truthful zero, matching the page's own
+      // silent-404 convention.
       //
-      // Fetched with Promise.allSettled, not Promise.all: an admin:manage
-      // (non-global) caller has no `admin:org_interest:read` permission
-      // and gets a 403 on that call, which must not blank out the
-      // access_requests count they DO have permission for.
-      const promises = [requestsAPI.getPending()]
+      // All fetched with Promise.allSettled, never Promise.all: a 403 on the
+      // org-interest call (an admin:manage, non-global caller has no
+      // admin:org_interest:read permission) or a 404 on the devices call must
+      // not blank out whichever counts DID resolve.
+      const promises = [deviceManagementAPI.getMyDevices()]
+      if (isManager) {
+        promises.push(requestsAPI.getPending())
+      }
       if (user?.is_global_manager) {
         promises.push(adminAPI.getOrgInterest({ status: 'pending' }))
       }
 
-      const [accessRequestsResult, orgInterestResult] = await Promise.allSettled(promises)
+      const [myDevicesResult, accessRequestsResult, orgInterestResult] =
+        await Promise.allSettled(promises);
 
+      const ownRenewalCount =
+        myDevicesResult.status === 'fulfilled'
+          ? filterDevicesNeedingRenewal(myDevicesResult.value?.data?.devices).length
+          : 0
       const accessRequestsCount =
-        accessRequestsResult.status === 'fulfilled'
-          ? accessRequestsResult.value.data.requests?.length || 0
+        accessRequestsResult?.status === 'fulfilled'
+          ? accessRequestsResult.value?.data?.requests?.length || 0
           : 0
       const orgInterestCount =
         orgInterestResult?.status === 'fulfilled'
-          ? orgInterestResult.value.data.requests?.length || 0
+          ? orgInterestResult.value?.data?.requests?.length || 0
           : 0
 
-      // Silent fail on either individual call — badge just reflects
-      // whichever count(s) succeeded, matching this effect's existing
-      // "silent fail, badge won't show" convention rather than
-      // introducing a new error surface.
-      setPendingRequestCount(accessRequestsCount + orgInterestCount)
+      setOutstandingTaskCount(ownRenewalCount + accessRequestsCount + orgInterestCount)
     }
 
-    fetchPendingCount()
-    const intervalId = setInterval(fetchPendingCount, 60000) // refresh every 60s
+    fetchOutstandingCount()
+    const intervalId = setInterval(fetchOutstandingCount, 60000) // refresh every 60s
 
     const handleVisibilityChange = () => {
-      if (!document.hidden) fetchPendingCount()
+      if (!document.hidden) fetchOutstandingCount()
     }
     document.addEventListener('visibilitychange', handleVisibilityChange)
 
@@ -266,9 +277,9 @@ export default function Layout({ children, user }) {
               >
                 <span className="relative mr-3">
                   <item.icon className="h-6 w-6" />
-                  {item.name === 'Tasks' && pendingRequestCount > 0 && (
+                  {item.name === 'Tasks' && outstandingTaskCount > 0 && (
                     <span className="absolute -top-1 -right-1 flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-red-600 px-0.5 text-[10px] font-bold text-white">
-                      {pendingRequestCount > 99 ? '99+' : pendingRequestCount}
+                      {outstandingTaskCount > 99 ? '99+' : outstandingTaskCount}
                     </span>
                   )}
                 </span>
@@ -308,9 +319,9 @@ export default function Layout({ children, user }) {
               >
                 <span className="relative mr-3">
                   <item.icon className="h-6 w-6" />
-                  {item.name === 'Tasks' && pendingRequestCount > 0 && (
+                  {item.name === 'Tasks' && outstandingTaskCount > 0 && (
                     <span className="absolute -top-1 -right-1 flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-red-600 px-0.5 text-[10px] font-bold text-white">
-                      {pendingRequestCount > 99 ? '99+' : pendingRequestCount}
+                      {outstandingTaskCount > 99 ? '99+' : outstandingTaskCount}
                     </span>
                   )}
                 </span>
@@ -404,7 +415,35 @@ export default function Layout({ children, user }) {
                 the start (left) instead of the right. `ml-auto` pins it
                 to the right regardless of how many siblings are actually
                 in flow. */}
-            <div className="relative ml-auto lg:hidden">
+            <div className="flex items-center gap-1 ml-auto lg:hidden">
+              {/* Notification bell (mobile only): the sidebar is an
+                  off-canvas drawer on mobile, so its "Tasks" badge is
+                  invisible until the user opens the drawer. This surfaces the
+                  SAME outstandingTaskCount in the always-visible top row and
+                  links straight to /tasks. Shown for every user -- a plain
+                  member's count is their own certificate renewals, an admin's
+                  also includes pending requests. The red pill mirrors the nav
+                  badge exactly; the state is carried in the aria-label's TEXT
+                  (a count), never by the red colour alone. p-2 rounded-lg is a
+                  real ~40px tap target, matching this app's other free-standing
+                  icon buttons. */}
+              <Link
+                to="/tasks"
+                aria-label={
+                  outstandingTaskCount > 0
+                    ? `Tasks, ${outstandingTaskCount} outstanding`
+                    : 'Tasks'
+                }
+                className="relative p-2 rounded-lg text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
+              >
+                <BellIcon className="h-6 w-6" />
+                {outstandingTaskCount > 0 && (
+                  <span className="absolute top-1 right-1 flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-red-600 px-0.5 text-[10px] font-bold text-white">
+                    {outstandingTaskCount > 99 ? '99+' : outstandingTaskCount}
+                  </span>
+                )}
+              </Link>
+              <div className="relative">
               <button
                 onClick={() => setUserMenuOpen((open) => !open)}
                 aria-expanded={userMenuOpen}
@@ -451,6 +490,7 @@ export default function Layout({ children, user }) {
                   </div>
                 </>
               )}
+              </div>
             </div>
           </div>
         </div>

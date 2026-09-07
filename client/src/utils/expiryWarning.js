@@ -291,3 +291,25 @@ export function classifyExpiry(
   // Further out than the warning window: no highlighting.
   return EXPIRY_STATES.NONE
 }
+
+/**
+ * cert-expiry-notifications Requirement 7.3(a): filters a self-owned device
+ * list down to only those whose live certificate classifies as imminent or
+ * expired -- the SAME classification/threshold the Dashboard renew banner,
+ * every device list's own highlighting, and the /tasks "My certificates
+ * needing renewal" section already use.
+ *
+ * Lives here (not in the page) so BOTH the /tasks page and the Layout's
+ * outstanding-task badge derive "needs renewal" from one rule, and so the
+ * badge count can never disagree with the list the page renders. Pure and
+ * total: a null/absent list yields `[]`, and each element is classified by
+ * the total `classifyExpiry`.
+ *
+ * @param {Array<{expiresAt: *}>} deviceList
+ * @returns {Array} the subset whose expiry is IMMINENT or EXPIRED.
+ */
+export function filterDevicesNeedingRenewal(deviceList) {
+  return (deviceList || []).filter(
+    (device) => classifyExpiry(device.expiresAt, getExpiryWarningDays(), Date.now()) !== EXPIRY_STATES.NONE
+  )
+}

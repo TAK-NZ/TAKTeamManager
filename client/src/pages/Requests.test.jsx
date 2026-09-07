@@ -332,9 +332,15 @@ describe('Requests page team_change card (mounted)', () => {
   }
 
   // Layout renders the sidebar twice (mobile + desktop), so the badge
-  // appears once per copy; both carry the same count.
-  const badgeCounts = () => Array.from(container.querySelectorAll('span'))
-    .filter((s) => typeof s.className === 'string' && s.className.includes('bg-red-600'))
+  // appears once per copy; both carry the same count. Scoped to the NAV-ITEM
+  // "Tasks" links (whose visible text ends with "Tasks") so the mobile
+  // notification BELL -- also a /tasks link with a bg-red-600 pill, but no
+  // visible "Tasks" text, only an aria-label -- is not counted here. The bell
+  // has its own dedicated coverage in Layout.test.jsx.
+  const badgeCounts = () => Array.from(container.querySelectorAll('a'))
+    .filter((a) => a.textContent.trim().endsWith('Tasks'))
+    .map((a) => a.querySelector('span.bg-red-600'))
+    .filter(Boolean)
     .map((s) => s.textContent)
 
   it('renders both hierarchy paths, both people, the justification and the timestamp (Req 16.1)', async () => {
@@ -735,13 +741,19 @@ describe('Requests page renewal sections (cert-expiry-notifications 7.3, 7.4, 7.
   const PLAIN_MEMBER = { userId: 42, isAdmin: false, isTeamAdmin: false, is_global_manager: false }
   const GLOBAL_MANAGER = { userId: 1, isAdmin: true, is_global_manager: true }
 
+  // NOTE: the real self-view shape (DeviceManagementService.mapDevice) has NO
+  // `username` field; these fixtures keep the (unused) `username` only so the
+  // pre-existing tests around them read unchanged. The row identifies the
+  // device by `clientUid` + `clientType` (its DeviceTypeIcon), never username.
   const SELF_DEVICE_DUE = {
     clientUid: 'ANDROID-self-due-1',
+    clientType: 'android',
     username: 'jdoe-phone',
     expiresAt: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString() // already expired
   }
   const SELF_DEVICE_FINE = {
     clientUid: 'ANDROID-self-fine-1',
+    clientType: 'android',
     username: 'jdoe-tablet',
     expiresAt: new Date(Date.now() + 730 * 24 * 60 * 60 * 1000).toISOString() // 2 years out
   }
@@ -835,8 +847,12 @@ describe('Requests page renewal sections (cert-expiry-notifications 7.3, 7.4, 7.
 
       const card = sectionCard('My certificates needing renewal')
       expect(card).toBeDefined()
-      expect(card.textContent).toContain(SELF_DEVICE_DUE.username)
-      expect(card.textContent).not.toContain(SELF_DEVICE_FINE.username)
+      // Bugfix: a self-owned device carries no `username` (the self-view's
+      // mapDevice omits it), so the row identifies the device by its stable
+      // `clientUid` -- the same way every other self-owned-device surface
+      // does -- not by a `username` that was always blank here.
+      expect(card.textContent).toContain(SELF_DEVICE_DUE.clientUid)
+      expect(card.textContent).not.toContain(SELF_DEVICE_FINE.clientUid)
     })
 
     it('renders no section at all when device management is disabled (404)', async () => {
