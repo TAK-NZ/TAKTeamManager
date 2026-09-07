@@ -451,12 +451,13 @@ function OfflineMapsTable({ groups, onDownload, onEnlarge, pendingIds }) {
                 </td>
                 <td className="py-2 pr-4 text-gray-500 dark:text-gray-400 whitespace-nowrap">
                   {/* Live S3 last-modified date; date-only precision (an annual
-                      map refresh makes the day the meaningful unit). Absent for
-                      a not-yet-uploaded object, rendered as an em dash. */}
-                  {map.available && map.lastModified ? (
+                      map refresh makes the day the meaningful unit). For a
+                      not-yet-uploaded object there is no date and the cell is
+                      left empty -- the row's Size cell already carries the
+                      "Currently unavailable" state, so a placeholder here would
+                      be redundant (and visually collided with it). */}
+                  {map.available && map.lastModified && (
                     <FormattedDate value={map.lastModified} precision={DATE_PRECISION.DATE} />
-                  ) : (
-                    '—'
                   )}
                 </td>
                 <td className="py-2 text-right">
