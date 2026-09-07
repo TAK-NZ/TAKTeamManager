@@ -12,7 +12,7 @@
  *
  * A dedicated throwaway DATABASE (via `CREATE DATABASE`), not a dedicated
  * schema inside a shared database: `pg_dump` (which produced the baseline
- * migration's DDL -- see `1789200000000_baseline-schema.cjs`'s own header
+ * migration's DDL -- see `1790200000000_baseline-schema.cjs`'s own header
  * comment) always schema-qualifies every statement
  * (`CREATE TABLE public.foo (...)`), so a `search_path` trick has no
  * effect and every run would collide with the real `public` schema

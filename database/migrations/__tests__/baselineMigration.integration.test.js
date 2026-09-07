@@ -1,7 +1,7 @@
 /**
  * Real-Postgres guards for the squashed baseline migration
  * (`database/migrations/*.cjs`, currently the single
- * `1789200000000_baseline-schema.cjs`).
+ * `1790200000000_baseline-schema.cjs`).
  *
  * =====================================================================
  * WHY THIS FILE EXISTS
@@ -9,9 +9,10 @@
  *
  * This repo periodically squashes its incremental migration chain into a
  * single new baseline file and deletes the superseded ones (most
- * recently: 17 incremental migrations folded into
- * `1789200000000_baseline-schema.cjs`, replacing an earlier squash that
- * did the same thing before it). Two prior integration tests --
+ * recently: 10 incremental migrations folded into
+ * `1790200000000_baseline-schema.cjs`, which replaced the earlier
+ * `1789200000000_baseline-schema.cjs` squash, itself replacing one
+ * before that). Two prior integration tests --
  * `server/config/migrations.originOrgId.integration.test.js` and
  * `server/config/migrations.teamTransfer.integration.test.js` -- named a
  * specific pre-squash migration file by its timestamp prefix
@@ -70,7 +71,7 @@
  * that trick relies on node-pg-migrate's `schema` option pointing
  * `search_path` at the throwaway schema so every UNQUALIFIED
  * `CREATE TABLE foo (...)` in a migration lands there instead of
- * `public`. The current baseline (`1789200000000_baseline-schema.cjs`)
+ * `public`. The current baseline (`1790200000000_baseline-schema.cjs`)
  * is a cleaned `pg_dump --schema-only` copy (see that file's own header
  * comment), and `pg_dump` always schema-qualifies every statement
  * (`CREATE TABLE public.foo (...)`, `CREATE FUNCTION public.bar() ...`)
@@ -244,7 +245,7 @@ describe('users.origin_org_id -> teams(id) foreign key is ON DELETE SET NULL', (
 
 /**
  * Every migration file's `up()` is a sequence of `pgm.sql(...)` calls
- * (see `1789200000000_baseline-schema.cjs`'s own header comment: raw SQL
+ * (see `1790200000000_baseline-schema.cjs`'s own header comment: raw SQL
  * via `pgm.sql(...)` rather than the schema-builder API, for byte-for-byte
  * `pg_dump` fidelity). Unlike the pure-DDL block(s), every SEED block in
  * this codebase's convention is written `ON CONFLICT ... DO NOTHING` (or,
@@ -281,7 +282,15 @@ function extractSeedSqlBlocks() {
     migration.up(mockPgm);
 
     for (const sql of recordedSql) {
-      if (/ON CONFLICT/i.test(sql)) {
+      // A seed block is an ON CONFLICT-guarded DATA statement. The DDL block
+      // must be excluded even though it may itself CONTAIN the phrase "ON
+      // CONFLICT" -- the baseline's cleaned pg_dump text includes a
+      // `COMMENT ON INDEX ... 'Enqueue uses ON CONFLICT DO NOTHING ...'` whose
+      // human-readable comment body trips a bare /ON CONFLICT/ match. A block
+      // that creates schema objects (CREATE TABLE/FUNCTION/SEQUENCE, ALTER
+      // TABLE) is DDL, not a re-runnable seed, so it is filtered out here.
+      const isDdl = /\bCREATE (TABLE|FUNCTION|SEQUENCE|INDEX|TRIGGER)\b|\bALTER (TABLE|SEQUENCE)\b/i.test(sql);
+      if (/ON CONFLICT/i.test(sql) && !isDdl) {
         seedBlocks.push(sql);
       }
     }

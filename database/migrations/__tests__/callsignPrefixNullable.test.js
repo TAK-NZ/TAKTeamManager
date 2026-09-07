@@ -13,7 +13,7 @@
  * exists to avoid.
  *
  * Scoped to every migration file present (currently just the single
- * squashed baseline, `1789200000000_baseline-schema.cjs`), rather than
+ * squashed baseline, `1790200000000_baseline-schema.cjs`), rather than
  * naming that file directly, so this guard keeps working unmodified
  * across a future incremental migration or a further squash -- it is
  * the RULE ("no migration ever adds NOT NULL to this column") that

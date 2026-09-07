@@ -1,70 +1,57 @@
 /**
  * Baseline (squashed) schema migration.
  *
- * This single migration reproduces the ENTIRE current database schema.
- * It replaces the previous baseline (`1786596755665_baseline-schema.cjs`)
- * plus the 17 incremental migrations that followed it: all of those have
- * been squashed into this one file now that this application has never
- * been deployed anywhere outside its own dev/test environment (per
- * `.env`/README) -- there is no production database anywhere that needs
- * to migrate forward from the old chain.
+ * This single migration reproduces the ENTIRE current database schema. It
+ * replaces the previous baseline (`1789200000000_baseline-schema.cjs`) plus
+ * the 10 incremental migrations that followed it, all squashed into this one
+ * file. This application has never been deployed anywhere outside its own
+ * dev/test environment (per `.env`/README), so there is no production
+ * database that needs to migrate forward from the old chain -- the periodic
+ * re-squash keeps the migration set a single baseline again ahead of the CDK
+ * deployment work.
  *
  * The schema DDL below is a cleaned copy of the exact output of
  *   pg_dump --schema-only --no-owner --no-privileges
- * against the current, verified-correct development database (which had
- * every one of the 17 superseded migrations already applied), with only
- * the following dump artifacts removed (none of which affect the schema
- * this migration produces):
- *   - psql meta-commands (\restrict/\unrestrict) and SET/set_config
- *     dump directives (statement_timeout, search_path, etc.);
- *   - the "-- *not* creating schema" note and COMMENT ON SCHEMA public;
- *   - the pgmigrations table, its sequence, PK, and DEFAULT -- that table
- *     is created and owned by node-pg-migrate itself.
- * Everything else (the update_updated_at_column() function, every table,
- * sequence, default, column comment, constraint, index -- including the
- * partial WHERE clauses -- trigger, and foreign key) is preserved verbatim
- * and in the same order pg_dump emitted it. Verified byte-for-byte against
- * a throwaway database: applying this migration's DDL alone reproduces
- * the exact same `pg_dump --schema-only` output (differing only in the
- * pgmigrations lines above) as the live development database it was
- * captured from.
+ * against the current, verified-correct development database (which had every
+ * one of the 10 superseded migrations already applied), with only the
+ * following dump artifacts removed (none of which affect the schema this
+ * migration produces):
+ *   - psql meta-commands (\restrict/\unrestrict) and SET/set_config dump
+ *     directives (statement_timeout, search_path, etc.);
+ *   - the "PostgreSQL database dump" banners, the "-- *not* creating schema"
+ *     note and COMMENT ON SCHEMA public;
+ *   - the pgmigrations table, its sequence, PK, and DEFAULT -- that table is
+ *     created and owned by node-pg-migrate itself.
+ * Everything else is preserved verbatim and in the same order pg_dump emitted
+ * it. Verified against a throwaway database: applying this migration's DDL
+ * reproduces the same `pg_dump --schema-only` schema as the live development
+ * database it was captured from (the only textual differences are three CHECK
+ * constraints Postgres re-renders in an equivalent array-cast form -- the
+ * allowed value sets are identical, confirmed via pg_get_constraintdef).
  *
- * As with the previous baseline, this replays raw SQL via pgm.sql(...)
- * rather than translating it into node-pg-migrate's schema-builder API,
- * to guarantee byte-for-byte fidelity with the verified schema. Every
- * schema change from this point forward should be its own incremental
- * migration rather than an edit to this file.
+ * As with the previous baseline, this replays raw SQL via pgm.sql(...) rather
+ * than translating it into node-pg-migrate's schema-builder API, to guarantee
+ * fidelity with the verified schema. Every schema change from this point
+ * forward should be its own incremental migration rather than an edit to this
+ * file.
  *
- * The schema DDL is followed by the seed-data INSERTs that previously
- * lived in the old baseline plus the superseded migrations' own seed/
- * UPDATE statements, folded into their FINAL post-migration content so
- * this single file reproduces the exact same seeded state the old chain
- * would have left behind. Each is reproduced in its own clearly-commented
- * pgm.sql block below, preserving its exact content and ON CONFLICT
- * idempotency. The TAK color/role seed preserves its original ENV-based
- * dynamic logic (it reads process.env at migration run time). NOTE: the
- * base seed rows that database/init.js inserts (sync_status,
- * escalation/verification system_config, the four base email templates,
- * and group_membership_rules) still live in init.js and run AFTER this
- * migration, exactly as before -- they are intentionally NOT duplicated
- * here. The email-template styling fixes (access_request_verification's
- * centered button, access_request_approved's removed footer) remain
- * folded directly into init.js's INSERT bodies, same as before -- this
- * migration does not touch either of those two rows.
+ * The schema DDL is followed by the seed-data INSERTs that previously lived in
+ * the old baseline plus the superseded migrations' own seed statements, folded
+ * into their FINAL post-migration content. The base seed rows database/init.js
+ * inserts (sync_status, escalation/verification system_config, base email
+ * templates, group_membership_rules) still live in init.js and run AFTER this
+ * migration -- they are intentionally NOT duplicated here.
  *
- * Superseded migrations, for the record (all 17 verified applied to, and
- * matching, the development database this baseline was captured from):
- *   device management (tak_devices + its `connected` column + its
- *     revoked-partial index), an email-nullable device invariant,
- *     pseudonymous usernames, region channel tiers/org access flags, BCH
- *     channel category, account lifecycle status, cert-expiry
- *     notifications (table + its two email templates), and five
- *     email/site-config content fixes (an access-approved footer
- *     removal, a team-transfer template restyle, a request-access
- *     rebrand, and a verification-email button centering).
- *
- * @type {import('node-pg-migrate').ColumnDefinitions | undefined}
+ * Superseded migrations (all 10 verified applied to, and matching, the
+ * development database this baseline was captured from):
+ *   team-memberships admin-not-inherited (a one-time data backfill, spent),
+ *   callsign-prefix uniqueness scoped to Organisation then to country,
+ *   widen teams.color, add teams.country_code, add teams.callsign_team_hyphenated,
+ *   sync_operations priority + rate_limit_buckets (its seed folded in below),
+ *   user_cache last_login, and the dedup partial index on pending
+ *   reconcile_owned_group ops (its one-time dedup DELETE, spent).
  */
+
 const shorthands = undefined;
 
 // ---------------------------------------------------------------------------
@@ -119,6 +106,11 @@ const toConfigKey = (envVarName) => envVarName.toLowerCase();
  * @returns {string}
  */
 const sqlStringLiteral = (value) => `'${String(value).replace(/'/g, "''")}'`;
+
+/**
+ * @param pgm {import('node-pg-migrate').MigrationBuilder}
+ * @returns {Promise<void> | void}
+ */
 
 /**
  * @param pgm {import('node-pg-migrate').MigrationBuilder}
@@ -609,6 +601,25 @@ CREATE SEQUENCE public.org_interest_requests_id_seq
 --
 
 ALTER SEQUENCE public.org_interest_requests_id_seq OWNED BY public.org_interest_requests.id;
+
+--
+-- Name: rate_limit_buckets; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.rate_limit_buckets (
+    bucket_key character varying(50) NOT NULL,
+    tokens double precision NOT NULL,
+    capacity double precision NOT NULL,
+    refill_per_sec double precision NOT NULL,
+    last_refill_at timestamp without time zone DEFAULT now() NOT NULL
+);
+
+--
+-- Name: TABLE rate_limit_buckets; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.rate_limit_buckets IS 'Shared cross-process token buckets throttling Authentik API calls. One row per lane (read/write/write_priority). Refill-and-consume is a single atomic UPDATE (see server/services/authentikRateLimiter.js). capacity/refill_per_sec are rewritten from the configured ceilings on each acquire so a config change needs no migration.';
+
 --
 -- Name: region_channels; Type: TABLE; Schema: public; Owner: -
 --
@@ -732,7 +743,8 @@ CREATE TABLE public.sync_operations (
     completed_at timestamp without time zone,
     created_by integer,
     correlation_id uuid,
-    failure_category text
+    failure_category text,
+    priority integer DEFAULT 100 NOT NULL
 );
 
 --
@@ -740,6 +752,12 @@ CREATE TABLE public.sync_operations (
 --
 
 COMMENT ON COLUMN public.sync_operations.operation_type IS 'Operation type discriminator, e.g. ''add_user_to_group'', ''remove_user_from_group'', ''create_group'', ''revoke_tak_certificates'' (Requirement 26.6). No CHECK constraint: see server/workers/operationSchemas.js for the authoritative, application-enforced set of valid values.';
+
+--
+-- Name: COLUMN sync_operations.priority; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.sync_operations.priority IS 'Claim priority for the Sync_Worker: LOWER number = HIGHER priority, drained via ORDER BY priority ASC, created_at ASC. 100 = normal (default, every existing row); urgent mutations (delete/suspend/revoke/cleanup) are enqueued lower so they pre-empt bulk background work. See server/services/EventPublisher.js for the op-type -> priority mapping and .kiro/steering/authentik-scaling.md.';
 
 --
 -- Name: sync_operations_id_seq; Type: SEQUENCE; Schema: public; Owner: -
@@ -879,7 +897,8 @@ CREATE TABLE public.team_memberships (
     team_id integer,
     role character varying(20) DEFAULT 'member'::character varying,
     created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
-    inherited_from_team_id integer
+    inherited_from_team_id integer,
+    CONSTRAINT team_memberships_admin_not_inherited CHECK ((NOT (((role)::text = 'admin'::text) AND (inherited_from_team_id IS NOT NULL))))
 );
 
 --
@@ -909,7 +928,7 @@ CREATE TABLE public.teams (
     name character varying(255) NOT NULL,
     description text,
     callsign_prefix character varying(255),
-    color character varying(7) DEFAULT '#3B82F6'::character varying,
+    color character varying(50) DEFAULT '#3B82F6'::character varying,
     visibility character varying(20) DEFAULT 'private'::character varying,
     can_join boolean DEFAULT false,
     parent_team_id integer,
@@ -920,7 +939,9 @@ CREATE TABLE public.teams (
     callsign_level_selection integer[],
     pseudonymous_usernames boolean,
     response_channel_access boolean,
-    support_channel_access boolean
+    support_channel_access boolean,
+    country_code character varying(3),
+    callsign_team_hyphenated boolean
 );
 
 --
@@ -940,6 +961,18 @@ COMMENT ON COLUMN public.teams.response_channel_access IS 'Organisation-level on
 --
 
 COMMENT ON COLUMN public.teams.support_channel_access IS 'Organisation-level only, exactly as response_channel_access is (see that column''s comment for the tri-state rationale). NULL on a Sub_Team; false or true on an Organisation. Resolved via Team.getAncestorChain(teamId)[0]. Whether members of this Organisation (and its Sub_Teams) are synced into support-tier region channels. Defaults to true at Organisation creation (application-supplied) -- the outer/support tier is the all-agency default, opposite of response_channel_access. Mutable thereafter.';
+
+--
+-- Name: COLUMN teams.country_code; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.teams.country_code IS 'ISO 3166-1 alpha-3 code of a Foreign_Partner Organisation (e.g. AUS, FJI), composed as the leading segment of the Organisation''s effective callsign prefix. NULL for a domestic (NZ) Organisation and always NULL on a Sub_Team. Organisation-only and write-once, enforced in Team.create/Team.update.';
+
+--
+-- Name: COLUMN teams.callsign_team_hyphenated; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.teams.callsign_team_hyphenated IS 'Whether this Organisation''s callsign Team segment (its selected Team-Depth prefixes) is joined with a hyphen between each present level (true) or concatenated with no separator (false/NULL, the pre-existing default). NULL on a Sub_Team, always. Organisation-only, freely editable at any time, enforced in Team.create/Team.update.';
 
 --
 -- Name: teams_id_seq; Type: SEQUENCE; Schema: public; Owner: -
@@ -991,8 +1024,15 @@ CREATE TABLE public.user_cache (
     is_team_device boolean DEFAULT false NOT NULL,
     device_label text,
     callsign_suffix character varying(255),
+    last_login timestamp without time zone,
     CONSTRAINT user_cache_email_required_unless_device CHECK (((email IS NOT NULL) OR (is_team_device = true)))
 );
+
+--
+-- Name: COLUMN user_cache.last_login; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.user_cache.last_login IS 'Cached mirror of Authentik''s last_login for this user, refreshed every periodic sync (authentikSync.js). NULL means never logged in (or not yet synced). Not locally authoritative and not write-once -- overwritten each sync from EXCLUDED.last_login.';
 
 --
 -- Name: user_cache_id_seq; Type: SEQUENCE; Schema: public; Owner: -
@@ -1150,6 +1190,7 @@ ALTER TABLE ONLY public.org_allowed_domains ALTER COLUMN id SET DEFAULT nextval(
 --
 
 ALTER TABLE ONLY public.org_interest_requests ALTER COLUMN id SET DEFAULT nextval('public.org_interest_requests_id_seq'::regclass);
+
 --
 -- Name: region_channels id; Type: DEFAULT; Schema: public; Owner: -
 --
@@ -1349,6 +1390,14 @@ ALTER TABLE ONLY public.org_allowed_domains
 
 ALTER TABLE ONLY public.org_interest_requests
     ADD CONSTRAINT org_interest_requests_pkey PRIMARY KEY (id);
+
+--
+-- Name: rate_limit_buckets rate_limit_buckets_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.rate_limit_buckets
+    ADD CONSTRAINT rate_limit_buckets_pkey PRIMARY KEY (bucket_key);
+
 --
 -- Name: region_channels region_channels_name_tier_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
@@ -1615,6 +1664,24 @@ CREATE INDEX idx_site_config_key ON public.site_config USING btree (config_key);
 CREATE INDEX idx_sync_operations_next_retry ON public.sync_operations USING btree (next_retry_at) WHERE ((status)::text = 'pending'::text);
 
 --
+-- Name: idx_sync_operations_pending_reconcile_dedup; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_sync_operations_pending_reconcile_dedup ON public.sync_operations USING btree (operation_type, payload) WHERE (((status)::text = 'pending'::text) AND ((operation_type)::text = 'reconcile_owned_group'::text));
+
+--
+-- Name: INDEX idx_sync_operations_pending_reconcile_dedup; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON INDEX public.idx_sync_operations_pending_reconcile_dedup IS 'Coalesces duplicate PENDING reconcile_owned_group ops: at most one pending reconcile per distinct (operation_type, payload=group identity). Enqueue uses ON CONFLICT DO NOTHING against this index (EventPublisher.publishReconcileOwnedGroup). Reconcile ops write the full desired set at drain time, so one pending op suffices for any number of coalesced changes. Deliberately NOT applied to other op types (not idempotent) and NOT to processing rows (a claimed op already snapshotted its set).';
+
+--
+-- Name: idx_sync_operations_priority_claim; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_sync_operations_priority_claim ON public.sync_operations USING btree (priority, created_at) WHERE ((status)::text = 'pending'::text);
+
+--
 -- Name: idx_sync_operations_status; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1666,7 +1733,7 @@ CREATE INDEX idx_team_memberships_user ON public.team_memberships USING btree (u
 -- Name: idx_teams_callsign_prefix; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE UNIQUE INDEX idx_teams_callsign_prefix ON public.teams USING btree (callsign_prefix) WHERE (callsign_prefix IS NOT NULL);
+CREATE UNIQUE INDEX idx_teams_callsign_prefix ON public.teams USING btree (country_code, callsign_prefix) NULLS NOT DISTINCT WHERE ((callsign_prefix IS NOT NULL) AND (parent_team_id IS NULL));
 
 --
 -- Name: idx_teams_parent; Type: INDEX; Schema: public; Owner: -
@@ -2139,18 +2206,26 @@ If a listed device is no longer needed, please revoke its certificate instead of
   // intentionally NOT here. Their final content has been folded into
   // database/init.js's INSERTs, which run after this migration. See file
   // header.
+
+  // -------------------------------------------------------------------------
+  // 8. Seed: rate_limit_buckets rows (folded from the former
+  //    1789900000000_add-sync-operations-priority-and-rate-limit-buckets
+  //    migration). This table is NOT seeded by database/init.js, so these
+  //    rows must be created here or the Authentik write rate limiter starts
+  //    with no buckets. Seeded at their ORIGINAL capacities (the live
+  //    `tokens`/`capacity` values drift at runtime as the worker consumes
+  //    and refills them; the seed is the initial state, ON CONFLICT DO
+  //    NOTHING so an existing bucket is never reset).
+  // -------------------------------------------------------------------------
+  pgm.sql(`
+    INSERT INTO rate_limit_buckets (bucket_key, tokens, capacity, refill_per_sec) VALUES
+      ('read', 5, 5, 5),
+      ('write', 3, 3, 3),
+      ('write_priority', 2, 2, 2)
+    ON CONFLICT (bucket_key) DO NOTHING;
+  `);
 };
 
-/**
- * Baseline teardown. Drops every object created by up(), in an order that
- * respects foreign keys. Triggers are dropped first, then all tables with
- * CASCADE (which also drops their sequences, constraints, indexes, and FKs),
- * then the shared trigger function. CASCADE + IF EXISTS keeps this simple and
- * order-robust.
- *
- * @param pgm {import('node-pg-migrate').MigrationBuilder}
- * @returns {Promise<void> | void}
- */
 const down = (pgm) => {
   pgm.sql(`
 DROP TRIGGER IF EXISTS update_admin_notification_preferences_updated_at ON public.admin_notification_preferences;
@@ -2175,6 +2250,7 @@ DROP TABLE IF EXISTS public.email_templates CASCADE;
 DROP TABLE IF EXISTS public.group_membership_rules CASCADE;
 DROP TABLE IF EXISTS public.org_allowed_domains CASCADE;
 DROP TABLE IF EXISTS public.org_interest_requests CASCADE;
+DROP TABLE IF EXISTS public.rate_limit_buckets CASCADE;
 DROP TABLE IF EXISTS public.region_channels CASCADE;
 DROP TABLE IF EXISTS public.signup_codes CASCADE;
 DROP TABLE IF EXISTS public.site_config CASCADE;

@@ -1,6 +1,8 @@
 /**
- * Real-Postgres regression guard for the bugfix in
- * `1789800000000_scope-callsign-prefix-uniqueness-to-country.cjs`.
+ * Real-Postgres regression guard for the country-scoping of
+ * `idx_teams_callsign_prefix` (the rule originally introduced by the
+ * since-squashed `scope-callsign-prefix-uniqueness-to-country` migration,
+ * now folded into the current baseline `1790200000000_baseline-schema.cjs`).
  *
  * `idx_teams_callsign_prefix` protects the Organisation-prefix SEGMENT
  * (`teams.callsign_prefix`) fed into `ManagedIdentifierService`, not the

@@ -32,7 +32,7 @@
  * every unqualified `CREATE TABLE`/`CREATE FUNCTION`/etc. would land
  * there instead of `public`. That stopped working once the migration
  * chain was squashed into a single baseline file
- * (`database/migrations/1789200000000_baseline-schema.cjs`): the
+ * (`database/migrations/1790200000000_baseline-schema.cjs`): the
  * baseline's DDL is a cleaned `pg_dump --schema-only` copy (see that
  * file's own header comment), and `pg_dump` always schema-qualifies
  * every statement (`CREATE TABLE public.foo (...)`), so `search_path`
@@ -358,6 +358,23 @@ function extractCteNamesAndLocalAliases(text) {
   let derivedMatch;
   while ((derivedMatch = derivedAliasRegex.exec(text)) !== null) {
     localAliases.add(derivedMatch[1].toLowerCase());
+  }
+
+  // Subquery / derived-table aliases written WITHOUT the "AS" keyword, i.e.
+  // "( <subquery> ) <alias>" (Postgres allows omitting AS). Every column
+  // then referenced as "<alias>.<something>" is produced by that subquery,
+  // not a real table -- e.g. OwnedGroupReconciler's region query ends its
+  // "JOIN LATERAL ( ... SELECT ... AS flag ... ) org ON true" and later reads
+  // "COALESCE(org.flag, false)", so "org" is a local alias and "org.flag"
+  // must not be misread as a missing "flag" column. Matched as a close-paren
+  // followed by a short identifier that is not a SQL keyword.
+  const subqueryAliasRegex = /\)\s+([a-zA-Z_][a-zA-Z0-9_]*)\b/gi;
+  let subAliasMatch;
+  while ((subAliasMatch = subqueryAliasRegex.exec(text)) !== null) {
+    const candidate = subAliasMatch[1].toLowerCase();
+    if (!SQL_KEYWORD_STOPLIST.has(candidate)) {
+      localAliases.add(candidate);
+    }
   }
 
   return { cteNames, localAliases };

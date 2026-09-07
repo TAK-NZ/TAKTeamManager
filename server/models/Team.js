@@ -257,7 +257,7 @@ class OrganisationCountryCodeImmutableError extends Error {
  *
  * Bugfix (Foreign_Partner Organisation country prefix): the index is
  * further scoped to `(country_code, callsign_prefix)` with `NULLS NOT
- * DISTINCT` (`1789800000000_scope-callsign-prefix-uniqueness-to-country.cjs`),
+ * DISTINCT` (now part of the squashed baseline schema),
  * since the column this protects is the Organisation-prefix SEGMENT, not
  * the effective composed prefix -- two Foreign_Partner Organisations
  * with the same `callsign_prefix` under DIFFERENT `country_code` values
