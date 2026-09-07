@@ -1,0 +1,11 @@
+{
+  "testEnvironment": "node",
+  "roots": ["<rootDir>/test"],
+  "testMatch": ["**/*.test.ts"],
+  "transform": {
+    "^.+\\.ts$": ["@swc/jest"]
+  },
+  "coverageReporters": ["text"],
+  "collectCoverageFrom": ["lib/**/*.ts", "!lib/**/*.d.ts"],
+  "moduleFileExtensions": ["ts", "tsx", "js", "jsx", "json", "node"]
+}

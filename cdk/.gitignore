@@ -1,0 +1,19 @@
+# CDK / build artifacts
+node_modules
+cdk.out
+*.js
+*.d.ts
+!jest.config.js
+# keep the OIDC-setup Lambda's own JS (it is source, not a build artifact)
+!src/oidc-setup/*.js
+
+# Local CDK context cache (account-specific lookups)
+cdk.context.json
+
+# Part-2 S3 EnvironmentFile populated with REAL secrets — never commit.
+tak-team-manager-config.env
+.env
+.env.*
+
+# Logs
+*.log
