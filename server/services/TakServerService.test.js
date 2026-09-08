@@ -637,6 +637,70 @@ describe('TakServerService.setAgentOptions', () => {
   });
 });
 
+/*
+ * The servername is a property of the SERVER we dial, not of the credential.
+ * The Admin_Credential_Loader's secrets-manager path returns only the
+ * credential (`{ cert, key, ca }`) with no servername, so `setAgentOptions`
+ * (the single agent-construction chokepoint) must re-apply the configured
+ * TAK_SERVER_TLS_SERVERNAME on every build/rotation -- otherwise TAK Server's
+ * CN=takserver / DNS:takserver certificate fails the hostname identity check
+ * (ERR_TLS_CERT_ALTNAME_INVALID) against the dialed load-balancer host.
+ */
+describe('TakServerService.setAgentOptions preserves the configured TLS servername', () => {
+  const NEW_CERT = Buffer.from('rotated-cert');
+  const NEW_KEY = Buffer.from('rotated-key');
+  const ENV_WITH_SERVERNAME = { ...TEST_ENV, TAK_SERVER_TLS_SERVERNAME: 'takserver' };
+
+  it('applies TAK_SERVER_TLS_SERVERNAME even when the options carry none (loader path)', () => {
+    const service = new TakServerService(ENV_WITH_SERVERNAME);
+
+    // Simulate the loader's secrets-manager result: credential only, no servername.
+    const newAgent = service.setAgentOptions({ cert: NEW_CERT, key: NEW_KEY });
+
+    expect(newAgent.options.servername).toBe('takserver');
+    expect(service.agentOptions).toEqual({
+      cert: NEW_CERT,
+      key: NEW_KEY,
+      servername: 'takserver',
+      family: 4
+    });
+  });
+
+  it('lets options-supplied servername win over the configured one', () => {
+    const service = new TakServerService(ENV_WITH_SERVERNAME);
+
+    const newAgent = service.setAgentOptions({
+      cert: NEW_CERT,
+      key: NEW_KEY,
+      servername: 'explicit-override'
+    });
+
+    expect(newAgent.options.servername).toBe('explicit-override');
+  });
+
+  it.each([
+    ['unset', {}],
+    ['empty', { TAK_SERVER_TLS_SERVERNAME: '' }],
+    ['whitespace-only', { TAK_SERVER_TLS_SERVERNAME: '   ' }]
+  ])('adds no servername when TAK_SERVER_TLS_SERVERNAME is %s and options carry none', (_label, envServername) => {
+    const service = new TakServerService({ ...TEST_ENV, ...envServername });
+
+    const newAgent = service.setAgentOptions({ cert: NEW_CERT, key: NEW_KEY });
+
+    expect(newAgent.options).not.toHaveProperty('servername');
+  });
+
+  it('survives a refreshAgent from a loader whose material omits servername', () => {
+    const loaded = { cert: Buffer.from('loader-cert'), key: Buffer.from('loader-key') };
+    const credentialLoader = { getAgentOptions: () => loaded };
+    const service = new TakServerService(ENV_WITH_SERVERNAME, { credentialLoader });
+
+    const newAgent = service.refreshAgent();
+
+    expect(newAgent.options.servername).toBe('takserver');
+  });
+});
+
 describe('TakServerService.refreshAgent', () => {
   it('rebuilds the agent from the attached credential loader current material', () => {
     const loaded = { cert: Buffer.from('loader-cert'), key: Buffer.from('loader-key') };

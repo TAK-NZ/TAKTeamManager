@@ -187,7 +187,27 @@ class TakServerService {
     // `family: 4` (server/config/database.js). Merged in here (the single
     // agent-construction chokepoint used by both the initial build and every
     // credential refresh) so it survives credential rotation.
-    const agentOptions = { ...options, family: 4 };
+    // Preserve the configured TLS `servername` (Requirement 10.4) across every
+    // credential source and rotation. TAK Server presents a certificate
+    // carrying only its internal name (`CN=takserver` / `DNS:takserver`), never
+    // the load-balancer host we dial, so without pinning the identity check to
+    // that name every Marti call fails with `ERR_TLS_CERT_ALTNAME_INVALID`.
+    // `buildMutualTlsAgentOptions` sets it from `TAK_SERVER_TLS_SERVERNAME`, but
+    // the Admin_Credential_Loader's secrets-manager path returns only
+    // `{ cert, key, ca }` (the credential, not server-trust config) -- so like
+    // `family: 4`, `servername` is a server-level concern that belongs at this
+    // single agent-construction chokepoint, applied unless the incoming options
+    // already carry their own. It narrows WHICH name is verified, not WHETHER;
+    // `rejectUnauthorized` remains untouched.
+    const configuredServername = this.env && this.env.TAK_SERVER_TLS_SERVERNAME;
+    const servernameOption =
+      typeof options.servername === 'string' && options.servername.length > 0
+        ? { servername: options.servername }
+        : typeof configuredServername === 'string' && configuredServername.trim().length > 0
+          ? { servername: configuredServername }
+          : {};
+
+    const agentOptions = { ...options, ...servernameOption, family: 4 };
     const httpsAgent = new https.Agent(agentOptions);
 
     this.agentOptions = agentOptions;
