@@ -204,3 +204,44 @@ describe('sync worker service (separate ECS service, no ALB)', () => {
     expect(prodServices.every((c) => c === 2)).toBe(true);
   });
 });
+
+describe('TAK Server TLS identity wiring (device management)', () => {
+  // Returns [{ Name, Value }] Environment for every container across both task
+  // defs (app + worker), so a single assertion can cover both services.
+  function allContainerEnvs(extraContext: Record<string, unknown>) {
+    const { template } = synthTemplate('dev-test', extraContext);
+    const taskDefs = template.findResources('AWS::ECS::TaskDefinition');
+    const containers = Object.values(taskDefs).flatMap(
+      (d) => (d as { Properties: { ContainerDefinitions: Array<Record<string, unknown>> } }).Properties.ContainerDefinitions
+    );
+    return containers.map(
+      (c) => ((c as { Environment?: Array<{ Name: string; Value: string }> }).Environment || [])
+    );
+  }
+
+  it('wires TAK_SERVER_TLS_SERVERNAME=takserver on BOTH app and worker when device management is on', () => {
+    // TAK Server presents CN=takserver / DNS:takserver only, never the dialed
+    // host; without pinning the servername every Marti call fails identity
+    // verification (ERR_TLS_CERT_ALTNAME_INVALID). Both the app and the worker
+    // dial Marti, so both must carry it.
+    const envs = allContainerEnvs({ deviceManagementEnabled: 'true' });
+
+    // Anti-vacuity: at least the two service containers with a TAK_SERVER_URL.
+    const takContainers = envs.filter((env) => env.some((e) => e.Name === 'TAK_SERVER_URL'));
+    expect(takContainers.length).toBe(2);
+
+    for (const env of takContainers) {
+      const servername = env.find((e) => e.Name === 'TAK_SERVER_TLS_SERVERNAME');
+      expect(servername).toBeDefined();
+      expect(servername!.Value).toBe('takserver');
+    }
+  });
+
+  it('does NOT wire TAK_SERVER_TLS_SERVERNAME when device management is off', () => {
+    const envs = allContainerEnvs({ deviceManagementEnabled: 'false' });
+    for (const env of envs) {
+      expect(env.some((e) => e.Name === 'TAK_SERVER_TLS_SERVERNAME')).toBe(false);
+      expect(env.some((e) => e.Name === 'TAK_SERVER_URL')).toBe(false);
+    }
+  });
+});

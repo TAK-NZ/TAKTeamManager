@@ -12,7 +12,7 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as path from 'path';
 import { ContextEnvironmentConfig } from '../stack-config';
-import { APP_CONSTANTS, DATABASE_CONSTANTS } from '../utils/constants';
+import { APP_CONSTANTS, DATABASE_CONSTANTS, TAK_SERVER_CONSTANTS } from '../utils/constants';
 
 export interface AppServiceProps {
   envConfig: ContextEnvironmentConfig;
@@ -200,7 +200,13 @@ export class AppService extends Construct {
 
     // Device management (TAK Server): only wire when enabled.
     if (props.deviceManagementEnabled) {
-      if (props.takServerUrl) environment.TAK_SERVER_URL = props.takServerUrl;
+      if (props.takServerUrl) {
+        environment.TAK_SERVER_URL = props.takServerUrl;
+        // TAK Server's certificate carries only CN=takserver / DNS:takserver,
+        // never the dialed load-balancer host, so pin the TLS identity check to
+        // that name (narrows which name is verified, not whether).
+        environment.TAK_SERVER_TLS_SERVERNAME = TAK_SERVER_CONSTANTS.TLS_SERVERNAME;
+      }
       if (props.takCertEnrollmentUrl) environment.TAK_SERVER_ENROLLMENT_URL = props.takCertEnrollmentUrl;
       if (props.takAdminCertSecret) {
         environment.TAK_ADMIN_CERT_SOURCE = 'secrets-manager';

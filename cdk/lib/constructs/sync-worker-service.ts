@@ -10,7 +10,7 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { ContextEnvironmentConfig } from '../stack-config';
-import { DATABASE_CONSTANTS } from '../utils/constants';
+import { DATABASE_CONSTANTS, TAK_SERVER_CONSTANTS } from '../utils/constants';
 
 /**
  * The Sync_Worker's own health server listens here (see
@@ -222,7 +222,13 @@ export class SyncWorkerService extends Construct {
     // revoke_tak_certificates and runs the device-mgmt jobs, so it needs the
     // TAK Server config + admin credential exactly like the app.
     if (props.deviceManagementEnabled) {
-      if (props.takServerUrl) environment.TAK_SERVER_URL = props.takServerUrl;
+      if (props.takServerUrl) {
+        environment.TAK_SERVER_URL = props.takServerUrl;
+        // TAK Server's certificate carries only CN=takserver / DNS:takserver,
+        // never the dialed load-balancer host, so pin the TLS identity check to
+        // that name (narrows which name is verified, not whether).
+        environment.TAK_SERVER_TLS_SERVERNAME = TAK_SERVER_CONSTANTS.TLS_SERVERNAME;
+      }
       if (props.takCertEnrollmentUrl) environment.TAK_SERVER_ENROLLMENT_URL = props.takCertEnrollmentUrl;
       if (props.takAdminCertSecret) {
         environment.TAK_ADMIN_CERT_SOURCE = 'secrets-manager';

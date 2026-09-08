@@ -25,6 +25,22 @@ export const APP_CONSTANTS = {
   HEALTH_CHECK_PATH: '/health'
 } as const;
 
+/** TAK Server (Marti API) integration constants. */
+export const TAK_SERVER_CONSTANTS = {
+  /**
+   * The name TAK Server's own TLS certificate carries. A stock TAK Server
+   * presents `CN=takserver` with a single `DNS:takserver` SAN, which never
+   * matches the load-balancer host we dial (e.g. `tak.test.tak.nz`), so Node's
+   * default identity check fails with `ERR_TLS_CERT_ALTNAME_INVALID` on every
+   * Marti call. Setting this as `TAK_SERVER_TLS_SERVERNAME` points the identity
+   * check at the name the certificate actually carries. It narrows WHICH name
+   * is verified, not WHETHER — the chain is still verified (see
+   * `buildMutualTlsAgentOptions` in `server/services/TakServerService.js` and
+   * `.env.example`). `rejectUnauthorized` is never disabled.
+   */
+  TLS_SERVERNAME: 'takserver'
+} as const;
+
 /** Authentik OIDC application identity for this app. */
 export const OIDC_CONSTANTS = {
   APPLICATION_NAME: 'Team Manager',
