@@ -28,6 +28,7 @@ import { LoadBalancer } from './constructs/load-balancer';
 import { Route53 } from './constructs/route53';
 import { OidcSetup } from './constructs/oidc-setup';
 import { AppService } from './constructs/app-service';
+import { SyncWorkerService } from './constructs/sync-worker-service';
 import { registerOutputs } from './outputs';
 
 export interface TakTeamManagerStackProps extends cdk.StackProps {
@@ -256,13 +257,49 @@ export class TakTeamManagerStack extends cdk.Stack {
     // only reference `appService` here to make the dependency explicit.
     void appService;
 
+    // The Sync_Worker: a SEPARATE ECS service (matching auth-infra's own
+    // worker/server split) running `node server/workers/syncWorker.js`, which
+    // drains the `sync_operations` queue and runs the periodic jobs. Without
+    // it, the /admin heartbeat reads "not responding" and queued operations
+    // (channel sync, group membership writes, revocations, ...) never apply.
+    // Reuses the app's shared inputs (image, cluster, SG, KMS, DB, secrets,
+    // Part-2 config); half the app's CPU/memory; desiredCount mirrors the app.
+    const syncWorkerService = new SyncWorkerService(this, 'SyncWorkerService', {
+      envConfig,
+      removalPolicy,
+      cluster,
+      ecsSecurityGroup: securityGroups.ecs,
+      kmsKey,
+      appUrl,
+      dbHostname: database.hostname,
+      dbMasterSecret: database.masterSecret,
+      jwtSecret: appSecrets.jwtSecret,
+      credentialEncryptionKey: appSecrets.credentialEncryptionKey,
+      authentikUrl,
+      authentikTeamManagerTokenSecret,
+      oidcClientSecret: oidc.clientSecret,
+      deviceManagementEnabled: envConfig.app.deviceManagementEnabled,
+      authentikAdminTokenSecret: envConfig.app.deviceManagementEnabled ? authentikAdminTokenSecret : undefined,
+      takServerUrl,
+      takCertEnrollmentUrl,
+      takAdminCertSecret,
+      offlineMapsEnabled: envConfig.app.offlineMapsEnabled,
+      mapDownloadsBucket,
+      envConfigBucket,
+      useS3ConfigFile,
+      dockerImageAsset,
+      ecrRepository,
+      imageTag: this.node.tryGetContext('imageTag')
+    });
+
     registerOutputs({
       stack: this,
       stackName: id,
       serviceUrl: appUrl,
       albDnsName: loadBalancer.alb.loadBalancerDnsName,
       databaseEndpoint: database.hostname,
-      oidcClientId: oidc.clientId
+      oidcClientId: oidc.clientId,
+      syncWorkerServiceName: syncWorkerService.service.serviceName
     });
   }
 }

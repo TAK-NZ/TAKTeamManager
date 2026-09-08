@@ -7,6 +7,7 @@ export interface OutputParams {
   albDnsName: string;
   databaseEndpoint: string;
   oidcClientId: string;
+  syncWorkerServiceName: string;
 }
 
 /**
@@ -38,5 +39,11 @@ export function registerOutputs(params: OutputParams): void {
     value: params.oidcClientId,
     description: 'Authentik OIDC client ID for TAK Team Manager',
     exportName: `${stackName}-OidcClientId`
+  });
+
+  new cdk.CfnOutput(stack, 'SyncWorkerServiceNameOutput', {
+    value: params.syncWorkerServiceName,
+    description: 'ECS service name of the TAK Team Manager sync worker',
+    exportName: `${stackName}-SyncWorkerServiceName`
   });
 }
