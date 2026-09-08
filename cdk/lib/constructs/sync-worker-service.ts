@@ -227,6 +227,13 @@ export class SyncWorkerService extends Construct {
       if (props.takAdminCertSecret) {
         environment.TAK_ADMIN_CERT_SOURCE = 'secrets-manager';
         environment.TAK_ADMIN_CERT_SECRET_ARN = props.takAdminCertSecret.secretArn;
+        // Same as the app: AdminCredentialLoader only reads the binary P12 from
+        // Secrets Manager when SECRETS_PROVIDER=aws-secrets-manager; unset, it
+        // falls back to the env provider and fails ("binary secret ... missing
+        // or empty in process.env"). The worker is the process that actually
+        // uses the admin credential (revoke + device-mgmt jobs), so it needs
+        // this set.
+        environment.SECRETS_PROVIDER = 'aws-secrets-manager';
         props.takAdminCertSecret.grantRead(taskRole);
       }
       if (props.authentikAdminTokenSecret) {
@@ -262,12 +269,14 @@ export class SyncWorkerService extends Construct {
         ? [ecs.EnvironmentFile.fromBucket(props.envConfigBucket, 'tak-team-manager-config.env')]
         : undefined,
       // Container-level health check against the worker's OWN heartbeat health
-      // server (SYNC_WORKER_HEALTH_PORT). There is no ALB target-group check
-      // for the worker, so this is what lets ECS restart a wedged worker whose
-      // poll loop has stopped writing its heartbeat. Uses BusyBox wget (the
-      // image ships no curl); a non-2xx (503 stale/unhealthy) exits non-zero.
-      // startPeriod is generous because the entrypoint runs migrations before
-      // the worker's health server binds.
+      // server (SYNC_WORKER_HEALTH_PORT). No ALB target-group check exists for
+      // the worker, so this is what lets ECS restart a wedged worker whose poll
+      // loop has stopped writing its heartbeat. Uses BusyBox wget (no curl in
+      // the image); the health server returns 503 (non-2xx -> wget exits
+      // non-zero -> unhealthy) until the poll loop has written a fresh
+      // heartbeat, so startPeriod is generous: the entrypoint runs migrations
+      // before the worker binds, then the first poll cycle writes the first
+      // heartbeat.
       healthCheck: {
         command: [
           'CMD-SHELL',

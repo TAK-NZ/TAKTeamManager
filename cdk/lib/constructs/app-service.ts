@@ -169,6 +169,15 @@ export class AppService extends Construct {
       DB_PORT: String(DATABASE_CONSTANTS.PORT),
       DB_NAME: DATABASE_CONSTANTS.DEFAULT_DATABASE_NAME,
       DB_USER: DATABASE_CONSTANTS.USERNAME,
+      // Aurora presents an Amazon RDS root CA that is NOT in Node's default
+      // trust store, so the app (which keeps rejectUnauthorized:true in prod)
+      // needs the RDS CA bundle to verify it — otherwise every DB connection
+      // fails with UNABLE_TO_GET_ISSUER_CERT_LOCALLY. The bundle is baked into
+      // the image at this path by the Dockerfile; set DB_CA_PATH here in Part-1
+      // (container `environment`, which takes precedence over the Part-2
+      // EnvironmentFile) so a stray/empty DB_CA_PATH in the ops config file
+      // cannot silently unset it and re-break DB connectivity.
+      DB_CA_PATH: '/app/rds-global-bundle.pem',
       // Offline-maps presign region + TTL (bucket name added below if enabled).
       OFFLINE_MAPS_S3_REGION: region,
       OFFLINE_MAPS_URL_TTL_SECONDS: '300'
@@ -196,6 +205,14 @@ export class AppService extends Construct {
       if (props.takAdminCertSecret) {
         environment.TAK_ADMIN_CERT_SOURCE = 'secrets-manager';
         environment.TAK_ADMIN_CERT_SECRET_ARN = props.takAdminCertSecret.secretArn;
+        // AdminCredentialLoader reads that binary P12 through the app's
+        // SecretsProvider, which is the AWS Secrets Manager provider ONLY when
+        // SECRETS_PROVIDER=aws-secrets-manager; unset, it falls back to the env
+        // provider and fails with "binary secret ... is missing or empty in
+        // process.env". Set it here so the admin credential is actually
+        // fetched from Secrets Manager via the SDK (using the taskRole grant
+        // below), not looked for in an env var.
+        environment.SECRETS_PROVIDER = 'aws-secrets-manager';
         // The app reads this secret itself via the AWS SDK (not an ECS secret,
         // since it is a binary P12 the app fetches at runtime).
         props.takAdminCertSecret.grantRead(taskRole);
@@ -254,6 +271,13 @@ export class AppService extends Construct {
       enableExecuteCommand: envConfig.ecs.enableEcsExec,
       minHealthyPercent: 100,
       maxHealthyPercent: 200,
+      // The container runs DB migrations + seed (docker-entrypoint.sh) before
+      // it starts listening on the container port, so a fresh task is not
+      // reachable for a while on first boot. Give the ALB target-group health
+      // check a grace period so it does not deregister/kill the task mid-
+      // migration and thrash the deploy. 5 min comfortably covers the baseline
+      // migration on a fresh Aurora.
+      healthCheckGracePeriod: cdk.Duration.minutes(5),
       circuitBreaker: { rollback: true }
     });
 

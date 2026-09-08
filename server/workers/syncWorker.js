@@ -407,6 +407,24 @@ async function checkSyncWorkerHeartbeatHealth(pool) {
   };
 }
 
+// Resolve the worker pool's `ssl` option, mirroring
+// server/config/database.js's resolveSslOption EXACTLY (the worker owns a
+// separate pool, so the logic must be duplicated, not diverge): off outside
+// production; in production verify against DB_CA_PATH's CA bundle when set,
+// else Node's default trust store with rejectUnauthorized:true. Aurora
+// requires SSL, so a production worker with `ssl:false`/absent is rejected
+// with `no pg_hba.conf entry ... no encryption`.
+function resolveWorkerDbSsl() {
+  if (process.env.NODE_ENV !== 'production') {
+    return false;
+  }
+  const caPath = process.env.DB_CA_PATH;
+  if (typeof caPath === 'string' && caPath.trim().length > 0) {
+    return { rejectUnauthorized: true, ca: require('fs').readFileSync(caPath) };
+  }
+  return { rejectUnauthorized: true };
+}
+
 class SyncWorker {
   constructor() {
     this.isRunning = false;
@@ -448,6 +466,19 @@ class SyncWorker {
       database: process.env.DB_NAME || 'tak_team_manager',
       user: process.env.DB_USER || 'postgres',
       password: process.env.DB_PASSWORD || 'postgres',
+      // The worker owns its OWN pool (separate from server/config/database.js),
+      // so it must replicate that pool's SSL + IPv4 handling or it cannot reach
+      // Aurora in production. TWO issues this fixes, both observed live:
+      //   1. SSL: this pool previously set no `ssl`, so it connected in
+      //      plaintext; Aurora's pg_hba requires SSL and rejected it with
+      //      `... no encryption`. Mirror database.js's resolveSslOption:
+      //      verify against DB_CA_PATH's bundle in production, off otherwise.
+      //   2. IPv4: the Aurora endpoint is dual-stack (A + AAAA), but its
+      //      pg_hba only permits the VPC IPv4 CIDR; Node can resolve the AAAA
+      //      first and get `no pg_hba.conf entry for host "<ipv6>"`. Pin
+      //      family:4 so the worker always uses the IPv4 address.
+      ssl: resolveWorkerDbSsl(),
+      family: 4,
       max: 5, // Maximum pool size
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 10000,

@@ -48,6 +48,19 @@ const pool = new Pool({
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   ssl: resolveSslOption(),
+  // Force IPv4 for the DB connection. The Aurora cluster endpoint is
+  // DUAL-STACK -- it publishes BOTH an A (IPv4) and an AAAA (IPv6) record --
+  // but the cluster's `pg_hba.conf` only permits the VPC's IPv4 CIDR. Node's
+  // default DNS resolution order (`verbatim`) can hand back the IPv6 address
+  // first, and a connection from that IPv6 source is rejected by Postgres with
+  // `no pg_hba.conf entry for host "<ipv6>" ... no encryption` (a FATAL that
+  // looks like a TLS problem but is really a host-not-permitted one). The app
+  // happened to resolve IPv4 and worked; the sync-worker resolved IPv6 and
+  // could not connect at all. Pinning `family: 4` makes `pg` (via
+  // `net.connect`) always use the IPv4 address, so neither process can land on
+  // the unpermitted IPv6 endpoint. Remove only if the DB endpoint's IPv6
+  // address is ever added to its pg_hba/security rules.
+  family: 4,
   // Requirement 8.6: explicit maximum pool size, configurable via
   // DB_POOL_MAX, sized for the documented scale target of up to 50,000
   // users rather than relying on the pg library's default.
