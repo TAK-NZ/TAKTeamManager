@@ -296,13 +296,24 @@ class AdminCredentialLoader {
       );
     }
 
-    const { cert, key } = convertP12ToPem(bundle, this.resolvePassphrase());
+    const { cert, key, caChain } = convertP12ToPem(bundle, this.resolvePassphrase());
 
     const agentOptions = { cert, key };
 
-    const ca = readCaBundle(this.env);
-    if (ca !== undefined) {
-      agentOptions.ca = ca;
+    // Trust material precedence: an explicitly-configured `TAK_CA_PATH` wins
+    // (an operator pointing at a specific bundle means it), otherwise fall back
+    // to the issuing chain carried inside the admin P12 itself. The reference
+    // TAK bundle ships the intermediate + self-signed root that also anchor the
+    // TAK Server's server certificate, so this default makes the server
+    // verifiable out of the box without a separately-wired CA secret and
+    // without relaxing verification. When neither is available, `ca` is left
+    // unset and Node's built-in trust store applies (correct for a deployment
+    // whose TAK Server presents a publicly-trusted certificate).
+    const configuredCa = readCaBundle(this.env);
+    if (configuredCa !== undefined) {
+      agentOptions.ca = configuredCa;
+    } else if (Array.isArray(caChain) && caChain.length > 0) {
+      agentOptions.ca = caChain;
     }
 
     return agentOptions;
@@ -492,9 +503,26 @@ function convertP12ToPem(p12Buffer, passphrase) {
 
   const leaf = certificates.find((cert) => matchesPrivateKey(cert, privateKey)) || certificates[0];
 
+  // Every certificate in the bundle that is NOT the leaf is issuing/trust
+  // material -- the intermediate(s) and the self-signed root that anchor the
+  // TAK deployment's PKI. The reference TAK admin bundle carries the full
+  // chain (`CN=admin` leaf -> `CN=intermediate-ca` -> self-signed `CN=<root>`).
+  // We expose it separately so the caller can use it as the agent's trust
+  // store (`ca`): TAK Server presents a server certificate anchored at that
+  // same self-signed root, which is absent from Node's built-in CA set, so
+  // without it every mutual-TLS call fails verification with
+  // `SELF_SIGNED_CERT_IN_CHAIN`. This is the trust-material direction
+  // (authenticating the server to us) -- it does NOT relax verification and is
+  // NOT a substitute for a leaf; `rejectUnauthorized`/`checkServerIdentity`
+  // remain untouched.
+  const caChain = certificates
+    .filter((cert) => cert !== leaf)
+    .map((cert) => forge.pki.certificateToPem(cert));
+
   return {
     cert: forge.pki.certificateToPem(leaf),
-    key: forge.pki.privateKeyToPem(privateKey)
+    key: forge.pki.privateKeyToPem(privateKey),
+    caChain
   };
 }
 

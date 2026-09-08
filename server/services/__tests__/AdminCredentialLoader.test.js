@@ -894,3 +894,147 @@ describe('AdminCredentialLoader secret hygiene (Requirement 2.11)', () => {
     expectNoSecretsLogged(FIXTURE_P12_PASSPHRASE);
   });
 });
+
+/**
+ * Builds a modern (AES) multi-certificate PKCS#12 bundle in memory: a `leaf`
+ * client certificate signed by a self-signed `ca`, with BOTH certificates in
+ * the bundle (leaf first, then its issuer) alongside the leaf's private key.
+ * This mirrors the shape of the real TAK admin bundle, which carries the full
+ * issuing chain (`CN=admin` leaf -> `CN=intermediate-ca` -> self-signed root),
+ * so the CA-chain extraction can be exercised without committing a second
+ * fixture. Legacy algorithms are irrelevant here (that is the single-cert
+ * fixture's job); this bundle only needs to parse and expose two certs.
+ *
+ * @returns {{p12: Buffer, leafCn: string, caCn: string, caPem: string,
+ *   leafPem: string}}
+ */
+function buildMultiCertP12() {
+  const caKeys = forge.pki.rsa.generateKeyPair(2048);
+  const caCn = 'admin-cred-loader-test-ca';
+  const ca = forge.pki.createCertificate();
+  ca.publicKey = caKeys.publicKey;
+  ca.serialNumber = '01';
+  ca.validity.notBefore = new Date();
+  ca.validity.notAfter = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
+  const caAttrs = [{ name: 'commonName', value: caCn }];
+  ca.setSubject(caAttrs);
+  ca.setIssuer(caAttrs); // self-signed
+  ca.setExtensions([{ name: 'basicConstraints', cA: true }]);
+  ca.sign(caKeys.privateKey, forge.md.sha256.create());
+
+  const leafKeys = forge.pki.rsa.generateKeyPair(2048);
+  const leafCn = 'admin-cred-loader-test-leaf';
+  const leaf = forge.pki.createCertificate();
+  leaf.publicKey = leafKeys.publicKey;
+  leaf.serialNumber = '02';
+  leaf.validity.notBefore = new Date();
+  leaf.validity.notAfter = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
+  leaf.setSubject([{ name: 'commonName', value: leafCn }]);
+  leaf.setIssuer(caAttrs);
+  leaf.setExtensions([{ name: 'basicConstraints', cA: false }]);
+  leaf.sign(caKeys.privateKey, forge.md.sha256.create());
+
+  const asn1 = forge.pkcs12.toPkcs12Asn1(
+    leafKeys.privateKey,
+    [leaf, ca],
+    FIXTURE_P12_PASSPHRASE,
+    { algorithm: 'aes256' }
+  );
+  const der = forge.asn1.toDer(asn1).getBytes();
+
+  return {
+    p12: Buffer.from(der, 'binary'),
+    leafCn,
+    caCn,
+    caPem: forge.pki.certificateToPem(ca),
+    leafPem: forge.pki.certificateToPem(leaf)
+  };
+}
+
+describe('convertP12ToPem chain extraction (self-signed TAK PKI trust material)', () => {
+  it('returns an empty caChain for a single self-signed cert bundle', () => {
+    const { caChain } = convertP12ToPem(legacyP12, FIXTURE_P12_PASSPHRASE);
+
+    // The committed fixture holds only its own self-signed leaf, so there is
+    // no separate issuing certificate to trust.
+    expect(caChain).toEqual([]);
+  });
+
+  it('extracts the non-leaf certificate(s) as the CA chain, leaf excluded', () => {
+    const { p12, leafCn, caCn } = buildMultiCertP12();
+
+    const { cert, caChain } = convertP12ToPem(p12, FIXTURE_P12_PASSPHRASE);
+
+    // The leaf is the one matching the private key.
+    expect(forge.pki.certificateFromPem(cert).subject.getField('CN').value).toBe(leafCn);
+
+    // The CA chain is exactly the issuer, and never re-includes the leaf.
+    expect(caChain).toHaveLength(1);
+    const caSubjects = caChain.map(
+      (pem) => forge.pki.certificateFromPem(pem).subject.getField('CN').value
+    );
+    expect(caSubjects).toEqual([caCn]);
+    expect(caSubjects).not.toContain(leafCn);
+  });
+});
+
+describe('AdminCredentialLoader trusts the admin P12 chain by default (SELF_SIGNED_CERT_IN_CHAIN fix)', () => {
+  it('uses the bundle-carried CA chain as { ca } when no TAK_CA_PATH is set', async () => {
+    const { p12, caCn } = buildMultiCertP12();
+
+    const loader = new AdminCredentialLoader({
+      env: {
+        TAK_ADMIN_CERT_SOURCE: 'secrets-manager',
+        TAK_ADMIN_CERT_SECRET_ARN: SECRET_ARN
+      },
+      secretsProvider: makeSecretsProvider(p12)
+    });
+
+    await loader.load();
+
+    const options = loader.getAgentOptions();
+    // The server-trust material is now present, derived from the same P12 —
+    // this is what makes TAK Server's self-signed chain verify without ever
+    // setting rejectUnauthorized:false.
+    expect(Object.keys(options).sort()).toEqual(['ca', 'cert', 'key']);
+    expect(Array.isArray(options.ca)).toBe(true);
+    expect(options.ca).toHaveLength(1);
+    expect(forge.pki.certificateFromPem(options.ca[0]).subject.getField('CN').value).toBe(caCn);
+  });
+
+  it('leaves { ca } unset for a single-cert bundle with no TAK_CA_PATH', async () => {
+    const loader = new AdminCredentialLoader({
+      env: {
+        TAK_ADMIN_CERT_SOURCE: 'secrets-manager',
+        TAK_ADMIN_CERT_SECRET_ARN: SECRET_ARN
+      },
+      secretsProvider: makeSecretsProvider() // single self-signed fixture
+    });
+
+    await loader.load();
+
+    const options = loader.getAgentOptions();
+    expect(Object.keys(options).sort()).toEqual(['cert', 'key']);
+    expect(options.ca).toBeUndefined();
+  });
+
+  it('lets an explicit TAK_CA_PATH win over the bundle-carried chain', async () => {
+    const { p12 } = buildMultiCertP12();
+
+    const loader = new AdminCredentialLoader({
+      env: {
+        TAK_ADMIN_CERT_SOURCE: 'secrets-manager',
+        TAK_ADMIN_CERT_SECRET_ARN: SECRET_ARN,
+        TAK_CA_PATH: fileFixtures.caPath
+      },
+      secretsProvider: makeSecretsProvider(p12)
+    });
+
+    await loader.load();
+
+    const options = loader.getAgentOptions();
+    // The configured file wins: `ca` is the file's bytes, not the P12 chain.
+    expect(Object.keys(options).sort()).toEqual(['ca', 'cert', 'key']);
+    expect(options.ca.toString('utf8')).toBe(fileFixtures.cert);
+  });
+});
