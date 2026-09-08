@@ -76,7 +76,11 @@
     "testPathIgnorePatterns": [
       "/node_modules/",
       "/client/",
+      "/cdk/",
       "\\.integration\\.test\\.js$"
+    ],
+    "modulePathIgnorePatterns": [
+      "/cdk/"
     ],
     "coverageThreshold": {
       "global": {
