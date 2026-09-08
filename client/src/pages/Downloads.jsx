@@ -166,6 +166,8 @@ const OFFLINE_MAP_GROUP_META = [
     heading: 'Vector Basemaps',
     // Vector is the one ATAK-only group.
     compatibility: 'Basemap · ATAK only',
+    previewSrc: '/assets/maps/vector-example.png',
+    previewAlt: 'Example vector basemap: styled roads, labels and landcover',
   },
 ]
 
@@ -221,7 +223,7 @@ function Token({ children }) {
  * MapTypePreview: a small representative thumbnail for a map TYPE, shown beside
  * a section heading. One image per type (topographic per island, marine) reused
  * across all sections of that type -- never a per-file thumbnail. Renders
- * nothing when a group has no `previewSrc` (the vector basemap, omitted for now).
+ * nothing when a group has no `previewSrc` at all (every group has one today).
  *
  * When `onEnlarge` is supplied (desktop only -- see OfflineMapsTable), the
  * thumbnail is a button that opens a larger preview in a modal, with a small
