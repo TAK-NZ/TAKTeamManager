@@ -2,6 +2,11 @@
   "testEnvironment": "node",
   "roots": ["<rootDir>/test"],
   "testMatch": ["**/*.test.ts"],
+  "testPathIgnorePatterns": [
+    "/node_modules/",
+    "/test/__helpers__/",
+    "/test/__fixtures__/"
+  ],
   "transform": {
     "^.+\\.ts$": ["@swc/jest"]
   },
