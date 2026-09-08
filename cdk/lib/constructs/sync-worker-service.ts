@@ -227,13 +227,9 @@ export class SyncWorkerService extends Construct {
       if (props.takAdminCertSecret) {
         environment.TAK_ADMIN_CERT_SOURCE = 'secrets-manager';
         environment.TAK_ADMIN_CERT_SECRET_ARN = props.takAdminCertSecret.secretArn;
-        // Same as the app: AdminCredentialLoader only reads the binary P12 from
-        // Secrets Manager when SECRETS_PROVIDER=aws-secrets-manager; unset, it
-        // falls back to the env provider and fails ("binary secret ... missing
-        // or empty in process.env"). The worker is the process that actually
-        // uses the admin credential (revoke + device-mgmt jobs), so it needs
-        // this set.
-        environment.SECRETS_PROVIDER = 'aws-secrets-manager';
+        // The worker reads this binary P12 itself via the AWS SDK at runtime
+        // (not an ECS env secret). Grant read; the loader uses the AWS SDK
+        // directly for the P12 regardless of SECRETS_PROVIDER.
         props.takAdminCertSecret.grantRead(taskRole);
       }
       if (props.authentikAdminTokenSecret) {

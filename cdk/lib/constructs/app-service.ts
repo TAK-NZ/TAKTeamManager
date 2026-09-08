@@ -205,14 +205,6 @@ export class AppService extends Construct {
       if (props.takAdminCertSecret) {
         environment.TAK_ADMIN_CERT_SOURCE = 'secrets-manager';
         environment.TAK_ADMIN_CERT_SECRET_ARN = props.takAdminCertSecret.secretArn;
-        // AdminCredentialLoader reads that binary P12 through the app's
-        // SecretsProvider, which is the AWS Secrets Manager provider ONLY when
-        // SECRETS_PROVIDER=aws-secrets-manager; unset, it falls back to the env
-        // provider and fails with "binary secret ... is missing or empty in
-        // process.env". Set it here so the admin credential is actually
-        // fetched from Secrets Manager via the SDK (using the taskRole grant
-        // below), not looked for in an env var.
-        environment.SECRETS_PROVIDER = 'aws-secrets-manager';
         // The app reads this secret itself via the AWS SDK (not an ECS secret,
         // since it is a binary P12 the app fetches at runtime).
         props.takAdminCertSecret.grantRead(taskRole);
