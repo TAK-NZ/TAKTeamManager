@@ -589,7 +589,11 @@ describe('TakServerService.setAgentOptions', () => {
     expect(newAgent).not.toBe(originalAgent);
     expect(newAgent.options.cert).toBe(NEW_CERT);
     expect(newAgent.options.key).toBe(NEW_KEY);
-    expect(service.agentOptions).toEqual({ cert: NEW_CERT, key: NEW_KEY });
+    // The supplied material is preserved, plus `family: 4` is merged in so the
+    // mutual-TLS connection to the dual-stack TAK Server host always dials IPv4
+    // (the handshake hangs over IPv6). See setAgentOptions.
+    expect(service.agentOptions).toEqual({ cert: NEW_CERT, key: NEW_KEY, family: 4 });
+    expect(newAgent.options.family).toBe(4);
     // No new axios client was created (only the constructor's).
     expect(axios.create).toHaveBeenCalledTimes(1);
   });

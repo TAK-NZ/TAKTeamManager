@@ -1,7 +1,7 @@
 const fs = require('fs');
 const forge = require('node-forge');
 const TakServerService = require('./TakServerService');
-const { getSecretsProvider } = require('../config/secretsProvider');
+const { getSecretsProvider, AwsSecretsManagerProvider } = require('../config/secretsProvider');
 const logger = require('../config/logger').createLogger('AdminCredentialLoader');
 
 /**
@@ -71,7 +71,27 @@ class AdminCredentialLoader {
   constructor({ takServerService, env = process.env, secretsProvider } = {}) {
     this.takServerService = takServerService;
     this.env = env;
-    this.secretsProvider = secretsProvider || getSecretsProvider(env);
+    // Provider selection for the BINARY P12 read. When the Credential_Source is
+    // `secrets-manager`, use the AWS Secrets Manager provider DIRECTLY,
+    // independent of the global `SECRETS_PROVIDER` switch. This mirrors how
+    // CloudTAK reads its admin P12 (a bespoke, env-presence-triggered
+    // GetSecretValue -> SecretBinary fetch), and — critically — decouples this
+    // binary read from `getSecretsProvider(env)`. Routing it through the global
+    // switch forced a choice between two broken states: without
+    // SECRETS_PROVIDER=aws-secrets-manager the P12 read fell through to the env
+    // provider and failed ("binary secret ... missing in process.env"); WITH it
+    // set, `validateProductionSecrets` then tried to resolve
+    // AUTHENTIK_API_TOKEN/JWT_SECRET/DB_PASSWORD/EMAIL_PASSWORD by NAME through
+    // Secrets Manager (they are ECS-injected env vars, not SM secrets) and
+    // crashed startup. Selecting the AWS provider here, only for the P12,
+    // avoids both. An explicitly injected `secretsProvider` (tests) still wins.
+    if (secretsProvider) {
+      this.secretsProvider = secretsProvider;
+    } else if (this.selectSource(env) === SOURCE_SECRETS_MANAGER) {
+      this.secretsProvider = new AwsSecretsManagerProvider({ region: env.AWS_REGION });
+    } else {
+      this.secretsProvider = getSecretsProvider(env);
+    }
 
     /**
      * The cached Admin_Credential as `https.Agent` mutual-TLS options, or

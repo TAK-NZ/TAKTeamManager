@@ -251,6 +251,42 @@ describe('AdminCredentialLoader.selectSource (Requirement 2.1)', () => {
   });
 });
 
+// The binary-P12 read must use the AWS Secrets Manager provider DIRECTLY when
+// the source is secrets-manager, independent of the global SECRETS_PROVIDER
+// switch (which is deliberately left unset so the app's env-secret startup
+// validation keeps working). Verified by the default provider the loader
+// selects when none is injected.
+describe('AdminCredentialLoader default provider selection (SECRETS_PROVIDER decoupling)', () => {
+  const { AwsSecretsManagerProvider, EnvSecretsProvider } = require('../../config/secretsProvider');
+
+  it('uses the AWS Secrets Manager provider for a secrets-manager source, even with SECRETS_PROVIDER unset', () => {
+    const loader = new AdminCredentialLoader({
+      // No secretsProvider injected; SECRETS_PROVIDER intentionally absent.
+      env: { TAK_ADMIN_CERT_SOURCE: 'secrets-manager', AWS_REGION: 'us-west-2' }
+    });
+
+    expect(loader.secretsProvider).toBeInstanceOf(AwsSecretsManagerProvider);
+  });
+
+  it('uses the env-based provider for a file source (no AWS client constructed)', () => {
+    const loader = new AdminCredentialLoader({
+      env: { TAK_ADMIN_CERT_SOURCE: 'file' }
+    });
+
+    expect(loader.secretsProvider).toBeInstanceOf(EnvSecretsProvider);
+  });
+
+  it('still honours an explicitly injected provider (tests) over the source-based default', () => {
+    const injected = makeSecretsProvider();
+    const loader = new AdminCredentialLoader({
+      env: { TAK_ADMIN_CERT_SOURCE: 'secrets-manager', AWS_REGION: 'us-west-2' },
+      secretsProvider: injected
+    });
+
+    expect(loader.secretsProvider).toBe(injected);
+  });
+});
+
 describe('AdminCredentialLoader.load from secrets-manager (Requirements 2.2, 2.5, 2.12)', () => {
   it('reads the bundle via getSecretBinary and caches PEM { cert, key }', async () => {
     const secretsProvider = makeSecretsProvider();

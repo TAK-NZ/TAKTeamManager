@@ -83,6 +83,13 @@ class TakServerService {
      */
     this.agentOptions = buildMutualTlsAgentOptions(env);
 
+    // Force IPv4 (see setAgentOptions for the full rationale): the TAK Server
+    // host is dual-stack but the mutual-TLS handshake only completes over IPv4,
+    // and Node may resolve the AAAA first and hang until the timeout. Merge
+    // `family: 4` into the initial agent options too, so even the very first
+    // Marti call (before any refreshAgent()) dials IPv4.
+    this.agentOptions = { ...this.agentOptions, family: 4 };
+
     this.client = axios.create({
       baseURL: this.baseURL,
       // Resiliency-hardening: no default timeout was set here, so a
@@ -169,9 +176,21 @@ class TakServerService {
       );
     }
 
-    const httpsAgent = new https.Agent(options);
+    // Force IPv4 for the mutual-TLS connection to TAK Server. The TAK Server
+    // host (e.g. tak.test.tak.nz / ops.test.tak.nz) is DUAL-STACK (A + AAAA),
+    // but the mutual-TLS handshake succeeds only over IPv4 in this
+    // deployment; Node can resolve the AAAA first and the TLS connection then
+    // hangs until the request timeout (observed live as ECONNABORTED / "timeout
+    // of 10000ms exceeded" on every Marti call from the sync worker, tripping
+    // the circuit breaker). Pinning `family: 4` makes `https.Agent` (via
+    // `net.connect`) always dial the IPv4 address. Same fix as the DB pool's
+    // `family: 4` (server/config/database.js). Merged in here (the single
+    // agent-construction chokepoint used by both the initial build and every
+    // credential refresh) so it survives credential rotation.
+    const agentOptions = { ...options, family: 4 };
+    const httpsAgent = new https.Agent(agentOptions);
 
-    this.agentOptions = options;
+    this.agentOptions = agentOptions;
     this.client.defaults.httpsAgent = httpsAgent;
 
     // Requirement 2.11 (shared with the Loader): shape only, never values.
