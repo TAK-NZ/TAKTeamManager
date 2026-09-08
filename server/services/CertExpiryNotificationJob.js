@@ -1,7 +1,9 @@
+const pool = require('../config/database');
 const logger = require('../config/logger').createLogger('CertExpiryNotificationJob');
 const { isCertExpiryNotificationsEnabled } = require('../config/certExpiryNotifications');
 const { isDeviceMgmtEnabled } = require('../config/deviceMgmt');
 const CertExpiryNotificationService = require('./CertExpiryNotificationService');
+const { withJobLock, JOB_LOCK_KEYS } = require('../utils/jobLock');
 
 /**
  * cert-expiry-notifications Requirement 5: runs
@@ -98,10 +100,20 @@ class CertExpiryNotificationJob {
       nowInTz.getMinutes() === digestMinute &&
       this.lastRunDateKey !== dateKey
     ) {
+      // Set the per-process date-key guard BEFORE the async run, unchanged
+      // from before: it collapses repeated matching-minute ticks WITHIN this
+      // one process. The advisory lock below is the CROSS-process guard added
+      // for desiredCount > 1: only the worker that wins the lock actually
+      // sends, so two workers observing the same matching minute cannot both
+      // send the digest (which would duplicate every recipient's email --
+      // CertExpiryNotificationService's dedup row is written only AFTER a
+      // successful send, so it cannot prevent a concurrent duplicate send on
+      // its own). A worker that does not win the lock skips this tick; the
+      // date-key guard means it will not retry until the next day anyway.
       this.lastRunDateKey = dateKey;
-      CertExpiryNotificationService.run().catch((err) =>
-        logger.error({ err }, 'Cert expiry notification run failed')
-      );
+      withJobLock(pool, JOB_LOCK_KEYS.CERT_EXPIRY_NOTIFICATION, () =>
+        CertExpiryNotificationService.run()
+      ).catch((err) => logger.error({ err }, 'Cert expiry notification run failed'));
     }
   }
 }

@@ -23,6 +23,22 @@ jest.mock('./OwnedGroupReconcileEnqueuer', () => ({
   sweepAllOwnedGroups: (...args) => mockSweep(...args)
 }));
 
+// runOnce() now routes the sweep through withJobLock (the desiredCount>1
+// single-runner guard). Mock the pool's connect() to return a client that
+// GRANTS the advisory lock, so these tests exercise the "won the lock, so it
+// sweeps" path; jobLock.test.js covers the lock-lost skip path directly.
+jest.mock('../config/database', () => ({
+  query: jest.fn(),
+  connect: jest.fn(async () => ({
+    query: jest.fn(async (sql) =>
+      typeof sql === 'string' && sql.includes('pg_try_advisory_lock')
+        ? { rows: [{ locked: true }] }
+        : { rows: [] }
+    ),
+    release: jest.fn()
+  }))
+}));
+
 const OwnedGroupSweepJob = require('./OwnedGroupSweepJob');
 
 beforeEach(() => {

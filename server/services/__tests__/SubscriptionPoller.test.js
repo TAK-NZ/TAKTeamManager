@@ -1,5 +1,9 @@
 jest.mock('../../config/database', () => ({
-  query: jest.fn()
+  query: jest.fn(),
+  // start() now schedules run() through withJobLock (the desiredCount>1
+  // single-runner guard), which takes a client + session advisory lock.
+  // connect() returns a lock-GRANTING client so the guarded poll runs.
+  connect: jest.fn()
 }));
 
 const mockLoggerInstance = { info: jest.fn(), error: jest.fn(), debug: jest.fn(), warn: jest.fn() };
@@ -9,6 +13,24 @@ jest.mock('../../config/logger', () => ({
 
 const pool = require('../../config/database');
 const SubscriptionPoller = require('../SubscriptionPoller');
+
+// A client that GRANTS the advisory lock.
+function lockGrantingClient() {
+  return {
+    query: jest.fn(async (sql) =>
+      typeof sql === 'string' && sql.includes('pg_try_advisory_lock')
+        ? { rows: [{ locked: true }] }
+        : { rows: [] }
+    ),
+    release: jest.fn()
+  };
+}
+
+// runGuarded() adds async hops (connect -> try-lock) before run(); flush enough
+// microtasks under fake timers for the immediate start() poll to reach run().
+async function flushJobLock() {
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+}
 const { parseLastEventTime, mergeSubscriptionFreshness } = require('../SubscriptionPoller');
 const TakServerService = require('../TakServerService');
 
@@ -191,6 +213,7 @@ describe('SubscriptionPoller start()/stop() lifecycle', () => {
     jest.clearAllMocks();
     jest.useFakeTimers();
     pool.query.mockResolvedValue({ rowCount: 0 });
+    pool.connect.mockImplementation(async () => lockGrantingClient());
     takServerService = createTakServerService([clientEndpoint()]);
     poller = new SubscriptionPoller({ takServerService, pool });
   });
@@ -200,14 +223,16 @@ describe('SubscriptionPoller start()/stop() lifecycle', () => {
     jest.useRealTimers();
   });
 
-  it('polls immediately on start(), before any interval elapses', () => {
+  it('polls immediately on start(), before any interval elapses', async () => {
     poller.start();
+    await flushJobLock();
 
     expect(takServerService.getClientEndpoints).toHaveBeenCalledTimes(1);
   });
 
   it('polls again after the configured interval elapses', async () => {
     poller.start();
+    await flushJobLock();
     expect(takServerService.getClientEndpoints).toHaveBeenCalledTimes(1);
 
     await jest.advanceTimersByTimeAsync(poller.intervalMs);
@@ -215,10 +240,11 @@ describe('SubscriptionPoller start()/stop() lifecycle', () => {
     expect(takServerService.getClientEndpoints).toHaveBeenCalledTimes(2);
   });
 
-  it('does not double-start: calling start() twice only sets up one interval/immediate poll', () => {
+  it('does not double-start: calling start() twice only sets up one interval/immediate poll', async () => {
     poller.start();
     const timerAfterFirstStart = poller.timer;
     poller.start();
+    await flushJobLock();
 
     expect(takServerService.getClientEndpoints).toHaveBeenCalledTimes(1);
     expect(poller.timer).toBe(timerAfterFirstStart);
@@ -226,6 +252,7 @@ describe('SubscriptionPoller start()/stop() lifecycle', () => {
 
   it('stop() clears the interval so no further polls run', async () => {
     poller.start();
+    await flushJobLock();
     expect(takServerService.getClientEndpoints).toHaveBeenCalledTimes(1);
 
     poller.stop();

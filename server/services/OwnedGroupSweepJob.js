@@ -36,6 +36,8 @@ const {
   getOwnedGroupSweepIntervalMinutes
 } = require('../config/bulkGroupReconcile');
 const { sweepAllOwnedGroups } = require('./OwnedGroupReconcileEnqueuer');
+const pool = require('../config/database');
+const { withJobLock, JOB_LOCK_KEYS } = require('../utils/jobLock');
 
 class OwnedGroupSweepJob {
   constructor() {
@@ -57,8 +59,18 @@ class OwnedGroupSweepJob {
     }
     this.isSweeping = true;
     try {
-      const counts = await sweepAllOwnedGroups({ includeCloudTak: isCloudTakEnabled() });
-      logger.info({ ...counts }, 'Owned-group anti-drift sweep enqueued reconciles for all owned groups');
+      // `isSweeping` above is the in-PROCESS guard (an overlapping tick within
+      // this worker). The advisory lock here is the CROSS-process guard for
+      // desiredCount > 1: only the worker that wins the lock enqueues the
+      // sweep's reconcile ops this tick. Without it, two workers would each
+      // enqueue a full set of `reconcile_owned_group` ops every sweep --
+      // double the queue writes, and the drain would then process each group's
+      // reconcile twice (idempotent, but pure waste). A worker that does not
+      // win the lock skips this tick and retries next interval.
+      await withJobLock(pool, JOB_LOCK_KEYS.OWNED_GROUP_SWEEP, async () => {
+        const counts = await sweepAllOwnedGroups({ includeCloudTak: isCloudTakEnabled() });
+        logger.info({ ...counts }, 'Owned-group anti-drift sweep enqueued reconciles for all owned groups');
+      });
     } catch (error) {
       logger.error({ err: error }, 'Owned-group anti-drift sweep failed');
     } finally {

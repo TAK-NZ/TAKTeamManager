@@ -1,6 +1,7 @@
 const pool = require('../config/database');
 const TakServerService = require('./TakServerService');
 const { matchesCreatorDn } = TakServerService;
+const { withJobLock, JOB_LOCK_KEYS } = require('../utils/jobLock');
 const logger = require('../config/logger').createLogger('DeviceSync');
 
 /**
@@ -151,11 +152,28 @@ class DeviceSync {
 
     logger.info({ intervalMs: this.intervalMs }, 'Device sync started');
 
-    this.run();
+    this.runGuarded();
 
     this.timer = setInterval(() => {
-      this.run();
+      this.runGuarded();
     }, this.intervalMs);
+  }
+
+  /**
+   * The SCHEDULED entry point: `run()` wrapped in the cross-process
+   * single-runner advisory lock, so at desiredCount > 1 only one worker
+   * reconciles the Device_Table against TAK Server per tick. Running the sync
+   * in every worker would double the Marti certificate-listing API load and
+   * have both workers issue the same upserts/scoped delete for no benefit.
+   * `run()` itself is left unguarded so direct/test callers exercise the sync
+   * logic without a lock. A worker that does not win the lock skips this tick.
+   */
+  async runGuarded() {
+    try {
+      await withJobLock(this.pool, JOB_LOCK_KEYS.DEVICE_SYNC, () => this.run());
+    } catch (error) {
+      logger.error({ err: error }, 'Device sync (guarded) failed');
+    }
   }
 
   /**

@@ -1,6 +1,24 @@
 jest.mock('../config/database', () => ({
-  query: jest.fn()
+  query: jest.fn(),
+  // withJobLock (added for the desiredCount>1 single-runner guard) takes a
+  // dedicated client and a session advisory lock. These tests exercise the
+  // GRANTED path — connect() returns a client whose pg_try_advisory_lock
+  // resolves true — so the guarded cleanup body runs exactly as before.
+  connect: jest.fn()
 }));
+
+// A client that GRANTS the advisory lock, so withJobLock runs its body.
+function lockGrantingClient() {
+  return {
+    query: jest.fn(async (sql) => {
+      if (typeof sql === 'string' && sql.includes('pg_try_advisory_lock')) {
+        return { rows: [{ locked: true }] };
+      }
+      return { rows: [] };
+    }),
+    release: jest.fn()
+  };
+}
 
 const mockLoggerInstance = { info: jest.fn(), error: jest.fn(), debug: jest.fn(), warn: jest.fn() };
 jest.mock('../config/logger', () => ({
@@ -25,6 +43,7 @@ describe('RetentionCleanupJob.deleteExpiredRows', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     pool.query.mockResolvedValue({ rowCount: 0 });
+    pool.connect.mockImplementation(async () => lockGrantingClient());
     job = new RetentionCleanupJob({ pool });
   });
 
@@ -177,6 +196,7 @@ describe('RetentionCleanupJob.runCleanup', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     pool.query.mockResolvedValue({ rowCount: 0 });
+    pool.connect.mockImplementation(async () => lockGrantingClient());
     job = new RetentionCleanupJob({ pool });
   });
 
@@ -232,6 +252,7 @@ describe('RetentionCleanupJob start()/stop() lifecycle', () => {
     jest.clearAllMocks();
     jest.useFakeTimers();
     pool.query.mockResolvedValue({ rowCount: 0 });
+    pool.connect.mockImplementation(async () => lockGrantingClient());
     job = new RetentionCleanupJob({ pool });
   });
 
@@ -242,7 +263,11 @@ describe('RetentionCleanupJob start()/stop() lifecycle', () => {
 
   it('runs a cleanup pass immediately on start(), before any interval elapses', async () => {
     job.start();
-    await Promise.resolve();
+    // runCleanup now runs through withJobLock, which adds several async hops
+    // before deleteExpiredRows: pool.connect(), the pg_try_advisory_lock
+    // query, then the three DELETE queries, then pg_advisory_unlock. Flush
+    // enough microtasks under fake timers for that whole chain to settle.
+    for (let i = 0; i < 10; i++) await Promise.resolve();
 
     const syncCall = pool.query.mock.calls.find(
       ([sql]) => typeof sql === 'string' && sql.includes('DELETE FROM sync_operations')
@@ -252,7 +277,9 @@ describe('RetentionCleanupJob start()/stop() lifecycle', () => {
 
   it('runs another cleanup pass after the configured interval elapses', async () => {
     job.start();
-    await Promise.resolve();
+    // Let the immediate start() pass (now routed through withJobLock) fully
+    // settle before clearing, so only the interval-triggered pass is counted.
+    for (let i = 0; i < 10; i++) await Promise.resolve();
     pool.query.mockClear();
 
     await jest.advanceTimersByTimeAsync(job.intervalMs);
@@ -273,12 +300,11 @@ describe('RetentionCleanupJob start()/stop() lifecycle', () => {
 
   it('stop() clears the interval so no further cleanup passes run', async () => {
     job.start();
-    // Three sequential `await pool.query(...)` calls inside
-    // deleteExpiredRows() means three microtask ticks are needed before
-    // the immediate start()-triggered pass has fully completed.
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    // The immediate start()-triggered pass now runs through withJobLock
+    // (pool.connect + try-lock + the three DELETEs + unlock), so flush enough
+    // microtask ticks for it to fully complete before clearing, or a straggler
+    // query from the immediate pass would be miscounted as a post-stop pass.
+    for (let i = 0; i < 10; i++) await Promise.resolve();
     pool.query.mockClear();
 
     job.stop();

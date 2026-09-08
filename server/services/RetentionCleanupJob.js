@@ -1,5 +1,6 @@
 const pool = require('../config/database');
 const logger = require('../config/logger').createLogger('RetentionCleanupJob');
+const { withJobLock, JOB_LOCK_KEYS } = require('../utils/jobLock');
 
 /**
  * Requirement 25 (Data Retention) / task 47.1: implements the
@@ -121,8 +122,17 @@ class RetentionCleanupJob {
    */
   async runCleanup() {
     try {
-      const result = await this.deleteExpiredRows();
-      logger.info(result, 'Retention cleanup run completed');
+      // Single-runner guard: at desiredCount > 1, only the worker that wins
+      // the advisory lock runs the DELETE pass. The cleanup is idempotent
+      // (a second run's WHERE clause simply matches nothing), so running it
+      // twice would be harmless-but-wasteful; the lock avoids the wasted
+      // scans and keeps the "runs once per tick" contract these periodic
+      // jobs are designed around. A worker that does not win the lock skips
+      // this tick and retries next interval.
+      await withJobLock(this.pool, JOB_LOCK_KEYS.RETENTION_CLEANUP, async () => {
+        const result = await this.deleteExpiredRows();
+        logger.info(result, 'Retention cleanup run completed');
+      });
     } catch (error) {
       logger.error({ err: error }, 'Retention cleanup run failed');
     }

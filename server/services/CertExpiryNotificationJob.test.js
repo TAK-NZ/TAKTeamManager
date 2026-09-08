@@ -2,6 +2,24 @@ jest.mock('./CertExpiryNotificationService', () => ({
   run: jest.fn(),
 }));
 
+// maybeRun() now routes CertExpiryNotificationService.run() through
+// withJobLock (the desiredCount>1 single-runner guard), which takes a client
+// and a session advisory lock. Mock the pool's connect() to hand back a client
+// that GRANTS the lock, so these tests exercise the "this worker won the lock,
+// so it sends" path. A separate suite (jobLock.test.js) covers the lock-lost
+// (skip) path directly.
+jest.mock('../config/database', () => ({
+  query: jest.fn(),
+  connect: jest.fn(async () => ({
+    query: jest.fn(async (sql) =>
+      typeof sql === 'string' && sql.includes('pg_try_advisory_lock')
+        ? { rows: [{ locked: true }] }
+        : { rows: [] }
+    ),
+    release: jest.fn(),
+  })),
+}));
+
 const mockLoggerInstance = { info: jest.fn(), error: jest.fn(), debug: jest.fn(), warn: jest.fn() };
 jest.mock('../config/logger', () => ({
   createLogger: jest.fn(() => mockLoggerInstance),
@@ -9,6 +27,13 @@ jest.mock('../config/logger', () => ({
 
 const CertExpiryNotificationService = require('./CertExpiryNotificationService');
 const CertExpiryNotificationJob = require('./CertExpiryNotificationJob');
+const pool = require('../config/database');
+
+// Flush enough microtask ticks for maybeRun()'s fire-and-forget
+// withJobLock(...).catch() chain (connect -> try-lock -> run) to settle.
+async function flushJobLock() {
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+}
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -87,15 +112,39 @@ describe('CertExpiryNotificationJob.maybeRun', () => {
     jest.useRealTimers();
   });
 
-  it('runs CertExpiryNotificationService.run() when now matches the configured digest hour/minute/timezone', () => {
+  it('runs CertExpiryNotificationService.run() when now matches the configured digest hour/minute/timezone', async () => {
     process.env.DIGEST_HOUR = '9';
     process.env.DIGEST_MINUTE = '0';
     process.env.DIGEST_TIMEZONE = 'UTC';
     jest.useFakeTimers().setSystemTime(new Date('2026-08-31T09:00:00.000Z'));
 
     job.maybeRun();
+    await flushJobLock();
 
     expect(CertExpiryNotificationService.run).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT send when another worker holds the advisory lock (desiredCount>1 single-runner guard)', async () => {
+    // Simulate a second worker: this process loses the lock, so even at the
+    // matching minute it must not send (the other worker sends). This is the
+    // guard against duplicate expiry emails at desiredCount>1.
+    pool.connect.mockImplementationOnce(async () => ({
+      query: jest.fn(async (sql) =>
+        typeof sql === 'string' && sql.includes('pg_try_advisory_lock')
+          ? { rows: [{ locked: false }] } // lock NOT acquired
+          : { rows: [] }
+      ),
+      release: jest.fn()
+    }));
+    process.env.DIGEST_HOUR = '9';
+    process.env.DIGEST_MINUTE = '0';
+    process.env.DIGEST_TIMEZONE = 'UTC';
+    jest.useFakeTimers().setSystemTime(new Date('2026-08-31T09:00:00.000Z'));
+
+    job.maybeRun();
+    await flushJobLock();
+
+    expect(CertExpiryNotificationService.run).not.toHaveBeenCalled();
   });
 
   it('does not run when now does not match the configured digest hour/minute', () => {
@@ -109,7 +158,7 @@ describe('CertExpiryNotificationJob.maybeRun', () => {
     expect(CertExpiryNotificationService.run).not.toHaveBeenCalled();
   });
 
-  it('defaults to hour 9, minute 0, Pacific/Auckland when unset', () => {
+  it('defaults to hour 9, minute 0, Pacific/Auckland when unset', async () => {
     delete process.env.DIGEST_HOUR;
     delete process.env.DIGEST_MINUTE;
     delete process.env.DIGEST_TIMEZONE;
@@ -117,11 +166,12 @@ describe('CertExpiryNotificationJob.maybeRun', () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-08-30T21:00:00.000Z'));
 
     job.maybeRun();
+    await flushJobLock();
 
     expect(CertExpiryNotificationService.run).toHaveBeenCalledTimes(1);
   });
 
-  it('does not double-fire within the same matching minute (lastRunDateKey guard)', () => {
+  it('does not double-fire within the same matching minute (lastRunDateKey guard)', async () => {
     process.env.DIGEST_HOUR = '9';
     process.env.DIGEST_MINUTE = '0';
     process.env.DIGEST_TIMEZONE = 'UTC';
@@ -130,20 +180,23 @@ describe('CertExpiryNotificationJob.maybeRun', () => {
     job.maybeRun();
     job.maybeRun();
     job.maybeRun();
+    await flushJobLock();
 
     expect(CertExpiryNotificationService.run).toHaveBeenCalledTimes(1);
   });
 
-  it('runs again on the following day at the same matching minute', () => {
+  it('runs again on the following day at the same matching minute', async () => {
     process.env.DIGEST_HOUR = '9';
     process.env.DIGEST_MINUTE = '0';
     process.env.DIGEST_TIMEZONE = 'UTC';
 
     jest.useFakeTimers().setSystemTime(new Date('2026-08-31T09:00:00.000Z'));
     job.maybeRun();
+    await flushJobLock();
 
     jest.setSystemTime(new Date('2026-09-01T09:00:00.000Z'));
     job.maybeRun();
+    await flushJobLock();
 
     expect(CertExpiryNotificationService.run).toHaveBeenCalledTimes(2);
   });
@@ -157,8 +210,7 @@ describe('CertExpiryNotificationJob.maybeRun', () => {
     CertExpiryNotificationService.run.mockRejectedValue(error);
 
     expect(() => job.maybeRun()).not.toThrow();
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushJobLock();
 
     expect(mockLoggerInstance.error).toHaveBeenCalledWith(
       expect.objectContaining({ err: error }),

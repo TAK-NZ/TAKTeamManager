@@ -1,5 +1,8 @@
 jest.mock('../../config/database', () => ({
-  query: jest.fn()
+  query: jest.fn(),
+  // start() now schedules run() through withJobLock (desiredCount>1
+  // single-runner guard); connect() returns a lock-GRANTING client.
+  connect: jest.fn()
 }));
 
 const mockLoggerInstance = { info: jest.fn(), error: jest.fn(), debug: jest.fn(), warn: jest.fn() };
@@ -10,6 +13,24 @@ jest.mock('../../config/logger', () => ({
 const pool = require('../../config/database');
 const DeviceSync = require('../DeviceSync');
 const TakServerService = require('../TakServerService');
+
+// A client that GRANTS the advisory lock.
+function lockGrantingClient() {
+  return {
+    query: jest.fn(async (sql) =>
+      typeof sql === 'string' && sql.includes('pg_try_advisory_lock')
+        ? { rows: [{ locked: true }] }
+        : { rows: [] }
+    ),
+    release: jest.fn()
+  };
+}
+
+// runGuarded() adds async hops (connect -> try-lock) before run(); flush enough
+// microtasks under fake timers for the immediate start() sync to reach run().
+async function flushJobLock() {
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+}
 
 /**
  * device-management tasks 7.4, 20.4: unit tests for `DeviceSync`
@@ -77,6 +98,7 @@ function mockPool({ users = [] } = {}) {
     }
     return Promise.resolve({ rowCount: 1 });
   });
+  pool.connect.mockImplementation(async () => lockGrantingClient());
 }
 
 /** Finds every `INSERT INTO tak_devices ...` call made on the pool. */
@@ -324,14 +346,16 @@ describe('DeviceSync start()/stop() lifecycle', () => {
     jest.useRealTimers();
   });
 
-  it('syncs immediately on start(), before any interval elapses', () => {
+  it('syncs immediately on start(), before any interval elapses', async () => {
     job.start();
+    await flushJobLock();
 
     expect(takServerService.listLiveCertificates).toHaveBeenCalledTimes(1);
   });
 
   it('syncs again after the configured interval elapses', async () => {
     job.start();
+    await flushJobLock();
     expect(takServerService.listLiveCertificates).toHaveBeenCalledTimes(1);
 
     await jest.advanceTimersByTimeAsync(job.intervalMs);
@@ -339,10 +363,11 @@ describe('DeviceSync start()/stop() lifecycle', () => {
     expect(takServerService.listLiveCertificates).toHaveBeenCalledTimes(2);
   });
 
-  it('does not double-start: calling start() twice only sets up one interval/immediate sync', () => {
+  it('does not double-start: calling start() twice only sets up one interval/immediate sync', async () => {
     job.start();
     const timerAfterFirstStart = job.timer;
     job.start();
+    await flushJobLock();
 
     expect(takServerService.listLiveCertificates).toHaveBeenCalledTimes(1);
     expect(job.timer).toBe(timerAfterFirstStart);
@@ -350,6 +375,7 @@ describe('DeviceSync start()/stop() lifecycle', () => {
 
   it('stop() clears the interval so no further syncs run', async () => {
     job.start();
+    await flushJobLock();
     expect(takServerService.listLiveCertificates).toHaveBeenCalledTimes(1);
 
     job.stop();

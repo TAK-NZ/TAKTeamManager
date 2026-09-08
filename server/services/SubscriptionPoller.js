@@ -1,6 +1,7 @@
 const pool = require('../config/database');
 const TakServerService = require('./TakServerService');
 const { candidateClientUids, unionCandidateClientUids } = require('../utils/connectionAlias');
+const { withJobLock, JOB_LOCK_KEYS } = require('../utils/jobLock');
 const logger = require('../config/logger').createLogger('SubscriptionPoller');
 
 /**
@@ -183,11 +184,31 @@ class SubscriptionPoller {
 
     // Run once immediately so a freshly-deployed/restarted worker doesn't wait
     // a full interval before its first read of TAK Server's history.
-    this.run();
+    this.runGuarded();
 
     this.timer = setInterval(() => {
-      this.run();
+      this.runGuarded();
     }, this.intervalMs);
+  }
+
+  /**
+   * The SCHEDULED entry point: `run()` wrapped in the cross-process
+   * single-runner advisory lock, so at desiredCount > 1 only one worker polls
+   * TAK Server per tick. Running the poll in every worker would double the
+   * Marti `clientEndPoints` API load and race on `last_seen_at` (which this
+   * job owns as monotonic-forward) for no benefit. `run()` itself is left
+   * unguarded so direct/test callers exercise the poll logic without needing a
+   * lock. A worker that does not win the lock skips this tick; the next
+   * interval retries. `run()` catches its own errors, but the lock's own
+   * failure path is caught here so a lock/connection error never becomes an
+   * unhandled rejection from the interval callback.
+   */
+  async runGuarded() {
+    try {
+      await withJobLock(this.pool, JOB_LOCK_KEYS.SUBSCRIPTION_POLLER, () => this.run());
+    } catch (error) {
+      logger.error({ err: error }, 'Subscription poll (guarded) failed');
+    }
   }
 
   /**
