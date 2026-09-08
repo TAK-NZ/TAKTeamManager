@@ -75,6 +75,14 @@ export class AppSecrets extends Construct {
       }
     });
     this.credentialEncryptionKey.grantWrite(generatorFn);
+    // The secret is encrypted with the IMPORTED BaseInfra KMS key. `grantWrite`
+    // only auto-adds the KMS grant when the encryption key is a construct in
+    // this stack that CDK can attach a key-policy grant to; an imported IKey
+    // (kms.Key.fromKeyArn) cannot have its policy mutated, so PutSecretValue
+    // fails at deploy with "Access to KMS is not allowed" unless we grant the
+    // generator's role KMS access explicitly. GenerateDataKey/Encrypt is what a
+    // write needs; Decrypt is harmless for this create-only internal Lambda.
+    kmsKey.grantEncryptDecrypt(generatorFn);
 
     const provider = new cr.Provider(this, 'SecretGeneratorProvider', {
       onEventHandler: generatorFn
