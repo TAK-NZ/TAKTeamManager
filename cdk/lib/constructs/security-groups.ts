@@ -79,9 +79,17 @@ export class SecurityGroups extends Construct {
     // SMTP (outbound email). 587 STARTTLS + 465 implicit TLS.
     this.ecs.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(587), 'SMTP STARTTLS');
     this.ecs.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(465), 'SMTP implicit TLS');
-    // TAK Server integration (Marti certadmin API :8443, enrollment :8446),
-    // in-VPC to the tak-infra NLB. Harmless when device management is off.
-    this.ecs.addEgressRule(ec2.Peer.ipv4(vpcCidrIpv4), ec2.Port.tcp(8443), 'TAK Server API');
-    this.ecs.addEgressRule(ec2.Peer.ipv4(vpcCidrIpv4), ec2.Port.tcp(8446), 'TAK Server enrollment');
+    // TAK Server integration (Marti certadmin API :8443, enrollment :8446).
+    // The tak-infra load balancer is an INTERNET-FACING NLB: both
+    // `tak.test.tak.nz` (TAK_SERVER_URL) and `ops.test.tak.nz`
+    // (TakServiceName) resolve to its PUBLIC addresses, and a task in a
+    // private subnet reaches them out through the NAT gateway — there is no
+    // in-VPC address for this endpoint. Egress must therefore allow the
+    // public internet on these ports, not just the VPC CIDR; scoping to the
+    // VPC CIDR silently blackholes every Marti call (connect timeout /
+    // ECONNABORTED). This matches how CloudTAK reaches the same NLB.
+    // Harmless when device management is off (nothing dials these ports).
+    this.ecs.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(8443), 'TAK Server API');
+    this.ecs.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(8446), 'TAK Server enrollment');
   }
 }
