@@ -31,5 +31,16 @@ export const OIDC_CONSTANTS = {
   APPLICATION_SLUG: 'team-manager',
   PROVIDER_NAME: 'TAK-TeamManager',
   /** Authentik group the application is placed in. */
-  GROUP_NAME: 'Team Awareness Kit'
+  GROUP_NAME: 'Team Awareness Kit',
+
+  /**
+   * Second, LINK-ONLY Authentik application: a launcher tile deep-linking to
+   * this app's /enrollment page. NO provider of its own (an OAuth2 provider
+   * binds to exactly one application, so it cannot reuse the Team Manager
+   * provider); the user is already authenticated through the Team Manager
+   * provider by the time they follow the link. Placed in the same GROUP_NAME.
+   */
+  ENROLLMENT_APPLICATION_NAME: 'TAK Device Enrollment',
+  ENROLLMENT_APPLICATION_SLUG: 'tak-device-enrollment',
+  ENROLLMENT_APPLICATION_DESCRIPTION: 'Enrol a mobile device with ATAK/TAK Aware/iTAK'
 } as const;

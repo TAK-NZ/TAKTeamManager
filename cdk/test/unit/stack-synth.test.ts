@@ -141,6 +141,21 @@ describe('sync worker service (separate ECS service, no ALB)', () => {
     expect(container.Command).toEqual(['node', 'server/workers/syncWorker.js']);
   });
 
+  it('carries the full OIDC env the shared startup validator requires (regression: AUTHENTIK_CLIENT_ID)', () => {
+    // The worker runs the same configValidator REQUIRED_VARS as the app; a
+    // trimmed env that omitted AUTHENTIK_CLIENT_ID made the worker crash at
+    // startup ("AUTHENTIK_CLIENT_ID is missing or empty") and the service
+    // rollout fail. Assert the worker container declares the OIDC vars.
+    const def = workerContainer('dev-test');
+    const container = def!.ContainerDefinitions.find((c) =>
+      Array.isArray((c as { Command?: string[] }).Command)
+    ) as { Environment?: Array<{ Name: string }> };
+    const envNames = (container.Environment || []).map((e) => e.Name);
+    for (const required of ['AUTHENTIK_URL', 'AUTHENTIK_CLIENT_ID', 'APP_URL', 'FRONTEND_URL', 'DB_HOST']) {
+      expect(envNames).toContain(required);
+    }
+  });
+
   it('is sized at HALF the app task cpu/memory (dev-test 512/1024 -> 256/512)', () => {
     const def = workerContainer('dev-test');
     // Fargate task-level Cpu/Memory are strings in the template.

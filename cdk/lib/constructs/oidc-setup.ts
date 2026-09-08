@@ -57,18 +57,21 @@ export class OidcSetup extends Construct {
         externalModules: ['@aws-sdk/*'],
         // Let esbuild install these from src/oidc-setup/package.json at synth
         // time (auth-infra's enroll-oidc-setup approach) rather than requiring
-        // a pre-existing, committed node_modules dir.
+        // a pre-existing, committed node_modules dir. form-data is needed for
+        // the multipart icon upload to /api/v3/admin/file/.
         nodeModules: ['axios', 'form-data'],
         forceDockerBundling: false,
         commandHooks: {
           beforeBundling: () => [],
           beforeInstall: () => [],
-          // The icon is read from disk at runtime, so it must be copied
-          // alongside the bundled handler (same technique as CloudTAK).
-          // inputDir is the projectRoot (src/oidc-setup), so the icon sits at
-          // its top level.
+          // The icon is uploaded from disk at runtime, so the PNG must ride
+          // alongside the bundled handler. inputDir is the projectRoot
+          // (src/oidc-setup), so the icon sits at its top level.
           afterBundling: (inputDir: string, outputDir: string) => [
-            `cp ${inputDir}/ManageMyTeam.png ${outputDir}/ManageMyTeam.png`
+            `cp ${inputDir}/ManageMyTeam.png ${outputDir}/ManageMyTeam.png`,
+            // The link-only Device Enrollment application's icon rides along
+            // the same way, uploaded from disk at runtime.
+            `cp ${inputDir}/TAK-Enroll.png ${outputDir}/TAK-Enroll.png`
           ]
         }
       },
@@ -80,6 +83,14 @@ export class OidcSetup extends Construct {
         APPLICATION_SLUG: OIDC_CONSTANTS.APPLICATION_SLUG,
         GROUP_NAME: OIDC_CONSTANTS.GROUP_NAME,
         LAUNCH_URL: appUrl,
+        // Second, LINK-ONLY application: a dashboard tile that deep-links to
+        // this same app's /enrollment page (no separate provider — see the
+        // Lambda). Same Team Awareness Kit group; its own icon + description.
+        ENROLLMENT_APPLICATION_NAME: OIDC_CONSTANTS.ENROLLMENT_APPLICATION_NAME,
+        ENROLLMENT_APPLICATION_SLUG: OIDC_CONSTANTS.ENROLLMENT_APPLICATION_SLUG,
+        ENROLLMENT_APPLICATION_DESCRIPTION: OIDC_CONSTANTS.ENROLLMENT_APPLICATION_DESCRIPTION,
+        ENROLLMENT_GROUP_NAME: OIDC_CONSTANTS.GROUP_NAME,
+        ENROLLMENT_LAUNCH_URL: `${appUrl}/enrollment`,
         // The app runs the Authorization Code flow itself; register both the
         // primary and the silent (prompt=none) callback paths (server/routes/auth.js).
         REDIRECT_URIS: JSON.stringify([

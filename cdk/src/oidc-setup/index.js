@@ -109,10 +109,47 @@ exports.handler = async (event) => {
       open_in_new_tab: false
     });
 
-    await assignApplicationIcon(api, application.slug);
+    await assignApplicationIcon(api, application.slug, 'ManageMyTeam.png', APPLICATION_ICON_MEDIA_NAME);
 
     if (process.env.GROUP_NAME) {
       await assignGroupToApplication(api, application.slug, process.env.GROUP_NAME);
+    }
+
+    // Second application: "TAK Device Enrollment" — a LINK-ONLY launcher tile
+    // (deliberately NO provider). An Authentik OAuth2 provider binds to exactly
+    // one application, so this second app cannot and must not reuse the Team
+    // Manager provider; it doesn't need one. It is a dashboard shortcut that
+    // deep-links to the SAME app's /enrollment page — the user is already
+    // authenticated through the Team Manager provider by the time they land
+    // there. createOrUpdateApplication with no `provider` field creates exactly
+    // that. Best-effort and self-contained: a failure here is logged and does
+    // NOT fail the whole custom resource (the primary provider/app the app
+    // depends on is already done above), mirroring the icon/group best-effort
+    // stance. Env-driven so the CDK controls name/slug/url/group.
+    if (process.env.ENROLLMENT_APPLICATION_SLUG) {
+      try {
+        const enrollmentApp = await createOrUpdateApplication(api, {
+          name: process.env.ENROLLMENT_APPLICATION_NAME,
+          slug: process.env.ENROLLMENT_APPLICATION_SLUG,
+          // No `provider` — link-only launcher.
+          meta_launch_url: process.env.ENROLLMENT_LAUNCH_URL,
+          meta_description: process.env.ENROLLMENT_APPLICATION_DESCRIPTION
+            || 'Enrol a mobile device with ATAK/TAK Aware/iTAK',
+          open_in_new_tab: false
+        });
+        await assignApplicationIcon(api, enrollmentApp.slug, 'TAK-Enroll.png', ENROLLMENT_ICON_MEDIA_NAME);
+        // Same group as the main app (Team Awareness Kit) unless overridden.
+        const enrollmentGroup = process.env.ENROLLMENT_GROUP_NAME || process.env.GROUP_NAME;
+        if (enrollmentGroup) {
+          await assignGroupToApplication(api, enrollmentApp.slug, enrollmentGroup);
+        }
+        console.log(`Link-only enrollment application ready: ${enrollmentApp.slug}`);
+      } catch (enrollmentErr) {
+        console.warn(
+          'Failed to provision the link-only Device Enrollment application (non-fatal):',
+          enrollmentErr.response ? JSON.stringify(enrollmentErr.response.data) : enrollmentErr.message
+        );
+      }
     }
 
     const oidcConfig = await getOidcConfiguration(authentikUrl, applicationSlug);
@@ -220,29 +257,58 @@ async function assignGroupToApplication(api, appSlug, groupName) {
 //     `undefined` and left the icon blank. Setting it to the media NAME we
 //     uploaded under is what makes `meta_icon_url` resolve to
 //     /files/media/public/<name>. `meta_icon_url` itself is read-only.
+// The two bundled application icons, each uploaded to Authentik media storage
+// under a STABLE `application-icons/<file>` name that `meta_icon` then points
+// at. See assignApplicationIcon's doc comment for why the media NAME (not the
+// upload response) is what gets assigned.
 const APPLICATION_ICON_MEDIA_NAME = 'application-icons/ManageMyTeam.png';
+const ENROLLMENT_ICON_MEDIA_NAME = 'application-icons/TAK-Enroll.png';
 
-async function assignApplicationIcon(api, appSlug) {
+/**
+ * Upload the bundled PNG `fileName` (from this Lambda's own directory) into
+ * Authentik media storage under `mediaName`, then point application `appSlug`'s
+ * `meta_icon` at that media path. Parameterised so BOTH the main Team Manager
+ * app and the link-only Device Enrollment app can reuse the exact same
+ * verified upload-then-PATCH-meta_icon mechanism with their own icon files.
+ *
+ * Both steps and their exact shapes were verified live against Authentik
+ * 2026.8.1:
+ *   - Upload: POST multipart to /api/v3/admin/file/ with `file` + `name`.
+ *     NOT idempotent — re-uploading an existing name returns
+ *     `400 {"name":["A file with this name already exists."]}`, treated as
+ *     success (the file we need is already there). Returns an EMPTY body on
+ *     success (>= 2025.12), so there is NO URL to read back.
+ *   - Assign: `meta_icon` is a plain writable STRING (PatchedApplicationRequest
+ *     .meta_icon: string), so `PATCH { meta_icon: '<media name>' }` is correct.
+ *     Setting it to the media NAME uploaded under is what makes `meta_icon_url`
+ *     resolve to /files/media/public/<name>; `meta_icon_url` is read-only.
+ *
+ * @param {import('axios').AxiosInstance} api
+ * @param {string} appSlug
+ * @param {string} fileName  bundled file in __dirname (e.g. 'TAK-Enroll.png')
+ * @param {string} mediaName stable media name (e.g. 'application-icons/TAK-Enroll.png')
+ */
+async function assignApplicationIcon(api, appSlug, fileName, mediaName) {
   try {
     // Step 1: ensure the file is in media storage under the stable name.
-    const iconPath = path.join(__dirname, 'ManageMyTeam.png');
+    const iconPath = path.join(__dirname, fileName);
     if (!fs.existsSync(iconPath)) {
       console.warn('Icon file not found at', iconPath, '- skipping icon assignment');
       return;
     }
     const form = new FormData();
-    form.append('file', fs.createReadStream(iconPath), 'ManageMyTeam.png');
-    form.append('name', APPLICATION_ICON_MEDIA_NAME);
+    form.append('file', fs.createReadStream(iconPath), fileName);
+    form.append('name', mediaName);
     try {
       await axios.post(`${api.defaults.baseURL}/api/v3/admin/file/`, form, {
         headers: { Authorization: api.defaults.headers.Authorization, ...form.getHeaders() }
       });
-      console.log(`Icon uploaded to media storage as: ${APPLICATION_ICON_MEDIA_NAME}`);
+      console.log(`Icon uploaded to media storage as: ${mediaName}`);
     } catch (uploadError) {
       const status = uploadError.response && uploadError.response.status;
       const detail = JSON.stringify((uploadError.response && uploadError.response.data) || '');
       if (status === 400 && detail.includes('already exists')) {
-        console.log(`Icon ${APPLICATION_ICON_MEDIA_NAME} already present in media storage; reusing it`);
+        console.log(`Icon ${mediaName} already present in media storage; reusing it`);
       } else {
         throw uploadError;
       }
@@ -251,12 +317,12 @@ async function assignApplicationIcon(api, appSlug) {
     // Step 2: point the application at that media path (idempotent). `meta_icon`
     // is a plain string field — a JSON PATCH is the verified-correct call.
     const current = await api.get(`/api/v3/core/applications/${appSlug}/`);
-    if (current.data.meta_icon === APPLICATION_ICON_MEDIA_NAME) {
-      console.log('Application already points at the expected icon; nothing to do');
+    if (current.data.meta_icon === mediaName) {
+      console.log(`Application ${appSlug} already points at ${mediaName}; nothing to do`);
       return;
     }
-    await api.patch(`/api/v3/core/applications/${appSlug}/`, { meta_icon: APPLICATION_ICON_MEDIA_NAME });
-    console.log(`Icon assigned to application ${appSlug}: ${APPLICATION_ICON_MEDIA_NAME}`);
+    await api.patch(`/api/v3/core/applications/${appSlug}/`, { meta_icon: mediaName });
+    console.log(`Icon assigned to application ${appSlug}: ${mediaName}`);
   } catch (error) {
     // Non-fatal: a missing/failed icon must not fail the whole OIDC provisioning.
     console.warn('Failed to assign application icon:', error.response ? JSON.stringify(error.response.data) : error.message);

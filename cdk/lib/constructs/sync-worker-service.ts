@@ -41,9 +41,19 @@ export interface SyncWorkerServiceProps {
   credentialEncryptionKey: secretsmanager.ISecret;
 
   // --- Authentik (imported + OIDC-setup) ---
+  // The worker runs the SAME startup config validation as the app
+  // (server/config/configValidator.js's REQUIRED_VARS covers both the App and
+  // the Sync_Worker), so it needs the full OIDC config present even though it
+  // performs no interactive OAuth itself — omitting AUTHENTIK_CLIENT_ID made
+  // the worker fail fast at startup ("AUTHENTIK_CLIENT_ID is missing or
+  // empty"). Mirror the app's Authentik env exactly.
   authentikUrl: string;
   authentikTeamManagerTokenSecret: secretsmanager.ISecret;
+  oidcClientId: string;
   oidcClientSecret: secretsmanager.ISecret;
+  oidcTokenUrl: string;
+  oidcUserInfoUrl: string;
+  oidcLogoutUrl: string;
 
   // --- Optional: device management (tak-infra) ---
   deviceManagementEnabled: boolean;
@@ -176,7 +186,13 @@ export class SyncWorkerService extends Construct {
       APP_URL: props.appUrl,
       FRONTEND_URL: props.appUrl,
       SYNC_WORKER_HEALTH_PORT: String(SYNC_WORKER_HEALTH_PORT),
+      // Full Authentik/OIDC config — required by the shared startup validator
+      // (REQUIRED_VARS) even though the worker performs no interactive OAuth.
       AUTHENTIK_URL: props.authentikUrl,
+      AUTHENTIK_CLIENT_ID: props.oidcClientId,
+      AUTHENTIK_TOKEN_URL: props.oidcTokenUrl,
+      AUTHENTIK_USERINFO_URL: props.oidcUserInfoUrl,
+      AUTHENTIK_LOGOUT_URL: props.oidcLogoutUrl,
       JWT_EXPIRES_IN: '7d',
       DB_HOST: props.dbHostname,
       DB_PORT: String(DATABASE_CONSTANTS.PORT),
