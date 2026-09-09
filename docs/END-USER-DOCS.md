@@ -157,7 +157,7 @@ A few areas are visible only to your organisation's Global Manager, not to a reg
 - **Devices** (`/devices`) *(if device management is enabled)* — the device counterpart of Users: every team-owned device across the organisation in one list. A regular team admin can also reach this page, but can only act on devices belonging to a team they administer; a Global Manager can act on all of them.
 - **Global Channels** — organisation-wide channel management across every channel type.
 - **Audit Log** — a complete, unchangeable history of administrative actions taken across the whole system, with CSV export.
-- **Admin/Settings** — site content text, email template editing, bulk import of team hierarchies, excluded sign-up domains, and export/import of settings.
+- **Admin/Settings** — site content text, email template editing, bulk import of team hierarchies, excluded sign-up domains, and export/import of settings (site content, branding, and email templates only — TAK Server configuration is managed by the deployment and is not part of export/import).
 
 If you're a team admin without global rights, you won't see these in your navigation menu at all.
 

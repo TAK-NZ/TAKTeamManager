@@ -1,14 +1,21 @@
 /**
- * The Import_Transform for the Settings Export / Import feature (Requirement 8).
+ * The Import_Transform for the Settings Export / Import feature.
  *
  * An Exported_Archive produced by `GET /api/settings/export` is a `.zip` holding
  * two JSON entries:
- *   - `settings.json`        -> `{ exportedAt, systemConfig, siteConfig }`
+ *   - `settings.json`        -> `{ exportedAt, siteConfig }`
  *   - `email_templates.json` -> an array of template rows
  *
  * The import endpoint (`POST /api/settings/import`) instead accepts a single
  * merged JSON body of the Import_Payload shape
- * (`{ systemConfig, siteConfig, emailTemplates }`). This module bridges the two.
+ * (`{ siteConfig, emailTemplates }`). This module bridges the two.
+ *
+ * CDK trim: `systemConfig` (the `tak_server_*` rows) is no longer part of the
+ * export or the import shape -- TAK Server config is owned by the CDK
+ * deployment via env, not by this feature. A legacy archive that still carries
+ * a `settings.json` `systemConfig` array is tolerated: `mergeExportedJson`
+ * simply drops it (it is not carried into the payload), and the server ignores
+ * a stray `systemConfig` on import too.
  *
  * The merge and shape helpers are deliberately dependency-free and pure so they
  * are trivially unit- and property-testable; `unzipExportedArchive` is the ONLY
@@ -18,32 +25,38 @@
 import { unzipSync, strFromU8 } from 'fflate'
 
 /**
- * Merge the two parsed export files into an Import_Payload (Requirements 8.2,
- * 8.4). This is a pure pass-through: the `systemConfig`, `siteConfig`, and
- * `emailTemplates` arrays are carried across element for element, in order, with
- * no reordering or transformation (Property 1 requires exact round-trip
- * preservation). Missing fields default to an empty array so a partial export
- * still yields a well-shaped payload.
+ * Merge the two parsed export files into an Import_Payload. This is a pure
+ * pass-through: the `siteConfig` and `emailTemplates` arrays are carried across
+ * element for element, in order, with no reordering or transformation (exact
+ * round-trip preservation). Missing fields default to an empty array so a
+ * partial export still yields a well-shaped payload.
  *
- * @param {{systemConfig?: Array, siteConfig?: Array}} settingsJson - parsed `settings.json`
+ * CDK trim: a legacy `settings.json`'s `systemConfig` array is intentionally
+ * NOT carried into the payload -- it is dropped here, so an old export imports
+ * only its still-relevant `siteConfig`/`emailTemplates`.
+ *
+ * @param {{siteConfig?: Array}} settingsJson - parsed `settings.json`
  * @param {Array} emailTemplatesJson - parsed `email_templates.json`
- * @returns {{systemConfig: Array, siteConfig: Array, emailTemplates: Array}}
+ * @returns {{siteConfig: Array, emailTemplates: Array}}
  */
 export function mergeExportedJson(settingsJson, emailTemplatesJson) {
   const source = settingsJson || {}
   return {
-    systemConfig: Array.isArray(source.systemConfig) ? source.systemConfig : [],
     siteConfig: Array.isArray(source.siteConfig) ? source.siteConfig : [],
     emailTemplates: Array.isArray(emailTemplatesJson) ? emailTemplatesJson : [],
   }
 }
 
 /**
- * Exact recognition of the Import_Payload shape (Requirements 8.3, 8.6,
- * Property 2). Returns true if and only if `value` is a non-null object whose
- * `systemConfig` and `siteConfig` are arrays and whose `emailTemplates`, when
- * present, is an array. Returns false for any non-object, a missing array
- * field, or a non-array field.
+ * Exact recognition of the Import_Payload shape. Returns true if and only if
+ * `value` is a non-null non-array object whose `siteConfig` is an array and
+ * whose `emailTemplates`, when present, is an array. Returns false for any
+ * non-object, a missing `siteConfig`, or a non-array field.
+ *
+ * CDK trim: `systemConfig` is no longer required (or considered) by the shape.
+ * A raw `.json` a user selects for import needs only a `siteConfig` array; a
+ * stray `systemConfig` key does not make it invalid (it is ignored), matching
+ * the server's tolerance of a legacy archive.
  *
  * @param {*} value
  * @returns {boolean}
@@ -52,7 +65,7 @@ export function isImportPayloadShape(value) {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     return false
   }
-  if (!Array.isArray(value.systemConfig) || !Array.isArray(value.siteConfig)) {
+  if (!Array.isArray(value.siteConfig)) {
     return false
   }
   if (value.emailTemplates !== undefined && !Array.isArray(value.emailTemplates)) {
@@ -72,7 +85,7 @@ export function isImportPayloadShape(value) {
  * error (Requirement 8.6) without issuing an import request.
  *
  * @param {ArrayBuffer} arrayBuffer - the raw bytes of the selected `.zip`
- * @returns {Promise<{systemConfig: Array, siteConfig: Array, emailTemplates: Array}>}
+ * @returns {Promise<{siteConfig: Array, emailTemplates: Array}>}
  */
 export async function unzipExportedArchive(arrayBuffer) {
   let entries
