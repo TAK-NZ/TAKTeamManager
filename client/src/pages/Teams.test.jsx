@@ -586,3 +586,50 @@ describe('Teams.jsx: cascade delete (enabled for teams-with-sub-teams) + type-to
     expect(fnBlock).toContain('setDeleteError(null)')
   })
 })
+
+// /teams overview keeps its team list current on the shared visibility-paused
+// 60s interval (`startVisibilityPausedRefresh`, the same mechanism the
+// Dashboard/Admin cards use), but PAUSES while a Create/Delete dialog is open
+// so a background refetch never disrupts an operator mid-edit -- mirroring the
+// Dashboard's open-dialog guard. Local UI state (search/sort/pagination) is
+// derived in-component and NOT re-seeded from the fetch, so it survives a
+// refresh untouched; only the underlying list data is replaced. Source-contract
+// check, matching this file's own established convention (no
+// @testing-library/react in this project).
+describe('Teams.jsx overview auto-refreshes on the visibility-paused interval, paused while a dialog is open', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'Teams.jsx'), 'utf8')
+
+  it('imports the shared startVisibilityPausedRefresh helper', () => {
+    expect(source).toContain("import { startVisibilityPausedRefresh } from '../utils/visibilityPausedRefresh'")
+  })
+
+  it('wires refreshTeams into a startVisibilityPausedRefresh effect', () => {
+    expect(source).toContain('startVisibilityPausedRefresh(refreshTeams)')
+    // The effect returns the teardown directly so no timer/listener survives
+    // the component.
+    expect(source).toContain('useEffect(() => startVisibilityPausedRefresh(refreshTeams), [refreshTeams])')
+  })
+
+  it('refreshTeams re-fetches the team list (getAllMyTeams) and replaces it via setTeams', () => {
+    const refreshStart = source.indexOf('const refreshTeams = useCallback(')
+    expect(refreshStart, 'refreshTeams should exist').toBeGreaterThan(-1)
+    const refreshBlock = source.slice(refreshStart, source.indexOf('useEffect(() => startVisibilityPausedRefresh', refreshStart))
+    expect(refreshBlock).toContain('teamsAPI.getAllMyTeams()')
+    expect(refreshBlock).toContain('setTeams(')
+  })
+
+  it('guards the refresh behind an open-dialog ref so it pauses while a Create/Delete dialog is open', () => {
+    // The ref tracks the create dialog and the delete confirmation.
+    expect(source).toContain('const dialogOpenRef = useRef(false)')
+    expect(source).toContain('dialogOpenRef.current = showCreateDialog || deleteTeamId !== null')
+
+    // refreshTeams bails out early when a dialog is open, BEFORE fetching --
+    // so a background refresh never pulls the list out from under an edit.
+    const refreshStart = source.indexOf('const refreshTeams = useCallback(')
+    const refreshBlock = source.slice(refreshStart, source.indexOf('useEffect(() => startVisibilityPausedRefresh', refreshStart))
+    const guardIndex = refreshBlock.indexOf('if (dialogOpenRef.current)')
+    const fetchIndex = refreshBlock.indexOf('teamsAPI.getAllMyTeams()')
+    expect(guardIndex, 'refreshTeams should check dialogOpenRef').toBeGreaterThan(-1)
+    expect(guardIndex).toBeLessThan(fetchIndex)
+  })
+})
