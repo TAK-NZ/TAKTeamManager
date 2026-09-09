@@ -120,7 +120,7 @@ describe('DeviceExpiryLine', () => {
   })
 })
 
-// Callsign-mismatch detection (docs/callsign-mismatch-design.md): the amber
+// Callsign-mismatch detection (docs/ARCHITECTURE.md ("Callsign Mismatch Detection" section)): the amber
 // marker shown beside a device connected under a wrong callsign. State carried
 // by TEXT/an accessible name (the observed callsign + an sr-only label), never
 // colour alone, mirroring the expiry markers' convention.

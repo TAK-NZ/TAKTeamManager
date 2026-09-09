@@ -571,7 +571,7 @@ describe('connected on the Device wire shape (Requirement 20.8)', () => {
 });
 
 // ══════════════════════════════════════════════════════════════════════════
-// Callsign-mismatch detection (docs/callsign-mismatch-design.md): mapDevice
+// Callsign-mismatch detection (docs/ARCHITECTURE.md ("Callsign Mismatch Detection" section)): mapDevice
 // emits observedCallsign + a computed callsignMismatch flag when the query
 // supplied the observed and assigned callsigns. The flag is scoped exactly like
 // the poller/nudge: connected, non-CloudTAK, observed not acceptable.

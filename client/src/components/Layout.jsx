@@ -204,7 +204,7 @@ export default function Layout({ children, user }) {
       // not blank out whichever counts DID resolve.
       // Category 2 also includes, for EVERY user, their own devices currently
       // connected under a wrong callsign (callsign-mismatch detection,
-      // docs/callsign-mismatch-design.md Phase 2). Like getMyDevices this is an
+      // docs/ARCHITECTURE.md ("Callsign Mismatch Detection" section) Phase 2). Like getMyDevices this is an
       // always-present call whose 404 (device management off) reads as a
       // truthful zero via allSettled, so it never blanks the other counts.
       const promises = [deviceManagementAPI.getMyDevices(), deviceManagementAPI.getMyCallsignStatus()]

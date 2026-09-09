@@ -105,7 +105,7 @@ export const EXPIRES_SOON_LABEL = 'Expires soon'
 export const EXPIRED_LABEL = 'Expired'
 
 /**
- * Callsign-mismatch detection (docs/callsign-mismatch-design.md): the
+ * Callsign-mismatch detection (docs/ARCHITECTURE.md ("Callsign Mismatch Detection" section)): the
  * accessible-name text for a device currently connected under a callsign that
  * does not preserve the user's assigned callsign.
  *
@@ -282,7 +282,7 @@ export function DeviceExpiryLine({ expiresAt }) {
 }
 
 /**
- * Callsign-mismatch detection (docs/callsign-mismatch-design.md): the inline
+ * Callsign-mismatch detection (docs/ARCHITECTURE.md ("Callsign Mismatch Detection" section)): the inline
  * marker shown beside a device's UID when it is connected under a callsign that
  * does not preserve its assigned one. Rendered by BOTH `DeviceListRow` and
  * `DeviceListCard` from this one definition so the two surfaces cannot drift.

@@ -491,7 +491,7 @@ const routes = {
   // Managed_User (and, for revoke, whose `:clientUid` Device belongs to
   // that target).
   'GET /api/device-management/me/devices': ['device_mgmt:read:own'],
-  // Callsign-mismatch detection (docs/callsign-mismatch-design.md, Phase 2):
+  // Callsign-mismatch detection (docs/ARCHITECTURE.md ("Callsign Mismatch Detection" section), Phase 2):
   // the caller's own currently-connected devices whose live callsign does not
   // preserve their assigned callsign. SELF-scoped exactly like `/me/devices`
   // (subject is the caller's own `req.user.userId`), so it shares

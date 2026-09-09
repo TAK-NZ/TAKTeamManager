@@ -6,7 +6,7 @@ const { classifyObservedCallsign, isCallsignAcceptable } = require('../utils/cal
 const logger = require('../config/logger').createLogger('CallsignPoller');
 
 /**
- * Callsign_Poller (design: docs/callsign-mismatch-design.md).
+ * Callsign_Poller (design: docs/ARCHITECTURE.md ("Callsign Mismatch Detection" section)).
  *
  * The FAST half of the fast-live / slow-history split. It runs every ~1 minute
  * against TAK Server's LIVE subscription table (`GET /Marti/api/subscriptions/all`,

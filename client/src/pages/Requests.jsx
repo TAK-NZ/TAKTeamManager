@@ -84,7 +84,7 @@ export default function Requests({ user }) {
   const [enrollingDevice, setEnrollingDevice] = useState(null)
   const canManageTeams = Boolean(user?.isAdmin || user?.isTeamAdmin || user?.is_global_manager)
 
-  // Callsign-mismatch detection (docs/callsign-mismatch-design.md, Phase 2):
+  // Callsign-mismatch detection (docs/ARCHITECTURE.md ("Callsign Mismatch Detection" section), Phase 2):
   // the viewer's own devices currently connected under a callsign that does not
   // preserve their assigned callsign. Visible to every user. Same 404-as-off
   // convention as the renewal probe above: device management disabled means no
@@ -316,7 +316,7 @@ export default function Requests({ user }) {
         </div>
       )}
 
-      {/* Callsign-mismatch detection (docs/callsign-mismatch-design.md,
+      {/* Callsign-mismatch detection (docs/ARCHITECTURE.md ("Callsign Mismatch Detection" section),
           Phase 2): the viewer's own devices currently connected under a
           callsign that does not preserve their assigned callsign. Visible to
           every user. The mismatch and the two callsigns are stated in TEXT

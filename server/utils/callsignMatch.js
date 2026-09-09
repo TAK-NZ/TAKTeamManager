@@ -1,5 +1,5 @@
 /**
- * Callsign-mismatch classification (design: docs/callsign-mismatch-design.md).
+ * Callsign-mismatch classification (design: docs/ARCHITECTURE.md ("Callsign Mismatch Detection" section)).
  *
  * Pure, total decision logic with an interesting boundary, so it lives here in
  * `server/utils/` (no framework import, no DB access) where a property test can

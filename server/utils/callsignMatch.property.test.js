@@ -1,6 +1,6 @@
 // Feature: callsign-mismatch-detection, Property 1: append-only acceptance
 //
-// **Validates: the append-only callsign rule (docs/callsign-mismatch-design.md
+// **Validates: the append-only callsign rule (docs/ARCHITECTURE.md ("Callsign Mismatch Detection" section)
 // Phase 1): observed is acceptable iff it equals the assigned callsign, or
 // extends it with a non-alphanumeric boundary character; every other divergence
 // is a mismatch; an absent assigned callsign never manufactures a violation.**

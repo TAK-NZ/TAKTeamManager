@@ -567,7 +567,7 @@ class SyncWorker {
     this.deviceSync = new DeviceSync({
       takServerService: this.takServerService
     });
-    // Callsign-mismatch detection (docs/callsign-mismatch-design.md): the fast
+    // Callsign-mismatch detection (docs/ARCHITECTURE.md ("Callsign Mismatch Detection" section)): the fast
     // 1-minute live-subscription poll. Takes the SAME shared TakServerService,
     // so a rotated Admin_Credential applies to its Marti calls too. Started
     // under the same isDeviceMgmtEnabled() gate as the other device jobs.

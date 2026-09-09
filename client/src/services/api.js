@@ -584,7 +584,7 @@ export const deviceManagementAPI = {
   // means "never seen" (Requirements 5.1, 5.2, 5.3).
   getMyDevices: () => api.get('/device-management/me/devices'),
 
-  // Callsign-mismatch detection (docs/callsign-mismatch-design.md, Phase 2).
+  // Callsign-mismatch detection (docs/ARCHITECTURE.md ("Callsign Mismatch Detection" section), Phase 2).
   // Resolves 200 with { mismatches: [...] } — the caller's own devices that are
   // CURRENTLY connected under a callsign that does not preserve their assigned
   // callsign; each entry carries { clientUid, clientType, observedCallsign,

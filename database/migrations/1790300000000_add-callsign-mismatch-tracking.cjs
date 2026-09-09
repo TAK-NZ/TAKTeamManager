@@ -1,5 +1,5 @@
 /**
- * Callsign-mismatch detection (design: docs/callsign-mismatch-design.md).
+ * Callsign-mismatch detection (design: docs/ARCHITECTURE.md ("Callsign Mismatch Detection" section)).
  *
  * Adds the three columns the feature needs to `tak_devices`, and seeds the
  * one email template the first-detection notice sends. Incremental migration

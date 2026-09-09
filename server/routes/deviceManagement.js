@@ -372,7 +372,7 @@ router.get('/me/devices', authenticateToken, authorize, async (req, res) => {
   }
 });
 
-// Callsign-mismatch detection (docs/callsign-mismatch-design.md, Phase 2): the
+// Callsign-mismatch detection (docs/ARCHITECTURE.md ("Callsign Mismatch Detection" section), Phase 2): the
 // caller's own devices currently connected under a callsign that does not
 // preserve their assigned callsign. Same self-scope as `/me/devices` (the only
 // input is `req.user.userId`), same `device_mgmt:read:own` permission, and the

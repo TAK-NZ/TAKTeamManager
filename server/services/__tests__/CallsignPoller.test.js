@@ -14,7 +14,7 @@ const { reduceObservedCallsigns } = require('../CallsignPoller');
 
 /**
  * Unit tests for `CallsignPoller` (callsign-mismatch detection,
- * docs/callsign-mismatch-design.md): the live-subscription reducer, the
+ * docs/ARCHITECTURE.md ("Callsign Mismatch Detection" section)): the live-subscription reducer, the
  * mismatch-episode latch state machine, and the post-commit best-effort email.
  * Mocked collaborators only. The append-only comparison rule itself has its own
  * property test (`server/utils/callsignMatch.property.test.js`); these are

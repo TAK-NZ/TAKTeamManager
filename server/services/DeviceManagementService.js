@@ -168,7 +168,7 @@ class DeviceManagementService {
   }
 
   /**
-   * Callsign-mismatch detection (docs/callsign-mismatch-design.md, Phase 2):
+   * Callsign-mismatch detection (docs/ARCHITECTURE.md ("Callsign Mismatch Detection" section), Phase 2):
    * the caller's OWN devices that are CURRENTLY connected under a callsign that
    * does not preserve their assigned callsign. Backs the in-app nudge (the
    * `/tasks` section and the outstanding-task badge).
@@ -415,7 +415,7 @@ class DeviceManagementService {
    * string or a zero date here. `user_id` is deliberately dropped: the caller
    * already knows whose Devices they asked for.
    *
-   * Callsign-mismatch detection (docs/callsign-mismatch-design.md): when the
+   * Callsign-mismatch detection (docs/ARCHITECTURE.md ("Callsign Mismatch Detection" section)): when the
    * caller's query supplied `observed_callsign` and the joined
    * `assigned_callsign` (the self/managed list does; the revoke-path row lookups
    * do not), this also emits `observedCallsign` and a computed
