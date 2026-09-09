@@ -56,7 +56,7 @@ vi.mock('../services/api', () => ({
   // Enrollment/Devices nav items (via useDeviceManagementEnabled). A
   // resolvable default is required or Layout's mount effect rejects unhandled;
   // feature-off is irrelevant to this page's assertions.
-  deviceManagementAPI: { getMyDevices: vi.fn(), probeEnabled: vi.fn().mockResolvedValue({ enabled: false }) },
+  deviceManagementAPI: { getMyDevices: vi.fn(), getMyCallsignStatus: vi.fn(), probeEnabled: vi.fn().mockResolvedValue({ enabled: false }) },
   devicesAPI: {
     getAll: vi.fn(),
     generateQrCode: vi.fn(),
@@ -259,6 +259,10 @@ describe('Requests page team_change card (mounted)', () => {
     // file (written before these sections existed) sees them render
     // nothing, matching its original assumptions.
     deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    // Callsign-mismatch detection: the page (and Layout's badge) call
+    // getMyCallsignStatus; default to no mismatches so pre-existing sections
+    // render unchanged.
+    deviceManagementAPI.getMyCallsignStatus.mockResolvedValue({ data: { mismatches: [] } })
     // Layout's nav gate calls the DEVICE_MGMT_ENABLED probe on mount; re-set
     // its default (clearAllMocks wiped it). Feature-off is fine here.
     deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false })
@@ -793,6 +797,10 @@ describe('Requests page renewal sections (cert-expiry-notifications 7.3, 7.4, 7.
     }
     requestsAPI.getPending.mockResolvedValue({ data: { requests: [] } })
     deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    // Callsign-mismatch detection: the page (and Layout's badge) call
+    // getMyCallsignStatus; default to no mismatches so pre-existing sections
+    // render unchanged.
+    deviceManagementAPI.getMyCallsignStatus.mockResolvedValue({ data: { mismatches: [] } })
     // Layout's nav gate calls the DEVICE_MGMT_ENABLED probe on mount; re-set
     // its default (clearAllMocks wiped it). Feature-off is fine here.
     deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false })
@@ -884,6 +892,47 @@ describe('Requests page renewal sections (cert-expiry-notifications 7.3, 7.4, 7.
       const card = sectionCard('My certificates needing renewal')
       const renewLink = Array.from(card.querySelectorAll('a')).find((a) => a.textContent.trim() === 'Renew')
       expect(renewLink.getAttribute('href')).toBe('/enrollment')
+    })
+  })
+
+  describe('Callsign needs correcting (callsign-mismatch detection)', () => {
+    const MISMATCH = {
+      clientUid: 'ANDROID-842f08e120efdbe3',
+      clientType: 'android',
+      observedCallsign: 'FENZ-WRONG',
+      assignedCallsign: 'FENZ-STL-J.Doe',
+      lastSeenAt: null
+    }
+
+    it('renders nothing when there are no mismatches', async () => {
+      deviceManagementAPI.getMyCallsignStatus.mockResolvedValue({ data: { mismatches: [] } })
+
+      await mount(PLAIN_MEMBER)
+
+      expect(sectionCard('Callsign needs correcting')).toBeUndefined()
+    })
+
+    it('renders the section for a plain member and shows both callsigns as text (not colour alone)', async () => {
+      deviceManagementAPI.getMyCallsignStatus.mockResolvedValue({ data: { mismatches: [MISMATCH] } })
+
+      await mount(PLAIN_MEMBER)
+
+      const card = sectionCard('Callsign needs correcting')
+      expect(card).toBeDefined()
+      // State carried in text: the assigned and observed callsigns are both present.
+      expect(card.textContent).toContain(MISMATCH.assignedCallsign)
+      expect(card.textContent).toContain(MISMATCH.observedCallsign)
+      expect(card.textContent).toContain(MISMATCH.clientUid)
+    })
+
+    it('renders no section when device management is disabled (404)', async () => {
+      deviceManagementAPI.getMyCallsignStatus.mockRejectedValue(
+        Object.assign(new Error('Not Found'), { response: { status: 404 } })
+      )
+
+      await mount(PLAIN_MEMBER)
+
+      expect(sectionCard('Callsign needs correcting')).toBeUndefined()
     })
   })
 

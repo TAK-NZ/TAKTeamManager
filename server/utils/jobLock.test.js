@@ -144,9 +144,16 @@ describe('withJobLock', () => {
     expect(new Set(keys).size).toBe(keys.length);
     // Frozen so a key can't be mutated at runtime.
     expect(Object.isFrozen(JOB_LOCK_KEYS)).toBe(true);
-    // The five locked jobs are present; the credential refresh is deliberately absent.
+    // The locked jobs are present; the credential refresh is deliberately absent.
     expect(Object.keys(JOB_LOCK_KEYS).sort()).toEqual(
-      ['CERT_EXPIRY_NOTIFICATION', 'DEVICE_SYNC', 'OWNED_GROUP_SWEEP', 'RETENTION_CLEANUP', 'SUBSCRIPTION_POLLER'].sort()
+      [
+        'CALLSIGN_POLLER',
+        'CERT_EXPIRY_NOTIFICATION',
+        'DEVICE_SYNC',
+        'OWNED_GROUP_SWEEP',
+        'RETENTION_CLEANUP',
+        'SUBSCRIPTION_POLLER'
+      ].sort()
     );
   });
 });

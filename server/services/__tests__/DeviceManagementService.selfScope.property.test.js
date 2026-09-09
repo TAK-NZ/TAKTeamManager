@@ -82,10 +82,18 @@ function installInMemoryDeviceTable(rows) {
       throw new Error(`Unexpected SQL in the self-scope property test: ${sql}`);
     }
 
-    if (sql.includes('WHERE user_id = $1')) {
+    // The self-view now qualifies its predicate/order as `d.user_id`/
+    // `d.issued_at`/`d.client_uid` (it joins tak_devices d to users/user_cache
+    // for the assigned callsign, callsign-mismatch detection). The self-scope
+    // guarantee is unchanged: still bound to $1 alone, no client-supplied
+    // filter. Accept either the bare or the `d.`-qualified form.
+    if (sql.includes('WHERE user_id = $1') || sql.includes('WHERE d.user_id = $1')) {
       const matched = rows.filter((row) => integerColumnEqualsParam(row.user_id, params[0]));
 
-      if (sql.includes('ORDER BY issued_at DESC NULLS LAST, client_uid ASC')) {
+      if (
+        sql.includes('ORDER BY issued_at DESC NULLS LAST, client_uid ASC') ||
+        sql.includes('ORDER BY d.issued_at DESC NULLS LAST, d.client_uid ASC')
+      ) {
         matched.sort((left, right) => {
           const leftIssued = left.issued_at === null ? null : left.issued_at.getTime();
           const rightIssued = right.issued_at === null ? null : right.issued_at.getTime();
@@ -124,6 +132,12 @@ function expectedDevice(row) {
     // about scope, so `connected` is here only to keep the wire shape whole --
     // it never affects which rows are visible (Criterion 17.8).
     connected: row.connected,
+    // Callsign-mismatch detection: the seeded rows in this scope property carry
+    // no `observed_callsign`/`assigned_callsign`, so mapDevice reports the
+    // absent-input defaults. (The mismatch classification itself is covered by
+    // this feature's own tests; this property is about scope.)
+    observedCallsign: null,
+    callsignMismatch: false,
     // Requirement 15.1: derived on read from the Client_Uid alone. This
     // property is about scope, not classification (Property 11 covers the
     // rules), so it reuses the classifier rather than restating its rules.

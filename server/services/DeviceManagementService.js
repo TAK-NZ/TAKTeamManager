@@ -2,6 +2,7 @@ const pool = require('../config/database');
 const DirectoryScopeService = require('./DirectoryScopeService');
 const { getLogger } = require('../middleware/requestContext');
 const { classifyClientType } = require('../utils/clientType');
+const { isCallsignAcceptable } = require('../utils/callsignMatch');
 
 /**
  * Thrown when an admin asks for (or tries to act on) the Devices of a user
@@ -62,6 +63,16 @@ const DEVICE_COLUMNS =
   'client_uid, user_id, cert_id, issued_at, expires_at, last_seen_at, revoked, connected';
 
 /**
+ * The same columns as `DEVICE_COLUMNS`, qualified with the `d` alias for the
+ * self/managed list query, which joins `tak_devices d` to `users`/`user_cache`
+ * to reach the assigned callsign. Kept derived from the one list so the two can
+ * never drift.
+ */
+const DEVICE_COLUMNS_QUALIFIED = DEVICE_COLUMNS.split(', ')
+  .map((column) => `d.${column}`)
+  .join(', ');
+
+/**
  * DeviceManagementService (device-management Requirements 5.5, 6.2, 6.6,
  * 6.7, 7.5, 8.5, 8.6, 9.3, 9.4; design.md's
  * `server/services/DeviceManagementService.js` section).
@@ -118,11 +129,22 @@ class DeviceManagementService {
    *   connected: boolean}>>}
    */
   static async listOwnDevices(userId) {
+    // Callsign-mismatch detection: the self/managed device list additionally
+    // selects the observed live callsign and joins the user's assigned callsign
+    // (`user_cache.tak_callsign`) so `mapDevice` can compute the mismatch flag
+    // the Dashboard card / user-details modal highlight. The device row set is
+    // bounded by `user_id`, so the LEFT JOIN adds no N+1 concern. Aliased to
+    // `d`/`uc` and columns qualified so the JOIN cannot make `client_uid`
+    // (present on both tables? no — but be explicit) ambiguous.
     const result = await pool.query(
-      `SELECT ${DEVICE_COLUMNS}
-         FROM tak_devices
-        WHERE user_id = $1
-        ORDER BY issued_at DESC NULLS LAST, client_uid ASC`,
+      `SELECT ${DEVICE_COLUMNS_QUALIFIED},
+              d.observed_callsign,
+              uc.tak_callsign AS assigned_callsign
+         FROM tak_devices d
+         JOIN users u ON u.id = d.user_id
+         LEFT JOIN user_cache uc ON uc.authentik_id = u.authentik_user_id::text
+        WHERE d.user_id = $1
+        ORDER BY d.issued_at DESC NULLS LAST, d.client_uid ASC`,
       [userId]
     );
 
@@ -143,6 +165,69 @@ class DeviceManagementService {
   static async listManagedUserDevices(actingUser, targetUserId) {
     await DeviceManagementService.assertManagedUser(actingUser, targetUserId);
     return DeviceManagementService.listOwnDevices(targetUserId);
+  }
+
+  /**
+   * Callsign-mismatch detection (docs/ARCHITECTURE.md ("Callsign Mismatch Detection" section), Phase 2):
+   * the caller's OWN devices that are CURRENTLY connected under a callsign that
+   * does not preserve their assigned callsign. Backs the in-app nudge (the
+   * `/tasks` section and the outstanding-task badge).
+   *
+   * The comparison uses the SAME pure `isCallsignAcceptable` rule the
+   * `CallsignPoller` uses, against the SAME stored values it writes, so the
+   * badge, the page and the poller can never disagree on what counts as a
+   * mismatch:
+   *
+   *   - `observed_callsign`  — what the client is connected under (written by
+   *     the poller from the live subscription table).
+   *   - `user_cache.tak_callsign` — the assigned, already-assembled callsign.
+   *
+   * Filtered to `connected = true` (a mismatch is only actionable while the
+   * device is actually connected — the design's connected-only scope for the
+   * in-app surface) and to devices with a recorded `observed_callsign`. CloudTAK
+   * devices are excluded, mirroring the poller's own skip: CloudTAK prevents
+   * callsign changes, so it can never be a real mismatch. A teamless user
+   * (`tak_callsign` NULL) has no assignment to violate, so `isCallsignAcceptable`
+   * returns true for them and they are naturally filtered out.
+   *
+   * The `client_uid`-based CloudTAK exclusion and the acceptability test both
+   * run in JS via the shared classifiers rather than in SQL, so the append
+   * boundary rule stays in exactly one place. The row set is bounded by
+   * `user_id`, so this is not an N+1 concern.
+   *
+   * @param {number|string} userId - LOCAL `users.id` of the caller.
+   * @returns {Promise<Array<{clientUid: string, clientType: string,
+   *   observedCallsign: string, assignedCallsign: string|null,
+   *   lastSeenAt: Date|null}>>} one entry per mismatched, currently-connected
+   *   device; empty when nothing is wrong.
+   */
+  static async listOwnCallsignMismatches(userId) {
+    const result = await pool.query(
+      `SELECT d.client_uid, d.observed_callsign, d.last_seen_at, uc.tak_callsign
+         FROM tak_devices d
+         JOIN users u ON u.id = d.user_id
+         LEFT JOIN user_cache uc ON uc.authentik_id = u.authentik_user_id::text
+        WHERE d.user_id = $1
+          AND d.connected = true
+          AND d.revoked = false
+          AND d.observed_callsign IS NOT NULL
+        ORDER BY d.client_uid ASC`,
+      [userId]
+    );
+
+    return result.rows
+      .filter((row) => {
+        const clientType = classifyClientType(row.client_uid);
+        if (clientType === 'cloudtak') return false;
+        return !isCallsignAcceptable(row.observed_callsign, row.tak_callsign);
+      })
+      .map((row) => ({
+        clientUid: row.client_uid,
+        clientType: classifyClientType(row.client_uid),
+        observedCallsign: row.observed_callsign,
+        assignedCallsign: row.tak_callsign,
+        lastSeenAt: row.last_seen_at
+      }));
   }
 
   /**
@@ -330,13 +415,47 @@ class DeviceManagementService {
    * string or a zero date here. `user_id` is deliberately dropped: the caller
    * already knows whose Devices they asked for.
    *
-   * @param {object} row - a `tak_devices` row.
+   * Callsign-mismatch detection (docs/ARCHITECTURE.md ("Callsign Mismatch Detection" section)): when the
+   * caller's query supplied `observed_callsign` and the joined
+   * `assigned_callsign` (the self/managed list does; the revoke-path row lookups
+   * do not), this also emits `observedCallsign` and a computed
+   * `callsignMismatch` boolean so the shared `DeviceListRow` can highlight a
+   * device connected under a wrong callsign on BOTH the Dashboard card and the
+   * user-details modal from one definition. The flag uses the SAME pure
+   * `isCallsignAcceptable` rule the `CallsignPoller` and the `/tasks` list use,
+   * and is scoped exactly like the in-app nudge: true only for a device that is
+   * `connected`, is NOT CloudTAK (CloudTAK cannot change its callsign), and
+   * whose observed callsign does not preserve the assigned one. A row without
+   * those columns (a revoke-path lookup) yields `observedCallsign: null` and
+   * `callsignMismatch: false`, so no caller can accidentally surface a
+   * half-computed flag.
+   *
+   * @param {object} row - a `tak_devices` row, optionally joined with
+   *   `observed_callsign` and `assigned_callsign`.
    * @returns {{clientUid: string, certId: number, issuedAt: Date|null,
    *   expiresAt: Date|null, lastSeenAt: Date|null, revoked: boolean,
-   *   connected: boolean,
+   *   connected: boolean, observedCallsign: string|null,
+   *   callsignMismatch: boolean,
    *   clientType: 'cloudtak'|'android'|'ios'|'windows'|'unknown'}}
    */
   static mapDevice(row) {
+    const observedCallsign =
+      row.observed_callsign === undefined ? null : row.observed_callsign;
+    const clientType = classifyClientType(row.client_uid);
+    // Only the self/managed list joins in the assigned callsign; when it did
+    // not, `assigned_callsign` is absent and there is nothing to compare, so the
+    // flag is false. Scoped to a connected, non-CloudTAK device, mirroring the
+    // in-app nudge and the poller's own skip.
+    const callsignMismatch =
+      row.assigned_callsign !== undefined &&
+      Boolean(row.connected) &&
+      // A revoked Device is never a live participant, so it is never flagged for
+      // a callsign mismatch (defense in depth: `connected` is already cleared on
+      // revoke, but a momentarily-stale value must not surface a nudge).
+      !row.revoked &&
+      clientType !== 'cloudtak' &&
+      !isCallsignAcceptable(observedCallsign, row.assigned_callsign);
+
     return {
       clientUid: row.client_uid,
       certId: row.cert_id,
@@ -344,6 +463,11 @@ class DeviceManagementService {
       expiresAt: row.expires_at,
       lastSeenAt: row.last_seen_at,
       revoked: row.revoked,
+      // Callsign-mismatch detection: the observed live callsign and the
+      // computed mismatch flag. Present on every device shape (null/false when
+      // the query did not supply the inputs) so the shared row can rely on them.
+      observedCallsign,
+      callsignMismatch,
       // Requirement 20.8: Connection_Status rides the same single wire-shape
       // definition, so all four device endpoints gain it at once and no
       // surface can see it while another does not.

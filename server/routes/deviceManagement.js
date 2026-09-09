@@ -372,6 +372,26 @@ router.get('/me/devices', authenticateToken, authorize, async (req, res) => {
   }
 });
 
+// Callsign-mismatch detection (docs/ARCHITECTURE.md ("Callsign Mismatch Detection" section), Phase 2): the
+// caller's own devices currently connected under a callsign that does not
+// preserve their assigned callsign. Same self-scope as `/me/devices` (the only
+// input is `req.user.userId`), same `device_mgmt:read:own` permission, and the
+// same 404-when-disabled gate — so the client's badge/tasks section can call it
+// exactly like the device list and treat a 404 as "feature off". A response
+// with an empty `mismatches` array means "nothing to correct".
+router.get('/me/callsign-status', authenticateToken, authorize, async (req, res) => {
+  if (respondNotFoundWhenDisabled(res)) {
+    return;
+  }
+
+  try {
+    const mismatches = await DeviceManagementService.listOwnCallsignMismatches(req.user.userId);
+    res.json({ mismatches });
+  } catch (error) {
+    handleServiceError(res, error, 'Failed to check your callsign status');
+  }
+});
+
 // Requirements 6.1, 6.3, 6.4, 6.5, 6.6, 6.7: a Managed_User's Devices.
 // `listManagedUserDevices` asserts the Managed_User relationship BEFORE it
 // reads any Device row, so a denied request (403 via `NotManagedUserError`)

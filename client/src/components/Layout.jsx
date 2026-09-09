@@ -202,7 +202,12 @@ export default function Layout({ children, user }) {
       // org-interest call (an admin:manage, non-global caller has no
       // admin:org_interest:read permission) or a 404 on the devices call must
       // not blank out whichever counts DID resolve.
-      const promises = [deviceManagementAPI.getMyDevices()]
+      // Category 2 also includes, for EVERY user, their own devices currently
+      // connected under a wrong callsign (callsign-mismatch detection,
+      // docs/ARCHITECTURE.md ("Callsign Mismatch Detection" section) Phase 2). Like getMyDevices this is an
+      // always-present call whose 404 (device management off) reads as a
+      // truthful zero via allSettled, so it never blanks the other counts.
+      const promises = [deviceManagementAPI.getMyDevices(), deviceManagementAPI.getMyCallsignStatus()]
       if (isManager) {
         promises.push(requestsAPI.getPending())
       }
@@ -210,12 +215,16 @@ export default function Layout({ children, user }) {
         promises.push(adminAPI.getOrgInterest({ status: 'pending' }))
       }
 
-      const [myDevicesResult, accessRequestsResult, orgInterestResult] =
+      const [myDevicesResult, callsignStatusResult, accessRequestsResult, orgInterestResult] =
         await Promise.allSettled(promises);
 
       const ownRenewalCount =
         myDevicesResult.status === 'fulfilled'
           ? filterDevicesNeedingRenewal(myDevicesResult.value?.data?.devices).length
+          : 0
+      const callsignMismatchCount =
+        callsignStatusResult?.status === 'fulfilled'
+          ? callsignStatusResult.value?.data?.mismatches?.length || 0
           : 0
       const accessRequestsCount =
         accessRequestsResult?.status === 'fulfilled'
@@ -226,7 +235,9 @@ export default function Layout({ children, user }) {
           ? orgInterestResult.value?.data?.requests?.length || 0
           : 0
 
-      setOutstandingTaskCount(ownRenewalCount + accessRequestsCount + orgInterestCount)
+      setOutstandingTaskCount(
+        ownRenewalCount + callsignMismatchCount + accessRequestsCount + orgInterestCount
+      )
     }
 
     fetchOutstandingCount()

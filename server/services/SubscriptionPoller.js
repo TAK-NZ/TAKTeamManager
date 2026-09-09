@@ -571,11 +571,26 @@ class SubscriptionPoller {
    * @param {boolean} connected the Status_Collapse_Rule's verdict for this
    *   `uid` across every entry that reported it.
    * @returns {Promise<{rowCount: number}>}
+   *
+   * REVOKED ROWS ARE NEVER MARKED CONNECTED. The `connected` write is
+   * `($3 AND revoked = false)`, so a revoked Device resolves to `connected =
+   * false` no matter what the live-subscription poll reported for it. A revoked
+   * certificate cannot be a legitimate live participant, and without this guard
+   * a just-revoked client whose socket is still open (or still lingering in TAK
+   * Server's subscription table) would keep being re-marked `connected = true`
+   * on every poll -- which presented a revoked Device as "Currently Connected"
+   * on the Dashboard AND made the Dashboard's connected count exceed the
+   * Enrollment page's `revoked = false` count (the exact 3-connected /
+   * 2-active split that surfaced this). `revoked` is still owned solely by the
+   * revoke handler; this only READS it to decide `connected`. `last_seen_at`
+   * keeps its own semantics untouched -- a revoked row TAK Server still reports
+   * may still advance its historical Last_Seen; only the live `connected`
+   * claim is suppressed.
    */
   async recordLastSeen(clientUids, lastEventTime, connected) {
     return this.pool.query(
       `UPDATE tak_devices
-          SET connected = $3,
+          SET connected = ($3 AND revoked = false),
               last_seen_at = CASE
                 WHEN $2::timestamptz IS NOT NULL
                  AND (last_seen_at IS NULL OR last_seen_at < $2) THEN $2

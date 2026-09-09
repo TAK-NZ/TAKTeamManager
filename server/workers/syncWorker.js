@@ -180,6 +180,7 @@ const AdminCredentialLoader = require('../services/AdminCredentialLoader');
 const AdminCredentialRefreshJob = require('../services/AdminCredentialRefreshJob');
 const SubscriptionPoller = require('../services/SubscriptionPoller');
 const DeviceSync = require('../services/DeviceSync');
+const CallsignPoller = require('../services/CallsignPoller');
 // Feature cloudtak-agency-groups (tasks 4.1/4.2): the pure CloudTAK
 // helpers -- `groupName(teamId)` (`CloudTAKAgency<id>`),
 // `agencyAttributes(team)` (the three Agency_Attributes), and
@@ -566,6 +567,13 @@ class SyncWorker {
     this.deviceSync = new DeviceSync({
       takServerService: this.takServerService
     });
+    // Callsign-mismatch detection (docs/ARCHITECTURE.md ("Callsign Mismatch Detection" section)): the fast
+    // 1-minute live-subscription poll. Takes the SAME shared TakServerService,
+    // so a rotated Admin_Credential applies to its Marti calls too. Started
+    // under the same isDeviceMgmtEnabled() gate as the other device jobs.
+    this.callsignPoller = new CallsignPoller({
+      takServerService: this.takServerService
+    });
   }
 
   async start() {
@@ -615,6 +623,9 @@ class SyncWorker {
       this.adminCredentialRefreshJob.start();
       this.subscriptionPoller.start();
       this.deviceSync.start();
+      // Callsign-mismatch detection: the fast live-callsign poll. Started
+      // alongside the history poller and device sync, behind the same gate.
+      this.callsignPoller.start();
     }
 
     while (this.isRunning) {
@@ -755,6 +766,7 @@ class SyncWorker {
     this.adminCredentialRefreshJob.stop();
     this.subscriptionPoller.stop();
     this.deviceSync.stop();
+    this.callsignPoller.stop();
 
     try {
       await this.pool.end();
@@ -3774,9 +3786,20 @@ class SyncWorker {
     if (uids.length === 0) return 0;
 
     try {
+      // `connected = false` alongside `revoked = true`: a revoked Device is not
+      // a live participant, so it must stop presenting as "Currently Connected"
+      // IMMEDIATELY rather than waiting for the next Subscription_Poller tick to
+      // clear it. The poller's `recordLastSeen` also refuses to re-mark a
+      // revoked row connected (`connected = ($3 AND revoked = false)`), so this
+      // clear stays cleared. Clearing `connected` here does not usurp the
+      // poller's ownership of the live-status signal: a revoked row has no
+      // legitimate live status to own, and the poller no longer writes one for
+      // it. `last_seen_at` is deliberately untouched (its historical value
+      // stands).
       const result = await this.pool.query(
         `UPDATE tak_devices
-            SET revoked = true
+            SET revoked = true,
+                connected = false
           WHERE client_uid = ANY($1::text[])`,
         [uids]
       );

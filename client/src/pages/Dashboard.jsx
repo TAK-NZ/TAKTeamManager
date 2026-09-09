@@ -45,6 +45,38 @@ const TOP_LEVEL_FOLDER_ICONS = Object.freeze({
   XtraTools: IconTool
 })
 
+/**
+ * The pending-tasks banner's description line. Names only the non-zero
+ * categories so it stays accurate for any combination.
+ *
+ * The admin categories (access requests + team-device renewals) keep their
+ * exact original wording, including the combined "...and device certificate
+ * renewals." sentence. The callsign-mismatch category (callsign-mismatch
+ * detection) is appended as its own sentence when present, since it is a
+ * different KIND of task (the viewer's own device, not a team-admin action) and
+ * reads more clearly separately than folded into the admin sentence.
+ *
+ * Exported so its combinations can be unit-tested directly.
+ *
+ * @param {{accessRequests: number, teamDeviceRenewals: number, callsignMismatches: number}} stats
+ * @returns {string}
+ */
+export function getPendingTasksDescription(stats) {
+  const adminSentence =
+    stats.accessRequests > 0 && stats.teamDeviceRenewals > 0
+      ? 'Review team access requests and device certificate renewals.'
+      : stats.teamDeviceRenewals > 0
+        ? 'Review team device certificate renewals.'
+        : stats.accessRequests > 0
+          ? 'Review team access requests from new users.'
+          : ''
+
+  const callsignSentence =
+    stats.callsignMismatches > 0 ? 'Correct the callsign on your connected device.' : ''
+
+  return [adminSentence, callsignSentence].filter(Boolean).join(' ')
+}
+
 export default function Dashboard({ user }) {
   // Bugfix (generic-pending-tasks-banner): this banner's count previously
   // covered ONLY the access_requests/Org_Interest queue (`accessRequests`
@@ -58,7 +90,14 @@ export default function Dashboard({ user }) {
   // of your devices has a certificate expiring soon or expired." with a
   // direct /enrollment link) -- folding them in here too would put two
   // banners about the same expiring cert on one page.
-  const [stats, setStats] = useState({ accessRequests: 0, teamDeviceRenewals: 0 })
+  //
+  // Callsign-mismatch detection: `callsignMismatches` (the viewer's own
+  // devices connected under a wrong callsign) IS folded in -- unlike own-cert
+  // renewals, a callsign mismatch has NO separate banner on this page, and the
+  // nav badge (Layout.jsx) and the /tasks page both count it, so excluding it
+  // here is exactly the drift that made this banner show a lower number than
+  // both of those.
+  const [stats, setStats] = useState({ accessRequests: 0, teamDeviceRenewals: 0, callsignMismatches: 0 })
   // Requests.jsx's own gate for whether the viewer administers ANY team
   // (Team_Admin, admin, or Global_Manager) -- reused here verbatim so the
   // team-device-renewal fetch below only fires for a viewer who could act
@@ -523,7 +562,10 @@ export default function Dashboard({ user }) {
       // permission and gets a 403 on that call, which must not blank out
       // the counts they DO have permission for.
       try {
-        const promises = [requestsAPI.getPending()]
+        // The callsign-mismatch count is an EVERY-user task (like the nav
+        // badge's), fetched unconditionally; the other two are admin-scoped.
+        // Order of the pushes below is mirrored by the destructure.
+        const promises = [requestsAPI.getPending(), deviceManagementAPI.getMyCallsignStatus()]
         if (user?.is_global_manager) {
           promises.push(adminAPI.getOrgInterest({ status: 'pending' }))
         } else {
@@ -535,11 +577,20 @@ export default function Dashboard({ user }) {
           promises.push(Promise.resolve(null))
         }
 
-        const [accessRequestsResult, orgInterestResult, teamDeviceRenewalsResult] = await Promise.allSettled(promises)
+        const [accessRequestsResult, callsignStatusResult, orgInterestResult, teamDeviceRenewalsResult] =
+          await Promise.allSettled(promises)
 
         const accessRequestsCount =
           accessRequestsResult.status === 'fulfilled'
             ? accessRequestsResult.value.data.requests?.length || 0
+            : 0
+        // Callsign-mismatch detection: fold the viewer's own mismatched-callsign
+        // count into the banner so it agrees with the nav badge (Layout.jsx) and
+        // the /tasks page, which both count it. A 404 (device management off)
+        // reads as zero via allSettled, never blanking the other counts.
+        const callsignMismatchCount =
+          callsignStatusResult.status === 'fulfilled' && callsignStatusResult.value
+            ? callsignStatusResult.value.data?.mismatches?.length || 0
             : 0
         const orgInterestCount =
           orgInterestResult.status === 'fulfilled' && orgInterestResult.value
@@ -552,14 +603,15 @@ export default function Dashboard({ user }) {
 
         setStats({
           accessRequests: accessRequestsCount + orgInterestCount,
-          teamDeviceRenewals: teamDeviceRenewalsCount
+          teamDeviceRenewals: teamDeviceRenewalsCount,
+          callsignMismatches: callsignMismatchCount
         })
       } catch (e) {
-        setStats({ accessRequests: 0, teamDeviceRenewals: 0 })
+        setStats({ accessRequests: 0, teamDeviceRenewals: 0, callsignMismatches: 0 })
       }
     } catch (error) {
       console.error('Failed to fetch channel data:', error)
-      setStats({ accessRequests: 0, teamDeviceRenewals: 0 })
+      setStats({ accessRequests: 0, teamDeviceRenewals: 0, callsignMismatches: 0 })
     } finally {
       setLoading(false)
     }
@@ -779,11 +831,12 @@ export default function Dashboard({ user }) {
 
       {/* Pending Tasks (bugfix: generic-pending-tasks-banner). The heading
           and count cover access requests + Org_Interest_Requests +
-          Team-Owned Device renewals; the description line names only the
-          category/categories that are actually non-zero, since a fixed
-          A-or-B sentence would misdescribe the case where both are
-          present. */}
-      {(stats.accessRequests + stats.teamDeviceRenewals) > 0 && (
+          Team-Owned Device renewals + the viewer's own callsign-mismatch
+          nudges; the description line names only the category/categories that
+          are actually non-zero, since a fixed sentence would misdescribe the
+          mixed cases. The total is kept in sync with the nav badge and /tasks
+          (all three now count callsign mismatches). */}
+      {(stats.accessRequests + stats.teamDeviceRenewals + stats.callsignMismatches) > 0 && (
         <div className="card bg-yellow-50 dark:bg-yellow-900/20 border-yellow-200 dark:border-yellow-800">
           {/* Below `sm`: the icon + text stay on their own row and the
               button drops underneath, full-width -- the previous single
@@ -797,15 +850,11 @@ export default function Dashboard({ user }) {
               <ClipboardDocumentListIcon className="h-6 w-6 text-yellow-600 dark:text-yellow-400 flex-shrink-0" />
               <div className="ml-3">
                 <h3 className="text-sm font-medium text-yellow-800 dark:text-yellow-200">
-                  You have {stats.accessRequests + stats.teamDeviceRenewals} pending task
-                  {(stats.accessRequests + stats.teamDeviceRenewals) !== 1 ? 's' : ''}
+                  You have {stats.accessRequests + stats.teamDeviceRenewals + stats.callsignMismatches} pending task
+                  {(stats.accessRequests + stats.teamDeviceRenewals + stats.callsignMismatches) !== 1 ? 's' : ''}
                 </h3>
                 <p className="text-sm text-yellow-700 dark:text-yellow-300">
-                  {stats.accessRequests > 0 && stats.teamDeviceRenewals > 0
-                    ? 'Review team access requests and device certificate renewals.'
-                    : stats.teamDeviceRenewals > 0
-                      ? 'Review team device certificate renewals.'
-                      : 'Review team access requests from new users.'}
+                  {getPendingTasksDescription(stats)}
                 </p>
               </div>
             </div>

@@ -491,6 +491,13 @@ const routes = {
   // Managed_User (and, for revoke, whose `:clientUid` Device belongs to
   // that target).
   'GET /api/device-management/me/devices': ['device_mgmt:read:own'],
+  // Callsign-mismatch detection (docs/ARCHITECTURE.md ("Callsign Mismatch Detection" section), Phase 2):
+  // the caller's own currently-connected devices whose live callsign does not
+  // preserve their assigned callsign. SELF-scoped exactly like `/me/devices`
+  // (subject is the caller's own `req.user.userId`), so it shares
+  // `device_mgmt:read:own` — the same reasoning that makes that identifier a
+  // static grant in `roleDefaults.authenticated_user` applies unchanged.
+  'GET /api/device-management/me/callsign-status': ['device_mgmt:read:own'],
   'GET /api/device-management/users/:userId/devices': ['device_mgmt:read:managed'],
   'POST /api/device-management/me/devices/:clientUid/revoke': ['device_mgmt:revoke:own'],
   'POST /api/device-management/users/:userId/devices/:clientUid/revoke': ['device_mgmt:revoke:managed'],
