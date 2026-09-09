@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { PlusIcon, KeyIcon, UserPlusIcon, GlobeAltIcon, RadioIcon, SignalIcon, PencilIcon, TrashIcon, FolderIcon, FolderOpenIcon, ChevronRightIcon, ChevronDownIcon, ChevronUpIcon } from '@heroicons/react/24/outline';
 // Response/Support/XtraTools use Tabler icons instead of a heroicons
 // stand-in: heroicons has no fire-truck/ambulance, digger, or wrench+tools
@@ -11,6 +11,7 @@ import { IconFiretruck, IconBackhoe, IconTool } from '@tabler/icons-react';
 import toast from 'react-hot-toast';
 import { globalChannelsAPI, configAPI } from '../services/api';
 import { buildFolderTree } from '../utils/channelTree';
+import { startVisibilityPausedRefresh } from '../utils/visibilityPausedRefresh';
 import BchChannelCredentialsDialog from '../components/BchChannelCredentialsDialog';
 import AddServiceAccountDialog from '../components/AddServiceAccountDialog';
 import ServiceAccountActionConfirmDialog from '../components/ServiceAccountActionConfirmDialog';
@@ -152,6 +153,55 @@ export default function GlobalChannels({ user }) {
       setLoading(false);
     }
   };
+
+  // Auto-refresh the channel lists on the shared visibility-paused 60s
+  // interval (the same mechanism the Dashboard/Admin cards use), so an open
+  // page reflects channels created/edited/deleted elsewhere without a manual
+  // reload. Only the `bchChannels`/`regionChannels` lists are refreshed; the
+  // expanded-folder set and the once-loaded folder separator / region-seed
+  // status are NOT re-derived from this fetch, so a background refresh
+  // preserves the tree's open/closed state.
+  //
+  // Distinct from `fetchChannels` in two ways, both because it runs
+  // unattended: it does NOT raise the loading spinner, and it does NOT
+  // toast on failure (a transient blip would otherwise pop a toast every
+  // minute) -- it just logs and leaves the last-good lists on screen.
+  //
+  // Paused while ANY dialog/modal is open: those read from the channel lists
+  // or hold their own transient/secret state (notably the credentials
+  // dialog), and refreshing underneath an operator mid-action is exactly the
+  // disruption the Dashboard's open-dialog guard avoids. `dialogOpenRef` lets
+  // the stable refresh closure see the current state without re-subscribing.
+  const dialogOpenRef = useRef(false);
+  dialogOpenRef.current =
+    showCreateModal ||
+    showEditModal ||
+    deleteChannel !== null ||
+    showAssignDialog ||
+    showSeedDialog ||
+    credentialsDialog !== null ||
+    addServiceAccountChannel !== null ||
+    serviceAccountAction !== null;
+
+  const refreshChannels = useCallback(async () => {
+    if (dialogOpenRef.current) {
+      return;
+    }
+    try {
+      const [bchResponse, regionResponse] = await Promise.all([
+        globalChannelsAPI.getBchChannels(),
+        globalChannelsAPI.getRegionChannels()
+      ]);
+      setBchChannels(bchResponse.data.channels);
+      setRegionChannels(regionResponse.data.channels);
+    } catch (error) {
+      // A failed background refresh leaves the last-good lists on screen and
+      // does not toast (unlike the attended fetchChannels above).
+      console.error('Failed to refresh global channels:', error);
+    }
+  }, []);
+
+  useEffect(() => startVisibilityPausedRefresh(refreshChannels), [refreshChannels]);
 
   // Bugfix: refreshes whether the standard region seed set is complete,
   // so the "Seed Standard Region Channels" action can hide itself once

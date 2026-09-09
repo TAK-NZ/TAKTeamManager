@@ -965,3 +965,185 @@ describe('Requests page renewal sections (cert-expiry-notifications 7.3, 7.4, 7.
     })
   })
 })
+
+/*
+ * The /tasks page keeps its two device-renewal sections current on the shared
+ * visibility-paused 60s interval (`startVisibilityPausedRefresh`, the same
+ * mechanism the Dashboard/Admin cards use), mirroring Dashboard.test.jsx's
+ * "My Devices" card auto-refresh block. It refreshes ONLY the device-renewal
+ * fetches (deviceManagementAPI.getMyDevices for self devices,
+ * devicesAPI.getAll for team devices) -- deliberately NOT the pending-requests
+ * list, whose editable per-request callsign-suffix/name inputs a refetch would
+ * clobber. This block asserts the tick/pause/resume/teardown lifecycle against
+ * getMyDevices; the mount is the direct page (no Layout) so the only calls to
+ * that mock are the ones this page makes.
+ */
+describe('Requests page device-renewal auto-refresh (visibility-paused 60s interval)', () => {
+  const REFRESH_INTERVAL_MS = 60000
+  let container
+  let root
+  let consoleErrorSpy
+  let tabHidden
+
+  const TEAM_ADMIN = { userId: 7, isAdmin: true, isTeamAdmin: true, is_global_manager: false }
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    vi.clearAllMocks()
+    consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    // `document.hidden` is a getter on Document.prototype in jsdom with no
+    // setter, so the tab's visibility is faked with an own property and
+    // removed again in afterEach (the same approach as Dashboard.test.jsx).
+    tabHidden = false
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => tabHidden
+    })
+
+    vi.useFakeTimers()
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+
+    requestsAPI.getPending.mockResolvedValue({ data: { requests: [] } })
+    // A fresh array of fresh objects per call so a refresh really does replace
+    // the rendered list with different object identities.
+    deviceManagementAPI.getMyDevices.mockImplementation(async () => ({
+      data: { devices: [] }
+    }))
+    devicesAPI.getAll.mockResolvedValue({
+      data: { devices: [], pagination: { page: 1, pageSize: 200, total: 0 } }
+    })
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    vi.useRealTimers()
+    delete document.hidden
+    container.remove()
+
+    // Every tick drives React state updates from a timer callback, exactly
+    // where an unwrapped-update warning would come from. console.error is
+    // silenced (the page logs a failed fetch on purpose), so the warnings are
+    // inspected here rather than being lost.
+    const actWarnings = consoleErrorSpy.mock.calls.filter(
+      ([first]) => typeof first === 'string' && first.includes('not wrapped in act')
+    )
+    vi.restoreAllMocks()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+    expect(actWarnings).toEqual([])
+  })
+
+  const mount = async () => {
+    root = createRoot(container)
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={['/tasks']}>
+          <Requests user={TEAM_ADMIN} />
+        </MemoryRouter>
+      )
+    })
+  }
+
+  const tick = async (intervals = 1) => {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL_MS * intervals)
+    })
+  }
+
+  const fireVisibilityChange = async (hidden) => {
+    tabHidden = hidden
+    await act(async () => {
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+  }
+
+  const selfFetchCount = () => deviceManagementAPI.getMyDevices.mock.calls.length
+  const teamFetchCount = () => devicesAPI.getAll.mock.calls.length
+
+  it('re-fetches both renewal sections on every interval tick while the tab is visible', async () => {
+    await mount()
+
+    // Mounting fetches once; the interval only schedules subsequent refreshes.
+    expect(selfFetchCount()).toBe(1)
+    expect(teamFetchCount()).toBe(1)
+
+    await tick()
+    expect(selfFetchCount()).toBe(2)
+    expect(teamFetchCount()).toBe(2)
+
+    await tick()
+    expect(selfFetchCount()).toBe(3)
+
+    // n ticks, n fetches -- including several in one advance. Both sections
+    // tick on the SAME mechanism, so their counts stay in lockstep.
+    await tick(3)
+    expect(selfFetchCount()).toBe(6)
+    expect(teamFetchCount()).toBe(6)
+  })
+
+  it('does NOT refetch the pending-requests list on a refresh tick (protects in-progress reviewer input)', async () => {
+    await mount()
+    expect(requestsAPI.getPending).toHaveBeenCalledTimes(1)
+
+    await tick(3)
+
+    // The device sections refreshed, but the editable pending-request list did
+    // not -- a refetch would re-seed the per-request callsign-suffix/name maps
+    // and wipe a reviewer's in-progress edits.
+    expect(requestsAPI.getPending).toHaveBeenCalledTimes(1)
+    expect(selfFetchCount()).toBe(4)
+  })
+
+  it('stops fetching while the tab is hidden, then fetches immediately when it becomes visible again', async () => {
+    await mount()
+    await tick()
+    expect(selfFetchCount()).toBe(2)
+
+    await fireVisibilityChange(true)
+    const whileHidden = selfFetchCount()
+
+    // The interval is CLEARED, not merely ignored: several intervals pass with
+    // no fetch at all.
+    await tick(5)
+    expect(selfFetchCount()).toBe(whileHidden)
+
+    // Becoming visible again refreshes IMMEDIATELY, without waiting out an
+    // interval.
+    await fireVisibilityChange(false)
+    expect(selfFetchCount()).toBe(whileHidden + 1)
+
+    // ...and the interval is restarted rather than left cleared.
+    await tick()
+    expect(selfFetchCount()).toBe(whileHidden + 2)
+  })
+
+  it('clears the interval and removes the visibilitychange listener on unmount', async () => {
+    const removeEventListener = vi.spyOn(document, 'removeEventListener')
+    await mount()
+    await tick()
+    const beforeUnmount = selfFetchCount()
+    expect(beforeUnmount).toBe(2)
+
+    await act(async () => {
+      root.unmount()
+    })
+    root = null
+
+    // No timer survives the component: several intervals pass with no fetch.
+    await tick(5)
+    expect(selfFetchCount()).toBe(beforeUnmount)
+
+    // Nor does the listener: a visibilitychange after unmount would otherwise
+    // call `refresh` on an unmounted tree.
+    await fireVisibilityChange(false)
+    expect(selfFetchCount()).toBe(beforeUnmount)
+    expect(removeEventListener).toHaveBeenCalledWith('visibilitychange', expect.any(Function))
+  })
+})

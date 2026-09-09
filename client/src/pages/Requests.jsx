@@ -7,6 +7,7 @@ import OrgInterestRequests from '../components/OrgInterestRequests'
 import DeviceTypeIcon from '../components/DeviceTypeIcon'
 import FormattedDate, { DATE_PRECISION, TOOLTIP_SIDES } from '../components/FormattedDate'
 import { filterDevicesNeedingRenewal } from '../utils/expiryWarning'
+import { startVisibilityPausedRefresh } from '../utils/visibilityPausedRefresh'
 import EnrollmentView from './EnrollmentView'
 
 // Requirement 11.11/11.12: pure helper computing the initial per-request
@@ -120,6 +121,30 @@ export default function Requests({ user }) {
   useEffect(() => {
     fetchMyDevicesNeedingRenewal()
     fetchTeamDevicesNeedingRenewal()
+  }, [fetchMyDevicesNeedingRenewal, fetchTeamDevicesNeedingRenewal])
+
+  // Keep the device-renewal sections current on the shared visibility-paused
+  // 60s interval (the same mechanism the Dashboard/Admin cards use). Separate
+  // from the first-load effect above so mounting still performs exactly one
+  // fetch -- `startVisibilityPausedRefresh` only SCHEDULES subsequent
+  // refreshes, it does not fetch up front.
+  //
+  // Deliberately refreshes ONLY the two READ-ONLY device-renewal sections,
+  // NOT the pending-access-requests list (`fetchRequests` below). That fetch
+  // re-seeds the per-request editable "Callsign Suffix" and First/Last Name
+  // inputs (`callsignSuffixByRequestId`/`namesByRequestId`) from the server
+  // response, so auto-refreshing it would wipe out whatever a reviewing admin
+  // is mid-way through typing into a pending row -- the same "never refresh an
+  // editor surface out from under an operator" rule the Admin page's editor
+  // tabs follow. The renewal sections carry no such in-progress input, and it
+  // is their count (own certificate renewals) that feeds the nav task badge,
+  // so refreshing them is exactly what keeps the badge and this page agreeing.
+  useEffect(() => {
+    const refresh = () => {
+      fetchMyDevicesNeedingRenewal()
+      fetchTeamDevicesNeedingRenewal()
+    }
+    return startVisibilityPausedRefresh(refresh)
   }, [fetchMyDevicesNeedingRenewal, fetchTeamDevicesNeedingRenewal])
 
   useEffect(() => {

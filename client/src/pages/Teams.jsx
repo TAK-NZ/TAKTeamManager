@@ -1,10 +1,11 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { PlusIcon, UserGroupIcon, TrashIcon, MagnifyingGlassIcon, ChevronUpIcon, ChevronDownIcon, ChevronRightIcon, EyeSlashIcon, ArrowLeftOnRectangleIcon, PencilIcon, QrCodeIcon, UsersIcon, DevicePhoneMobileIcon, ShieldCheckIcon, BuildingOfficeIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import { teamsAPI, configAPI } from '../services/api'
 import api from '../services/api'
 import { labelFor } from '../utils/teamLabels'
+import { startVisibilityPausedRefresh } from '../utils/visibilityPausedRefresh'
 import TeamFormDialog from '../components/TeamFormDialog'
 
 // Mobile card fallback (bugfix: the /teams table required constant
@@ -287,6 +288,37 @@ export default function Teams({ user }) {
 
     fetchData()
   }, [])
+
+  // Auto-refresh the team list on the shared visibility-paused 60s interval
+  // (the same mechanism the Dashboard/Admin cards use), so an open /teams page
+  // reflects teams created/renamed/deleted elsewhere without a manual reload.
+  // Only the `teams` list is refreshed -- the cosmetic colour mappings and
+  // max-depth loaded once above do not change at runtime. Client-side view
+  // state (search term, sort, pagination, expanded rows) is NOT re-derived
+  // from this fetch, so a background refresh preserves it.
+  //
+  // Paused while a create/edit or delete dialog is open: those dialogs read
+  // from `teams`/`editingTeam`, and refreshing the underlying list out from
+  // under an operator mid-edit is exactly the disruption the Dashboard's
+  // open-dialog guard avoids. `dialogOpenRef` lets the stable refresh closure
+  // see the current open/closed state without re-subscribing the interval.
+  const dialogOpenRef = useRef(false)
+  dialogOpenRef.current = showCreateDialog || deleteTeamId !== null
+
+  const refreshTeams = useCallback(async () => {
+    if (dialogOpenRef.current) {
+      return
+    }
+    try {
+      const teams = await teamsAPI.getAllMyTeams()
+      setTeams(teams)
+    } catch (error) {
+      // A failed background refresh leaves the last-good list on screen.
+      console.error('Failed to refresh teams:', error)
+    }
+  }, [])
+
+  useEffect(() => startVisibilityPausedRefresh(refreshTeams), [refreshTeams])
 
   const closeTeamFormDialog = () => {
     setShowCreateDialog(false)
