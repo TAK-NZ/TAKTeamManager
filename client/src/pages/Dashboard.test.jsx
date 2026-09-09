@@ -68,6 +68,10 @@ vi.mock('../services/api', () => ({
     probeEnabled: vi.fn(),
     revokeMyDevice: vi.fn(),
     revokeUserDevice: vi.fn(),
+    // The pending-tasks banner now folds in the viewer's own callsign-mismatch
+    // count (callsign-mismatch detection), so the banner fetch calls this for
+    // every user. Default to no mismatches.
+    getMyCallsignStatus: vi.fn().mockResolvedValue({ data: { mismatches: [] } }),
     // Used only by the cross-surface comparison at the bottom of this file,
     // which mounts the admin modal beside the Dashboard card.
     getUserDevices: vi.fn()
@@ -561,6 +565,9 @@ describe('Dashboard "Pending Tasks" stat (bugfix: pending-requests-badge, generi
     configAPI.getColorMappings.mockResolvedValue({ data: { colorMappings: {}, roleDescriptions: {} } })
     configAPI.getPublic.mockResolvedValue({ data: {} })
     deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false, devices: [] })
+    // The banner's every-user callsign-mismatch fetch; clearAllMocks above
+    // wiped the factory default, so re-establish "no mismatches" here.
+    deviceManagementAPI.getMyCallsignStatus.mockResolvedValue({ data: { mismatches: [] } })
     // Only reached by tests below that mount an admin/team-admin/
     // Global_Manager user; harmless default for every other test in this
     // suite, which never triggers the canManageTeams branch at all.
@@ -701,6 +708,48 @@ describe('Dashboard "Pending Tasks" stat (bugfix: pending-requests-badge, generi
   it('describes access requests alone when that is the only non-zero category', async () => {
     requestsAPI.getPending.mockResolvedValue({ data: { requests: [{ id: 1 }] } })
     devicesAPI.getAll.mockResolvedValue({ data: { devices: [], pagination: { page: 1, pageSize: 200, total: 0 } } })
+
+    await mount({ ...USER, isAdmin: true })
+
+    expect(pendingTasksStatText()).toBe('1')
+    expect(bannerDescriptionText()).toBe('Review team access requests from new users.')
+  })
+
+  // --- callsign-mismatch detection: the banner counts the viewer's own
+  //     mismatched-callsign devices, matching the nav badge and /tasks ---
+
+  it('folds the viewer\'s callsign mismatches into the count and names them (agrees with the nav badge)', async () => {
+    // Org-interest 0, access requests 0, team devices 0, but ONE callsign
+    // mismatch -- the exact shape that previously showed 1 on the badge and
+    // /tasks but 0 (no banner) here.
+    requestsAPI.getPending.mockResolvedValue({ data: { requests: [] } })
+    deviceManagementAPI.getMyCallsignStatus.mockResolvedValue({
+      data: { mismatches: [{ clientUid: 'ANDROID-x', observedCallsign: 'WRONG', assignedCallsign: 'RIGHT' }] }
+    })
+
+    await mount({ ...USER, isAdmin: true })
+
+    expect(pendingTasksStatText()).toBe('1')
+    expect(bannerDescriptionText()).toBe('Correct the callsign on your connected device.')
+  })
+
+  it('sums an access request AND a callsign mismatch, naming both (the reported 1-vs-2 case)', async () => {
+    requestsAPI.getPending.mockResolvedValue({ data: { requests: [{ id: 1 }] } })
+    deviceManagementAPI.getMyCallsignStatus.mockResolvedValue({
+      data: { mismatches: [{ clientUid: 'ANDROID-x', observedCallsign: 'WRONG', assignedCallsign: 'RIGHT' }] }
+    })
+
+    await mount({ ...USER, isAdmin: true })
+
+    expect(pendingTasksStatText()).toBe('2')
+    expect(bannerDescriptionText()).toBe(
+      'Review team access requests from new users. Correct the callsign on your connected device.'
+    )
+  })
+
+  it('treats a 404 from getMyCallsignStatus (device management off) as zero, not an error', async () => {
+    requestsAPI.getPending.mockResolvedValue({ data: { requests: [{ id: 1 }] } })
+    deviceManagementAPI.getMyCallsignStatus.mockRejectedValue({ response: { status: 404 } })
 
     await mount({ ...USER, isAdmin: true })
 

@@ -145,7 +145,7 @@ function isValidCertificateCount(count) {
 }
 
 /**
- * The "Active TAK Server Certificates" field's text colour.
+ * The "Active Devices" field's text colour.
  *
  * Bugfix: this field replaces the old `MultipleCertificateWarning` note,
  * which rendered amber -- a warning colour -- for any count greater than
@@ -698,7 +698,7 @@ export default function EnrollmentView({
                   effect yet", the actual condition worth a second look. */}
               <div>
                 <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">
-                  Active TAK Server Certificates
+                  Active Devices
                 </dt>
                 <dd className={`text-sm font-medium ${certificateCountColorClass(summary.liveCertificateCount)}`}>
                   {isValidCertificateCount(summary.liveCertificateCount)
