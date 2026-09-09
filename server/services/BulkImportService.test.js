@@ -511,6 +511,12 @@ describe('BulkImportService.importTeams', () => {
       if (sql === 'SELECT id FROM teams WHERE name = $1' && params[0] === 'FENZ') {
         return Promise.resolve({ rows: [{ id: 1 }] });
       }
+      // The parentTeamId branch now verifies the referenced team
+      // exists (bugfix: dangling parentTeamId FK explosion) -- team 3
+      // is present here so the by-id row still resolves and succeeds.
+      if (sql === 'SELECT id FROM teams WHERE id = $1' && params[0] === 3) {
+        return Promise.resolve({ rows: [{ id: 3 }] });
+      }
       return Promise.resolve({ rows: [] });
     });
 
@@ -537,6 +543,14 @@ describe('BulkImportService.importTeams', () => {
     expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ name: 'Southland District', parent_team_id: 1 }));
     expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ name: 'Otago District', parent_team_id: 3 }));
     expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ name: 'FENZ', parent_team_id: null }));
+
+    // 504 fix: every bulk-imported team defers its Authentik group
+    // creation to the sync worker, so the import makes zero blocking
+    // Authentik HTTP calls per row inside the request handler. Every
+    // Team.create call must carry deferGroupCreation: true.
+    Team.create.mock.calls.forEach(([teamData]) => {
+      expect(teamData.deferGroupCreation).toBe(true);
+    });
   });
 
   it('continues processing remaining rows when a parentTeamName lookup fails to find a match', async () => {
@@ -573,6 +587,55 @@ describe('BulkImportService.importTeams', () => {
 
     // The failing row never reached Team.create.
     expect(Team.create).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails a row cleanly (never a raw FK error) when its parentTeamId references a team that does not exist', async () => {
+    // Regression: verified against the live Test deployment, a CSV
+    // carrying parentTeamId values from a DIFFERENT environment (low
+    // ids like 22 when this database's real teams sit in the
+    // thousands) produced 1130 rows that reached Team.create unchecked
+    // and were rejected by Postgres' teams_parent_team_id_fkey as raw
+    // DatabaseErrors (SQLSTATE 23503). resolveNodeParentTeamId now
+    // confirms the id exists first, so a stale id is a readable
+    // per-row failure identical in shape to the parentTeamName miss.
+    const csv = csvFromTeamRows([
+      { name: 'Southland District', parentTeamId: '1' },
+      { name: 'Orphan Team', parentTeamId: '22' },
+      { name: 'Otago District', parentTeamId: '1' }
+    ]);
+
+    pool.query.mockImplementation((sql, params) => {
+      // Only team 1 exists; team 22 is a dangling cross-environment id.
+      if (sql === 'SELECT id FROM teams WHERE id = $1' && params[0] === 1) {
+        return Promise.resolve({ rows: [{ id: 1 }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    Team.create.mockImplementation((teamData) => {
+      const idsByName = { 'Southland District': 301, 'Otago District': 303 };
+      return Promise.resolve({ id: idsByName[teamData.name], name: teamData.name, parent_team_id: teamData.parent_team_id });
+    });
+
+    const importingUser = { userId: 1, is_global_manager: true };
+    const summary = await BulkImportService.importTeams(csv, importingUser);
+
+    expect(summary.successCount).toBe(2);
+    expect(summary.failureCount).toBe(1);
+    expect(summary.results[0]).toEqual({ row: 1, success: true, teamId: 301 });
+    expect(summary.results[1]).toEqual({
+      row: 2,
+      success: false,
+      error: 'Parent team not found: 22'
+    });
+    expect(summary.results[2]).toEqual({ row: 3, success: true, teamId: 303 });
+
+    // The dangling-id row never reached Team.create, so Postgres never
+    // saw the FK-violating insert that produced the production errors.
+    expect(Team.create).toHaveBeenCalledTimes(2);
+    expect(Team.create).not.toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'Orphan Team' })
+    );
   });
 
   it('imports a multi-level rowId/parentRowRef chain in one call, in topological order, passing each real created parent id', async () => {
