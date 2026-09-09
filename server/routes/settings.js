@@ -666,50 +666,41 @@ router.post('/tak-server/key', authenticateToken, authorize, handleUpload(certKe
  *
  * `GET /api/settings/export` (Global_Manager-only) builds a zip archive
  * (via `archiver`) containing:
- *   - `settings.json`: every `system_config`/`site_config` row whose
- *     `config_key` appears in `exportableSettingsKeys.js`'s
- *     `systemConfigKeys`/`siteConfigKeys` arrays (queried with an
- *     `IN (...)` allow-list filter, so a row can only be included by
- *     being named in that shared module -- there is no "export
- *     everything" code path here).
+ *   - `settings.json`: `{ exportedAt, siteConfig }` -- every `site_config`
+ *     row whose `config_key` appears in `exportableSettingsKeys.js`'s
+ *     `siteConfigKeys` array (queried with an `IN (...)` allow-list filter,
+ *     so a row can only be included by being named in that shared module --
+ *     there is no "export everything" code path here).
  *   - `email_templates.json`: every row of the `email_templates` table,
- *     included wholesale (not key-filtered) per design.md's reasoning
- *     that template rows have no secret-shaped columns.
+ *     included wholesale (not key-filtered) since template rows have no
+ *     secret-shaped columns.
  *
- * Two separate JSON files (rather than one combined `export.json`) are
- * used inside the zip so the shape mirrors `exportableSettingsKeys.js`'s
- * own two-groups-plus-a-flag structure, and so a future
- * `POST /api/settings/import` (task 54.6) can validate/apply each file
- * independently (config_key allow-list check for `settings.json`,
- * shape check for `email_templates.json`) without first having to split
- * a combined document back apart.
+ * CDK trim: `system_config` (the `tak_server_*` rows) is NO LONGER exported.
+ * TAK Server configuration is injected as env by the CDK deployment and read
+ * only from `process.env` at runtime; the `system_config` rows are inert under
+ * CDK, so exporting them was pointless and misleading. See
+ * `exportableSettingsKeys.js`'s header for the full reasoning. `settings.json`
+ * therefore carries only `siteConfig` now (no `systemConfig` key at all).
  *
- * `tak_server_p12_passphrase` is never queried by this route (it is not
- * present in `exportableSettingsKeys.js`'s `systemConfigKeys`), so it is
- * structurally impossible for the exported zip to contain it -- see that
- * module's header comment for the full secrets-exclusion reasoning.
+ * Two separate JSON files (rather than one combined `export.json`) are kept so
+ * the import route can validate/apply each independently (config_key allow-list
+ * check for `settings.json`, shape check for `email_templates.json`).
  *
  * The zip is streamed directly to the HTTP response as it is built
  * (`archive.pipe(res)`) rather than buffered fully in memory first, since
  * `archiver` supports pumping entries into a writable stream; this
- * settings dataset is small (a few dozen config rows plus template rows),
+ * settings dataset is small (a few config rows plus template rows),
  * so streaming here is a memory-safety habit rather than a load-bearing
  * requirement, consistent with `GET /api/audit-logs/export.csv`'s existing
  * `csv-stringify` streaming pattern in `server/routes/auditLogs.js`.
  */
 router.get('/export', authenticateToken, authorize, async (req, res) => {
-  const allowedSystemConfigKeys = exportableSettingsKeys.systemConfigKeys;
   const allowedSiteConfigKeys = exportableSettingsKeys.siteConfigKeys;
 
   try {
-    const systemConfigPlaceholders = allowedSystemConfigKeys.map((_, i) => `$${i + 1}`).join(',');
     const siteConfigPlaceholders = allowedSiteConfigKeys.map((_, i) => `$${i + 1}`).join(',');
 
-    const [systemConfigResult, siteConfigResult, emailTemplatesResult] = await Promise.all([
-      pool.query(
-        `SELECT config_key, config_value, description FROM system_config WHERE config_key IN (${systemConfigPlaceholders})`,
-        allowedSystemConfigKeys
-      ),
+    const [siteConfigResult, emailTemplatesResult] = await Promise.all([
       pool.query(
         `SELECT config_key, config_value, description FROM site_config WHERE config_key IN (${siteConfigPlaceholders})`,
         allowedSiteConfigKeys
@@ -721,7 +712,6 @@ router.get('/export', authenticateToken, authorize, async (req, res) => {
 
     const settingsPayload = {
       exportedAt: new Date().toISOString(),
-      systemConfig: systemConfigResult.rows,
       siteConfig: siteConfigResult.rows
     };
 
@@ -756,21 +746,26 @@ router.get('/export', authenticateToken, authorize, async (req, res) => {
  * --- Configuration import (Requirement 32.6, task 54.6) ---
  *
  * `POST /api/settings/import` (Global_Manager-only) is the write-side
- * counterpart to `GET /api/settings/export` (task 54.5) above: it
- * restores `system_config`/`site_config` rows and (optionally)
- * `email_templates` rows from a previously exported archive, validating
- * every top-level `config_key` against the exact same
+ * counterpart to `GET /api/settings/export` above: it restores `site_config`
+ * rows and (optionally) `email_templates` rows from a previously exported
+ * archive, validating every `site_config` `config_key` against the exact same
  * `exportableSettingsKeys.js` allow-list the export route reads from, and
  * rejecting the entire import -- applying nothing -- if any key falls
- * outside it (Requirement 32.6).
+ * outside it.
+ *
+ * CDK trim: `system_config` (the `tak_server_*` rows) is no longer imported --
+ * TAK Server config is owned by the CDK deployment via env, not by this route.
+ * A legacy archive that still carries a `systemConfig` array is tolerated: the
+ * validator ignores it (only checking it is an array if present) and the
+ * handler does not apply it, so an old export still restores its
+ * site_config/email_templates cleanly.
  *
  * --- Payload format: JSON body, not a re-uploaded zip ---
  *
  * `GET /api/settings/export` produces a zip containing `settings.json`
- * (`{exportedAt, systemConfig: [...], siteConfig: [...]}`) and
- * `email_templates.json` (an array of rows). This route accepts the
- * combined equivalent of those two files as a single JSON request body
- * (`{systemConfig: [...], siteConfig: [...], emailTemplates: [...]}`)
+ * (`{exportedAt, siteConfig: [...]}`) and `email_templates.json` (an array of
+ * rows). This route accepts the combined equivalent of those two files as a
+ * single JSON request body (`{siteConfig: [...], emailTemplates: [...]}`)
  * rather than a re-uploaded multipart zip file, for two reasons:
  *
  *   1. Dependency risk: this repo's only zip-reading library (`adm-zip`)
@@ -790,10 +785,10 @@ router.get('/export', authenticateToken, authorize, async (req, res) => {
  *   2. A JSON body round-trips losslessly with the export's own
  *      `settings.json`/`email_templates.json` shape: an operator (or a
  *      small script) can unzip an exported archive locally, merge
- *      `settings.json`'s `systemConfig`/`siteConfig` arrays and
- *      `email_templates.json`'s array into one object under
- *      `{systemConfig, siteConfig, emailTemplates}`, and POST that object
- *      directly -- no server-side unzip step, no temporary file handling,
+ *      `settings.json`'s `siteConfig` array and `email_templates.json`'s
+ *      array into one object under `{siteConfig, emailTemplates}`, and POST
+ *      that object directly -- no server-side unzip step, no temporary file
+ *      handling,
  *      and no new attack surface from parsing untrusted archive bytes
  *      (zip parsers have a history of path-traversal/zip-bomb CVEs).
  *
@@ -804,18 +799,14 @@ router.get('/export', authenticateToken, authorize, async (req, res) => {
  * --- Validation happens BEFORE any database write ---
  *
  * `validateImportPayload` below performs every check -- allow-list
- * membership for every `systemConfig`/`siteConfig` row's `config_key`,
- * and row-shape validation for every row of all three arrays -- and
- * returns a list of every problem found, without touching the database.
- * The route handler responds 400 with that full list (and applies
- * nothing) if the list is non-empty; only once validation has fully
- * passed does the handler open a transaction and start writing.
- * `tak_server_p12_passphrase` is excluded from
- * `exportableSettingsKeys.systemConfigKeys` (see that module's header
- * comment), so it is naturally rejected by the same allow-list check as
- * any other disallowed key -- there is no separate/special-cased check
- * for it in this route, confirming it cannot be imported via any path
- * through this handler.
+ * membership for every `siteConfig` row's `config_key`, and row-shape
+ * validation for every row of both arrays -- and returns a list of every
+ * problem found, without touching the database. The route handler responds
+ * 400 with that full list (and applies nothing) if the list is non-empty;
+ * only once validation has fully passed does the handler open a transaction
+ * and start writing. Because `system_config` is no longer imported at all
+ * (CDK trim), no `tak_server_*` key -- including the `tak_server_p12_passphrase`
+ * secret -- can be written via any path through this handler.
  *
  * --- Atomic apply ---
  *
@@ -897,11 +888,8 @@ function validateImportPayload(body) {
     return ['Request body must be a JSON object'];
   }
 
-  const { systemConfig, siteConfig, emailTemplates } = body;
+  const { siteConfig, emailTemplates } = body;
 
-  if (!Array.isArray(systemConfig)) {
-    problems.push('systemConfig must be an array');
-  }
   if (!Array.isArray(siteConfig)) {
     problems.push('siteConfig must be an array');
   }
@@ -909,21 +897,22 @@ function validateImportPayload(body) {
     problems.push('emailTemplates must be an array when present');
   }
 
+  // CDK trim: `systemConfig` is no longer part of the import shape (the
+  // `tak_server_*` rows it carried are owned by the CDK deployment via env,
+  // not by import). A legacy archive exported before this change may still
+  // carry a `systemConfig` array; it is deliberately IGNORED here rather than
+  // rejected, so an old export still imports its siteConfig/emailTemplates
+  // cleanly. It is validated only insofar as, if present, it must be an array
+  // (a malformed non-array top-level field still signals a broken file).
+  if (body.systemConfig !== undefined && !Array.isArray(body.systemConfig)) {
+    problems.push('systemConfig must be an array when present');
+  }
+
   // Stop here if the top-level shape is already wrong -- per-row checks
   // below assume each field is an array.
   if (problems.length > 0) {
     return problems;
   }
-
-  systemConfig.forEach((row, index) => {
-    if (!isValidConfigRowShape(row)) {
-      problems.push(`systemConfig[${index}] must be an object with a non-empty string config_key and a string config_value`);
-      return;
-    }
-    if (!exportableSettingsKeys.systemConfigKeys.includes(row.config_key)) {
-      problems.push(`systemConfig[${index}] has a disallowed config_key: ${row.config_key}`);
-    }
-  });
 
   siteConfig.forEach((row, index) => {
     if (!isValidConfigRowShape(row)) {
@@ -1007,16 +996,16 @@ router.post('/import', authenticateToken, authorize, async (req, res) => {
     return res.status(400).json({ error: 'Import rejected: one or more settings are invalid or not allow-listed', problems });
   }
 
-  const { systemConfig, siteConfig, emailTemplates } = req.body;
+  // CDK trim: `systemConfig` is no longer imported (owned by CDK env, not by
+  // this route). A legacy archive's `systemConfig` array, if present, was
+  // ignored by the validator and is not applied here.
+  const { siteConfig, emailTemplates } = req.body;
   const updatedBy = req.user && req.user.userId;
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    for (const row of systemConfig) {
-      await upsertImportedConfigRow(client, 'system_config', row, updatedBy);
-    }
     for (const row of siteConfig) {
       await upsertImportedConfigRow(client, 'site_config', row, updatedBy);
     }
@@ -1031,7 +1020,7 @@ router.post('/import', authenticateToken, authorize, async (req, res) => {
     try {
       await pool.query(
         'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
-        [req.user.userId, 'settings.import', 'settings', null, JSON.stringify({ systemConfig: systemConfig.length, siteConfig: siteConfig.length, emailTemplates: Array.isArray(emailTemplates) ? emailTemplates.length : 0 })]
+        [req.user.userId, 'settings.import', 'settings', null, JSON.stringify({ siteConfig: siteConfig.length, emailTemplates: Array.isArray(emailTemplates) ? emailTemplates.length : 0 })]
       );
     } catch (auditErr) {
       getLogger().error({ err: auditErr }, 'Failed to write audit log');
@@ -1040,7 +1029,6 @@ router.post('/import', authenticateToken, authorize, async (req, res) => {
     res.json({
       success: true,
       imported: {
-        systemConfig: systemConfig.length,
         siteConfig: siteConfig.length,
         emailTemplates: Array.isArray(emailTemplates) ? emailTemplates.length : 0
       }

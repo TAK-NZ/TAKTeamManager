@@ -262,9 +262,10 @@ export default function Admin({ user }) {
   // --- Settings Export / Import state (admin-settings-management, tasks 8.1/8.2) ---
   // Both controls live in a dedicated "Export / Import" tab. Every call goes
   // through the shared `api` instance via `settingsAPI` (no raw axios / no
-  // localStorage token). This is a SETTINGS export, not a domain-data backup,
-  // and secrets (the TAK Server passphrase) are excluded by the server -- both
-  // facts are surfaced as notices below (Req 7.5, 9.5, 10.1, 10.2).
+  // localStorage token). This is a SETTINGS export (site content, branding,
+  // email templates), not a domain-data backup. TAK Server configuration is
+  // managed by the deployment (env) and is neither exported nor imported here
+  // (CDK trim) -- both facts are surfaced as notices below.
   const [exportError, setExportError] = useState(null)
   const [exporting, setExporting] = useState(false)
   // Import file + branched-transform results. `importResult` holds the success
@@ -672,7 +673,7 @@ export default function Admin({ user }) {
       }
       if (!isImportPayloadShape(parsed)) {
         setImportError(
-          'The selected file is not a valid settings import (expected systemConfig and siteConfig arrays). No settings were imported.'
+          'The selected file is not a valid settings import (expected a siteConfig array). No settings were imported.'
         )
         return
       }
@@ -1530,13 +1531,17 @@ export default function Admin({ user }) {
                   Export settings
                 </h3>
 
-                {/* Secrets-excluded / not-a-DB-backup notice (Req 7.5). */}
+                {/* Scope notice. This export covers only the settings an admin
+                    edits at runtime here (request-access page content, branding,
+                    and email templates). TAK Server configuration is managed by
+                    the deployment (env), not by this export, so it is not
+                    included. It is NOT a backup of domain data. */}
                 <div className="rounded border border-blue-300 dark:border-blue-700 bg-blue-50 dark:bg-blue-900/30 p-3">
                   <p className="text-sm text-blue-800 dark:text-blue-200">
-                    This export <strong>excludes secrets</strong> (specifically the TAK Server
-                    passphrase). It is a <strong>settings export, not a backup of domain data</strong>
-                    &mdash; it does not include organisations, teams, members, channels, access
-                    requests, or audit logs.
+                    This exports the <strong>site content, branding, and email templates</strong> you
+                    can edit here. It does <strong>not</strong> include TAK Server configuration
+                    (managed by the deployment), and it is <strong>not a backup of domain data</strong>
+                    &mdash; no organisations, teams, members, channels, access requests, or audit logs.
                   </p>
                 </div>
 
@@ -1566,11 +1571,15 @@ export default function Admin({ user }) {
                   Import settings
                 </h3>
 
-                {/* Secret-must-be-re-entered notice (Req 9.5). */}
+                {/* Scope notice. Import restores only site content, branding,
+                    and email templates. TAK Server configuration is managed by
+                    the deployment and is neither exported nor imported here. */}
                 <div className="rounded border border-blue-300 dark:border-blue-700 bg-blue-50 dark:bg-blue-900/30 p-3">
                   <p className="text-sm text-blue-800 dark:text-blue-200">
-                    Importing into a fresh environment does <strong>not</strong> restore the excluded
-                    secret (the TAK Server passphrase); it must be re-entered separately.
+                    Import restores <strong>site content, branding, and email templates</strong> only.
+                    TAK Server configuration is managed by the deployment, not restored here. A
+                    settings file exported by an older version may still contain TAK Server settings;
+                    those are ignored on import.
                   </p>
                 </div>
 
@@ -1624,7 +1633,6 @@ export default function Admin({ user }) {
                       Settings imported successfully.
                     </p>
                     <ul className="list-disc list-inside space-y-1 text-sm text-green-700 dark:text-green-300">
-                      <li>System settings: {importResult.systemConfig}</li>
                       <li>Site settings: {importResult.siteConfig}</li>
                       <li>Email templates: {importResult.emailTemplates}</li>
                     </ul>

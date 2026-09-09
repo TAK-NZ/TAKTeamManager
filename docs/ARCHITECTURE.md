@@ -206,7 +206,7 @@ Pages under `client/src/pages/`:
 | `Requests.jsx` (route `/tasks`, `/requests` redirects here) | Visible to every authenticated user: own devices needing renewal (everyone), team devices needing renewal and pending access requests (Team_Admin/Global_Manager), Org Interest Requests (Global_Manager only) |
 | `RequestAccess.jsx` | Public join flow |
 | `GlobalChannels.jsx` | BCH/region channel admin (Global_Manager-only) |
-| `Admin.jsx` | Site settings/config (Global_Manager-only): Site Content, Email Templates, Bulk Import, Excluded Domains, Export/Import tabs |
+| `Admin.jsx` | Site settings/config (Global_Manager-only): Site Content, Email Templates, Bulk Import, Excluded Domains, Export/Import tabs. The Export/Import tab moves only runtime-admin-edited settings (`site_config` branding + request-access content, and all `email_templates`); it does NOT carry `system_config`/TAK Server configuration, which the CDK deployment owns via env — see `server/config/exportableSettingsKeys.js`. |
 | `AuditLogs.jsx` | Audit log viewer/export (Global_Manager-only) |
 | `EnrollmentView.jsx` | Device enrollment QR/manual flow, reused embedded in dialogs elsewhere |
 | `Downloads.jsx` | Client app download links, plus a CloudTAK link when `CLOUDTAK_URL` is configured |
