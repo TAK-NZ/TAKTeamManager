@@ -184,7 +184,16 @@ const initialRowArb = fc.record({
     { weight: 5, arbitrary: fc.constantFrom(...REPORTED_OFFSETS) },
     { weight: 2, arbitrary: fc.constant(AHEAD_OF_EVERYTHING) }
   ),
-  connected: fc.boolean()
+  connected: fc.boolean(),
+  // A revoked row must NEVER be marked connected by a poll: the per-uid write
+  // is `connected = ($3 AND revoked = false)`, so a revoked Device resolves to
+  // `connected = false` whatever the payload reported for it. Generated here
+  // (weighted toward false, the common case) so the property exercises both a
+  // revoked row a poll tries to connect and a non-revoked one.
+  revoked: fc.oneof(
+    { weight: 4, arbitrary: fc.constant(false) },
+    { weight: 1, arbitrary: fc.constant(true) }
+  )
 });
 
 const tableArb = fc.tuple(...TRACKED_UIDS.map(() => initialRowArb));
@@ -325,7 +334,8 @@ function createTable(initialRows) {
       uid,
       {
         lastSeenAt: initialRows[index].lastSeenAt === null ? null : new Date(BASE_MS + initialRows[index].lastSeenAt),
-        connected: initialRows[index].connected
+        connected: initialRows[index].connected,
+        revoked: initialRows[index].revoked
       }
     ])
   );
@@ -336,7 +346,7 @@ function snapshot(table) {
   return Object.fromEntries(
     [...table].map(([uid, row]) => [
       uid,
-      { lastSeenAt: row.lastSeenAt === null ? null : row.lastSeenAt.getTime(), connected: row.connected }
+      { lastSeenAt: row.lastSeenAt === null ? null : row.lastSeenAt.getTime(), connected: row.connected, revoked: row.revoked }
     ])
   );
 }
@@ -386,7 +396,15 @@ function createModelPool(table, log) {
         return { rowCount };
       }
 
-      if (!/connected\s*=\s*\$3/.test(setClause)) {
+      // The per-uid write. Since the revoked-guard fix the SET form is
+      // `connected = ($3 AND revoked = false)` rather than a bare
+      // `connected = $3`: a revoked row is never marked connected whatever the
+      // poll reported. The model recognises this form and applies the guard
+      // below (`connected && !row.revoked`), so a regression that dropped the
+      // guard (bare `connected = $3`) would let a revoked row go connected and
+      // fail this property on state.
+      const bindsConnectedWithRevokedGuard = /connected\s*=\s*\(\s*\$3\s+AND\s+revoked\s*=\s*false\s*\)/i.test(setClause);
+      if (!bindsConnectedWithRevokedGuard) {
         log.unmodelled.push(sql);
         return { rowCount: 0 };
       }
@@ -432,7 +450,8 @@ function createModelPool(table, log) {
         if (/last_seen_at/.test(whereClause) && !advances) continue;
 
         rowCount += 1;
-        row.connected = connected;
+        // The revoked guard from the SET form: a revoked row is never connected.
+        row.connected = connected && !row.revoked;
 
         if (/last_seen_at = CASE/.test(setClause)) {
           if (advances) row.lastSeenAt = lastEventTime;
@@ -480,7 +499,10 @@ async function runPoll(entries, initialRows) {
  * shape no longer tells them apart (Requirement 22.4).
  */
 function perUidWrites(log) {
-  return log.statements.filter(([sql]) => /connected\s*=\s*\$3/.test(sql));
+  // The per-uid write binds `$3` inside the revoked-guarded form
+  // `connected = ($3 AND revoked = false)`; the sweep writes a literal false and
+  // binds no `$3`, so keying on the `$3` bind still tells the two apart.
+  return log.statements.filter(([sql]) => /connected\s*=\s*\(\s*\$3\s+AND\s+revoked\s*=\s*false\s*\)/i.test(sql));
 }
 
 /** The unreported-uid sweeps a run issued -- the only statement writing a literal false. */
@@ -548,7 +570,11 @@ describe('Property 17: One poll writes current status for every reported UID, in
         // frequent generated cases where the reported time is equal to or behind
         // the stored one, a status write sharing the Monotonic_Guard's `WHERE`
         // clause writes nothing at all and this fails.
-        expect(row.connected).toBe(verdict.connected);
+        //
+        // The revoked guard: a revoked row is NEVER connected, whatever the poll
+        // reported (`connected = ($3 AND revoked = false)`). So the expected
+        // landed status is the collapsed verdict ANDed with not-revoked.
+        expect(row.connected).toBe(verdict.connected && !row.revoked);
 
         // `last_seen_at` keeps exactly its old semantics: the running maximum of
         // the parseable reported times and the stored value (Property 3).

@@ -13,7 +13,7 @@
  *
  * This is a MODEL-BASED property test: the mocked pool is backed by an
  * in-memory `client_uid -> last_seen_at` map that faithfully applies the
- * poller's clamped `UPDATE tak_devices SET connected = $3, last_seen_at = CASE
+ * poller's clamped `UPDATE tak_devices SET connected = ($3 AND revoked = false), last_seen_at = CASE
  * WHEN $2::timestamptz IS NOT NULL AND (last_seen_at IS NULL OR last_seen_at <
  * $2) THEN $2 ELSE last_seen_at END WHERE client_uid = ANY($1::text[])`, and
  * the REAL
@@ -118,7 +118,13 @@ function createModelPool(store) {
       }
 
       if (
-        !/SET\s+connected = \$3/.test(sql) ||
+        // Since the revoked-guard fix the connected write is
+        // `connected = ($3 AND revoked = false)` (a revoked row is never marked
+        // connected) rather than a bare `connected = $3`. This model is about
+        // `last_seen_at` (Property 3), which the guard does not affect, so it
+        // only needs to recognise the statement — the `connected` value itself
+        // is not stored here.
+        !/SET\s+connected = \(\s*\$3\s+AND\s+revoked = false\s*\)/.test(sql) ||
         !/last_seen_at = CASE/.test(sql) ||
         !/last_seen_at IS NULL OR last_seen_at < \$2/.test(sql) ||
         !/ELSE last_seen_at/.test(sql) ||

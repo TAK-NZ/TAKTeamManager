@@ -350,7 +350,13 @@ describe('Property 18: The Connection_Alias is total, additive, exact, and reach
     async (uids) => {
       const { statements } = await runPoll(uids);
 
-      const perEntryWrites = statements.filter(([sql]) => /connected\s*=\s*\$3/.test(sql));
+      // The per-entry write binds `$3` inside the revoked-guarded form
+      // `connected = ($3 AND revoked = false)` (a revoked row is never marked
+      // connected); the sweep writes a literal false. Keying on the `$3` bind
+      // still tells the two apart.
+      const perEntryWrites = statements.filter(([sql]) =>
+        /connected\s*=\s*\(\s*\$3\s+AND\s+revoked\s*=\s*false\s*\)/i.test(sql)
+      );
       const sweeps = statements.filter(([sql]) => /connected\s*=\s*false/i.test(sql));
 
       // Exactly one sweep, scoped by equality against a complete-string array.

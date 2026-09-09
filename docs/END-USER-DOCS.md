@@ -33,11 +33,12 @@ To log out, use the menu in the top navigation bar. This also ends your identity
 After logging in, your Dashboard is home base. It shows:
 
 - **TAK Profile** — your callsign, your TAK role, your team's colour/function, your organisation, and your team (with a lock icon if your team is private). If you don't currently belong to a team, this reads literally "None" rather than being blank.
-- **Pending Requests** — if you're an admin and there are requests waiting for review, a banner links you straight to the Tasks page.
+- **Pending Tasks** — a banner appears when you have something to act on and links you to the Tasks page. For admins that includes team access requests waiting for review; for everyone it includes your own device certificates due for renewal and any device connected under a callsign that needs correcting.
 - **My Devices** *(if device management is enabled for your deployment)* — every TAK device you've enrolled, with its name, type, when it was last seen, and its status. You can:
   - Click **Add Device** to enroll a new one (see "Enrolling a Device" below).
   - **Revoke** a device you no longer use, right from this card.
   - If one of your devices' certificates is expiring soon or has already expired, a banner appears above the list linking you to **Renew now** — see "Certificate Renewal" below.
+  - If a device is currently connected using a callsign that doesn't match the one assigned to you, it's flagged with an amber warning showing the callsign it connected with — see "Keeping Your Callsign Correct" below.
 - **My Channels** — a searchable, expandable folder tree of every TAK channel you have access to, each one marked Read, Write, or Read-Write.
 
 ## Downloading and Enrolling a TAK Client
@@ -75,6 +76,19 @@ As your device's certificate approaches expiry, you'll get an email reminder —
 If a device stopped being used a while ago and you don't need it anymore, don't bother renewing it — revoke its certificate instead, either from your Dashboard's "My Devices" card or from the Tasks page (see below).
 
 For a team-owned device (one that belongs to the team rather than to any one person), the same kind of reminder email goes to the team's admins instead of to any individual, escalating to admins further up the organisation's hierarchy the closer the certificate gets to expiring.
+
+### Keeping Your Callsign Correct
+
+*(If your deployment has device management enabled.)*
+
+You're assigned a callsign by TAK Team Manager (shown on your Dashboard's TAK Profile and on the Enrollment page). You're free to **add** to the end of it in your TAK client — for example `FENZ-STL-J.Doe (Tablet)` or `FENZ-STL-J.Doe (Drone)` — but the assigned part itself should stay unchanged.
+
+If one of your devices connects using a callsign that changes the assigned part, the app notices and lets you know:
+
+- The device is flagged with an amber warning on your Dashboard's "My Devices" card (showing the callsign it connected with), and it appears under **Callsign needs correcting** on the Tasks page, which also counts toward the pending-tasks badge.
+- You'll also get a single email the first time it's noticed, showing your assigned callsign and the one the device connected with. You won't be emailed again about the same device unless you fix the callsign and it later drifts again.
+
+To clear it, just set the callsign in your TAK client back to your assigned callsign (optionally with your own addition on the end) and reconnect. The warning clears on its own once the device connects with an acceptable callsign. Note this only applies to native TAK clients (ATAK, iTAK, WinTAK); CloudTAK/WebTAK manages your callsign for you, so it's never flagged.
 
 ## Team Admin: Managing Your Team
 

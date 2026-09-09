@@ -147,7 +147,10 @@ function mockDb({ devices, managedPairs }) {
       return Promise.resolve({ rows: managed ? [{ exists: 1 }] : [] });
     }
 
-    if (sql.includes('FROM tak_devices') && sql.includes('WHERE user_id = $1')) {
+    if (
+      sql.includes('FROM tak_devices') &&
+      (sql.includes('WHERE user_id = $1') || sql.includes('WHERE d.user_id = $1'))
+    ) {
       return Promise.resolve({
         rows: devices.filter((row) => row.user_id !== null && String(row.user_id) === String(params[0]))
       });
@@ -184,6 +187,11 @@ function expectedWireShape(row) {
     // about admin scope, so `connected` is here only to keep the wire shape
     // whole -- it never affects which rows are visible (Criterion 17.8).
     connected: row.connected,
+    // Callsign-mismatch detection: seeded rows carry no
+    // observed_callsign/assigned_callsign, so mapDevice reports the
+    // absent-input defaults. This property is about admin scope.
+    observedCallsign: null,
+    callsignMismatch: false,
     // Requirement 15.1: derived on read from the Client_Uid alone. This
     // property is about admin scope, not classification (Property 11 covers
     // the rules), so it reuses the classifier rather than restating its rules.

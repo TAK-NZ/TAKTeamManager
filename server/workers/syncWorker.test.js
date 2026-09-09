@@ -4690,6 +4690,21 @@ describe('SyncWorker.revokeTakCertificates Device_Table revoked flag (7.6, 8.7, 
 
     await expect(worker.markDevicesRevoked(['uid-alice-1', 'uid-alice-2'])).resolves.toBe(2);
   });
+
+  it('clears connected alongside setting revoked, so a revoked device stops showing Currently Connected', async () => {
+    // Revoked-guard regression (enrollment-vs-dashboard discrepancy): a revoked
+    // Device is not a live participant, so the revoke both flags it revoked AND
+    // clears its connection status immediately (the Subscription_Poller also
+    // refuses to re-mark a revoked row connected, keeping it cleared).
+    process.env.DEVICE_MGMT_ENABLED = 'true';
+    worker.pool.query = jest.fn().mockResolvedValue({ rows: [], rowCount: 1 });
+
+    await worker.markDevicesRevoked(['uid-alice-1']);
+
+    const [sql] = worker.pool.query.mock.calls[0];
+    expect(sql).toMatch(/revoked = true/);
+    expect(sql).toMatch(/connected = false/);
+  });
 });
 
 /**

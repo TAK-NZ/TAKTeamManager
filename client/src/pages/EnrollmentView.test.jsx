@@ -190,10 +190,15 @@ describe('EnrollmentView (mounted)', () => {
 
   // ── Bugfix: certificate count moved into the Enrollment Data grid,
   // colour flips from amber-on->1 to amber-only-at-0 ────────────────────
-  describe('Active TAK Server Certificates field (bugfix)', () => {
+  describe('Active Devices field (bugfix)', () => {
+    // Relabelled from "Active TAK Server Certificates" to "Active Devices":
+    // the value is a count of non-revoked tak_devices rows (one per device /
+    // client_uid) in TTM's own DB, NOT a count of TAK Server certificates
+    // (one client_uid holds a whole set of certs), so the old label was
+    // doubly misleading ("Certificates" and "TAK Server").
     const certificateFieldValue = () => {
       const dt = Array.from(container.querySelectorAll('dt')).find(
-        (element) => element.textContent === 'Active TAK Server Certificates'
+        (element) => element.textContent === 'Active Devices'
       )
       return dt?.nextElementSibling
     }
@@ -205,7 +210,7 @@ describe('EnrollmentView (mounted)', () => {
       await mount()
       await flush()
 
-      expect(container.textContent).toContain('Active TAK Server Certificates')
+      expect(container.textContent).toContain('Active Devices')
       const dd = certificateFieldValue()
       expect(dd).toBeTruthy()
       expect(dd.textContent).toBe('2')

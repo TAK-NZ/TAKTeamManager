@@ -584,6 +584,14 @@ export const deviceManagementAPI = {
   // means "never seen" (Requirements 5.1, 5.2, 5.3).
   getMyDevices: () => api.get('/device-management/me/devices'),
 
+  // Callsign-mismatch detection (docs/ARCHITECTURE.md ("Callsign Mismatch Detection" section), Phase 2).
+  // Resolves 200 with { mismatches: [...] } — the caller's own devices that are
+  // CURRENTLY connected under a callsign that does not preserve their assigned
+  // callsign; each entry carries { clientUid, clientType, observedCallsign,
+  // assignedCallsign, lastSeenAt }. An empty array means nothing to correct.
+  // 404 means device management is off (same convention as getMyDevices).
+  getMyCallsignStatus: () => api.get('/device-management/me/callsign-status'),
+
   // Admin view of a Managed_User's devices (Requirements 6.3, 6.4, 6.5).
   // Rejects with 403 when `userId` is not a Managed_User of the caller.
   getUserDevices: (userId) =>
