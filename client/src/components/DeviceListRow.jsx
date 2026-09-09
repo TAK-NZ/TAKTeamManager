@@ -105,6 +105,22 @@ export const EXPIRES_SOON_LABEL = 'Expires soon'
 export const EXPIRED_LABEL = 'Expired'
 
 /**
+ * Callsign-mismatch detection (docs/callsign-mismatch-design.md): the
+ * accessible-name text for a device currently connected under a callsign that
+ * does not preserve the user's assigned callsign.
+ *
+ * Carried by TEXT, never colour alone (client conventions), the same way the
+ * two expiry markers above are: an AMBER warning glyph with an `sr-only` label
+ * and a hover/focus tooltip, plus the observed callsign shown as visible text.
+ * AMBER, not the expiry markers' red -- a wrong callsign is a "please correct
+ * this" nudge, not a certificate-validity failure, and giving it the same red
+ * as "Expired" would conflate two unrelated states. The `callsignMismatch`
+ * flag itself is computed server-side (`DeviceManagementService.mapDevice`) via
+ * the same rule the poller uses, so this component only renders it.
+ */
+export const CALLSIGN_MISMATCH_LABEL = 'Callsign needs correcting'
+
+/**
  * The accessible-name text each expiry state carries, or nothing for `none`.
  *
  * A lookup rather than a conditional chain so a fourth state could not
@@ -177,12 +193,26 @@ export function revokeActionLabel(clientUid) {
 function computeDeviceRowState(device) {
   const isRevoked = Boolean(device.revoked)
   const tooltip = isRevoked ? 'Device already revoked' : 'Revoke device'
-  const isConnected = Boolean(device.connected)
+  // A revoked Device is never presented as "Currently Connected": a revoked
+  // certificate cannot be a live participant. This is defense in depth on top
+  // of the server (the revoke handler clears `connected`, and the poller refuses
+  // to re-mark a revoked row connected) -- so even a momentarily-stale
+  // `connected = true` on a revoked row never reaches the UI as a connection.
+  // Without this, a revoked-but-still-flagged row showed as connected on the
+  // Dashboard while being excluded from the Enrollment page's active count.
+  const isConnected = Boolean(device.connected) && !isRevoked
   const expiryMarker = EXPIRY_MARKERS[
     classifyExpiry(device.expiresAt, getExpiryWarningDays(), Date.now())
   ]
+  // Callsign-mismatch detection: the flag is computed server-side
+  // (DeviceManagementService.mapDevice, via the shared isCallsignAcceptable
+  // rule, scoped to connected non-CloudTAK devices), so this row only reads it.
+  // `observedCallsign` is the callsign the client is connected under, shown as
+  // visible text beside the marker.
+  const callsignMismatch = Boolean(device.callsignMismatch)
+  const observedCallsign = device.observedCallsign ?? null
 
-  return { isRevoked, tooltip, isConnected, expiryMarker }
+  return { isRevoked, tooltip, isConnected, expiryMarker, callsignMismatch, observedCallsign }
 }
 
 /**
@@ -248,6 +278,50 @@ export function DeviceExpiryLine({ expiresAt }) {
         </span>
       )}
     </div>
+  )
+}
+
+/**
+ * Callsign-mismatch detection (docs/callsign-mismatch-design.md): the inline
+ * marker shown beside a device's UID when it is connected under a callsign that
+ * does not preserve its assigned one. Rendered by BOTH `DeviceListRow` and
+ * `DeviceListCard` from this one definition so the two surfaces cannot drift.
+ *
+ * Follows the exact convention the expiry markers use, in AMBER: the observed
+ * callsign as visible text, an `aria-hidden` warning glyph, an `sr-only` label
+ * (`CALLSIGN_MISMATCH_LABEL`) that states the fact unconditionally in the
+ * accessibility tree, and a hover/focus tooltip repeating it for a sighted
+ * mouse/keyboard user. Renders nothing when the device is not flagged
+ * ("additive, nothing to say", mirroring `DeviceExpiryLine`).
+ *
+ * @param {object} props
+ * @param {boolean} props.callsignMismatch whether this device is flagged.
+ * @param {string|null} props.observedCallsign the callsign the client is
+ *   connected under, shown beside the marker.
+ */
+export function CallsignMismatchMarker({ callsignMismatch, observedCallsign }) {
+  if (!callsignMismatch) {
+    return null
+  }
+
+  return (
+    <span className="ml-2 inline-flex items-center gap-1 align-middle text-xs font-bold text-amber-600 dark:text-amber-400">
+      <span className="relative group inline-flex" tabIndex={0}>
+        <ExclamationTriangleIcon
+          className="h-4 w-4 text-amber-600 dark:text-amber-400 cursor-help"
+          aria-hidden="true"
+        />
+        <span className="sr-only">{CALLSIGN_MISMATCH_LABEL}</span>
+        <span
+          aria-hidden="true"
+          className="absolute left-full top-1/2 transform -translate-y-1/2 ml-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-10"
+        >
+          {CALLSIGN_MISMATCH_LABEL}
+          {observedCallsign ? `: ${observedCallsign}` : ''}
+        </span>
+      </span>
+      {observedCallsign && <span className="break-all font-normal">{observedCallsign}</span>}
+    </span>
   )
 }
 
@@ -354,7 +428,8 @@ export default function DeviceListRow({ device, onRevoke, compact = false }) {
   // Requirements 20.1, 20.9, 21.2-21.5: see `computeDeviceRowState`'s own
   // doc comment -- this is the exact classification this row always
   // computed inline, now shared verbatim with `DeviceListCard` below.
-  const { isRevoked, tooltip, isConnected, expiryMarker } = computeDeviceRowState(device)
+  const { isRevoked, tooltip, isConnected, expiryMarker, callsignMismatch, observedCallsign } =
+    computeDeviceRowState(device)
 
   return (
     <tr>
@@ -368,6 +443,10 @@ export default function DeviceListRow({ device, onRevoke, compact = false }) {
             Revoked
           </span>
         )}
+        <CallsignMismatchMarker
+          callsignMismatch={callsignMismatch}
+          observedCallsign={observedCallsign}
+        />
       </td>
       {/* The merged Certificate column: Issued on the first line, Expires on
           the second, each labelled so the shared "Certificate" header does
@@ -525,7 +604,8 @@ export default function DeviceListRow({ device, onRevoke, compact = false }) {
  *   `DeviceListRow`'s `onRevoke`.
  */
 export function DeviceListCard({ device, onRevoke }) {
-  const { isRevoked, tooltip, isConnected, expiryMarker } = computeDeviceRowState(device)
+  const { isRevoked, tooltip, isConnected, expiryMarker, callsignMismatch, observedCallsign } =
+    computeDeviceRowState(device)
 
   return (
     <div className="p-4 space-y-3 text-sm">
@@ -562,6 +642,18 @@ export function DeviceListCard({ device, onRevoke }) {
         <span className="inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800">
           Revoked
         </span>
+      )}
+
+      {/* Callsign-mismatch detection: same marker as the desktop row, from the
+          one shared definition, on its own line here so it reads clearly in the
+          stacked card. */}
+      {callsignMismatch && (
+        <div>
+          <CallsignMismatchMarker
+            callsignMismatch={callsignMismatch}
+            observedCallsign={observedCallsign}
+          />
+        </div>
       )}
 
       <div className="space-y-1 text-gray-500 dark:text-gray-400">

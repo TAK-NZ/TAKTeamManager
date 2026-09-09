@@ -47,6 +47,9 @@ vi.mock('../services/api', () => ({
   // file asserts the ungated Downloads nav item, not Enrollment/Devices.
   deviceManagementAPI: {
     getMyDevices: vi.fn().mockResolvedValue({ data: { devices: [] } }),
+    // Layout's badge also calls getMyCallsignStatus for every user
+    // (callsign-mismatch detection); stub it so the named import resolves.
+    getMyCallsignStatus: vi.fn().mockResolvedValue({ data: { mismatches: [] } }),
     probeEnabled: vi.fn().mockResolvedValue({ enabled: false })
   },
   // Layout.jsx's own version-display mount effect calls this too.

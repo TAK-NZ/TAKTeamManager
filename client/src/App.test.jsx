@@ -104,6 +104,9 @@ vi.mock('./services/api', () => ({
   // it -- a resolvable value is required either way.
   deviceManagementAPI: {
     getMyDevices: vi.fn().mockResolvedValue({ data: { devices: [] } }),
+    // Layout's badge also calls getMyCallsignStatus for every user
+    // (callsign-mismatch detection); stub it so the named import resolves.
+    getMyCallsignStatus: vi.fn().mockResolvedValue({ data: { mismatches: [] } }),
     probeEnabled: vi.fn().mockResolvedValue({ enabled: false })
   },
   default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() }
@@ -133,6 +136,7 @@ describe('App startup installs the presentation config (Requirements 18.7, 18.11
     // on a signed-in mount. Re-establish resolvable defaults; feature OFF is
     // fine for these auth-flow tests.
     deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    deviceManagementAPI.getMyCallsignStatus.mockResolvedValue({ data: { mismatches: [] } })
     deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false })
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -308,6 +312,7 @@ describe('App startup honours force_sso_login from the public config', () => {
     // on a signed-in mount. Re-establish resolvable defaults; feature OFF is
     // fine for these auth-flow tests.
     deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    deviceManagementAPI.getMyCallsignStatus.mockResolvedValue({ data: { mismatches: [] } })
     deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false })
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -470,6 +475,7 @@ describe('App startup does not auto-login on an ?error= return (429 loop-guard)'
     // on a signed-in mount. Re-establish resolvable defaults; feature OFF is
     // fine for these auth-flow tests.
     deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    deviceManagementAPI.getMyCallsignStatus.mockResolvedValue({ data: { mismatches: [] } })
     deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false })
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -594,6 +600,7 @@ describe('App post-login return path (QR deep link returns to /downloads, not /d
     // on a signed-in mount. Re-establish resolvable defaults; feature OFF is
     // fine for these auth-flow tests.
     deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    deviceManagementAPI.getMyCallsignStatus.mockResolvedValue({ data: { mismatches: [] } })
     deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false })
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -712,6 +719,7 @@ describe('cert-expiry-notifications: /requests redirects to /tasks (Requirement 
     // on a signed-in mount. Re-establish resolvable defaults; feature OFF is
     // fine for these auth-flow tests.
     deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    deviceManagementAPI.getMyCallsignStatus.mockResolvedValue({ data: { mismatches: [] } })
     deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false })
     container = document.createElement('div')
     document.body.appendChild(container)

@@ -81,7 +81,15 @@ function mockDb({ devices = [], managedPairs = [] } = {}) {
       return Promise.resolve({ rows: managed ? [{ exists: 1 }] : [] });
     }
 
-    if (sql.includes('FROM tak_devices') && sql.includes('WHERE user_id = $1')) {
+    // The self/managed list now qualifies the predicate as `d.user_id = $1`
+    // (it joins `tak_devices d` to users/user_cache for the assigned callsign,
+    // callsign-mismatch detection); accept either form. Seeded rows carry no
+    // `observed_callsign`/`assigned_callsign`, so mapDevice reports no callsign
+    // mismatch for them, which is what these pre-callsign tests expect.
+    if (
+      sql.includes('FROM tak_devices') &&
+      (sql.includes('WHERE user_id = $1') || sql.includes('WHERE d.user_id = $1'))
+    ) {
       return Promise.resolve({
         rows: devices.filter((row) => row.user_id !== null && String(row.user_id) === String(params[0]))
       });
@@ -139,7 +147,7 @@ describe('DeviceManagementService.listOwnDevices', () => {
     await DeviceManagementService.listOwnDevices(42);
 
     const [sql, params] = deviceQueries()[0];
-    expect(sql).toContain('WHERE user_id = $1');
+    expect(sql).toContain('WHERE d.user_id = $1');
     expect(params).toEqual([42]);
   });
 
@@ -177,6 +185,11 @@ describe('DeviceManagementService.listOwnDevices', () => {
       // Requirement 20.8: Connection_Status is passed straight through from
       // the stored column, on the same single wire shape.
       connected: false,
+      // Callsign-mismatch detection: the seeded row carries no
+      // observed_callsign/assigned_callsign, so mapDevice reports the
+      // absent-input defaults (no observed callsign, no mismatch).
+      observedCallsign: null,
+      callsignMismatch: false,
       // Requirements 15.1/15.2: derived on read from the Client_Uid alone;
       // `uid-9` matches no rule, so `unknown` is the honest answer.
       clientType: 'unknown'
@@ -558,6 +571,74 @@ describe('connected on the Device wire shape (Requirement 20.8)', () => {
 });
 
 // ══════════════════════════════════════════════════════════════════════════
+// Callsign-mismatch detection (docs/callsign-mismatch-design.md): mapDevice
+// emits observedCallsign + a computed callsignMismatch flag when the query
+// supplied the observed and assigned callsigns. The flag is scoped exactly like
+// the poller/nudge: connected, non-CloudTAK, observed not acceptable.
+// ══════════════════════════════════════════════════════════════════════════
+describe('callsign mismatch on the Device wire shape', () => {
+  // A native (android) row connected with the assigned callsign present.
+  function callsignRow(overrides = {}) {
+    return deviceRow({
+      client_uid: 'ANDROID-63040a40563b5fab',
+      connected: true,
+      observed_callsign: 'FENZ-STL-J.Doe',
+      assigned_callsign: 'FENZ-STL-J.Doe',
+      ...overrides
+    });
+  }
+
+  it('reports observedCallsign and no mismatch when the connected callsign matches the assigned one', () => {
+    const mapped = DeviceManagementService.mapDevice(callsignRow());
+    expect(mapped.observedCallsign).toBe('FENZ-STL-J.Doe');
+    expect(mapped.callsignMismatch).toBe(false);
+  });
+
+  it('reports no mismatch for a valid append', () => {
+    const mapped = DeviceManagementService.mapDevice(
+      callsignRow({ observed_callsign: 'FENZ-STL-J.Doe (Tablet)' })
+    );
+    expect(mapped.callsignMismatch).toBe(false);
+  });
+
+  it('flags a mismatch when the connected callsign does not preserve the assigned one', () => {
+    const mapped = DeviceManagementService.mapDevice(
+      callsignRow({ observed_callsign: 'FENZ-WRONG' })
+    );
+    expect(mapped.observedCallsign).toBe('FENZ-WRONG');
+    expect(mapped.callsignMismatch).toBe(true);
+  });
+
+  it('does not flag a disconnected device even if the observed callsign is wrong', () => {
+    const mapped = DeviceManagementService.mapDevice(
+      callsignRow({ observed_callsign: 'FENZ-WRONG', connected: false })
+    );
+    expect(mapped.callsignMismatch).toBe(false);
+  });
+
+  it('does not flag a CloudTAK device (it cannot change its callsign)', () => {
+    const mapped = DeviceManagementService.mapDevice(
+      callsignRow({ client_uid: 'ANDROID-CloudTAK-jdoe@example.com', observed_callsign: 'FENZ-WRONG' })
+    );
+    expect(mapped.callsignMismatch).toBe(false);
+  });
+
+  it('does not flag a teamless user (no assigned callsign)', () => {
+    const mapped = DeviceManagementService.mapDevice(
+      callsignRow({ observed_callsign: 'FENZ-WRONG', assigned_callsign: null })
+    );
+    expect(mapped.callsignMismatch).toBe(false);
+  });
+
+  it('defaults to no observed callsign and no mismatch when the query did not join them (revoke-path lookup)', () => {
+    // A plain tak_devices row (no observed_callsign / assigned_callsign keys).
+    const mapped = DeviceManagementService.mapDevice(deviceRow({ connected: true }));
+    expect(mapped.observedCallsign).toBeNull();
+    expect(mapped.callsignMismatch).toBe(false);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
 // Requirements 17.8, 21.9: visibility has EXACTLY ONE mechanism -- the
 // presence of the Device_Table row.
 //
@@ -614,7 +695,12 @@ describe('listOwnDevices keeps exactly one visibility mechanism (Requirements 17
     const [sql, params] = deviceQueries()[0];
     const whereClause = sql.slice(sql.indexOf('WHERE'), sql.indexOf('ORDER BY'));
 
-    expect(whereClause.trim()).toBe('WHERE user_id = $1');
+    // Qualified as `d.user_id = $1` since the self-view now joins tak_devices d
+    // to users/user_cache for the assigned callsign (callsign-mismatch
+    // detection). The scope guarantee is unchanged and is what this asserts:
+    // the ONLY device-scoping predicate is user_id, bound to the single
+    // parameter $1 -- no client-supplied filter widens it.
+    expect(whereClause.trim()).toBe('WHERE d.user_id = $1');
     expect(params).toEqual([1]);
     // One placeholder, so there is no second predicate to bind.
     expect(sql.match(/\$\d/g)).toEqual(['$1']);

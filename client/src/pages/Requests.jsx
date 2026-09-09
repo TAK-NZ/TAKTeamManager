@@ -84,6 +84,25 @@ export default function Requests({ user }) {
   const [enrollingDevice, setEnrollingDevice] = useState(null)
   const canManageTeams = Boolean(user?.isAdmin || user?.isTeamAdmin || user?.is_global_manager)
 
+  // Callsign-mismatch detection (docs/callsign-mismatch-design.md, Phase 2):
+  // the viewer's own devices currently connected under a callsign that does not
+  // preserve their assigned callsign. Visible to every user. Same 404-as-off
+  // convention as the renewal probe above: device management disabled means no
+  // section and no surfaced error.
+  const [myCallsignMismatches, setMyCallsignMismatches] = useState([])
+
+  const fetchMyCallsignMismatches = useCallback(async () => {
+    try {
+      const response = await deviceManagementAPI.getMyCallsignStatus()
+      setMyCallsignMismatches(response.data?.mismatches || [])
+    } catch (error) {
+      if (error?.response?.status !== 404) {
+        console.error('Failed to fetch my callsign status:', error)
+      }
+      setMyCallsignMismatches([])
+    }
+  }, [])
+
   const fetchMyDevicesNeedingRenewal = useCallback(async () => {
     try {
       const response = await deviceManagementAPI.getMyDevices()
@@ -120,7 +139,8 @@ export default function Requests({ user }) {
   useEffect(() => {
     fetchMyDevicesNeedingRenewal()
     fetchTeamDevicesNeedingRenewal()
-  }, [fetchMyDevicesNeedingRenewal, fetchTeamDevicesNeedingRenewal])
+    fetchMyCallsignMismatches()
+  }, [fetchMyDevicesNeedingRenewal, fetchTeamDevicesNeedingRenewal, fetchMyCallsignMismatches])
 
   useEffect(() => {
     const fetchRequests = async () => {
@@ -290,6 +310,43 @@ export default function Requests({ user }) {
                 <Link to="/enrollment" className="btn-primary text-sm self-start sm:self-auto">
                   Renew
                 </Link>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Callsign-mismatch detection (docs/callsign-mismatch-design.md,
+          Phase 2): the viewer's own devices currently connected under a
+          callsign that does not preserve their assigned callsign. Visible to
+          every user. The mismatch and the two callsigns are stated in TEXT
+          (never colour alone), so the state reaches assistive technology. */}
+      {myCallsignMismatches.length > 0 && (
+        <div className="card">
+          <h2 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4 flex items-center">
+            <InformationCircleIcon className="h-5 w-5 mr-2 text-amber-600 dark:text-amber-400" aria-hidden="true" />
+            Callsign needs correcting
+          </h2>
+          <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+            One or more of your connected devices is using a callsign that does not match your
+            assigned callsign. You may add to the end of it, but the assigned part must stay
+            unchanged. Please correct the callsign in your TAK client.
+          </p>
+          <div className="divide-y divide-gray-200 dark:divide-gray-700">
+            {myCallsignMismatches.map((device) => (
+              <div key={device.clientUid} className="flex items-start gap-2 py-3">
+                <DeviceTypeIcon clientType={device.clientType} />
+                <div className="min-w-0 text-sm text-gray-700 dark:text-gray-300">
+                  <div className="font-medium break-all">{device.clientUid}</div>
+                  <div className="mt-1">
+                    <span className="text-gray-500 dark:text-gray-400">Assigned: </span>
+                    <code className="break-all">{device.assignedCallsign || 'None'}</code>
+                  </div>
+                  <div>
+                    <span className="text-gray-500 dark:text-gray-400">Connected as: </span>
+                    <code className="break-all">{device.observedCallsign}</code>
+                  </div>
+                </div>
               </div>
             ))}
           </div>

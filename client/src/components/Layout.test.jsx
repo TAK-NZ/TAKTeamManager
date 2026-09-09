@@ -46,6 +46,10 @@ vi.mock('../services/api', () => ({
   // overrides it to { enabled: false }.
   deviceManagementAPI: {
     getMyDevices: vi.fn().mockResolvedValue({ data: { devices: [] } }),
+    // Layout's badge now also calls getMyCallsignStatus for every user
+    // (callsign-mismatch detection). Stub it here so the named import never
+    // load-fails and its default is "no mismatches -> zero".
+    getMyCallsignStatus: vi.fn().mockResolvedValue({ data: { mismatches: [] } }),
     probeEnabled: vi.fn().mockResolvedValue({ enabled: true })
   },
   // The version-display mount effect (Layout.jsx) always calls this; a
@@ -151,6 +155,7 @@ describe('Layout "Tasks" nav badge (bugfix: pending-requests-badge; renamed by c
     // now-always-called getMyDevices default (no devices -> zero renewals) and
     // a known expiry-warning threshold (module state shared across files).
     deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    deviceManagementAPI.getMyCallsignStatus.mockResolvedValue({ data: { mismatches: [] } })
     deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: true })
     setExpiryWarningDays(DEFAULT_EXPIRY_WARNING_DAYS)
     container = document.createElement('div')
@@ -293,6 +298,7 @@ describe('Layout "Tasks" nav item visibility and badge-fetch gating (cert-expiry
     // now-always-called getMyDevices default (no devices -> zero renewals) and
     // a known expiry-warning threshold (module state shared across files).
     deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    deviceManagementAPI.getMyCallsignStatus.mockResolvedValue({ data: { mismatches: [] } })
     deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: true })
     setExpiryWarningDays(DEFAULT_EXPIRY_WARNING_DAYS)
     container = document.createElement('div')
@@ -402,6 +408,7 @@ describe('Layout "Users"/"Devices" nav item visibility (bugfix: Team_Admin was m
     requestsAPI.getPending.mockResolvedValue({ data: { requests: [] } })
     adminAPI.getOrgInterest.mockResolvedValue({ data: { requests: [] } })
     deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    deviceManagementAPI.getMyCallsignStatus.mockResolvedValue({ data: { mismatches: [] } })
     // Default: device management ON, so the pre-existing Devices-visible
     // assertions in this block hold. clearAllMocks wiped the factory default.
     deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: true })
@@ -501,6 +508,7 @@ describe('Layout Enrollment/Devices nav gating on the DEVICE_MGMT_ENABLED probe'
     requestsAPI.getPending.mockResolvedValue({ data: { requests: [] } })
     adminAPI.getOrgInterest.mockResolvedValue({ data: { requests: [] } })
     deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    deviceManagementAPI.getMyCallsignStatus.mockResolvedValue({ data: { mismatches: [] } })
     container = document.createElement('div')
     document.body.appendChild(container)
     if (typeof window.matchMedia !== 'function') {
@@ -618,6 +626,7 @@ describe('Layout version display', () => {
     // now-always-called getMyDevices default (no devices -> zero renewals) and
     // a known expiry-warning threshold (module state shared across files).
     deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    deviceManagementAPI.getMyCallsignStatus.mockResolvedValue({ data: { mismatches: [] } })
     deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: true })
     setExpiryWarningDays(DEFAULT_EXPIRY_WARNING_DAYS)
     container = document.createElement('div')
@@ -716,6 +725,7 @@ describe('Layout mobile notification bell (links to /tasks, count for all users)
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     vi.clearAllMocks()
     deviceManagementAPI.getMyDevices.mockResolvedValue({ data: { devices: [] } })
+    deviceManagementAPI.getMyCallsignStatus.mockResolvedValue({ data: { mismatches: [] } })
     deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: true })
     setExpiryWarningDays(DEFAULT_EXPIRY_WARNING_DAYS)
     container = document.createElement('div')

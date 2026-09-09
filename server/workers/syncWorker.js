@@ -180,6 +180,7 @@ const AdminCredentialLoader = require('../services/AdminCredentialLoader');
 const AdminCredentialRefreshJob = require('../services/AdminCredentialRefreshJob');
 const SubscriptionPoller = require('../services/SubscriptionPoller');
 const DeviceSync = require('../services/DeviceSync');
+const CallsignPoller = require('../services/CallsignPoller');
 // Feature cloudtak-agency-groups (tasks 4.1/4.2): the pure CloudTAK
 // helpers -- `groupName(teamId)` (`CloudTAKAgency<id>`),
 // `agencyAttributes(team)` (the three Agency_Attributes), and
@@ -566,6 +567,13 @@ class SyncWorker {
     this.deviceSync = new DeviceSync({
       takServerService: this.takServerService
     });
+    // Callsign-mismatch detection (docs/callsign-mismatch-design.md): the fast
+    // 1-minute live-subscription poll. Takes the SAME shared TakServerService,
+    // so a rotated Admin_Credential applies to its Marti calls too. Started
+    // under the same isDeviceMgmtEnabled() gate as the other device jobs.
+    this.callsignPoller = new CallsignPoller({
+      takServerService: this.takServerService
+    });
   }
 
   async start() {
@@ -615,6 +623,9 @@ class SyncWorker {
       this.adminCredentialRefreshJob.start();
       this.subscriptionPoller.start();
       this.deviceSync.start();
+      // Callsign-mismatch detection: the fast live-callsign poll. Started
+      // alongside the history poller and device sync, behind the same gate.
+      this.callsignPoller.start();
     }
 
     while (this.isRunning) {
@@ -755,6 +766,7 @@ class SyncWorker {
     this.adminCredentialRefreshJob.stop();
     this.subscriptionPoller.stop();
     this.deviceSync.stop();
+    this.callsignPoller.stop();
 
     try {
       await this.pool.end();
