@@ -915,10 +915,19 @@ describe('SubscriptionPoller request surface (Requirements 13.7, 14.4)', () => {
  */
 function createDeviceTable(rows) {
   return new Map(
-    rows.map(({ clientUid, lastSeenAt = null, connected = false }) => [
-      clientUid,
-      { lastSeenAt, connected }
-    ])
+    rows.map((row) => {
+      const { clientUid, lastSeenAt = null, connected = false } = row;
+      // `revoked` is only materialised on the row when a test explicitly asks
+      // for it, so the many existing deep-equal assertions on `{ lastSeenAt,
+      // connected }` rows are undisturbed. `backPoolWith` treats a missing
+      // `revoked` as false (`connected && !row.revoked`), matching a real
+      // non-revoked row.
+      const built = { lastSeenAt, connected };
+      if (Object.prototype.hasOwnProperty.call(row, 'revoked')) {
+        built.revoked = row.revoked;
+      }
+      return [clientUid, built];
+    })
   );
 }
 
@@ -973,7 +982,9 @@ function backPoolWith(table) {
       if (!row) continue;
       rowCount += 1;
 
-      row.connected = connected;
+      // The real statement writes `connected = ($3 AND revoked = false)`: a
+      // revoked row is never marked connected whatever the poll reported.
+      row.connected = connected && !row.revoked;
       if (
         lastEventTime !== null &&
         (row.lastSeenAt === null || row.lastSeenAt.getTime() < lastEventTime.getTime())
@@ -1065,6 +1076,53 @@ describe('SubscriptionPoller.run connection status (task 28.6)', () => {
       });
     }
   );
+
+  /**
+   * Revoked-guard regression (enrollment-vs-dashboard count discrepancy): a
+   * REVOKED Device that TAK Server still reports as Connected must NOT be marked
+   * connected. `connected = ($3 AND revoked = false)` suppresses it at the write.
+   * Without the guard, a just-revoked device with a lingering session showed as
+   * "Currently Connected" on the Dashboard while being excluded from the
+   * Enrollment page's `revoked = false` active count -- the 3-connected /
+   * 2-active split. `last_seen_at` still advances (its history is unaffected).
+   */
+  it('does not mark a revoked row connected even when the poll reports it Connected', async () => {
+    const reported = new Date('2025-06-02T00:00:00.000Z');
+    const table = createDeviceTable([
+      { clientUid: 'uid-revoked', lastSeenAt: STORED, connected: false, revoked: true },
+      { clientUid: 'uid-live', lastSeenAt: STORED, connected: false, revoked: false }
+    ]);
+    backPoolWith(table);
+
+    const takServerService = createTakServerService([
+      clientEndpoint({ uid: 'uid-revoked', lastEventTime: reported.toISOString(), lastStatus: 'Connected' }),
+      clientEndpoint({ uid: 'uid-live', lastEventTime: reported.toISOString(), lastStatus: 'Connected' })
+    ]);
+    const poller = new SubscriptionPoller({ takServerService, pool });
+
+    await poller.run();
+
+    // The revoked row stays disconnected despite the Connected report; the
+    // non-revoked one connects as normal.
+    expect(table.get('uid-revoked').connected).toBe(false);
+    expect(table.get('uid-live').connected).toBe(true);
+    // last_seen_at still advanced for the revoked row (history is unaffected).
+    expect(table.get('uid-revoked').lastSeenAt).toEqual(reported);
+  });
+
+  it('binds the connected write with the revoked guard in the SET clause, not a bare $3', async () => {
+    const table = createDeviceTable([{ clientUid: 'uid-1', lastSeenAt: STORED, connected: false }]);
+    backPoolWith(table);
+    const takServerService = createTakServerService([
+      clientEndpoint({ uid: 'uid-1', lastEventTime: STORED.toISOString(), lastStatus: 'Connected' })
+    ]);
+    const poller = new SubscriptionPoller({ takServerService, pool });
+
+    await poller.run();
+
+    const [sql] = lastSeenUpdateCalls()[0];
+    expect(sql).toMatch(/SET\s+connected = \(\s*\$3\s+AND\s+revoked = false\s*\)/);
+  });
 
   /**
    * Requirements 20.4 / 13.6: an unusable `lastEventTime` costs a Device its
