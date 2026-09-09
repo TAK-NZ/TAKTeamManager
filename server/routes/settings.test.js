@@ -434,9 +434,9 @@ describe('GET /api/settings/export', () => {
     expect(entryNames).toEqual(expect.arrayContaining(['settings.json', 'email_templates.json']));
 
     const settingsJson = JSON.parse(zip.readAsText('settings.json'));
-    expect(settingsJson.systemConfig).toEqual(
-      expect.arrayContaining([{ config_key: 'tak_server_url', config_value: 'https://tak.example.com', description: null }])
-    );
+    // CDK trim: system_config is no longer exported, so settings.json carries
+    // only siteConfig and has no systemConfig key at all.
+    expect(settingsJson.systemConfig).toBeUndefined();
     expect(settingsJson.siteConfig).toEqual(
       expect.arrayContaining([{ config_key: 'organization_display_name', config_value: 'Acme Response', description: null }])
     );
@@ -446,29 +446,28 @@ describe('GET /api/settings/export', () => {
       { template_key: 'welcome_email', subject_template: 'Welcome', body_template: 'Hi {{name}}', description: null }
     ]);
 
-    // The passphrase key is never queried by this route (it is excluded
-    // from exportableSettingsKeys.js's allow-list), so it can never
-    // appear in the archive bytes.
+    // The strongest guarantee that no TAK Server config (including the
+    // passphrase) can leak into the archive: this route never queries
+    // system_config at all.
     const systemConfigQuery = pool.query.mock.calls.find(([sql]) => sql.includes('FROM system_config'));
-    expect(systemConfigQuery[1]).not.toContain('tak_server_p12_passphrase');
+    expect(systemConfigQuery).toBeUndefined();
   });
 
-  it('never includes tak_server_p12_passphrase in the exported archive even if present in system_config', async () => {
-    pool.query.mockImplementation((sql, params) => {
-      if (sql.includes('FROM system_config')) {
-        // Simulate the allow-list filter correctly excluding the
-        // passphrase row (it is not among the queried keys), by only
-        // returning rows for keys actually passed in `params`.
-        const rows = params
-          .filter((key) => key !== 'tak_server_p12_passphrase')
-          .map((key) => ({ config_key: key, config_value: 'value', description: null }));
-        return Promise.resolve({ rows });
-      }
+  it('never queries system_config, so no tak_server_* value (incl. the passphrase) can reach the archive', async () => {
+    pool.query.mockImplementation((sql) => {
       if (sql.includes('FROM site_config')) {
         return Promise.resolve({ rows: [] });
       }
       if (sql.includes('FROM email_templates')) {
         return Promise.resolve({ rows: [] });
+      }
+      // A system_config read would be a bug under the CDK trim; return a
+      // passphrase-bearing row so that, IF the route ever queried it, the
+      // archive-bytes assertion below would catch the leak.
+      if (sql.includes('FROM system_config')) {
+        return Promise.resolve({
+          rows: [{ config_key: 'tak_server_p12_passphrase', config_value: 'super-secret-passphrase', description: null }]
+        });
       }
       return Promise.resolve({ rows: [] });
     });
@@ -485,14 +484,14 @@ describe('GET /api/settings/export', () => {
     const settingsJson = zip.readAsText('settings.json');
     const emailTemplatesJson = zip.readAsText('email_templates.json');
 
+    // Neither the passphrase value nor any system_config content appears.
     expect(settingsJson).not.toContain('tak_server_p12_passphrase');
+    expect(settingsJson).not.toContain('super-secret-passphrase');
     expect(emailTemplatesJson).not.toContain('tak_server_p12_passphrase');
 
-    // Verify the query itself never asked for the passphrase key, since
-    // exportableSettingsKeys.js's allow-list is what makes this
-    // structurally impossible rather than incidentally true.
+    // The structural guarantee: system_config is never read by the export.
     const systemConfigQuery = pool.query.mock.calls.find(([sql]) => sql.includes('FROM system_config'));
-    expect(systemConfigQuery[1]).not.toContain('tak_server_p12_passphrase');
+    expect(systemConfigQuery).toBeUndefined();
   });
 
   it('rejects a non-Global_Manager caller with 403 and never queries the database', async () => {
@@ -682,9 +681,6 @@ describe('POST /api/settings/import', () => {
     const res = await request(app)
       .post('/api/settings/import')
       .send({
-        systemConfig: [
-          { config_key: 'tak_server_url', config_value: 'https://tak.example.com' }
-        ],
         siteConfig: [
           { config_key: 'organization_display_name', config_value: 'Acme Response' }
         ],
@@ -694,9 +690,10 @@ describe('POST /api/settings/import', () => {
       });
 
     expect(res.status).toBe(200);
+    // CDK trim: no systemConfig in the response counts anymore.
     expect(res.body).toEqual({
       success: true,
-      imported: { systemConfig: 1, siteConfig: 1, emailTemplates: 1 }
+      imported: { siteConfig: 1, emailTemplates: 1 }
     });
 
     expect(pool.connect).toHaveBeenCalledTimes(1);
@@ -705,22 +702,56 @@ describe('POST /api/settings/import', () => {
     expect(mockClient.query).not.toHaveBeenCalledWith('ROLLBACK');
     expect(mockClient.release).toHaveBeenCalledTimes(1);
 
+    // CDK trim: system_config is NEVER written by import anymore.
     const systemConfigUpsert = mockClient.query.mock.calls.find(
       ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO system_config')
     );
-    expect(systemConfigUpsert[1][0]).toBe('tak_server_url');
-    expect(systemConfigUpsert[1][1]).toBe('https://tak.example.com');
-    expect(systemConfigUpsert[1][3]).toBe(1); // updated_by = req.user.userId
+    expect(systemConfigUpsert).toBeUndefined();
 
     const siteConfigUpsert = mockClient.query.mock.calls.find(
       ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO site_config')
     );
     expect(siteConfigUpsert[1][0]).toBe('organization_display_name');
+    expect(siteConfigUpsert[1][3]).toBe(1); // updated_by = req.user.userId
 
     const emailTemplateUpsert = mockClient.query.mock.calls.find(
       ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO email_templates')
     );
     expect(emailTemplateUpsert[1][0]).toBe('welcome_email');
+  });
+
+  it('ignores a legacy systemConfig array (does not reject it, and never writes system_config)', async () => {
+    // CDK trim: an archive exported by an older version still carries a
+    // systemConfig array. Import must tolerate it -- apply the still-relevant
+    // siteConfig/emailTemplates, silently ignore systemConfig, and NEVER write
+    // a system_config row (including a passphrase, were one present).
+    const mockClient = buildMockClient();
+    pool.connect.mockResolvedValue(mockClient);
+
+    const res = await request(app)
+      .post('/api/settings/import')
+      .send({
+        systemConfig: [
+          { config_key: 'tak_server_url', config_value: 'https://tak.example.com' },
+          { config_key: 'tak_server_p12_passphrase', config_value: 'super-secret' }
+        ],
+        siteConfig: [
+          { config_key: 'organization_display_name', config_value: 'Acme Response' }
+        ]
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.imported).toEqual({ siteConfig: 1, emailTemplates: 0 });
+
+    const systemConfigUpsert = mockClient.query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO system_config')
+    );
+    expect(systemConfigUpsert).toBeUndefined();
+    // The passphrase value never reaches any query parameter.
+    const anyQueryWithPassphrase = mockClient.query.mock.calls.find(
+      ([, params]) => Array.isArray(params) && params.includes('super-secret')
+    );
+    expect(anyQueryWithPassphrase).toBeUndefined();
   });
 
   it('accepts an import with no emailTemplates key, treating it as zero rows imported', async () => {
@@ -729,36 +760,18 @@ describe('POST /api/settings/import', () => {
 
     const res = await request(app)
       .post('/api/settings/import')
-      .send({ systemConfig: [], siteConfig: [] });
+      .send({ siteConfig: [] });
 
     expect(res.status).toBe(200);
-    expect(res.body.imported).toEqual({ systemConfig: 0, siteConfig: 0, emailTemplates: 0 });
+    expect(res.body.imported).toEqual({ siteConfig: 0, emailTemplates: 0 });
     expect(mockClient.query).toHaveBeenCalledWith('BEGIN');
     expect(mockClient.query).toHaveBeenCalledWith('COMMIT');
-  });
-
-  it('rejects the entire import when systemConfig contains a disallowed config_key, applying no changes', async () => {
-    const res = await request(app)
-      .post('/api/settings/import')
-      .send({
-        systemConfig: [
-          { config_key: 'tak_server_url', config_value: 'https://tak.example.com' },
-          { config_key: 'not_an_allowed_key', config_value: 'x' }
-        ],
-        siteConfig: []
-      });
-
-    expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/rejected/i);
-    expect(res.body.problems.join(' ')).toContain('not_an_allowed_key');
-    expect(pool.connect).not.toHaveBeenCalled();
   });
 
   it('rejects the entire import when siteConfig contains a disallowed config_key, applying no changes', async () => {
     const res = await request(app)
       .post('/api/settings/import')
       .send({
-        systemConfig: [],
         siteConfig: [
           { config_key: 'organization_display_name', config_value: 'Acme' },
           { config_key: 'not_an_allowed_site_key', config_value: 'x' }
@@ -770,12 +783,11 @@ describe('POST /api/settings/import', () => {
     expect(pool.connect).not.toHaveBeenCalled();
   });
 
-  it('rejects the entire import when a row is malformed (missing config_value), applying no changes', async () => {
+  it('rejects the entire import when a siteConfig row is malformed (missing config_value), applying no changes', async () => {
     const res = await request(app)
       .post('/api/settings/import')
       .send({
-        systemConfig: [{ config_key: 'tak_server_url' }],
-        siteConfig: []
+        siteConfig: [{ config_key: 'organization_display_name' }]
       });
 
     expect(res.status).toBe(400);
@@ -787,7 +799,6 @@ describe('POST /api/settings/import', () => {
     const res = await request(app)
       .post('/api/settings/import')
       .send({
-        systemConfig: [],
         siteConfig: [],
         emailTemplates: [{ template_key: 'welcome_email', subject_template: 'Welcome' }]
       });
@@ -797,27 +808,24 @@ describe('POST /api/settings/import', () => {
     expect(pool.connect).not.toHaveBeenCalled();
   });
 
-  it('rejects an import containing tak_server_p12_passphrase, since it is not in the systemConfig allow-list', async () => {
+  it('rejects a missing/non-array siteConfig body with 400 and never opens a transaction', async () => {
     const res = await request(app)
       .post('/api/settings/import')
-      .send({
-        systemConfig: [
-          { config_key: 'tak_server_p12_passphrase', config_value: 'super-secret' }
-        ],
-        siteConfig: []
-      });
+      .send({ siteConfig: 'not-an-array' });
 
     expect(res.status).toBe(400);
-    expect(res.body.problems.join(' ')).toContain('tak_server_p12_passphrase');
     expect(pool.connect).not.toHaveBeenCalled();
   });
 
-  it('rejects a non-array systemConfig/siteConfig body with 400 and never opens a transaction', async () => {
+  it('rejects a legacy body whose systemConfig is present but not an array (broken file)', async () => {
+    // A stray systemConfig is ignored when it's an array, but a non-array one
+    // still signals a malformed file, so it is rejected.
     const res = await request(app)
       .post('/api/settings/import')
-      .send({ systemConfig: 'not-an-array', siteConfig: [] });
+      .send({ siteConfig: [], systemConfig: 'not-an-array' });
 
     expect(res.status).toBe(400);
+    expect(res.body.problems.join(' ')).toContain('systemConfig');
     expect(pool.connect).not.toHaveBeenCalled();
   });
 
@@ -833,7 +841,6 @@ describe('POST /api/settings/import', () => {
     const res = await request(app)
       .post('/api/settings/import')
       .send({
-        systemConfig: [{ config_key: 'tak_server_url', config_value: 'https://tak.example.com' }],
         siteConfig: [{ config_key: 'organization_display_name', config_value: 'Acme' }]
       });
 
@@ -848,7 +855,7 @@ describe('POST /api/settings/import', () => {
 
     const res = await request(app)
       .post('/api/settings/import')
-      .send({ systemConfig: [], siteConfig: [] });
+      .send({ siteConfig: [] });
 
     expect(res.status).toBe(403);
     expect(pool.connect).not.toHaveBeenCalled();

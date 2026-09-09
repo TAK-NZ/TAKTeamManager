@@ -52,28 +52,26 @@ describe('settingsImportTransform', () => {
   // ---------------------------------------------------------------------------
   describe('Feature: admin-settings-management, Property 1: Export-to-import round-trip preserves rows (Validates: Requirements 8.2, 8.4)', () => {
     // Feature: admin-settings-management, Property 1: Export-to-import round-trip preserves rows
-    it('merging a settings.json ({exportedAt, systemConfig, siteConfig}) with an emailTemplates array yields those three arrays element-for-element, in order, unchanged', () => {
+    it('merging a settings.json ({exportedAt, siteConfig, ...}) with an emailTemplates array yields siteConfig + emailTemplates element-for-element, dropping any legacy systemConfig', () => {
       fc.assert(
         fc.property(
           fc.string(), // exportedAt: an arbitrary sibling field that must be ignored
-          configArrayArb,
+          configArrayArb, // a legacy systemConfig that must be DROPPED (CDK trim)
           configArrayArb,
           emailTemplatesArrayArb,
-          (exportedAt, systemConfig, siteConfig, emailTemplates) => {
-            const settingsJson = { exportedAt, systemConfig, siteConfig }
+          (exportedAt, legacySystemConfig, siteConfig, emailTemplates) => {
+            const settingsJson = { exportedAt, systemConfig: legacySystemConfig, siteConfig }
             const merged = mergeExportedJson(settingsJson, emailTemplates)
 
-            // The result carries exactly the three named arrays and nothing else.
-            expect(Object.keys(merged).sort()).toEqual(['emailTemplates', 'siteConfig', 'systemConfig'])
+            // CDK trim: the result carries exactly the two named arrays --
+            // systemConfig is dropped, never carried into the payload.
+            expect(Object.keys(merged).sort()).toEqual(['emailTemplates', 'siteConfig'])
+            expect(merged.systemConfig).toBeUndefined()
 
             // Same length, and element-for-element identical references/values in order.
-            expect(merged.systemConfig).toHaveLength(systemConfig.length)
             expect(merged.siteConfig).toHaveLength(siteConfig.length)
             expect(merged.emailTemplates).toHaveLength(emailTemplates.length)
 
-            for (let i = 0; i < systemConfig.length; i++) {
-              expect(merged.systemConfig[i]).toBe(systemConfig[i])
-            }
             for (let i = 0; i < siteConfig.length; i++) {
               expect(merged.siteConfig[i]).toBe(siteConfig[i])
             }
@@ -82,7 +80,6 @@ describe('settingsImportTransform', () => {
             }
 
             // The whole arrays are deep-equal to the inputs (no reordering/transformation).
-            expect(merged.systemConfig).toEqual(systemConfig)
             expect(merged.siteConfig).toEqual(siteConfig)
             expect(merged.emailTemplates).toEqual(emailTemplates)
           }
@@ -142,15 +139,16 @@ describe('settingsImportTransform', () => {
     )
 
     // Feature: admin-settings-management, Property 2: Import-payload shape recognition is exact
-    it('isImportPayloadShape(value) is true IFF value is a non-null non-array object with array systemConfig, array siteConfig, and (undefined or array) emailTemplates', () => {
+    it('isImportPayloadShape(value) is true IFF value is a non-null non-array object with an array siteConfig and (undefined or array) emailTemplates (CDK trim: systemConfig is no longer part of the shape)', () => {
       fc.assert(
         fc.property(candidateArb, (value) => {
-          // Re-derive the expected boolean independently of the function under test.
+          // Re-derive the expected boolean independently of the function under
+          // test. CDK trim: systemConfig is IRRELEVANT to the shape now -- only
+          // siteConfig (array) and emailTemplates (undefined-or-array) decide it.
           const isPlainObject =
             typeof value === 'object' && value !== null && !Array.isArray(value)
           const expected =
             isPlainObject &&
-            Array.isArray(value.systemConfig) &&
             Array.isArray(value.siteConfig) &&
             (value.emailTemplates === undefined || Array.isArray(value.emailTemplates))
 
@@ -198,13 +196,16 @@ describe('settingsImportTransform', () => {
       { templateKey: 'reset', subjectTemplate: 'Reset', bodyTemplate: 'Reset link' }
     ]
 
-    it('unzips a representative archive and resolves the merge of its two entries (round-trip against the real fflate dependency)', async () => {
+    it('unzips a representative archive and resolves the merge of its two entries, dropping a legacy systemConfig (round-trip against the real fflate dependency)', async () => {
+      // The fixture's settings.json carries a legacy systemConfig array; the
+      // merged payload must DROP it (CDK trim) and keep only siteConfig +
+      // emailTemplates.
       const arrayBuffer = buildArchive(settingsJson, emailTemplatesJson)
 
       const payload = await unzipExportedArchive(arrayBuffer)
 
       expect(payload).toEqual(mergeExportedJson(settingsJson, emailTemplatesJson))
-      expect(payload.systemConfig).toEqual(settingsJson.systemConfig)
+      expect(payload.systemConfig).toBeUndefined()
       expect(payload.siteConfig).toEqual(settingsJson.siteConfig)
       expect(payload.emailTemplates).toEqual(emailTemplatesJson)
       // The result satisfies the guard the Admin UI checks before importing.
@@ -239,7 +240,6 @@ describe('settingsImportTransform', () => {
     // recognised as such, and mergeExportedJson leaves such content intact.
     it('recognises an already-merged Import_Payload object via isImportPayloadShape', () => {
       const rawMerged = {
-        systemConfig: [{ key: 'a', value: 1 }],
         siteConfig: [{ key: 'b', value: 2 }],
         emailTemplates: [{ templateKey: 'welcome', subjectTemplate: 'S', bodyTemplate: 'B' }]
       }
@@ -248,14 +248,18 @@ describe('settingsImportTransform', () => {
 
     it('recognises an already-merged object even when emailTemplates is absent', () => {
       const rawMerged = {
-        systemConfig: [{ key: 'a', value: 1 }],
         siteConfig: []
       }
       expect(isImportPayloadShape(rawMerged)).toBe(true)
     })
 
-    it('rejects a misshapen raw object (non-array systemConfig) so the UI blocks the import', () => {
-      const misshapen = { systemConfig: 'nope', siteConfig: [] }
+    it('accepts a legacy raw object that still carries a systemConfig array (it is ignored, not disqualifying)', () => {
+      const legacy = { systemConfig: [{ key: 'a', value: 1 }], siteConfig: [] }
+      expect(isImportPayloadShape(legacy)).toBe(true)
+    })
+
+    it('rejects a misshapen raw object (non-array siteConfig) so the UI blocks the import', () => {
+      const misshapen = { siteConfig: 'nope' }
       expect(isImportPayloadShape(misshapen)).toBe(false)
     })
   })

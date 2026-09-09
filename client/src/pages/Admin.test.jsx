@@ -62,20 +62,21 @@ describe('Admin.jsx template editor structure (task 7.4)', () => {
 })
 
 describe('Admin.jsx export/import structure (task 8.3)', () => {
-  // Req 7.5: notice adjacent to the export control -- secrets excluded and it
-  // is a settings export, not a backup of domain data.
-  it('renders the export secrets-excluded / not-a-DB-backup notice (Req 7.5)', () => {
-    expect(normalized).toContain('excludes secrets')
-    expect(normalized).toContain('settings export, not a backup of domain data')
+  // Scope notice adjacent to the export control (CDK trim): it names what the
+  // export covers, states that TAK Server config is NOT included, and that it
+  // is not a backup of domain data.
+  it('renders the export scope notice (site content/branding/templates, not TAK Server config, not domain data)', () => {
+    expect(normalized).toContain('site content, branding, and email templates')
+    expect(normalized).toContain('not a backup of domain data')
   })
 
-  // Req 9.5: notice adjacent to the import control -- the excluded secret is
-  // not restored and must be re-entered separately.
-  it('renders the import secret-must-be-re-entered notice (Req 9.5)', () => {
-    // The notice wraps "not" in inline markup, so match the stable phrases
-    // on either side rather than the full sentence.
-    expect(normalized).toContain('restore the excluded')
-    expect(normalized).toContain('must be re-entered separately')
+  // Scope notice adjacent to the import control (CDK trim): import restores
+  // only site content/branding/templates; TAK Server config is not restored,
+  // and a legacy file's TAK Server settings are ignored.
+  it('renders the import scope notice (restores templates/site content only; ignores legacy TAK Server settings)', () => {
+    // The notice wraps "not" in inline markup, so match the stable phrases.
+    expect(normalized).toContain('site content, branding, and email templates')
+    expect(normalized).toContain('are ignored on import')
   })
 
   // Req 10.1 / 10.2: durability notice -- UI-edited templates/settings live
