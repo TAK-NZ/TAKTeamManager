@@ -1224,7 +1224,19 @@ class BulkImportService {
           can_join: canJoin,
           parent_team_id: parentTeamId,
           created_by: importingUser?.userId ?? null,
-          country_code: countryCode
+          country_code: countryCode,
+          // 504 fix: defer the primary team channel's Authentik group
+          // creation to the sync worker instead of a blocking
+          // ~250-300ms Authentik call PER ROW inside this request
+          // handler. A multi-hundred-row import otherwise ran past the
+          // ALB idle timeout and returned a 504 to the browser while
+          // the server kept working. The worker's
+          // `reconcile_team_channel_group` handler is idempotent
+          // (create-or-reuse by name), so groups still get created --
+          // just after the request returns, with the queue's backoff
+          // and rate limiting (see authentik-scaling.md). See
+          // `Team.createTeamChannel`'s `deferGroupCreation` doc comment.
+          deferGroupCreation: true
         });
 
         // Record the created team's id back onto this node so any
@@ -1322,6 +1334,25 @@ class BulkImportService {
       const parentTeamId = Number.parseInt(node.parentTeamIdRef, 10);
       if (!Number.isInteger(parentTeamId) || parentTeamId <= 0) {
         throw new BulkImportRowError(`Invalid parentTeamId: ${node.parentTeamIdRef}`);
+      }
+      // Bugfix (parentTeamId dangling-reference FK explosion): a
+      // syntactically-valid positive integer used to be returned here
+      // directly, with no check that a team with that id actually
+      // exists. A `parentTeamId` carried over from a DIFFERENT
+      // environment (or an earlier DB state) -- e.g. a low id like 22
+      // when this database's real teams sit in the thousands -- then
+      // reached `Team.create` unchanged and was rejected by Postgres'
+      // `teams_parent_team_id_fkey` foreign key as a raw DatabaseError
+      // (SQLSTATE 23503, "Key (parent_team_id)=(22) is not present in
+      // table teams"), logged as a stack-trace-bearing failure rather
+      // than a clean per-row result. Verified against the live Test
+      // deployment: a single CSV produced 1130 such rows. Confirm the
+      // id exists first and throw the same BulkImportRowError the
+      // `parentTeamName` branch below already throws, so a stale id is
+      // a readable per-row failure, never a raw FK violation.
+      const result = await pool.query('SELECT id FROM teams WHERE id = $1', [parentTeamId]);
+      if (!result.rows[0]) {
+        throw new BulkImportRowError(`Parent team not found: ${parentTeamId}`);
       }
       return parentTeamId;
     }

@@ -312,6 +312,13 @@ class TeamNameConflictError extends Error {
 class Team {
   static async create(teamData) {
     const { name, description, callsign_prefix, visibility, can_join, parent_team_id, created_by } = teamData;
+    // Control option (NOT a persisted column): when true, the
+    // auto-created primary team channel defers its Authentik group
+    // creation to the sync worker instead of making a blocking Authentik
+    // call inline -- see `createTeamChannel`'s doc comment. Used by CSV
+    // bulk team import to keep each per-row create pure DB work. Defaults
+    // to false so every single-team-creation caller is unchanged.
+    const deferGroupCreation = teamData.deferGroupCreation === true;
     // Requirement 3.2 (task 6.1): `color`/`callsign_name_format` are
     // Organisation-only fields -- declared with `let` (not `const`)
     // because, when `parent_team_id` is present, they are overridden
@@ -550,8 +557,10 @@ class Team {
       
       const team = result.rows[0];
       
-      // Auto-create team channel
-      await this.createTeamChannel(team.id);
+      // Auto-create team channel. `deferGroupCreation` is threaded
+      // through so a bulk import routes the Authentik group create onto
+      // the sync worker rather than blocking this call (the 504 fix).
+      await this.createTeamChannel(team.id, { deferGroupCreation });
 
       // Requirement 2.1/2.6/9.1 (task 6.1): enqueue a CloudTAK_Group
       // creation Sync_Operation for the newly created Team (root
@@ -2285,7 +2294,30 @@ class Team {
     }
   }
 
-  static async createTeamChannel(teamId) {
+  /**
+   * @param {number} teamId
+   * @param {{deferGroupCreation?: boolean}} [options]
+   *   `deferGroupCreation` (default false): skip the SYNCHRONOUS
+   *   Authentik group create/lookup entirely and take the
+   *   enqueue-reconcile path directly -- insert the channel row with no
+   *   `authentik_group_id` and enqueue a `reconcile_team_channel_group`
+   *   Sync_Operation for the worker to create-or-reuse the group with
+   *   backoff and rate limiting. This is used by CSV bulk team import
+   *   (`BulkImportService`): a large batch would otherwise make one (or
+   *   two) blocking Authentik HTTP calls PER ROW inside the request
+   *   handler -- measured at ~250-300ms each against the live Test
+   *   deployment -- pushing a multi-hundred-row import past the ALB idle
+   *   timeout and returning a 504 to the browser while the server kept
+   *   working. Deferring makes each `Team.create` pure DB work so the
+   *   request finishes quickly, and routes every group create through
+   *   the same rate-limited, retryable worker path the codebase already
+   *   mandates for Authentik writes (see server-conventions.md's
+   *   "Transactions and the sync queue" and authentik-scaling.md). The
+   *   worker's `reconcile_team_channel_group` handler is idempotent
+   *   (create-or-reuse by name), so this is behaviourally identical to
+   *   the synchronous path, only later.
+   */
+  static async createTeamChannel(teamId, { deferGroupCreation = false } = {}) {
     try {
       // Get team with root team info
       const teamResult = await pool.query(`
@@ -2339,7 +2371,23 @@ class Team {
       // reaches TAK is normalized.
       const authentikGroupName = `tak_${toAsciiIdentifier(channelName)}`;
       const channelDbName = channelName.toLowerCase().replace(/[^a-z0-9-]/g, '-');
-      
+
+      // Bulk-import fast path: skip the synchronous Authentik call(s)
+      // and go straight to the enqueue-reconcile path the catch block
+      // below already implements, so a bulk batch does zero blocking
+      // Authentik HTTP work in the request handler (see this method's
+      // doc comment). Behaviourally identical to the synchronous path
+      // via the idempotent worker handler, only later.
+      if (deferGroupCreation) {
+        return await this.insertChannelAndEnqueueGroupReconcile({
+          teamId,
+          channelDbName,
+          channelName,
+          description,
+          authentikGroupName
+        });
+      }
+
       try {
         // Create read/write group. If a group with this name already
         // exists in Authentik (e.g. left over from an earlier
@@ -2411,40 +2459,71 @@ class Team {
         // operation, never a silently-dropped one.
         logger.error({ err: authentikError, teamId }, 'Error creating Authentik team group; enqueueing reconcile for retry');
 
-        const channelResult = await pool.query(
-          'INSERT INTO channels (name, display_name, description, team_id, is_primary) VALUES ($1, $2, $3, $4, true) RETURNING *',
-          [channelDbName, channelName, description, teamId]
-        );
-        const channel = channelResult.rows[0];
-
-        // Enqueue on the default pool (Team.create does not run inside an
-        // explicit transaction -- see the create_cloudtak_group enqueue in
-        // Team.create). A transient enqueue failure must never fail team
-        // creation, so it is logged and swallowed: a later manual reconcile
-        // or the cleanup script remains the backstop.
-        try {
-          await EventPublisher.publishOperation(
-            'reconcile_team_channel_group',
-            {
-              channel_id: channel.id,
-              authentik_group_name: authentikGroupName,
-              description
-            },
-            null
-          );
-        } catch (enqueueError) {
-          logger.error(
-            { err: enqueueError, teamId, channelId: channel.id },
-            'Failed to enqueue reconcile_team_channel_group; channel left without a group id until a manual reconcile'
-          );
-        }
-
-        return channel;
+        return await this.insertChannelAndEnqueueGroupReconcile({
+          teamId,
+          channelDbName,
+          channelName,
+          description,
+          authentikGroupName
+        });
       }
     } catch (error) {
       logger.error({ err: error, teamId }, 'Error creating team channel');
       return null;
     }
+  }
+
+  /**
+   * Inserts the primary team channel row WITHOUT an `authentik_group_id`
+   * and enqueues a `reconcile_team_channel_group` Sync_Operation for the
+   * worker to create-or-reuse the Authentik group (with backoff and rate
+   * limiting) and write its pk back onto the row.
+   *
+   * Extracted from `createTeamChannel` so the SAME code serves both the
+   * synchronous path's failure fallback (an Authentik timeout / rate
+   * limit during a burst) and the bulk-import `deferGroupCreation` fast
+   * path -- see `createTeamChannel`'s doc comment. This is the
+   * codebase's mandated pattern: an Authentik write that did not (or
+   * deliberately will not) complete synchronously becomes a retryable
+   * queued operation, never a silently-dropped one.
+   *
+   * A transient enqueue failure must never fail team creation, so it is
+   * logged and swallowed: a later manual reconcile or the cleanup script
+   * remains the backstop. Enqueues on the default pool (Team.create does
+   * not run inside an explicit transaction -- see the
+   * create_cloudtak_group enqueue in Team.create).
+   */
+  static async insertChannelAndEnqueueGroupReconcile({
+    teamId,
+    channelDbName,
+    channelName,
+    description,
+    authentikGroupName
+  }) {
+    const channelResult = await pool.query(
+      'INSERT INTO channels (name, display_name, description, team_id, is_primary) VALUES ($1, $2, $3, $4, true) RETURNING *',
+      [channelDbName, channelName, description, teamId]
+    );
+    const channel = channelResult.rows[0];
+
+    try {
+      await EventPublisher.publishOperation(
+        'reconcile_team_channel_group',
+        {
+          channel_id: channel.id,
+          authentik_group_name: authentikGroupName,
+          description
+        },
+        null
+      );
+    } catch (enqueueError) {
+      logger.error(
+        { err: enqueueError, teamId, channelId: channel.id },
+        'Failed to enqueue reconcile_team_channel_group; channel left without a group id until a manual reconcile'
+      );
+    }
+
+    return channel;
   }
 }
 

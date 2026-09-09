@@ -1826,6 +1826,76 @@ describe('Team.createTeamChannel Authentik group creation/reconciliation', () =>
     const insertCall = pool.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO channels'));
     expect(insertCall[1][1]).toBe('Teams - FENZ - Ngā Tai ki te Puku');
   });
+
+  // 504 fix (bulk team import): with `deferGroupCreation`, createTeamChannel
+  // must make NO synchronous Authentik call and instead take the
+  // enqueue-reconcile path directly -- the same path the failure catch
+  // uses -- so a bulk import does zero blocking Authentik HTTP work per
+  // row inside the request handler.
+  it('makes no Authentik fetch and enqueues reconcile_team_channel_group directly when deferGroupCreation is true', async () => {
+    pool.query.mockImplementation((sql) => {
+      if (sql.includes('WITH RECURSIVE root_team')) {
+        return Promise.resolve({ rows: [teamRow] });
+      }
+      if (sql.includes('INSERT INTO channels')) {
+        return Promise.resolve({ rows: [{ id: 3, authentik_group_id: null }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    global.fetch = jest.fn();
+
+    const result = await Team.createTeamChannel(10, { deferGroupCreation: true });
+
+    // The whole point: not a single Authentik HTTP call was made.
+    expect(global.fetch).not.toHaveBeenCalled();
+
+    // Channel row inserted via the no-group-id INSERT (immediately usable).
+    const insertCalls = pool.query.mock.calls.filter(([sql]) => sql.includes('INSERT INTO channels'));
+    expect(insertCalls).toHaveLength(1);
+    expect(insertCalls[0][0]).not.toContain('authentik_group_id');
+    expect(result).toEqual({ id: 3, authentik_group_id: null });
+
+    // The group creation is handed to the worker, carrying the same
+    // channel id + intended group name the failure path would enqueue.
+    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
+      'reconcile_team_channel_group',
+      expect.objectContaining({
+        channel_id: 3,
+        authentik_group_name: 'tak_Teams - FENZ'
+      }),
+      null
+    );
+  });
+
+  // Guard the default: the single-team-creation path is unchanged and
+  // still creates the group synchronously (one POST), so this fix is
+  // scoped to bulk import alone.
+  it('still makes the synchronous Authentik group create when deferGroupCreation is omitted', async () => {
+    pool.query.mockImplementation((sql) => {
+      if (sql.includes('WITH RECURSIVE root_team')) {
+        return Promise.resolve({ rows: [teamRow] });
+      }
+      if (sql.includes('INSERT INTO channels')) {
+        return Promise.resolve({ rows: [{ id: 3, authentik_group_id: 'new-group-pk' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ pk: 'new-group-pk' })
+    });
+
+    await Team.createTeamChannel(10);
+
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(EventPublisher.publishOperation).not.toHaveBeenCalledWith(
+      'reconcile_team_channel_group',
+      expect.anything(),
+      expect.anything()
+    );
+  });
 });
 
 /**
