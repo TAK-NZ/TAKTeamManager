@@ -35,15 +35,30 @@ export class AppSecrets extends Construct {
   constructor(scope: Construct, id: string, props: AppSecretsProps) {
     super(scope, id);
 
-    const { envConfig, kmsKey, removalPolicy } = props;
+    const { envConfig, kmsKey } = props;
     const prefix = `TAK-${envConfig.stackName}-TAKTeamManager`;
+
+    // These secrets are ALWAYS DESTROY, deliberately NOT the env-derived
+    // `removalPolicy` (which is RETAIN under the prod profile). Matching
+    // auth-infra, only genuinely stateful data stores (the Aurora cluster)
+    // follow RETAIN-in-prod; regenerable secrets do not. A RETAIN here is
+    // actively harmful in this stack's usage: the demo pipeline deploys the
+    // PROD profile to a disposable demo stack, so a RETAIN turned every
+    // failed/rolled-back CREATE into an orphaned secret (DELETE_SKIPPED),
+    // whose stable `secretName` then COLLIDES on the next attempt and fails
+    // the deploy again. Both values are regenerable — the JWT secret only
+    // invalidates existing sessions, and the credential-encryption key is
+    // (re)populated by the generator Lambda on create. (This app has never
+    // been deployed outside its own dev/test environment, so there is no
+    // long-lived encrypted production data a retained key would protect.)
+    const secretRemovalPolicy = cdk.RemovalPolicy.DESTROY;
 
     // JWT signing secret — any 64 alphanumeric chars (>= the app's 32 min).
     this.jwtSecret = new secretsmanager.Secret(this, 'JwtSecret', {
       secretName: `${prefix}/JWT-Secret`,
       description: 'JWT signing secret for TAK Team Manager session cookies',
       encryptionKey: kmsKey,
-      removalPolicy,
+      removalPolicy: secretRemovalPolicy,
       generateSecretString: {
         passwordLength: 64,
         excludePunctuation: true,
@@ -59,7 +74,7 @@ export class AppSecrets extends Construct {
       secretName: `${prefix}/Credential-Encryption-Key`,
       description: 'AES-256-GCM key (base64 32 bytes) for encrypting BCH service-account passwords',
       encryptionKey: kmsKey,
-      removalPolicy
+      removalPolicy: secretRemovalPolicy
     });
 
     const generatorFn = new nodejs.NodejsFunction(this, 'SecretGeneratorFunction', {
