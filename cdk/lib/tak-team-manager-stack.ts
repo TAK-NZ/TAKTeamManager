@@ -81,9 +81,22 @@ export class TakTeamManagerStack extends cdk.Stack {
       securityGroups: []
     });
 
+    // The hosted-zone NAME is imported from base-infra (per stack name), NOT
+    // taken from the cdk.json profile's `r53ZoneName`. This is the single
+    // source of truth for the zone, so the Route53 records, the ACM cert, and
+    // the app's own public URL all agree with the account actually being
+    // deployed to. It matters for the demo pipeline, which deploys the PROD
+    // profile under a DEMO stack name: the profile's hardcoded `r53ZoneName`
+    // (tak.nz) would otherwise leak into the URL Authentik is told, producing
+    // https://team.tak.nz instead of the demo zone's https://team.demo.tak.nz.
+    // Mirrors auth-infra, which builds every URL from this imported value.
+    const hostedZoneName = Fn.importValue(
+      createBaseImportValue(stackNameComponent, BASE_EXPORT_NAMES.HOSTED_ZONE_NAME)
+    );
+
     const hostedZone = route53.HostedZone.fromHostedZoneAttributes(this, 'HostedZone', {
       hostedZoneId: Fn.importValue(createBaseImportValue(stackNameComponent, BASE_EXPORT_NAMES.HOSTED_ZONE_ID)),
-      zoneName: Fn.importValue(createBaseImportValue(stackNameComponent, BASE_EXPORT_NAMES.HOSTED_ZONE_NAME))
+      zoneName: hostedZoneName
     });
 
     const certificate = acm.Certificate.fromCertificateArn(
@@ -150,8 +163,10 @@ export class TakTeamManagerStack extends cdk.Stack {
       );
     }
 
-    // Resolved public URL for this app (one SPA, one origin).
-    const appUrl = `https://${envConfig.hostname}.${envConfig.r53ZoneName}`;
+    // Resolved public URL for this app (one SPA, one origin). Built from the
+    // base-infra-imported zone name (above), NOT the profile's `r53ZoneName`,
+    // so it matches the Route53 record / cert and the deployed account's zone.
+    const appUrl = `https://${envConfig.hostname}.${hostedZoneName}`;
 
     // Whether to attach the Part-2 S3 EnvironmentFile (tak-team-manager-config.env).
     // Mirrors auth-infra's `useS3AuthentikConfigFile` / tak-infra's
@@ -295,6 +310,21 @@ export class TakTeamManagerStack extends cdk.Stack {
       ecrRepository,
       imageTag: this.node.tryGetContext('imageTag')
     });
+
+    // Order both ECS services AFTER the Aurora cluster. Each task's entrypoint
+    // runs blocking DB migrations at startup (docker-entrypoint.sh ->
+    // database/init.js), so a service must not launch tasks before the cluster
+    // resource is created. Without this, CloudFormation only orders the
+    // services after the cluster via the endpoint `Fn::GetAtt` reference, and
+    // on a fresh stack the tasks could start against a not-yet-resolvable
+    // cluster endpoint -- the observed `getaddrinfo ENOTFOUND ...rds.amazonaws.com`
+    // that failed migrations, killed the essential container, and tripped the
+    // ECS deployment circuit breaker into a full rollback. This dependency is
+    // the CDK-side half; the durable half is init.js retrying the initial
+    // connection (so a brief post-CREATE DNS-propagation gap, or a later Aurora
+    // failover, is ridden out rather than fatal).
+    appService.node.addDependency(database.cluster);
+    syncWorkerService.node.addDependency(database.cluster);
 
     registerOutputs({
       stack: this,
