@@ -206,8 +206,10 @@ function computeDeviceRowState(device) {
   ]
   // Callsign-mismatch detection: the flag is computed server-side
   // (DeviceManagementService.mapDevice, via the shared isCallsignAcceptable
-  // rule, scoped to connected non-CloudTAK devices), so this row only reads it.
-  // `observedCallsign` is the callsign the client is connected under, shown as
+  // rule, scoped to an open, recently-seen mismatch episode -- matching the
+  // /tasks list, NOT live connection state -- so an unresolved mismatch stays
+  // flagged after the device goes offline), so this row only reads it.
+  // `observedCallsign` is the callsign the client last connected under, shown as
   // visible text beside the marker.
   const callsignMismatch = Boolean(device.callsignMismatch)
   const observedCallsign = device.observedCallsign ?? null
