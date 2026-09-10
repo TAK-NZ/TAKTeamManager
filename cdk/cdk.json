@@ -37,8 +37,8 @@
         "enableEcsExec": true
       },
       "app": {
-        "deviceManagementEnabled": false,
-        "offlineMapsEnabled": false
+        "deviceManagementEnabled": true,
+        "offlineMapsEnabled": true
       },
       "general": {
         "removalPolicy": "DESTROY",
@@ -68,8 +68,8 @@
         "enableEcsExec": false
       },
       "app": {
-        "deviceManagementEnabled": false,
-        "offlineMapsEnabled": false
+        "deviceManagementEnabled": true,
+        "offlineMapsEnabled": true
       },
       "general": {
         "removalPolicy": "RETAIN",
