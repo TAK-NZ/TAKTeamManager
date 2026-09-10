@@ -8,6 +8,7 @@ const Team = require('../models/Team');
 const pool = require('../config/database');
 const EventPublisher = require('../services/EventPublisher');
 const { REGION_CHANNEL_TIER_PREFIX, BCH_CHANNEL_CATEGORY_PREFIX } = require('../config/constants');
+const { resolveChannelFolderSeparator } = require('../utils/channelFolderSeparator');
 const router = express.Router();
 
 // Get channel descriptions for user's groups
@@ -87,7 +88,7 @@ router.get('/descriptions', authenticateToken, authorize, async (req, res) => {
       baseChannels.add(baseName)
     })
 
-    const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
+    const separator = resolveChannelFolderSeparator();
 
     // Fetch every locally-known description in 3 queries (not one query
     // per channel) and build lookup maps keyed the same way each table

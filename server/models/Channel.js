@@ -2,6 +2,7 @@ const pool = require('../config/database');
 const logger = require('../config/logger').createLogger('Channel');
 const EventPublisher = require('../services/EventPublisher');
 const { fetchWithTimeout } = require('../utils/fetchWithTimeout');
+const { resolveChannelFolderSeparator } = require('../utils/channelFolderSeparator');
 
 /**
  * Requirement 16.6 (task 35.6): thrown by `Channel.createCustomChannel`
@@ -420,7 +421,7 @@ class Channel {
       const team = teamResult.rows[0];
 
       // Generate channel name
-      const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
+      const separator = resolveChannelFolderSeparator();
       let baseChannelName;
       if (team.parent_team_id) {
         baseChannelName = `Teams${separator}${team.root_prefix}${separator}${team.name}`;

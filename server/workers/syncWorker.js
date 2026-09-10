@@ -124,6 +124,7 @@ function requireGroupId(groupUuid, groupKind, logContext) {
 // rules, which must produce the IDENTICAL string or the LDAP rule stops
 // matching the created group.
 const { toAsciiIdentifier } = require('../utils/asciiNormalize');
+const { resolveChannelFolderSeparator } = require('../utils/channelFolderSeparator');
 // Requirement 25 (task 47.1): the Retention_Cleanup_Job, running on its
 // own scheduled interval (default 24h) inside the Sync_Worker process,
 // started/stopped alongside the poll loop, health server, and expiry
@@ -1609,7 +1610,7 @@ class SyncWorker {
       );
     }
 
-    const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
+    const separator = resolveChannelFolderSeparator();
     // Create read and write groups using tak_<category> format
     // (tak_BCH.../tak_XtraTools...). The channel name is ASCII-normalized
     // (see the toAsciiIdentifier import) so a non-ASCII channel name never
@@ -2059,7 +2060,7 @@ class SyncWorker {
       );
     }
 
-    const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
+    const separator = resolveChannelFolderSeparator();
     // ASCII-normalized channel name (see the toAsciiIdentifier import) so a
     // non-ASCII region name never reaches TAK; must match
     // GlobalChannelService's region target_group_pattern, which normalizes
@@ -2140,7 +2141,7 @@ class SyncWorker {
     
     const { read_group_id, write_group_id } = channelResult.rows[0];
     
-    const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
+    const separator = resolveChannelFolderSeparator();
     // ASCII-normalized so a rename never PATCHes a non-ASCII group name
     // onto the group -- matches createBchChannelGroups' own normalization.
     const asciiChannelName = toAsciiIdentifier(channel_name);
@@ -2235,7 +2236,7 @@ class SyncWorker {
       );
     }
     
-    const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
+    const separator = resolveChannelFolderSeparator();
     const authentikDescription = `${description} (Bi-directional location sharing)`;
     const requestBody = {
       // ASCII-normalized, matching createRegionChannelGroup.
@@ -4162,7 +4163,7 @@ class SyncWorker {
       logger.debug({ groupCount: groups.length }, 'Found groups in Authentik');
       
       // Define separator at the top
-      const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
+      const separator = resolveChannelFolderSeparator();
       
       // Process BCH/UTL channels (groups starting with 'tak_BCH'/
       // 'tak_XtraTools' -- the two BCH_CHANNEL_CATEGORY_PREFIX values), mirroring exactly
