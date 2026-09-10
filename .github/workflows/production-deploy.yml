@@ -3,9 +3,13 @@ name: Production Deployment
 # On a v* tag (or manual dispatch): run the CDK tests, build the production
 # app image, then deploy the production environment with that image.
 #
-# CDK runs from the cdk/ subdirectory. The stack takes only --context envType;
-# the deployed CloudFormation stack name is TAK-<stackName>-TAKTeamManager,
-# where <stackName> is the PROD_STACK_NAME repo variable (e.g. Prod).
+# CDK runs from the cdk/ subdirectory. The deploy applies the prod profile via
+# --context envType=prod and drives the stack name from --context
+# stackName=${{ vars.PROD_STACK_NAME }} (rather than the value baked into
+# cdk.json), so the deploy, the change-set validation, and the imported
+# TAK-<PROD_STACK_NAME>-BaseInfra exports all stay consistent regardless of what
+# PROD_STACK_NAME is set to. The deployed CloudFormation stack name is
+# TAK-<PROD_STACK_NAME>-TAKTeamManager (e.g. Prod).
 
 on:
   push:
@@ -65,4 +69,4 @@ jobs:
 
       - name: Deploy Production
         working-directory: cdk
-        run: npm run cdk deploy -- --context envType=prod --context usePreBuiltImages=true --context imageTag=${{ needs.build-image.outputs.image-tag }} --context useS3ConfigFile=true --require-approval never
+        run: npm run cdk deploy -- --context envType=prod --context stackName=${{ vars.PROD_STACK_NAME }} --context usePreBuiltImages=true --context imageTag=${{ needs.build-image.outputs.image-tag }} --context useS3ConfigFile=true --require-approval never
