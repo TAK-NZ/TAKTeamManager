@@ -6,6 +6,7 @@ const { MAX_TEAM_DEPTH } = require('../config/constants');
 const { fetchWithTimeout } = require('../utils/fetchWithTimeout');
 const { toAsciiIdentifier } = require('../utils/asciiNormalize');
 const { isValidCountryCode, normaliseCountryCode } = require('../utils/isoCountry');
+const { resolveChannelFolderSeparator } = require('../utils/channelFolderSeparator');
 
 /**
  * Requirement 2.2-2.3 (task 5.1): thrown by `Team.create` when the
@@ -2344,7 +2345,7 @@ class Team {
       const team = teamResult.rows[0];
       
       // Generate channel name
-      const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
+      const separator = resolveChannelFolderSeparator();
       let channelName;
       if (team.parent_team_id) {
         // Sub-team: "Teams - FENZ - Southland District"

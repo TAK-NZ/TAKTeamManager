@@ -6,6 +6,7 @@ const authentikService = require('./authentik');
 const logger = require('../config/logger').createLogger('GlobalChannelService');
 const { REGION_CHANNEL_TIER_PREFIX, REGION_CHANNEL_TIER_DESCRIPTION_QUALIFIER, BCH_CHANNEL_CATEGORY_PREFIX } = require('../config/constants');
 const { buildRegionSeedWorkItems } = require('../config/regions');
+const { resolveChannelFolderSeparator } = require('../utils/channelFolderSeparator');
 // Bugfix (service-account provisioning/naming): the single source of
 // truth for the `etl-` prefix and the default-name derivation, shared by
 // `createBchChannel` (a brand-new channel), `provisionServiceAccount`'s
@@ -119,7 +120,7 @@ class GlobalChannelService {
       // Add group membership rules for all users. The rule/pattern prefix
       // is category-derived (categoryPrefix), not the literal 'BCH', so a
       // UTL channel's rules correctly reference tak_XtraTools... groups.
-      const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
+      const separator = resolveChannelFolderSeparator();
       await client.query(`
         INSERT INTO group_membership_rules (
           rule_name, rule_type, source_type, source_id, 
@@ -197,7 +198,7 @@ class GlobalChannelService {
       // target_group_pattern's prefix is tier-specific (tak_Response.../
       // tak_Support...), replacing the former single untiered tak_Regions
       // prefix.
-      const separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
+      const separator = resolveChannelFolderSeparator();
       await client.query(`
         INSERT INTO group_membership_rules (
           rule_name, rule_type, source_type, source_id, 

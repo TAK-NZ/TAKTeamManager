@@ -5,6 +5,7 @@ const { MAX_TEAM_DEPTH } = require('../config/constants');
 const { isRecaptchaDisabledForTesting } = require('../middleware/captcha');
 const { resolveCloudTakUrl } = require('../utils/cloudtakUrl');
 const { isForceSsoLoginEnabled } = require('../config/forceSso');
+const { resolveChannelFolderSeparator } = require('../utils/channelFolderSeparator');
 const logger = require('../config/logger').createLogger('SiteConfig');
 
 /**
@@ -53,8 +54,12 @@ class SiteConfig {
       config[row.config_key] = row.config_value;
     });
     
-    // Add channel folder separator from environment
-    config.channel_folder_separator = process.env.CHANNEL_FOLDER_SEPARATOR || ' - ';
+    // Add channel folder separator from environment (quote-tolerant: an ECS
+    // EnvironmentFile does not strip surrounding quotes, so `" - "` in the
+    // config file would otherwise reach the client as a quoted literal and
+    // stop the Dashboard folder tree from splitting names — see
+    // resolveChannelFolderSeparator's doc comment).
+    config.channel_folder_separator = resolveChannelFolderSeparator();
 
     // Expose the configured Authentik origin so the client can detect an
     // Authentik-originated referrer without hardcoding the Authentik
