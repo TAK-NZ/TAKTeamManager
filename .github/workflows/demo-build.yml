@@ -1,0 +1,139 @@
+name: Build and Push Docker Image - Demo
+
+# Builds the single TAK Team Manager application image from the repo-root
+# Dockerfile and pushes it to the shared base-infra artifacts ECR repository
+# for the demo environment. The image is tagged with a deterministic content
+# hash of the build inputs, and the build is skipped if that tag already
+# exists. Both ECS services (the app and the sync worker) run this one image.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'server/**'
+      - 'client/**'
+      - 'database/**'
+      - 'Dockerfile'
+      - 'docker-entrypoint.sh'
+      - 'package.json'
+      - 'package-lock.json'
+  workflow_call:
+    inputs:
+      force_rebuild:
+        description: 'Force rebuild even if content unchanged'
+        required: false
+        default: false
+        type: boolean
+    outputs:
+      image-tag:
+        description: 'TAK Team Manager image tag'
+        value: ${{ jobs.build-image.outputs.image-tag }}
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: 'Force rebuild even if content unchanged'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-image:
+    runs-on: ubuntu-latest
+    environment: demo
+    outputs:
+      image-tag: ${{ steps.tags.outputs.image-tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup CDK Environment
+        uses: ./.github/actions/setup-cdk
+        with:
+          aws-role-arn: ${{ secrets.DEMO_AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.DEMO_AWS_REGION }}
+          role-session-name: GitHubActions-DockerBuild
+
+      - name: Get ECR Repository and Build Tag
+        id: tags
+        run: |
+          # Resolve the shared artifacts ECR repository from the base-infra stack.
+          ECR_REPO_ARN=$(aws cloudformation describe-stacks \
+            --stack-name TAK-${{ vars.DEMO_STACK_NAME }}-BaseInfra \
+            --query 'Stacks[0].Outputs[?OutputKey==`EcrArtifactsRepoArnOutput`].OutputValue' \
+            --output text)
+
+          if [[ -z "$ECR_REPO_ARN" || "$ECR_REPO_ARN" == "None" ]]; then
+            echo "ERROR: ECR repository ARN not found in BaseInfra stack outputs"
+            exit 1
+          fi
+
+          ECR_REPO_NAME=$(echo "$ECR_REPO_ARN" | cut -d'/' -f2)
+          ECR_REPO_URI="${{ secrets.DEMO_AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.DEMO_AWS_REGION }}.amazonaws.com/${ECR_REPO_NAME}"
+
+          # Deterministic hash of the build inputs -- the same directories and
+          # files the Dockerfile copies. A tag reused across runs with identical
+          # content lets the existence check below skip a rebuild.
+          CONTENT_SHA=$(find server/ client/ database/ Dockerfile docker-entrypoint.sh package.json package-lock.json \
+            -type f -not -path '*/node_modules/*' -exec sha256sum {} \; | sort | sha256sum | cut -c1-8)
+
+          if [[ -z "$CONTENT_SHA" ]]; then
+            echo "ERROR: Failed to generate content hash for build inputs"
+            exit 1
+          fi
+
+          if [[ "${{ github.event.inputs.force_rebuild }}" == "true" ]]; then
+            TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+            IMAGE_TAG="takteammanager-${CONTENT_SHA}-${TIMESTAMP}"
+          else
+            IMAGE_TAG="takteammanager-${CONTENT_SHA}"
+          fi
+
+          echo "ecr-repo-uri=$ECR_REPO_URI" >> $GITHUB_OUTPUT
+          echo "ecr-repo-name=$ECR_REPO_NAME" >> $GITHUB_OUTPUT
+          echo "image-tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "Using ECR repository: $ECR_REPO_URI"
+          echo "Content hash: $CONTENT_SHA"
+          echo "Building image with tag: $IMAGE_TAG"
+
+      - name: Login to Amazon ECR
+        run: |
+          aws ecr get-login-password --region ${{ secrets.DEMO_AWS_REGION }} | \
+            docker login --username AWS --password-stdin \
+            ${{ steps.tags.outputs.ecr-repo-uri }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and Push Image
+        run: |
+          if aws ecr describe-images \
+            --repository-name ${{ steps.tags.outputs.ecr-repo-name }} \
+            --image-ids imageTag=${{ steps.tags.outputs.image-tag }} >/dev/null 2>&1; then
+            echo "✅ Image ${{ steps.tags.outputs.image-tag }} already exists, skipping build"
+          else
+            echo "🔨 Building image ${{ steps.tags.outputs.image-tag }}"
+            docker buildx build \
+              -f Dockerfile \
+              --no-cache \
+              --platform linux/amd64 \
+              --output type=docker \
+              --provenance=false \
+              -t ${{ steps.tags.outputs.ecr-repo-uri }}:${{ steps.tags.outputs.image-tag }} \
+              .
+            docker push ${{ steps.tags.outputs.ecr-repo-uri }}:${{ steps.tags.outputs.image-tag }}
+            echo "✅ Image pushed successfully"
+          fi
+
+      - name: Output Image Information
+        run: |
+          echo "✅ Successfully built and pushed the TAK Team Manager image:"
+          echo "📦 ${{ steps.tags.outputs.image-tag }}"
+          echo ""
+          echo "🚀 To deploy with this image, use:"
+          echo "npm run cdk deploy -- \\"
+          echo "  --context usePreBuiltImages=true \\"
+          echo "  --context imageTag=${{ steps.tags.outputs.image-tag }}"

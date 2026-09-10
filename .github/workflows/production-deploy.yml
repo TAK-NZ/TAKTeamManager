@@ -1,0 +1,68 @@
+name: Production Deployment
+
+# On a v* tag (or manual dispatch): run the CDK tests, build the production
+# app image, then deploy the production environment with that image.
+#
+# CDK runs from the cdk/ subdirectory. The stack takes only --context envType;
+# the deployed CloudFormation stack name is TAK-<stackName>-TAKTeamManager,
+# where <stackName> is the PROD_STACK_NAME repo variable (e.g. Prod).
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      force_deploy:
+        description: 'Force deployment without tag'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  test:
+    uses: ./.github/workflows/cdk-test.yml
+
+  build-image:
+    uses: ./.github/workflows/production-build.yml
+    secrets: inherit
+
+  deploy-production:
+    runs-on: ubuntu-latest
+    environment: production
+    needs: [test, build-image]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup CDK Environment
+        uses: ./.github/actions/setup-cdk
+        with:
+          aws-role-arn: ${{ secrets.PROD_AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.PROD_AWS_REGION }}
+          role-session-name: GitHubActions-Production
+
+      - name: Bootstrap CDK (if needed)
+        run: |
+          if ! aws cloudformation describe-stacks --stack-name CDKToolkit >/dev/null 2>&1; then
+            (cd cdk && npx cdk bootstrap aws://${{ secrets.PROD_AWS_ACCOUNT_ID }}/${{ secrets.PROD_AWS_REGION }} --context envType=prod)
+          else
+            echo "✅ CDK already bootstrapped"
+          fi
+
+      - name: Validate Production Change Set
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          if [[ "$COMMIT_MSG" == *"[force-deploy]"* ]]; then
+            echo "🚨 Force deploy detected - skipping change set validation"
+          else
+            ./scripts/github/validate-changeset.sh TAK-${{ vars.PROD_STACK_NAME }}-TAKTeamManager
+          fi
+
+      - name: Deploy Production
+        working-directory: cdk
+        run: npm run cdk deploy -- --context envType=prod --context usePreBuiltImages=true --context imageTag=${{ needs.build-image.outputs.image-tag }} --context useS3ConfigFile=true --require-approval never

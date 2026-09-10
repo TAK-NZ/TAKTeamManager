@@ -1,0 +1,62 @@
+name: Test CDK code
+
+# Runs the CDK stack's own TypeScript compile check and unit tests. Callable by
+# the deploy pipelines (workflow_call) and also on its own for pushes/PRs to
+# main. This is SEPARATE from the repo-root `ci.yml`, which covers the
+# application (server + client) test suites and dependency audit; this workflow
+# is only the `cdk/` infrastructure code.
+#
+# Does not run for draft pull requests.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - run: echo "🌅 Job triggered by ${{ github.event_name }} event"
+      - run: echo "💨 Job running on ${{ runner.os }}"
+      - run: echo "🕊️ Branch is ${{ github.ref }}"
+      - run: echo "👾 Repository is ${{ github.repository }}."
+
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          registry-url: https://registry.npmjs.org/
+          cache: 'npm'
+          cache-dependency-path: cdk/package-lock.json
+
+      - name: Install CDK dependencies
+        working-directory: cdk
+        run: npm ci
+
+      - name: Install Lambda dependencies
+        working-directory: cdk/src/oidc-setup
+        run: npm ci
+
+      - name: TypeScript compilation check
+        working-directory: cdk
+        run: npx tsc --noEmit --skipLibCheck
+
+      - name: Run tests with coverage report
+        working-directory: cdk
+        run: npm run test:coverage
