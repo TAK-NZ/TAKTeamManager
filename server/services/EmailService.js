@@ -2,6 +2,7 @@ const nodemailer = require('nodemailer');
 const pool = require('../config/database');
 const logger = require('../config/logger').createLogger('EmailService');
 const { wrapInBrandedTemplate } = require('../templates/emailBase');
+const { stripOneMatchedQuotePair } = require('../utils/channelFolderSeparator');
 
 // Requirement 6.5/6.6: generic SMTP configuration, not tied to any single
 // provider (AWS SES, Authentik's own outbound mail relay, or otherwise) --
@@ -24,7 +25,18 @@ class EmailService {
     const useSsl = process.env.EMAIL_USE_SSL === 'true';
     const useTls = process.env.EMAIL_USE_TLS !== 'false';
 
-    this.fromAddress = process.env.EMAIL_FROM;
+    // Strip one matched pair of surrounding quotes, if present. EMAIL_FROM is
+    // typically `Display Name <addr@host>`, and in the ECS deployment it comes
+    // from the Part-2 S3 EnvironmentFile — which, unlike a shell sourcing a
+    // .env, does NOT strip quotes from a `KEY="value"` line. A config file
+    // written `EMAIL_FROM="TAK.NZ Account <account@tak.nz>"` therefore delivered
+    // the literal quotes into process.env, and nodemailer then mangled the
+    // whole quoted blob into a broken `From` header
+    // (`<"TAK.NZ Account account"@tak.nz>`). Same ECS-quoting trap as
+    // CHANNEL_FOLDER_SEPARATOR; reuse the same one-matched-pair stripper. A
+    // value with no surrounding pair (the correct, unquoted form) is untouched.
+    const rawFrom = process.env.EMAIL_FROM;
+    this.fromAddress = typeof rawFrom === 'string' ? stripOneMatchedQuotePair(rawFrom) : rawFrom;
 
     this.transporter = nodemailer.createTransport({
       host: process.env.EMAIL_HOST,
