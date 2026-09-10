@@ -49,14 +49,26 @@ if ! aws cloudformation describe-stacks --stack-name "$STACK_NAME" >/dev/null 2>
 fi
 
 # Generate the CDK template with the SAME context the deploy uses: the prod
-# profile under the target stack's own name. Synth from cdk/ (where
-# package.json/cdk.json live); write the template to the repo root so the path
-# below is stable regardless of cwd.
+# profile under the target stack's own name.
+#
+# Invoked as `npm run cdk synth --` (NOT `npx cdk synth`), matching auth-infra /
+# tak-infra. This runs the package's own `cdk` script, which resolves the local
+# CDK and evaluates `cdk.json`'s `app` (ts-node bin/cdk.ts) so the env-config
+# context is loaded correctly. `npx cdk synth` here previously ran the compiled
+# bin/cdk.js with the context not applied, so envType defaulted to dev-test and
+# the app threw "Environment configuration for 'dev-test' not found" -- the
+# whole reason this validation step was failing. No separate `npm run build` is
+# needed; ts-node executes the TypeScript directly.
+#
+# Run from cdk/ (this repo's CDK app lives there, unlike the sibling repos whose
+# CDK is at the repo root); write the template to the repo root so the path
+# below is stable regardless of cwd. deviceManagementEnabled / offlineMapsEnabled
+# are NOT passed -- they now default to true in cdk.json (see PR #18), so the
+# synthesised template already matches what deploys.
 TEMPLATE_PATH="$(pwd)/template.json"
 (
   cd cdk
-  npm run --silent build
-  npx cdk synth --context envType=prod --context stackName="$STACK_NAME_COMPONENT"
+  npm run --silent cdk synth -- --context envType=prod --context stackName="$STACK_NAME_COMPONENT"
 ) > "$TEMPLATE_PATH"
 
 aws cloudformation create-change-set \

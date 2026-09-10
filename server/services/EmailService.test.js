@@ -113,6 +113,40 @@ describe('EmailService', () => {
       expect(options.port).toBe(587);
       expect(options.connectionTimeout).toBe(10000);
     });
+
+    // Regression: an ECS EnvironmentFile does not strip surrounding quotes, so
+    // EMAIL_FROM="Name <addr>" arrived with literal quotes and nodemailer
+    // mangled the From header into `<"Name addr"@host>`. The constructor now
+    // strips one matched surrounding quote pair.
+    it('strips a matched pair of surrounding quotes from EMAIL_FROM', () => {
+      process.env.EMAIL_FROM = '"TAK.NZ Account <account@tak.nz>"';
+
+      const svc = new EmailService();
+
+      expect(svc.fromAddress).toBe('TAK.NZ Account <account@tak.nz>');
+    });
+
+    it('leaves an already-unquoted EMAIL_FROM untouched', () => {
+      process.env.EMAIL_FROM = 'TAK.NZ Account <account@tak.nz>';
+
+      const svc = new EmailService();
+
+      expect(svc.fromAddress).toBe('TAK.NZ Account <account@tak.nz>');
+    });
+
+    it('uses the de-quoted EMAIL_FROM as the sent message From header', async () => {
+      process.env.EMAIL_FROM = '"TAK.NZ Account <account@tak.nz>"';
+      const svc = new EmailService();
+      pool.query.mockResolvedValue({
+        rows: [{ subject_template: 'Subj', body_template: 'Body' }]
+      });
+
+      await svc.sendEmail('user@example.com', 'any_template', {});
+
+      expect(mockSendMail).toHaveBeenCalledWith(
+        expect.objectContaining({ from: 'TAK.NZ Account <account@tak.nz>' })
+      );
+    });
   });
 
   describe('sendEmail', () => {

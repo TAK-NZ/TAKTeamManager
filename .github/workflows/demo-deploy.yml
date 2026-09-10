@@ -123,13 +123,23 @@ jobs:
           echo "Placeholder for automated tests"
           # TODO: health checks / integration tests against the deployed demo URL.
 
-  # Always revert demo back to its dev-test profile, regardless of test result,
-  # so the environment is left consistent and cheap.
+  # Revert demo back to its dev-test profile after a successful prod-profile
+  # deploy, so the environment is left consistent and cheap.
+  #
+  # Gated on `deploy-and-test` having SUCCEEDED (not the bare `if: always()` the
+  # sibling repos use). If an upstream job failed -- e.g. validate-prod -- then
+  # `deploy-and-test` is SKIPPED, no prod-profile deploy happened, and there is
+  # nothing to revert. Running anyway would deploy with an EMPTY
+  # `needs.deploy-and-test.outputs.image-tag`, which CDK resolves to the ECR tag
+  # `latest` (app-service.ts's `imageTag || 'latest'`) -- an image that does not
+  # exist in the artifacts repo -- producing a CannotPullContainerError and a
+  # broken revert deploy on top of an already-failed run. Reverting only after a
+  # real deploy avoids that entirely.
   revert-to-dev-test:
     runs-on: ubuntu-latest
     environment: demo
     needs: [deploy-and-test]
-    if: always()
+    if: ${{ always() && needs.deploy-and-test.result == 'success' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
