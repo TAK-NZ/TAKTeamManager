@@ -62,7 +62,7 @@ jobs:
 
       - name: Validate CDK Synthesis (Prod Profile, Demo Stack Name)
         working-directory: cdk
-        run: npm run cdk synth -- --context envType=prod --context stackName=${{ vars.DEMO_STACK_NAME }}
+        run: npm run cdk synth -- --context envType=prod --context stackName=${{ vars.DEMO_STACK_NAME }} --context deviceManagementEnabled=true --context offlineMapsEnabled=true
 
       - name: Validate Change Set
         env:
@@ -113,7 +113,7 @@ jobs:
 
       - name: Deploy Demo with Prod Profile
         working-directory: cdk
-        run: npm run cdk deploy -- --context envType=prod --context stackName=${{ vars.DEMO_STACK_NAME }} --context usePreBuiltImages=true --context imageTag=${{ needs.build-image.outputs.image-tag }} --context useS3TAKTeamManagerConfigFile=true ${{ steps.db-config.outputs.db-context }} --require-approval never
+        run: npm run cdk deploy -- --context envType=prod --context stackName=${{ vars.DEMO_STACK_NAME }} --context deviceManagementEnabled=true --context offlineMapsEnabled=true --context usePreBuiltImages=true --context imageTag=${{ needs.build-image.outputs.image-tag }} --context useS3TAKTeamManagerConfigFile=true ${{ steps.db-config.outputs.db-context }} --require-approval never
 
       - name: Wait for Testing Period
         run: sleep ${{ vars.DEMO_TEST_DURATION || '300' }}
@@ -143,8 +143,8 @@ jobs:
 
       - name: Validate CDK Synthesis (Dev-Test Profile, Demo Stack Name)
         working-directory: cdk
-        run: npm run cdk synth -- --context envType=dev-test --context stackName=${{ vars.DEMO_STACK_NAME }}
+        run: npm run cdk synth -- --context envType=dev-test --context stackName=${{ vars.DEMO_STACK_NAME }} --context deviceManagementEnabled=true --context offlineMapsEnabled=true
 
       - name: Revert Demo to Dev-Test Profile
         working-directory: cdk
-        run: npm run cdk deploy -- --context envType=dev-test --context stackName=${{ vars.DEMO_STACK_NAME }} --context usePreBuiltImages=true --context imageTag=${{ needs.deploy-and-test.outputs.image-tag }} --context useS3TAKTeamManagerConfigFile=true --require-approval never
+        run: npm run cdk deploy -- --context envType=dev-test --context stackName=${{ vars.DEMO_STACK_NAME }} --context deviceManagementEnabled=true --context offlineMapsEnabled=true --context usePreBuiltImages=true --context imageTag=${{ needs.deploy-and-test.outputs.image-tag }} --context useS3TAKTeamManagerConfigFile=true --require-approval never

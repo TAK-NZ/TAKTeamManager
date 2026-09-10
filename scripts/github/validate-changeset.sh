@@ -56,7 +56,7 @@ TEMPLATE_PATH="$(pwd)/template.json"
 (
   cd cdk
   npm run --silent build
-  npx cdk synth --context envType=prod --context stackName="$STACK_NAME_COMPONENT"
+  npx cdk synth --context envType=prod --context stackName="$STACK_NAME_COMPONENT" --context deviceManagementEnabled=true --context offlineMapsEnabled=true
 ) > "$TEMPLATE_PATH"
 
 aws cloudformation create-change-set \
