@@ -69,4 +69,4 @@ jobs:
 
       - name: Deploy Production
         working-directory: cdk
-        run: npm run cdk deploy -- --context envType=prod --context stackName=${{ vars.PROD_STACK_NAME }} --context usePreBuiltImages=true --context imageTag=${{ needs.build-image.outputs.image-tag }} --context useS3ConfigFile=true --require-approval never
+        run: npm run cdk deploy -- --context envType=prod --context stackName=${{ vars.PROD_STACK_NAME }} --context usePreBuiltImages=true --context imageTag=${{ needs.build-image.outputs.image-tag }} --context useS3TAKTeamManagerConfigFile=true --require-approval never

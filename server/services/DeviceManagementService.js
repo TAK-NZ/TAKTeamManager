@@ -3,6 +3,7 @@ const DirectoryScopeService = require('./DirectoryScopeService');
 const { getLogger } = require('../middleware/requestContext');
 const { classifyClientType } = require('../utils/clientType');
 const { isCallsignAcceptable } = require('../utils/callsignMatch');
+const { getCallsignMismatchStaleDays } = require('../config/deviceMgmt');
 
 /**
  * Thrown when an admin asks for (or tries to act on) the Devices of a user
@@ -73,6 +74,40 @@ const DEVICE_COLUMNS_QUALIFIED = DEVICE_COLUMNS.split(', ')
   .join(', ');
 
 /**
+ * Whether a `last_seen_at` value falls inside the Callsign_Mismatch_Stale_Days
+ * window -- the JS counterpart of the `/tasks` query's
+ * `(last_seen_at IS NULL OR last_seen_at > NOW() - make_interval(days => N))`.
+ *
+ * Computed in JS (not SQL) on purpose: the device-read path must carry exactly
+ * one visibility mechanism -- row presence -- and grow no `NOW()`/interval
+ * comparison (Requirements 17.8, 21.9), so `mapDevice`'s callsign-mismatch flag
+ * decides staleness here off the plain selected column instead.
+ *
+ * A NULL/absent `last_seen_at` is IN-window (an open episode observed by the
+ * live `CallsignPoller` before the history poller ever recorded the device is
+ * itself recent evidence -- the `/tasks` query treats it identically). An
+ * unparseable value is treated as out-of-window rather than throwing, keeping
+ * `mapDevice` total over any row the pool might hand back.
+ *
+ * @param {Date|string|null|undefined} lastSeenAt
+ * @param {number} [now=Date.now()] injectable clock (ms since epoch).
+ * @returns {boolean}
+ */
+function isLastSeenWithinStaleWindow(lastSeenAt, now = Date.now()) {
+  if (lastSeenAt === null || lastSeenAt === undefined) {
+    return true;
+  }
+
+  const seenMs = lastSeenAt instanceof Date ? lastSeenAt.getTime() : new Date(lastSeenAt).getTime();
+  if (!Number.isFinite(seenMs)) {
+    return false;
+  }
+
+  const windowMs = getCallsignMismatchStaleDays() * 24 * 60 * 60 * 1000;
+  return now - seenMs <= windowMs;
+}
+
+/**
  * DeviceManagementService (device-management Requirements 5.5, 6.2, 6.6,
  * 6.7, 7.5, 8.5, 8.6, 9.3, 9.4; design.md's
  * `server/services/DeviceManagementService.js` section).
@@ -139,6 +174,7 @@ class DeviceManagementService {
     const result = await pool.query(
       `SELECT ${DEVICE_COLUMNS_QUALIFIED},
               d.observed_callsign,
+              d.callsign_violation_first_seen_at,
               uc.tak_callsign AS assigned_callsign
          FROM tak_devices d
          JOIN users u ON u.id = d.user_id
@@ -182,37 +218,85 @@ class DeviceManagementService {
    *     the poller from the live subscription table).
    *   - `user_cache.tak_callsign` — the assigned, already-assembled callsign.
    *
-   * Filtered to `connected = true` (a mismatch is only actionable while the
-   * device is actually connected — the design's connected-only scope for the
-   * in-app surface) and to devices with a recorded `observed_callsign`. CloudTAK
-   * devices are excluded, mirroring the poller's own skip: CloudTAK prevents
-   * callsign changes, so it can never be a real mismatch. A teamless user
-   * (`tak_callsign` NULL) has no assignment to violate, so `isCallsignAcceptable`
-   * returns true for them and they are naturally filtered out.
+   * STANDING TASK, NOT LIVE STATUS -- deliberately NOT `connected`-scoped.
+   * This backs a to-do list, whose value is that an item persists until the
+   * user actually resolves it. A callsign mismatch is a persistent client-side
+   * misconfiguration: the device disconnecting does not fix it, and it will
+   * almost certainly reconnect the same way. The old `connected = true` filter
+   * made the task evaporate the moment the offending device went offline --
+   * precisely when the user has stopped looking -- even though nothing was
+   * corrected. So this surface is scoped instead to:
+   *
+   *   - an OPEN, debounced mismatch episode:
+   *     `callsign_violation_first_seen_at IS NOT NULL`. The `CallsignPoller`
+   *     owns this latch: it is set once a mismatch survives two consecutive
+   *     live polls, and CLEARED to NULL the instant the poller observes a
+   *     correction. Keying off the latch (rather than re-deriving from
+   *     `observed_callsign` alone) is what makes a fixed-then-disconnected
+   *     device drop off immediately: the poller nulls the latch on the
+   *     correcting poll while the device is still live, so no stale task
+   *     lingers. It also inherits the poller's one-poll flap debounce.
+   *   - RECENT evidence: `last_seen_at` within `Callsign_Mismatch_Stale_Days`
+   *     (`CALLSIGN_MISMATCH_STALE_DAYS`, default 7). A device untouched longer
+   *     than the window is weak evidence the mismatch is still live -- the user
+   *     may have corrected it and not reconnected -- so it ages out rather than
+   *     nagging forever. A NULL `last_seen_at` (an open episode observed by the
+   *     live `CallsignPoller` before the 5-minute history `SubscriptionPoller`
+   *     ever recorded the device) is treated as IN-window: the open episode is
+   *     itself recent evidence.
+   *
+   * The mismatch VERDICT still uses the SAME pure `isCallsignAcceptable` rule
+   * the `CallsignPoller` uses, against the SAME stored values it writes, so the
+   * badge, the page and the poller can never disagree on what counts as a
+   * mismatch:
+   *
+   *   - `observed_callsign`  — what the client is connected under (written by
+   *     the poller from the live subscription table).
+   *   - `user_cache.tak_callsign` — the assigned, already-assembled callsign.
+   *
+   * CloudTAK devices are excluded, mirroring the poller's own skip: CloudTAK
+   * prevents callsign changes, so it can never be a real mismatch. A teamless
+   * user (`tak_callsign` NULL) has no assignment to violate, so
+   * `isCallsignAcceptable` returns true for them and they are naturally filtered
+   * out. The JS-side acceptability re-check is redundant with the latch (which
+   * only opens on a real mismatch) but kept as the single place the append
+   * boundary rule lives, so the page can never drift from the poller.
    *
    * The `client_uid`-based CloudTAK exclusion and the acceptability test both
    * run in JS via the shared classifiers rather than in SQL, so the append
    * boundary rule stays in exactly one place. The row set is bounded by
    * `user_id`, so this is not an N+1 concern.
    *
+   * NOTE: this is the ONLY callsign-mismatch surface that outlives the
+   * connection. The device-list row flag (`mapDevice`'s `callsignMismatch`) and
+   * the first-detection email (`CallsignPoller`) are both deliberately still
+   * connected-only: the former annotates a live device row beside its own
+   * `connected` badge, the latter is an edge-triggered notice that can only fire
+   * on a fresh good->bad transition observed live.
+   *
    * @param {number|string} userId - LOCAL `users.id` of the caller.
    * @returns {Promise<Array<{clientUid: string, clientType: string,
    *   observedCallsign: string, assignedCallsign: string|null,
-   *   lastSeenAt: Date|null}>>} one entry per mismatched, currently-connected
-   *   device; empty when nothing is wrong.
+   *   lastSeenAt: Date|null}>>} one entry per mismatched device with an open,
+   *   recently-seen episode; empty when nothing is wrong.
    */
   static async listOwnCallsignMismatches(userId) {
+    const staleDays = getCallsignMismatchStaleDays();
     const result = await pool.query(
       `SELECT d.client_uid, d.observed_callsign, d.last_seen_at, uc.tak_callsign
          FROM tak_devices d
          JOIN users u ON u.id = d.user_id
          LEFT JOIN user_cache uc ON uc.authentik_id = u.authentik_user_id::text
         WHERE d.user_id = $1
-          AND d.connected = true
           AND d.revoked = false
+          AND d.callsign_violation_first_seen_at IS NOT NULL
           AND d.observed_callsign IS NOT NULL
+          AND (
+            d.last_seen_at IS NULL
+            OR d.last_seen_at > NOW() - make_interval(days => $2)
+          )
         ORDER BY d.client_uid ASC`,
-      [userId]
+      [userId, staleDays]
     );
 
     return result.rows
@@ -420,15 +504,20 @@ class DeviceManagementService {
    * `assigned_callsign` (the self/managed list does; the revoke-path row lookups
    * do not), this also emits `observedCallsign` and a computed
    * `callsignMismatch` boolean so the shared `DeviceListRow` can highlight a
-   * device connected under a wrong callsign on BOTH the Dashboard card and the
+   * device under a wrong callsign on BOTH the Dashboard card and the
    * user-details modal from one definition. The flag uses the SAME pure
    * `isCallsignAcceptable` rule the `CallsignPoller` and the `/tasks` list use,
-   * and is scoped exactly like the in-app nudge: true only for a device that is
-   * `connected`, is NOT CloudTAK (CloudTAK cannot change its callsign), and
-   * whose observed callsign does not preserve the assigned one. A row without
-   * those columns (a revoke-path lookup) yields `observedCallsign: null` and
-   * `callsignMismatch: false`, so no caller can accidentally surface a
-   * half-computed flag.
+   * and is scoped to MATCH the `/tasks` standing-task surface rather than live
+   * connection state: true for a device with an OPEN mismatch episode
+   * (`callsign_violation_first_seen_at` set) that was seen within
+   * Callsign_Mismatch_Stale_Days (a NULL `last_seen_at` treated as in-window),
+   * that is NOT revoked, is NOT CloudTAK (CloudTAK cannot change its callsign),
+   * and whose observed callsign does not preserve the assigned one. It is
+   * deliberately NOT gated on `connected` -- an unresolved mismatch stays
+   * flagged after the device disconnects, since disconnecting does not correct
+   * it. A row without the callsign columns/latch (a revoke-path lookup) yields
+   * `observedCallsign: null` and `callsignMismatch: false`, so no caller can
+   * accidentally surface a half-computed flag.
    *
    * @param {object} row - a `tak_devices` row, optionally joined with
    *   `observed_callsign` and `assigned_callsign`.
@@ -442,16 +531,35 @@ class DeviceManagementService {
     const observedCallsign =
       row.observed_callsign === undefined ? null : row.observed_callsign;
     const clientType = classifyClientType(row.client_uid);
-    // Only the self/managed list joins in the assigned callsign; when it did
-    // not, `assigned_callsign` is absent and there is nothing to compare, so the
-    // flag is false. Scoped to a connected, non-CloudTAK device, mirroring the
-    // in-app nudge and the poller's own skip.
+    // Callsign-mismatch flag, scoped to MATCH the `/tasks` standing-task surface
+    // (`listOwnCallsignMismatches`) rather than live connection state -- the two
+    // callsign-mismatch surfaces must not disagree about whether a device is
+    // misconfigured. So this is NOT gated on `connected`: an unresolved mismatch
+    // stays flagged after the device disconnects (the misconfiguration is not
+    // fixed by disconnecting), exactly as the `/tasks` list now does. The gate:
+    //
+    //   - `assigned_callsign !== undefined`: only the self/managed list joins in
+    //     the assigned callsign and the episode latch; a revoke-path lookup
+    //     (`findDeviceRow`) supplies neither, so this outer guard keeps that path
+    //     at `false` with nothing to compare.
+    //   - an OPEN, debounced episode: `callsign_violation_first_seen_at` is set
+    //     (the `CallsignPoller` opens it after two consecutive mismatching polls
+    //     and CLEARS it the instant it observes a correction), so a corrected
+    //     device drops the flag immediately.
+    //   - RECENT evidence: `last_seen_at` within `Callsign_Mismatch_Stale_Days`.
+    //     Computed in JS here (NOT in SQL) deliberately: the device-read queries
+    //     carry exactly one visibility mechanism -- row presence -- and must grow
+    //     no `NOW()`/interval comparison (Requirements 17.8, 21.9, guarded), so
+    //     the staleness decision lives here off the plain `last_seen_at` column.
+    //     A NULL `last_seen_at` is treated as in-window (an open episode the live
+    //     poller saw before the 5-minute history poller ever recorded the device
+    //     is itself recent evidence), matching the `/tasks` query's NULL handling.
+    //   - a revoked Device is never flagged (a revoked cert cannot be a live
+    //     participant), and CloudTAK is skipped (it cannot change its callsign).
     const callsignMismatch =
       row.assigned_callsign !== undefined &&
-      Boolean(row.connected) &&
-      // A revoked Device is never a live participant, so it is never flagged for
-      // a callsign mismatch (defense in depth: `connected` is already cleared on
-      // revoke, but a momentarily-stale value must not surface a nudge).
+      row.callsign_violation_first_seen_at != null &&
+      isLastSeenWithinStaleWindow(row.last_seen_at) &&
       !row.revoked &&
       clientType !== 'cloudtak' &&
       !isCallsignAcceptable(observedCallsign, row.assigned_callsign);

@@ -129,12 +129,19 @@ export class AppService extends Construct {
     }
 
     // --- Log group ---
+    // ALWAYS DESTROY, deliberately NOT the env-derived `props.removalPolicy`
+    // (RETAIN under the prod profile). A log group is a reproducible resource,
+    // recreated on every deploy; matching auth-infra, only stateful data
+    // stores follow RETAIN-in-prod. A RETAIN here orphaned the log group on a
+    // rolled-back CREATE (DELETE_SKIPPED), and its stable `logGroupName` then
+    // collided on the next attempt — the demo pipeline deploys the prod
+    // profile to a disposable stack, so this bit on every retry.
     const logGroup = new logs.LogGroup(this, 'LogGroup', {
       logGroupName: `/aws/ecs/${family}`,
       retention: envConfig.general.enableDetailedLogging
         ? logs.RetentionDays.ONE_MONTH
         : logs.RetentionDays.TWO_WEEKS,
-      removalPolicy: props.removalPolicy
+      removalPolicy: cdk.RemovalPolicy.DESTROY
     });
 
     // --- Task definition ---

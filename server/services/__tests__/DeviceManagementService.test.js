@@ -577,18 +577,26 @@ describe('connected on the Device wire shape (Requirement 20.8)', () => {
 // the poller/nudge: connected, non-CloudTAK, observed not acceptable.
 // ══════════════════════════════════════════════════════════════════════════
 describe('callsign mismatch on the Device wire shape', () => {
-  // A native (android) row connected with the assigned callsign present.
+  // A native (android) row with the assigned callsign present and an OPEN
+  // mismatch episode (callsign_violation_first_seen_at set) recently seen. The
+  // flag now MATCHES the /tasks surface: an open, recently-seen episode, NOT
+  // live `connected` state -- so an unresolved mismatch stays flagged after the
+  // device disconnects. `connected` is left true here only to prove it is NOT
+  // what the flag keys off (the offline case below sets it false and still
+  // flags).
   function callsignRow(overrides = {}) {
     return deviceRow({
       client_uid: 'ANDROID-63040a40563b5fab',
       connected: true,
+      last_seen_at: new Date(),
       observed_callsign: 'FENZ-STL-J.Doe',
       assigned_callsign: 'FENZ-STL-J.Doe',
+      callsign_violation_first_seen_at: new Date(),
       ...overrides
     });
   }
 
-  it('reports observedCallsign and no mismatch when the connected callsign matches the assigned one', () => {
+  it('reports observedCallsign and no mismatch when the observed callsign matches the assigned one', () => {
     const mapped = DeviceManagementService.mapDevice(callsignRow());
     expect(mapped.observedCallsign).toBe('FENZ-STL-J.Doe');
     expect(mapped.callsignMismatch).toBe(false);
@@ -601,7 +609,7 @@ describe('callsign mismatch on the Device wire shape', () => {
     expect(mapped.callsignMismatch).toBe(false);
   });
 
-  it('flags a mismatch when the connected callsign does not preserve the assigned one', () => {
+  it('flags a mismatch on an open, recently-seen episode whose observed callsign does not preserve the assigned one', () => {
     const mapped = DeviceManagementService.mapDevice(
       callsignRow({ observed_callsign: 'FENZ-WRONG' })
     );
@@ -609,9 +617,35 @@ describe('callsign mismatch on the Device wire shape', () => {
     expect(mapped.callsignMismatch).toBe(true);
   });
 
-  it('does not flag a disconnected device even if the observed callsign is wrong', () => {
+  it('STILL flags a mismatch when the device is DISCONNECTED (the flag matches /tasks, not connection state)', () => {
+    // This is the behaviour change: a disconnected device with an open episode
+    // and a recent last_seen_at is flagged. `connected: false` is irrelevant.
     const mapped = DeviceManagementService.mapDevice(
       callsignRow({ observed_callsign: 'FENZ-WRONG', connected: false })
+    );
+    expect(mapped.callsignMismatch).toBe(true);
+  });
+
+  it('flags a disconnected mismatch with a NULL last_seen_at (an open episode is itself recent evidence, in-window)', () => {
+    const mapped = DeviceManagementService.mapDevice(
+      callsignRow({ observed_callsign: 'FENZ-WRONG', connected: false, last_seen_at: null })
+    );
+    expect(mapped.callsignMismatch).toBe(true);
+  });
+
+  it('does NOT flag when the episode is closed (callsign_violation_first_seen_at is NULL -- the poller observed a correction)', () => {
+    const mapped = DeviceManagementService.mapDevice(
+      callsignRow({ observed_callsign: 'FENZ-WRONG', callsign_violation_first_seen_at: null })
+    );
+    expect(mapped.callsignMismatch).toBe(false);
+  });
+
+  it('does NOT flag when last_seen_at is older than the staleness window (the episode has aged out)', () => {
+    // Well beyond the 7-day default; the observed callsign is still wrong and the
+    // episode latch is still open, but the evidence is too old to be actionable.
+    const stale = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const mapped = DeviceManagementService.mapDevice(
+      callsignRow({ observed_callsign: 'FENZ-WRONG', connected: false, last_seen_at: stale })
     );
     expect(mapped.callsignMismatch).toBe(false);
   });
@@ -630,8 +664,16 @@ describe('callsign mismatch on the Device wire shape', () => {
     expect(mapped.callsignMismatch).toBe(false);
   });
 
+  it('does not flag a revoked device even with an open, recent mismatch episode', () => {
+    const mapped = DeviceManagementService.mapDevice(
+      callsignRow({ observed_callsign: 'FENZ-WRONG', revoked: true })
+    );
+    expect(mapped.callsignMismatch).toBe(false);
+  });
+
   it('defaults to no observed callsign and no mismatch when the query did not join them (revoke-path lookup)', () => {
-    // A plain tak_devices row (no observed_callsign / assigned_callsign keys).
+    // A plain tak_devices row (no observed_callsign / assigned_callsign /
+    // callsign_violation_first_seen_at keys).
     const mapped = DeviceManagementService.mapDevice(deviceRow({ connected: true }));
     expect(mapped.observedCallsign).toBeNull();
     expect(mapped.callsignMismatch).toBe(false);
@@ -754,4 +796,144 @@ describe('DeviceManagementService.isManagedUser fails closed', () => {
       DeviceManagementService.isManagedUser({ userId: 10, is_global_manager: false }, 20)
     ).rejects.toBe(dbError);
   });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// listOwnCallsignMismatches: the /tasks "Callsign needs correcting" surface.
+//
+// This is a STANDING TASK list, deliberately NOT connected-scoped (the earlier
+// `connected = true` filter made an unresolved mismatch vanish the moment the
+// device went offline). The scope is now:
+//   - an OPEN, debounced mismatch episode (callsign_violation_first_seen_at
+//     IS NOT NULL, owned/cleared by the CallsignPoller), AND
+//   - a device seen within CALLSIGN_MISMATCH_STALE_DAYS (default 7), with a
+//     NULL last_seen_at treated as in-window.
+// The mismatch VERDICT and the CloudTAK/teamless exclusions still run in JS via
+// the shared classifiers, so the SQL narrows candidate rows and the JS decides.
+//
+// Asserted two ways, mirroring the listOwnDevices visibility block above:
+// textually against the emitted SQL (the specific regression this change
+// forbids is the reappearance of a `connected` comparison, or the loss of the
+// episode-latch / staleness predicates), and behaviourally through the JS-side
+// filtering. The pool is stubbed per case with the exact candidate rows the
+// SQL would have returned, so the JS classifier's own decisions are what these
+// assert.
+// ══════════════════════════════════════════════════════════════════════════
+describe('DeviceManagementService.listOwnCallsignMismatches', () => {
+  const ORIGINAL_STALE_DAYS = process.env.CALLSIGN_MISMATCH_STALE_DAYS;
+
+  afterEach(() => {
+    if (ORIGINAL_STALE_DAYS === undefined) {
+      delete process.env.CALLSIGN_MISMATCH_STALE_DAYS;
+    } else {
+      process.env.CALLSIGN_MISMATCH_STALE_DAYS = ORIGINAL_STALE_DAYS;
+    }
+  });
+
+  /**
+   * A candidate row AS THE SQL WOULD RETURN IT: an open, recently-seen episode
+   * has already passed the latch + staleness predicates, so the row set handed
+   * to the JS filter is exactly these. Only the columns the query selects.
+   */
+  function candidateRow(overrides = {}) {
+    return {
+      client_uid: 'ANDROID-63040a40563b5fab',
+      observed_callsign: 'FENZ-STL-J.Doe',
+      last_seen_at: new Date('2024-06-01T00:00:00.000Z'),
+      tak_callsign: 'FENZ-STL-J.Doe',
+      ...overrides
+    };
+  }
+
+  /** Stub the single query this method issues with a given candidate row set. */
+  function stubRows(rows) {
+    pool.query.mockResolvedValueOnce({ rows });
+  }
+
+  it('emits the episode-latch and staleness predicates and NO connected comparison', async () => {
+    stubRows([]);
+
+    await DeviceManagementService.listOwnCallsignMismatches(1);
+
+    const [sql, params] = pool.query.mock.calls[0];
+    // The load-bearing change: no connection scoping on this surface.
+    expect(sql).not.toMatch(/connected\s*(=|<>|!=|IS\b)/i);
+    // The open, debounced episode latch.
+    expect(sql).toMatch(/callsign_violation_first_seen_at\s+IS\s+NOT\s+NULL/i);
+    // The staleness window, with a NULL last_seen_at treated as in-window.
+    expect(sql).toMatch(/last_seen_at\s+IS\s+NULL/i);
+    expect(sql).toMatch(/make_interval/i);
+    // revoked is still excluded.
+    expect(sql).toMatch(/revoked\s*=\s*false/i);
+    // The caller id plus the resolved stale-days window are the two params.
+    expect(params).toEqual([1, 7]);
+  });
+
+  it('flags an OPEN episode whose observed callsign no longer preserves the assigned one', async () => {
+    stubRows([candidateRow({ observed_callsign: 'FENZ-WRONG' })]);
+
+    const mismatches = await DeviceManagementService.listOwnCallsignMismatches(1);
+
+    expect(mismatches).toHaveLength(1);
+    expect(mismatches[0]).toMatchObject({
+      clientUid: 'ANDROID-63040a40563b5fab',
+      observedCallsign: 'FENZ-WRONG',
+      assignedCallsign: 'FENZ-STL-J.Doe'
+    });
+  });
+
+  it('flags a mismatch even though the device is offline (the whole point of the change): a NULL last_seen_at candidate still counts', async () => {
+    // The SQL returned it (open episode, NULL last_seen_at is in-window), and it
+    // is a real mismatch -- so it appears on the task list with no notion of
+    // "connected" involved anywhere.
+    stubRows([candidateRow({ observed_callsign: 'FENZ-WRONG', last_seen_at: null })]);
+
+    const mismatches = await DeviceManagementService.listOwnCallsignMismatches(1);
+
+    expect(mismatches.map((m) => m.clientUid)).toEqual(['ANDROID-63040a40563b5fab']);
+    expect(mismatches[0].lastSeenAt).toBeNull();
+  });
+
+  it('does not flag a valid append (observed extends the assigned callsign at a boundary)', async () => {
+    stubRows([candidateRow({ observed_callsign: 'FENZ-STL-J.Doe (Tablet)' })]);
+
+    await expect(DeviceManagementService.listOwnCallsignMismatches(1)).resolves.toEqual([]);
+  });
+
+  it('does not flag a CloudTAK device (it cannot change its callsign)', async () => {
+    stubRows([
+      candidateRow({ client_uid: 'ANDROID-CloudTAK-jdoe@example.com', observed_callsign: 'FENZ-WRONG' })
+    ]);
+
+    await expect(DeviceManagementService.listOwnCallsignMismatches(1)).resolves.toEqual([]);
+  });
+
+  it('does not flag a teamless user (no assigned callsign to violate)', async () => {
+    stubRows([candidateRow({ observed_callsign: 'FENZ-WRONG', tak_callsign: null })]);
+
+    await expect(DeviceManagementService.listOwnCallsignMismatches(1)).resolves.toEqual([]);
+  });
+
+  it('resolves the configured CALLSIGN_MISMATCH_STALE_DAYS into the window parameter', async () => {
+    process.env.CALLSIGN_MISMATCH_STALE_DAYS = '30';
+    stubRows([]);
+
+    await DeviceManagementService.listOwnCallsignMismatches(1);
+
+    const [, params] = pool.query.mock.calls[0];
+    expect(params).toEqual([1, 30]);
+  });
+
+  it.each(['', '0', '-5', 'not-a-number'])(
+    'falls back to the 7-day default when CALLSIGN_MISMATCH_STALE_DAYS=%p',
+    async (value) => {
+      process.env.CALLSIGN_MISMATCH_STALE_DAYS = value;
+      stubRows([]);
+
+      await DeviceManagementService.listOwnCallsignMismatches(1);
+
+      const [, params] = pool.query.mock.calls[0];
+      expect(params).toEqual([1, 7]);
+    }
+  );
 });

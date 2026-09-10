@@ -153,12 +153,16 @@ export class SyncWorkerService extends Construct {
     }
 
     // --- Log group (distinct name from the app's) ---
+    // ALWAYS DESTROY, deliberately NOT the env-derived `props.removalPolicy`
+    // (RETAIN under the prod profile) — same reasoning as the app service's
+    // log group: a reproducible resource whose RETAIN orphaned it on a
+    // rolled-back CREATE and then collided by `logGroupName` on retry.
     const logGroup = new logs.LogGroup(this, 'LogGroup', {
       logGroupName: `/aws/ecs/${family}`,
       retention: envConfig.general.enableDetailedLogging
         ? logs.RetentionDays.ONE_MONTH
         : logs.RetentionDays.TWO_WEEKS,
-      removalPolicy: props.removalPolicy
+      removalPolicy: cdk.RemovalPolicy.DESTROY
     });
 
     // --- Task definition: HALF the app's cpu/memory (worker is lighter). Uses
