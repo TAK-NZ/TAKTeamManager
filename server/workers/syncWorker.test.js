@@ -540,6 +540,10 @@ describe('Property 3: Payload validation failures never schedule a retry', () =>
     // fails; reconciled (create-or-reuse-by-name + write pk back) by the
     // Sync_Worker.
     reconcile_team_channel_group: 'reconcileTeamChannelGroup',
+    // Bugfix (a renamed team's Authentik group kept its stale name):
+    // enqueued by Team.update when a rename changes a team's derived
+    // Team_Channel group name; PATCHes the group's `name` in Authentik.
+    rename_team_channel_group: 'renameTeamChannelGroup',
     // Bugfix (Channels tab has no edit action, and no way to add/edit a
     // custom channel's Authentik/LDAP description): enqueued by
     // Channel.updateCustomChannel.
@@ -1326,6 +1330,97 @@ describe('SyncWorker Authentik failure classification wiring', () => {
         }
         return Promise.resolve({ ok: true, json: () => Promise.resolve({ results: [] }) });
       });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      const retryCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('next_retry_at')
+      );
+      expect(retryCall).toBeDefined();
+      expect(retryCall[1][0]).toBe('pending');
+    });
+  });
+
+  /**
+   * Bugfix (a renamed team's Authentik group kept its stale name):
+   * `renameTeamChannelGroup` loads the channel by id and PATCHes its
+   * Authentik group's `name` (and `description` when supplied). Idempotent:
+   * a channel that is gone, or has no group id yet, or whose group 404s, is
+   * a no-op success; a 5xx is retryable.
+   */
+  describe('renameTeamChannelGroup', () => {
+    const baseOperation = {
+      id: 'op-rename-team-channel-1',
+      operation_type: 'rename_team_channel_group',
+      retry_count: 0,
+      max_retries: 48,
+      correlation_id: 'corr-rename-team-channel-1',
+      payload: { channel_id: 10, authentik_group_name: 'tak_Teams - NZDF - HADR', description: 'desc' }
+    };
+
+    function mockChannelQueries(channelRow) {
+      worker.pool.query = jest.fn().mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT id, authentik_group_id FROM channels')) {
+          return Promise.resolve({ rows: channelRow ? [channelRow] : [] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+    }
+
+    it('PATCHes the group name (and description) then completes', async () => {
+      mockChannelQueries({ id: 10, authentik_group_id: 'group-pk-1' });
+      global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 200 });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/core/groups/group-pk-1/'),
+        expect.objectContaining({ method: 'PATCH' })
+      );
+      const [, options] = global.fetch.mock.calls[0];
+      expect(JSON.parse(options.body)).toEqual({
+        name: 'tak_Teams - NZDF - HADR',
+        attributes: { description: 'desc' }
+      });
+      const completedCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('status') && sql.includes('completed')
+      );
+      expect(completedCall).toBeDefined();
+    });
+
+    it('is a no-op success (no fetch) when the channel no longer exists', async () => {
+      mockChannelQueries(null);
+      global.fetch = jest.fn();
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it('is a no-op success (no fetch) when the channel has no Authentik group id yet', async () => {
+      mockChannelQueries({ id: 10, authentik_group_id: null });
+      global.fetch = jest.fn();
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it('treats a 404 from the group PATCH as an already-absent group (no-op success)', async () => {
+      mockChannelQueries({ id: 10, authentik_group_id: 'group-pk-1' });
+      global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 404, statusText: 'Not Found' });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      const completedCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('status') && sql.includes('completed')
+      );
+      expect(completedCall).toBeDefined();
+    });
+
+    it('classifies a 5xx PATCH failure as retryable', async () => {
+      mockChannelQueries({ id: 10, authentik_group_id: 'group-pk-1' });
+      global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 503, statusText: 'Service Unavailable' });
 
       await worker.executeOperationSafely({ ...baseOperation });
 

@@ -7,6 +7,7 @@ const { fetchWithTimeout } = require('../utils/fetchWithTimeout');
 const { toAsciiIdentifier } = require('../utils/asciiNormalize');
 const { isValidCountryCode, normaliseCountryCode } = require('../utils/isoCountry');
 const { resolveChannelFolderSeparator } = require('../utils/channelFolderSeparator');
+const { deriveTeamChannelName } = require('../utils/teamChannelGroupName');
 
 /**
  * Requirement 2.2-2.3 (task 5.1): thrown by `Team.create` when the
@@ -1690,6 +1691,37 @@ class Team {
         }
       }
 
+      // Bugfix (a renamed team's Authentik group kept its stale name): a
+      // rename changes the team's derived Team_Channel group name
+      // (`tak_Teams - <root prefix>[ - <team name>]`), but nothing here
+      // ever recomputed it — the only rename-triggered enqueue above is
+      // `update_cloudtak_group`, whose group is keyed by numeric id and
+      // whose name never contains the team name, so the `tak_Teams - ...`
+      // group kept its old name forever. When `name` actually changed,
+      // recompute the affected channel name(s), UPDATE the local
+      // `channels.display_name`/`name` so every read site and a future
+      // reconcile see the new name, and enqueue a `rename_team_channel_group`
+      // per affected channel so the Sync_Worker PATCHes the Authentik group
+      // `name`.
+      //
+      // Scope: the team's OWN channel always, PLUS every descendant channel.
+      // A Sub_Team's group name embeds the root Organisation's prefix and
+      // the Sub_Team's own name, so a Sub_Team rename only changes its own
+      // channel; but a prefix-less Organisation's own name feeds the root
+      // fallback (`effectiveRootPrefix || teamName`) that descendants can
+      // depend on too, so recomputing the whole subtree and enqueuing only
+      // where the derived name actually DIFFERS from the stored one is both
+      // correct and cheap (a no-diff subtree enqueues nothing). Non-transactional
+      // like the CloudTAK enqueue above, and failures are logged, not
+      // rethrown — a later rename or manual reconcile is the backstop.
+      if (updatedTeam && name !== undefined) {
+        try {
+          await this.renameTeamChannelGroups(teamId);
+        } catch (renameError) {
+          logger.error({ err: renameError, teamId }, 'Error reconciling team channel group name(s) after rename');
+        }
+      }
+
       return updatedTeam;
     } catch (error) {
       // Bugfix (callsign-handling): `idx_teams_callsign_prefix` is UNIQUE
@@ -2296,6 +2328,125 @@ class Team {
   }
 
   /**
+   * Bugfix (a renamed team's Authentik group kept its stale name):
+   * recomputes the derived Team_Channel group name for `teamId` AND every
+   * descendant, and for each primary channel whose recomputed name DIFFERS
+   * from its stored `display_name`, updates the local `channels` row and
+   * enqueues a `rename_team_channel_group` Sync_Operation so the worker
+   * PATCHes the Authentik group `name`.
+   *
+   * Called from `Team.update` only when the team's `name` actually changed.
+   * Derives names via the SAME shared helper (`deriveTeamChannelName`) the
+   * create path uses, so the recomputed group name is byte-identical to what
+   * a fresh creation would produce (including the `country_code` leading
+   * segment). Only the PRIMARY team channel (`is_primary = true`) is renamed
+   * — a custom channel's name is independent of the team name.
+   *
+   * A channel whose group has not been reconciled yet (`authentik_group_id
+   * IS NULL`) still gets its local name updated here; its pending
+   * `reconcile_team_channel_group` will then create the group under the new
+   * name, and the enqueued rename is a no-op in that case (the worker guards
+   * on a null group id). Enqueue failures are per-channel and swallowed by
+   * the caller's try/catch — a later rename or manual reconcile is the
+   * backstop, matching every other non-transactional enqueue in this model.
+   *
+   * @param {number} teamId the just-renamed team.
+   */
+  static async renameTeamChannelGroups(teamId) {
+    const separator = resolveChannelFolderSeparator();
+
+    // The subtree rooted at the renamed team (the team itself + all
+    // descendants), each joined to its PRIMARY channel and to its
+    // Organisation's prefix/country (via a per-row ancestor walk to the
+    // root), so a single query yields every primitive the shared name
+    // helper needs. `display_name` is the current stored channel name we
+    // diff the recomputed name against.
+    const subtree = await pool.query(`
+      WITH RECURSIVE subtree AS (
+        SELECT id, name, parent_team_id FROM teams WHERE id = $1
+        UNION ALL
+        SELECT t.id, t.name, t.parent_team_id
+        FROM teams t JOIN subtree s ON t.parent_team_id = s.id
+      ),
+      roots AS (
+        SELECT s.id AS team_id,
+               (SELECT r.callsign_prefix FROM (
+                  WITH RECURSIVE anc AS (
+                    SELECT id, callsign_prefix, country_code, parent_team_id FROM teams WHERE id = s.id
+                    UNION ALL
+                    SELECT p.id, p.callsign_prefix, p.country_code, p.parent_team_id
+                    FROM teams p JOIN anc a ON p.id = a.parent_team_id
+                  )
+                  SELECT callsign_prefix FROM anc WHERE parent_team_id IS NULL
+                ) r) AS root_prefix,
+               (SELECT r.country_code FROM (
+                  WITH RECURSIVE anc AS (
+                    SELECT id, callsign_prefix, country_code, parent_team_id FROM teams WHERE id = s.id
+                    UNION ALL
+                    SELECT p.id, p.callsign_prefix, p.country_code, p.parent_team_id
+                    FROM teams p JOIN anc a ON p.id = a.parent_team_id
+                  )
+                  SELECT country_code FROM anc WHERE parent_team_id IS NULL
+                ) r) AS root_country_code,
+               s.name AS team_name,
+               s.parent_team_id
+        FROM subtree s
+      )
+      SELECT roots.team_id, roots.root_prefix, roots.root_country_code,
+             roots.team_name, roots.parent_team_id,
+             c.id AS channel_id, c.display_name, c.authentik_group_id
+      FROM roots
+      JOIN channels c ON c.team_id = roots.team_id AND c.is_primary = true
+    `, [teamId]);
+
+    for (const row of subtree.rows) {
+      const { channelName, authentikGroupName } = deriveTeamChannelName({
+        rootPrefix: row.root_prefix,
+        rootCountryCode: row.root_country_code,
+        teamName: row.team_name,
+        isSubTeam: row.parent_team_id !== null,
+        separator,
+        toAsciiIdentifier
+      });
+
+      // Nothing to do when the derived name is unchanged (the common case
+      // for descendants of a renamed team, whose names embed the root
+      // prefix rather than the renamed team's name).
+      if (channelName === row.display_name) {
+        continue;
+      }
+
+      const description = `Users from ${channelName} (Location sharing enabled)`;
+      const channelDbName = channelName.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+
+      // Update the local channel row FIRST so every read site and any
+      // pending reconcile see the new name; then enqueue the Authentik
+      // rename.
+      await pool.query(
+        'UPDATE channels SET name = $1, display_name = $2, description = $3, updated_at = CURRENT_TIMESTAMP WHERE id = $4',
+        [channelDbName, channelName, description, row.channel_id]
+      );
+
+      try {
+        await EventPublisher.publishOperation(
+          'rename_team_channel_group',
+          {
+            channel_id: row.channel_id,
+            authentik_group_name: authentikGroupName,
+            description
+          },
+          null
+        );
+      } catch (enqueueError) {
+        logger.error(
+          { err: enqueueError, teamId, channelId: row.channel_id },
+          'Failed to enqueue rename_team_channel_group; Authentik group name left stale until a later rename or reconcile'
+        );
+      }
+    }
+  }
+
+  /**
    * @param {number} teamId
    * @param {{deferGroupCreation?: boolean}} [options]
    *   `deferGroupCreation` (default false): skip the SYNCHRONOUS
@@ -2323,20 +2474,21 @@ class Team {
       // Get team with root team info
       const teamResult = await pool.query(`
         WITH RECURSIVE root_team AS (
-          SELECT id, name, callsign_prefix, parent_team_id FROM teams WHERE id = $1
+          SELECT id, name, callsign_prefix, country_code, parent_team_id FROM teams WHERE id = $1
           UNION ALL
-          SELECT p.id, p.name, p.callsign_prefix, p.parent_team_id 
+          SELECT p.id, p.name, p.callsign_prefix, p.country_code, p.parent_team_id 
           FROM teams p JOIN root_team r ON p.id = r.parent_team_id
         )
         SELECT t.id, t.name, t.parent_team_id,
                rt.callsign_prefix as root_prefix,
+               rt.country_code as root_country_code,
                CASE 
                  WHEN t.parent_team_id IS NOT NULL THEN 
                    COALESCE(rt.callsign_prefix, rt.name, '') || ' - ' || t.name
                  ELSE t.name
                END as display_name
         FROM teams t
-        LEFT JOIN (SELECT name, callsign_prefix FROM root_team WHERE parent_team_id IS NULL) rt ON true
+        LEFT JOIN (SELECT name, callsign_prefix, country_code FROM root_team WHERE parent_team_id IS NULL) rt ON true
         WHERE t.id = $1
       `, [teamId]);
       
@@ -2344,33 +2496,35 @@ class Team {
       
       const team = teamResult.rows[0];
       
-      // Generate channel name
-      const separator = resolveChannelFolderSeparator();
-      let channelName;
-      if (team.parent_team_id) {
-        // Sub-team: "Teams - FENZ - Southland District"
-        channelName = `Teams${separator}${team.root_prefix}${separator}${team.name}`;
-      } else {
-        // Root team: "Teams - FENZ"
-        channelName = `Teams${separator}${team.root_prefix || team.name}`;
-      }
-      
-      const description = `Users from ${team.display_name} (Location sharing enabled)`;
-      
-      // Create groups in Authentik with tak_ prefix.
+      // Generate channel name and the ASCII-normalized Authentik group
+      // name via the shared helper, so this create path, `Team.update`'s
+      // rename path and the Sync_Worker's `renameTeamChannelGroup` all
+      // derive the SAME string from the same primitives (see
+      // teamChannelGroupName.js).
       //
-      // Special-character bugfix (Māori macrons): TAK Server cannot handle
-      // non-ASCII characters in an LDAP group name, so the Authentik group
-      // name derived from the (human, macron-bearing) team name is
-      // ASCII-normalized -- "Teams - FENZ - Ngā Tai ki te Puku" becomes
-      // "tak_Teams - FENZ - Nga Tai ki te Puku". `toAsciiIdentifier`
-      // strips diacritics to their base letter and drops any remaining
-      // non-ASCII glyph, while preserving the spaces/`-`/separators the
-      // group name legitimately uses. `channelName` itself is left intact
-      // and stored as the channel's `display_name` below, so the
-      // human-facing name keeps its macrons -- only the identifier that
-      // reaches TAK is normalized.
-      const authentikGroupName = `tak_${toAsciiIdentifier(channelName)}`;
+      // The root Organisation's `country_code` is composed as the LEADING
+      // segment of the effective root prefix ('CHL' + 'CDEM' ->
+      // 'CHL-CDEM'), matching userAttributes.js. Without it, two distinct
+      // Foreign_Partner Organisations sharing a `callsign_prefix` under
+      // different country codes (CHL-CDEM vs USA-CDEM) collapsed onto ONE
+      // Authentik group named `tak_Teams - CDEM`.
+      //
+      // Special-character handling (Māori macrons): TAK Server cannot carry
+      // non-ASCII in an LDAP group name, so the group name is
+      // ASCII-normalized ("Teams - FENZ - Ngā Tai ki te Puku" ->
+      // "tak_Teams - FENZ - Nga Tai ki te Puku") while `channelName` keeps
+      // its macrons and is stored as the channel's `display_name` below.
+      const separator = resolveChannelFolderSeparator();
+      const { channelName, authentikGroupName } = deriveTeamChannelName({
+        rootPrefix: team.root_prefix,
+        rootCountryCode: team.root_country_code,
+        teamName: team.name,
+        isSubTeam: !!team.parent_team_id,
+        separator,
+        toAsciiIdentifier
+      });
+
+      const description = `Users from ${team.display_name} (Location sharing enabled)`;
       const channelDbName = channelName.toLowerCase().replace(/[^a-z0-9-]/g, '-');
 
       // Bulk-import fast path: skip the synchronous Authentik call(s)

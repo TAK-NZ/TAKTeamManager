@@ -3738,13 +3738,15 @@ describe('Team.create / Team.update CloudTAK enqueue (Requirement 2.1/2.6/6.1/6.
 
     await Team.update(5, { name: 'Renamed' });
 
-    expect(EventPublisher.publishOperation).toHaveBeenCalledTimes(1);
-    expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
-      'update_cloudtak_group',
-      { team_id: 5 },
-      null
+    // A rename also enqueues rename_team_channel_group (independent of the
+    // CloudTAK flag), so assert specifically about the CloudTAK operation
+    // rather than the total enqueue count.
+    const cloudtakCalls = EventPublisher.publishOperation.mock.calls.filter(
+      ([op]) => op === 'update_cloudtak_group'
     );
-    const [, , , client] = EventPublisher.publishOperation.mock.calls[0];
+    expect(cloudtakCalls).toHaveLength(1);
+    expect(cloudtakCalls[0]).toEqual(['update_cloudtak_group', { team_id: 5 }, null]);
+    const [, , , client] = cloudtakCalls[0];
     expect(client).toBeUndefined();
   });
 
@@ -3754,6 +3756,9 @@ describe('Team.create / Team.update CloudTAK enqueue (Requirement 2.1/2.6/6.1/6.
 
     await Team.update(5, { description: 'New desc' });
 
+    // A description-only change does NOT touch the derived team-channel
+    // group name, so no rename is enqueued here; the only enqueue is the
+    // CloudTAK one.
     expect(EventPublisher.publishOperation).toHaveBeenCalledTimes(1);
     expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
       'update_cloudtak_group',
@@ -3777,7 +3782,180 @@ describe('Team.create / Team.update CloudTAK enqueue (Requirement 2.1/2.6/6.1/6.
 
     await Team.update(5, { name: 'Renamed', description: 'New desc' });
 
-    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+    // Requirement 1.4 is about the CloudTAK integration specifically: with
+    // the flag off, NO CloudTAK operation is enqueued. (The tak_Teams
+    // team-channel group rename is a separate, non-CloudTAK concern and is
+    // covered by its own tests below; it is intentionally NOT gated by this
+    // flag.)
+    const cloudtakCalls = EventPublisher.publishOperation.mock.calls.filter(
+      ([op]) => op === 'update_cloudtak_group' || op === 'create_cloudtak_group'
+    );
+    expect(cloudtakCalls).toHaveLength(0);
+  });
+});
+
+/**
+ * Bugfix: a renamed team's Authentik team-channel group (`tak_Teams - ...`)
+ * kept its stale name because `Team.update` never recomputed or re-enqueued
+ * it. `Team.update` now, when `name` changes, recomputes the derived channel
+ * name for the renamed team (and its descendants), updates the local
+ * `channels` row when the name changed, and enqueues a
+ * `rename_team_channel_group` per changed channel so the Sync_Worker PATCHes
+ * the Authentik group name. This is NOT gated by the CloudTAK flag (the
+ * team-channel group is unrelated to CloudTAK).
+ *
+ * `pool.query` is mocked per SQL fragment: the subtree query returns one
+ * row per affected team joined to its primary channel, carrying the root
+ * Organisation's prefix/country so the derivation matches the create path.
+ */
+describe('Team.update renames the Authentik team-channel group on a name change (bugfix)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    EventPublisher.publishOperation.mockResolvedValue('op-id');
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  // Builds a pool.query mock: the UPDATE teams returns the renamed row, the
+  // subtree query returns `subtreeRows`, and the channels UPDATE is a no-op.
+  function mockPool({ updatedTeam, subtreeRows }) {
+    const channelUpdates = [];
+    pool.query.mockImplementation((sql, params) => {
+      if (typeof sql === 'string' && sql.startsWith('UPDATE teams SET name')) {
+        return Promise.resolve({ rows: [updatedTeam] });
+      }
+      if (typeof sql === 'string' && sql.includes('WITH RECURSIVE subtree')) {
+        return Promise.resolve({ rows: subtreeRows });
+      }
+      if (typeof sql === 'string' && sql.startsWith('UPDATE channels SET name')) {
+        channelUpdates.push(params);
+        return Promise.resolve({ rows: [] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    return channelUpdates;
+  }
+
+  it('enqueues rename_team_channel_group and updates the local channel when the derived name changed (root Organisation)', async () => {
+    const channelUpdates = mockPool({
+      updatedTeam: { id: 5, name: 'NZDF - HADR', parent_team_id: null },
+      subtreeRows: [
+        {
+          team_id: 5,
+          root_prefix: 'NZDF - HADR',
+          root_country_code: null,
+          team_name: 'NZDF - HADR',
+          parent_team_id: null,
+          channel_id: 42,
+          display_name: 'Teams - NZDF - Humanitarian assistance & disaster relief',
+          authentik_group_id: 'group-pk-1'
+        }
+      ]
+    });
+
+    await Team.update(5, { name: 'NZDF - HADR' });
+
+    const renameCalls = EventPublisher.publishOperation.mock.calls.filter(
+      ([op]) => op === 'rename_team_channel_group'
+    );
+    expect(renameCalls).toHaveLength(1);
+    expect(renameCalls[0][1]).toEqual({
+      channel_id: 42,
+      authentik_group_name: 'tak_Teams - NZDF - HADR',
+      description: 'Users from Teams - NZDF - HADR (Location sharing enabled)'
+    });
+    // Enqueued on the default pool (no transactional client).
+    expect(renameCalls[0][2]).toBeNull();
+
+    // Local channel row was updated to the new derived name.
+    expect(channelUpdates).toHaveLength(1);
+    const [dbName, displayName] = channelUpdates[0];
+    expect(dbName).toBe('teams---nzdf---hadr');
+    expect(displayName).toBe('Teams - NZDF - HADR');
+  });
+
+  it('composes the root country_code into the group name so CHL-CDEM and USA-CDEM never collide', async () => {
+    // A rename on the USA-CDEM Organisation derives a country-qualified
+    // group name distinct from the CHL-CDEM one.
+    mockPool({
+      updatedTeam: { id: 8, name: 'USA CDEM', parent_team_id: null },
+      subtreeRows: [
+        {
+          team_id: 8,
+          root_prefix: 'CDEM',
+          root_country_code: 'USA',
+          team_name: 'USA CDEM',
+          parent_team_id: null,
+          channel_id: 80,
+          display_name: 'Teams - CDEM',
+          authentik_group_id: 'group-pk-usa'
+        }
+      ]
+    });
+
+    await Team.update(8, { name: 'USA CDEM' });
+
+    const renameCall = EventPublisher.publishOperation.mock.calls.find(
+      ([op]) => op === 'rename_team_channel_group'
+    );
+    expect(renameCall).toBeTruthy();
+    expect(renameCall[1].authentik_group_name).toBe('tak_Teams - USA-CDEM');
+  });
+
+  it('does NOT enqueue a rename for a channel whose derived name is unchanged (e.g. a descendant of the renamed team)', async () => {
+    mockPool({
+      updatedTeam: { id: 5, name: 'NZDF - HADR', parent_team_id: null },
+      subtreeRows: [
+        // The renamed root: name changed.
+        {
+          team_id: 5,
+          root_prefix: 'NZDF',
+          root_country_code: null,
+          team_name: 'NZDF - HADR',
+          parent_team_id: null,
+          channel_id: 42,
+          display_name: 'Teams - NZDF',
+          authentik_group_id: 'group-pk-1'
+        },
+        // A descendant whose group name embeds the (unchanged) root prefix
+        // and its own (unchanged) name -> derived name matches stored name.
+        {
+          team_id: 6,
+          root_prefix: 'NZDF',
+          root_country_code: null,
+          team_name: 'Southland',
+          parent_team_id: 5,
+          channel_id: 43,
+          display_name: 'Teams - NZDF - Southland',
+          authentik_group_id: 'group-pk-2'
+        }
+      ]
+    });
+
+    await Team.update(5, { name: 'NZDF - HADR' });
+
+    const renameCalls = EventPublisher.publishOperation.mock.calls.filter(
+      ([op]) => op === 'rename_team_channel_group'
+    );
+    // Root prefix is 'NZDF' (immutable), so even the root channel's derived
+    // name 'Teams - NZDF' is unchanged -> zero renames.
+    expect(renameCalls).toHaveLength(0);
+  });
+
+  it('does NOT enqueue any rename when the update did not touch name (description-only)', async () => {
+    mockPool({
+      updatedTeam: { id: 5, name: 'FENZ', description: 'x', parent_team_id: null },
+      subtreeRows: []
+    });
+
+    await Team.update(5, { description: 'x' });
+
+    const renameCalls = EventPublisher.publishOperation.mock.calls.filter(
+      ([op]) => op === 'rename_team_channel_group'
+    );
+    expect(renameCalls).toHaveLength(0);
   });
 });
 

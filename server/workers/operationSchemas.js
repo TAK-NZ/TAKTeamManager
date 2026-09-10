@@ -327,6 +327,30 @@ module.exports = {
     }
   },
 
+  // Bugfix (renamed team's Authentik group was never renamed): enqueued by
+  // `Team.update` when a rename changes a team's derived Team_Channel group
+  // name. Before this, `Team.update` only ever enqueued `update_cloudtak_group`
+  // (the numeric-id-keyed CloudTAK group, whose name never contains the team
+  // name), so the `tak_Teams - ...` group kept its stale name forever. The
+  // Sync_Worker handler `renameTeamChannelGroup` loads the channel row by
+  // `channel_id`, and PATCHes its Authentik group's `name` to
+  // `authentik_group_name` (ASCII-normalized upstream in the shared
+  // teamChannelGroupName helper). A rename cascades to descendants (a
+  // Sub_Team's group name embeds the root prefix and its own name), so
+  // `Team.update` enqueues one operation per affected channel. `channel_id`
+  // is the LIVE local channel id (like `reconcile_team_channel_group`) so the
+  // handler can look up the stored `authentik_group_id`. `description` is
+  // optional — it is refreshed in the same PATCH when supplied.
+  rename_team_channel_group: {
+    requiredFields: {
+      channel_id: 'number',
+      authentik_group_name: 'string'
+    },
+    optionalFields: {
+      description: 'string'
+    }
+  },
+
   // Bugfix (Channels tab has no edit action, and no way to add/edit a
   // custom channel's Authentik/LDAP description): enqueued by
   // Channel.updateCustomChannel after updating the local `channels` row.

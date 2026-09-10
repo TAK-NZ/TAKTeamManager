@@ -1221,6 +1221,10 @@ class SyncWorker {
         await this.reconcileTeamChannelGroup(payload);
         break;
 
+      case 'rename_team_channel_group':
+        await this.renameTeamChannelGroup(payload);
+        break;
+
       case 'update_channel_group':
         await this.updateChannelGroup(payload);
         break;
@@ -2537,6 +2541,99 @@ class SyncWorker {
     logger.info(
       { channelId: channel_id, groupId: group.pk },
       'Reconciled team channel Authentik group id'
+    );
+  }
+
+  /**
+   * Bugfix (a renamed team's Authentik group kept its stale name): PATCHes
+   * the Team_Channel's Authentik group `name` (and `description`, when
+   * supplied) after `Team.update` recomputed the derived group name for a
+   * rename. Enqueued by `Team.update`, one operation per affected channel
+   * (a rename cascades to descendants because a Sub_Team's group name embeds
+   * the root prefix and its own name).
+   *
+   * Idempotent, mirroring `reconcileTeamChannelGroup`'s shape:
+   *   1. Load the channel row. If it is gone (team deleted between enqueue
+   *      and processing), treat as an already-satisfied no-op.
+   *   2. If it has NO `authentik_group_id` yet (group never reconciled — the
+   *      create path deferred or failed), there is nothing to rename; the
+   *      pending `reconcile_team_channel_group` will create the group under
+   *      the CURRENT name (`Team.update` writes the new `channels.display_name`
+   *      before enqueueing), so this is a satisfied no-op.
+   *   3. PATCH `/core/groups/<pk>/` with the new `name`. A 404 means the
+   *      group is already absent (nothing to rename) — a satisfied no-op,
+   *      matching `removeTeamChannelGroup`'s 404 handling. Any other non-2xx
+   *      classifies via `classifyFailure`/`AuthentikApiError` (5xx retryable,
+   *      4xx permanent) so the operation is retried or permanently failed by
+   *      the normal path.
+   *
+   * @param {{channel_id: number, authentik_group_name: string, description?: string}} payload
+   */
+  async renameTeamChannelGroup(payload) {
+    const { channel_id, authentik_group_name, description } = payload;
+
+    const channelResult = await this.pool.query(
+      'SELECT id, authentik_group_id FROM channels WHERE id = $1',
+      [channel_id]
+    );
+    const channel = channelResult.rows[0];
+    if (!channel) {
+      logger.info(
+        { channelId: channel_id },
+        'Channel no longer exists; rename_team_channel_group is a no-op'
+      );
+      return;
+    }
+
+    if (channel.authentik_group_id == null) {
+      // The group has not been reconciled yet; a pending
+      // reconcile_team_channel_group will create it under the current name.
+      logger.info(
+        { channelId: channel_id },
+        'Team channel has no Authentik group id yet; rename is a no-op (reconcile will create it under the new name)'
+      );
+      return;
+    }
+
+    // Only `name` (and `description`, when supplied) change on a rename —
+    // never membership. The name is already ASCII-normalized upstream by the
+    // shared teamChannelGroupName helper.
+    const requestBody = { name: authentik_group_name };
+    if (description != null) {
+      requestBody.attributes = { description };
+    }
+
+    const response = await fetchWithTimeout(
+      `${process.env.AUTHENTIK_URL}/api/v3/core/groups/${channel.authentik_group_id}/`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(requestBody)
+      }
+    );
+
+    if (response.status === 404) {
+      logger.info(
+        { channelId: channel_id, groupId: channel.authentik_group_id },
+        'Team channel Authentik group already absent; rename is a no-op'
+      );
+      return;
+    }
+
+    if (!response.ok) {
+      const classification = classifyFailure(response.status);
+      throw new AuthentikApiError(
+        `Failed to rename team channel Authentik group ${channel.authentik_group_id} to "${authentik_group_name}": ${response.status} ${response.statusText}`,
+        classification
+      );
+    }
+
+    logger.info(
+      { channelId: channel_id, groupId: channel.authentik_group_id, authentikGroupName: authentik_group_name },
+      'Renamed team channel Authentik group'
     );
   }
 
