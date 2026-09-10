@@ -10,8 +10,19 @@
 # Adapted from the sibling TAK-NZ infra repos, with two differences specific to
 # this project:
 #   - The CDK app lives in cdk/, not the repo root, so synth runs from there.
-#   - The stack takes only `--context envType`; it has no stackName/adminUserEmail
-#     context inputs (the deployed stackName comes from cdk.json's env block).
+#   - The stack has no adminUserEmail context input.
+#
+# The synth MUST use the same stackName the deploy will use, or it produces a
+# template for the wrong stack (with the wrong TAK-<name>-BaseInfra imports) and
+# the change set is meaningless. The stackName COMPONENT is derived from the
+# passed CloudFormation stack name (TAK-<component>-TAKTeamManager -> <component>)
+# and forwarded as --context stackName, so this works for BOTH callers:
+#   - demo-deploy passes TAK-<DEMO_STACK_NAME>-TAKTeamManager (prod profile,
+#     demo stack name), and
+#   - production-deploy passes TAK-<PROD_STACK_NAME>-TAKTeamManager.
+# The profile is always envType=prod: change-set validation checks the
+# production CONFIGURATION against the live stack, which is exactly what the
+# demo flow's prod-profile deploy and the production deploy both apply.
 #
 # Usage: scripts/github/validate-changeset.sh <cloudformation-stack-name>
 #   e.g. scripts/github/validate-changeset.sh TAK-Prod-TAKTeamManager
@@ -21,7 +32,15 @@ set -euo pipefail
 STACK_NAME=${1:?Usage: validate-changeset.sh <cloudformation-stack-name>}
 CHANGE_SET_NAME="breaking-change-check-$(date +%s)"
 
-echo "🔍 Creating CloudFormation change set for $STACK_NAME..."
+# Derive the stackName component from the CFN stack name: strip the leading
+# "TAK-" and the trailing "-TAKTeamManager". If the name does not match that
+# shape, fall back to the whole argument (so an unusual name still synths
+# *something* rather than an empty context value).
+STACK_NAME_COMPONENT="$STACK_NAME"
+STACK_NAME_COMPONENT="${STACK_NAME_COMPONENT#TAK-}"
+STACK_NAME_COMPONENT="${STACK_NAME_COMPONENT%-TAKTeamManager}"
+
+echo "🔍 Creating CloudFormation change set for $STACK_NAME (stackName=$STACK_NAME_COMPONENT)..."
 
 # Nothing to compare against on a first-ever deploy.
 if ! aws cloudformation describe-stacks --stack-name "$STACK_NAME" >/dev/null 2>&1; then
@@ -29,14 +48,15 @@ if ! aws cloudformation describe-stacks --stack-name "$STACK_NAME" >/dev/null 2>
   exit 0
 fi
 
-# Generate the CDK template with the SAME context the production deploy uses.
-# Synth from cdk/ (where package.json/cdk.json live); write the template to the
-# repo root so the path below is stable regardless of cwd.
+# Generate the CDK template with the SAME context the deploy uses: the prod
+# profile under the target stack's own name. Synth from cdk/ (where
+# package.json/cdk.json live); write the template to the repo root so the path
+# below is stable regardless of cwd.
 TEMPLATE_PATH="$(pwd)/template.json"
 (
   cd cdk
   npm run --silent build
-  npx cdk synth --context envType=prod
+  npx cdk synth --context envType=prod --context stackName="$STACK_NAME_COMPONENT"
 ) > "$TEMPLATE_PATH"
 
 aws cloudformation create-change-set \

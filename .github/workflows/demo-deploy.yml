@@ -7,9 +7,14 @@ name: Demo Testing Pipeline
 # profile so it is always left in a consistent, cheaper state.
 #
 # CDK runs from the cdk/ subdirectory (this repo's CDK app is not at the repo
-# root). The stack takes only --context envType; the deployed CloudFormation
-# stack name is TAK-<stackName>-TAKTeamManager, where <stackName> is the
-# DEMO_STACK_NAME repo variable (e.g. Dev).
+# root). Every CDK command here applies the PROFILE via --context envType while
+# OVERRIDING --context stackName=${{ vars.DEMO_STACK_NAME }}, so the prod
+# profile deploys under the DEMO stack name (TAK-<DEMO_STACK_NAME>-TAKTeamManager)
+# and imports the DEMO account's TAK-<DEMO_STACK_NAME>-BaseInfra exports -- not
+# the baked-in "Prod" stackName from cdk.json, which would look for a
+# TAK-Prod-BaseInfra that does not exist in the demo account. The revert uses
+# the same stackName override with the dev-test profile, so it targets the very
+# same stack it just deployed and only swaps the profile.
 
 on:
   push:
@@ -55,9 +60,9 @@ jobs:
           aws-region: ${{ secrets.DEMO_AWS_REGION }}
           role-session-name: GitHubActions-Demo
 
-      - name: Validate CDK Synthesis (Prod Profile)
+      - name: Validate CDK Synthesis (Prod Profile, Demo Stack Name)
         working-directory: cdk
-        run: npm run synth:prod
+        run: npm run cdk synth -- --context envType=prod --context stackName=${{ vars.DEMO_STACK_NAME }}
 
       - name: Validate Change Set
         env:
@@ -108,7 +113,7 @@ jobs:
 
       - name: Deploy Demo with Prod Profile
         working-directory: cdk
-        run: npm run cdk deploy -- --context envType=prod --context usePreBuiltImages=true --context imageTag=${{ needs.build-image.outputs.image-tag }} --context useS3ConfigFile=true ${{ steps.db-config.outputs.db-context }} --require-approval never
+        run: npm run cdk deploy -- --context envType=prod --context stackName=${{ vars.DEMO_STACK_NAME }} --context usePreBuiltImages=true --context imageTag=${{ needs.build-image.outputs.image-tag }} --context useS3ConfigFile=true ${{ steps.db-config.outputs.db-context }} --require-approval never
 
       - name: Wait for Testing Period
         run: sleep ${{ vars.DEMO_TEST_DURATION || '300' }}
@@ -136,10 +141,10 @@ jobs:
           aws-region: ${{ secrets.DEMO_AWS_REGION }}
           role-session-name: GitHubActions-Demo
 
-      - name: Validate CDK Synthesis (Dev-Test Profile)
+      - name: Validate CDK Synthesis (Dev-Test Profile, Demo Stack Name)
         working-directory: cdk
-        run: npm run synth:dev
+        run: npm run cdk synth -- --context envType=dev-test --context stackName=${{ vars.DEMO_STACK_NAME }}
 
       - name: Revert Demo to Dev-Test Profile
         working-directory: cdk
-        run: npm run cdk deploy -- --context envType=dev-test --context usePreBuiltImages=true --context imageTag=${{ needs.deploy-and-test.outputs.image-tag }} --context useS3ConfigFile=true --require-approval never
+        run: npm run cdk deploy -- --context envType=dev-test --context stackName=${{ vars.DEMO_STACK_NAME }} --context usePreBuiltImages=true --context imageTag=${{ needs.deploy-and-test.outputs.image-tag }} --context useS3ConfigFile=true --require-approval never
