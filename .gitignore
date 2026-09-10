@@ -55,3 +55,7 @@ Thumbs.db
 # upload endpoints, not source-controlled.
 server/uploads/
 server/certs/
+
+# Throwaway CloudFormation template written by scripts/github/validate-changeset.sh
+# (synth output for change-set validation); never source-controlled.
+/template.json

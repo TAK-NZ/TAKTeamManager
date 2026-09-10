@@ -71,20 +71,82 @@ TEMPLATE_PATH="$(pwd)/template.json"
   npm run --silent cdk synth -- --context envType=prod --context stackName="$STACK_NAME_COMPONENT"
 ) > "$TEMPLATE_PATH"
 
+# create-change-set accepts an INLINE --template-body only up to 51,200 bytes;
+# a larger template MUST be uploaded to S3 and referenced with --template-url.
+# Ours crossed that limit once device management + offline maps became defaults
+# (extra resources/imports), so branch on the actual size rather than assuming
+# inline always works (the sibling repos' templates happen to stay under it).
+TEMPLATE_BYTES=$(wc -c < "$TEMPLATE_PATH")
+INLINE_LIMIT=51200
+S3_UPLOADED=""
+
+if [ "$TEMPLATE_BYTES" -le "$INLINE_LIMIT" ]; then
+  echo "Template is ${TEMPLATE_BYTES} bytes (<= ${INLINE_LIMIT}); passing inline."
+  TEMPLATE_ARG=(--template-body "file://$TEMPLATE_PATH")
+else
+  echo "Template is ${TEMPLATE_BYTES} bytes (> ${INLINE_LIMIT}); uploading to S3 and using --template-url."
+  # Reuse the BaseInfra env-config bucket (the deploy role already reads/writes
+  # it — it holds the Part-2 config file). Resolved from the same per-stack
+  # export the stack imports, so it tracks the target account/region.
+  CONFIG_BUCKET=$(aws cloudformation describe-stacks \
+    --stack-name "TAK-${STACK_NAME_COMPONENT}-BaseInfra" \
+    --query 'Stacks[0].Outputs[?OutputKey==`EnvConfigBucketOutput` || OutputKey==`EnvConfigBucket`].OutputValue' \
+    --output text 2>/dev/null)
+  if [ -z "$CONFIG_BUCKET" ] || [ "$CONFIG_BUCKET" = "None" ]; then
+    # Fall back to the CloudFormation EXPORT name if the output key differs.
+    CONFIG_BUCKET=$(aws cloudformation list-exports \
+      --query "Exports[?Name=='TAK-${STACK_NAME_COMPONENT}-BaseInfra-EnvConfigBucket'].Value" \
+      --output text 2>/dev/null)
+  fi
+  if [ -z "$CONFIG_BUCKET" ] || [ "$CONFIG_BUCKET" = "None" ]; then
+    echo "ERROR: could not resolve the BaseInfra env-config bucket for changeset template upload"
+    exit 1
+  fi
+  S3_KEY="changeset-templates/${STACK_NAME}-${CHANGE_SET_NAME}.json"
+  S3_UPLOADED="s3://${CONFIG_BUCKET}/${S3_KEY}"
+  aws s3 cp "$TEMPLATE_PATH" "$S3_UPLOADED" >/dev/null
+  # A presigned URL lets create-change-set fetch the object without granting
+  # CloudFormation its own bucket read; valid well beyond the short-lived
+  # change-set create.
+  TEMPLATE_URL=$(aws s3 presign "$S3_UPLOADED" --expires-in 900)
+  TEMPLATE_ARG=(--template-url "$TEMPLATE_URL")
+fi
+
+# Remove the uploaded template on exit (best-effort), whatever the outcome.
+cleanup_s3() { [ -n "$S3_UPLOADED" ] && aws s3 rm "$S3_UPLOADED" >/dev/null 2>&1 || true; }
+trap cleanup_s3 EXIT
+
 aws cloudformation create-change-set \
   --stack-name "$STACK_NAME" \
   --change-set-name "$CHANGE_SET_NAME" \
-  --template-body "file://$TEMPLATE_PATH" \
+  "${TEMPLATE_ARG[@]}" \
   --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM
 
 aws cloudformation wait change-set-create-complete \
   --stack-name "$STACK_NAME" \
   --change-set-name "$CHANGE_SET_NAME"
 
+# Detect DANGEROUS resource replacements, EXCLUDING AWS::ECS::TaskDefinition.
+#
+# An ECS task definition is IMMUTABLE by design: every property that matters
+# (ContainerDefinitions, Cpu, Memory) has RequiresRecreation: Always, so ANY
+# change -- including the image tag, which is a fresh content hash on every
+# build -- makes CloudFormation "replace" it with a new revision and roll the
+# service onto it. That is the normal, safe ECS deploy mechanism, NOT a
+# destructive replacement like an RDS instance or an S3 bucket. So a task-def
+# replacement shows up on essentially every deploy and is a false positive for
+# this guard; excluding it keeps the guard meaningful for the replacements that
+# actually cause downtime/data loss.
+#
+# This is a deliberate divergence from the sibling repos' changeset scripts
+# (auth-infra/tak-infra), which filter nothing -- they simply haven't exercised
+# the changeset path with a changed container, so they've not hit this. The
+# exclusion is scoped STRICTLY to AWS::ECS::TaskDefinition; every other resource
+# type still trips the guard on replacement.
 REPLACEMENTS=$(aws cloudformation describe-change-set \
   --stack-name "$STACK_NAME" \
   --change-set-name "$CHANGE_SET_NAME" \
-  --query 'Changes[?ResourceChange.Replacement==`True`].ResourceChange.LogicalResourceId' \
+  --query "Changes[?ResourceChange.Replacement=='True' && ResourceChange.ResourceType!='AWS::ECS::TaskDefinition'].ResourceChange.LogicalResourceId" \
   --output text)
 
 # Best-effort cleanup; never fail the run on cleanup alone.
