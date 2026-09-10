@@ -81,4 +81,48 @@ function getRevokeMaxCerts(env = process.env) {
   return Math.max(1, parseInt(env.DEVICE_MGMT_REVOKE_MAX_CERTS, 10) || DEFAULT_REVOKE_MAX_CERTS);
 }
 
-module.exports = { isDeviceMgmtEnabled, isDeviceMgmtRevokeEnabled, getRevokeMaxCerts };
+/**
+ * Default Callsign_Mismatch_Stale_Days: how recently a device must have been
+ * seen (`tak_devices.last_seen_at`) for an open, unresolved callsign-mismatch
+ * episode to still count as an actionable task on the in-app `/tasks` surface.
+ *
+ * The `/tasks` callsign-mismatch flag is a STANDING to-do list, so it keeps
+ * flagging a mismatch after the device disconnects (the episode latch
+ * `callsign_violation_first_seen_at` remains set until the CallsignPoller
+ * observes a correction). This window is the counterweight: a device untouched
+ * for longer than it is weak evidence that the mismatch is still live -- the
+ * user may have corrected it and simply not reconnected -- so it ages out of
+ * the task list rather than nagging indefinitely. 7 days lines up with a normal
+ * weekly usage cycle: a device used at all in the last week is almost certainly
+ * still configured the same way.
+ */
+const DEFAULT_CALLSIGN_MISMATCH_STALE_DAYS = 7;
+
+/**
+ * Callsign_Mismatch_Stale_Days (server-side only).
+ *
+ * Reads `CALLSIGN_MISMATCH_STALE_DAYS` with a documented default of 7,
+ * following the same `parseInt(...) > 0 ? parsed : DEFAULT` convention as
+ * `DEVICE_MGMT_EXPIRY_WARNING_DAYS` (see `server/models/SiteConfig.js`): an
+ * unset, empty, non-numeric, zero, or negative value falls back to the
+ * positive default rather than a window of 0 (which would suppress every task)
+ * or a negative one.
+ *
+ * UNLIKE `DEVICE_MGMT_EXPIRY_WARNING_DAYS`, this value FILTERS a query rather
+ * than only affecting how a date is drawn, so it is SERVER-ONLY and must never
+ * be surfaced through the Public_Config_Endpoint (`GET /api/config/public`).
+ *
+ * @param {NodeJS.ProcessEnv} [env=process.env] Environment source; injectable for testing.
+ * @returns {number} A positive integer day count; 7 when unset or unparseable.
+ */
+function getCallsignMismatchStaleDays(env = process.env) {
+  const parsed = parseInt(env.CALLSIGN_MISMATCH_STALE_DAYS, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_CALLSIGN_MISMATCH_STALE_DAYS;
+}
+
+module.exports = {
+  isDeviceMgmtEnabled,
+  isDeviceMgmtRevokeEnabled,
+  getRevokeMaxCerts,
+  getCallsignMismatchStaleDays
+};
