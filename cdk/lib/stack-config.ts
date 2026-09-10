@@ -8,7 +8,14 @@
 export interface ContextEnvironmentConfig {
   /** Env label used in stack/export names, e.g. "Dev" / "Prod". */
   stackName: string;
-  /** Route53 hosted-zone name imported from base-infra, e.g. "dev.tak.nz". */
+  /**
+   * Documented default zone for this profile, e.g. "dev.tak.nz". NOTE: the
+   * stack does NOT build URLs from this — the hosted-zone name is imported
+   * from base-infra (`HOSTED_ZONE_NAME`) so it always matches the deployed
+   * account's zone. Kept for documentation and as an overridable context key;
+   * the imported value is the source of truth for the ALB record, cert, and
+   * the app's public URL.
+   */
   r53ZoneName: string;
   /** Sub-domain label for this app's ALB record, e.g. "team" -> team.<zone>. */
   hostname: string;

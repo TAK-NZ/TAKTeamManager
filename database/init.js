@@ -41,9 +41,65 @@ async function runMigrations() {
   });
 }
 
+// Waits for the database to become reachable before migrations run.
+//
+// WHY: on a fresh deploy the app's ECS task starts as soon as its
+// dependencies report complete, but the Aurora cluster endpoint's DNS can take
+// a short while longer to become resolvable. A single immediate connection
+// then dies with `getaddrinfo ENOTFOUND ...rds.amazonaws.com`, migrations
+// abort, the essential container exits non-zero, and the ECS deployment
+// circuit breaker rolls the whole stack back. The same transient window also
+// occurs on an Aurora failover/restart. Rather than fail on the first miss,
+// probe with bounded exponential backoff until the DB answers a trivial query
+// (or the budget is exhausted, at which point this still throws so a genuinely
+// unreachable DB is a real, visible failure -- not silently skipped).
+//
+// The probe reuses the app's own pool/connection config, so it validates the
+// EXACT host/port/SSL settings migrations and the app will use. Errors are
+// swallowed per-attempt (that is the point -- ENOTFOUND/ECONNREFUSED are
+// expected while the endpoint warms up); only exhausting every attempt is
+// fatal.
+async function waitForDatabase() {
+  // ~2.5 min total budget: enough to cover observed fresh-Aurora DNS/endpoint
+  // warm-up, comfortably inside the ECS service healthCheckGracePeriod (5 min).
+  const maxAttempts = 30;
+  const baseDelayMs = 1000;
+  const maxDelayMs = 10000;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await pool.query('SELECT 1');
+      if (attempt > 1) {
+        process.stdout.write(`Database reachable after ${attempt} attempt(s)\n`);
+      }
+      return;
+    } catch (error) {
+      const code = (error && error.code) || 'unknown';
+      if (attempt === maxAttempts) {
+        // Out of budget -- rethrow so the caller fails loudly (non-zero exit).
+        throw new Error(
+          `Database not reachable after ${maxAttempts} attempts (last error ${code}): ${
+            error && error.message ? error.message : error
+          }`,
+          { cause: error }
+        );
+      }
+      const delayMs = Math.min(maxDelayMs, baseDelayMs * 2 ** (attempt - 1));
+      process.stdout.write(
+        `Database not reachable yet (attempt ${attempt}/${maxAttempts}, ${code}); retrying in ${delayMs}ms...\n`
+      );
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
 async function initializeDatabase() {
   try {
     process.stdout.write('Initializing database...\n');
+
+    // Ride out the fresh-deploy / failover window where the DB endpoint is not
+    // yet resolvable, so migrations don't die on a transient ENOTFOUND.
+    await waitForDatabase();
 
     await runMigrations();
 
