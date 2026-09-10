@@ -1,0 +1,145 @@
+name: Demo Testing Pipeline
+
+# On every push to main: run the CDK tests, build the app image, validate the
+# PRODUCTION profile synthesises and introduces no resource replacements, then
+# deploy it to the demo environment USING THE PROD PROFILE (so demo exercises
+# the production configuration), and finally REVERT demo back to its dev-test
+# profile so it is always left in a consistent, cheaper state.
+#
+# CDK runs from the cdk/ subdirectory (this repo's CDK app is not at the repo
+# root). The stack takes only --context envType; the deployed CloudFormation
+# stack name is TAK-<stackName>-TAKTeamManager, where <stackName> is the
+# DEMO_STACK_NAME repo variable (e.g. Dev).
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - '.gitignore'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: demo-deploy
+  cancel-in-progress: false
+
+jobs:
+  # CDK infrastructure tests (separate from the app-level ci.yml).
+  test:
+    uses: ./.github/workflows/cdk-test.yml
+
+  # Build and push the application image for the demo environment.
+  build-image:
+    uses: ./.github/workflows/demo-build.yml
+    secrets: inherit
+
+  # Validate the prod profile synthesises and introduces no replacements.
+  # Runs in parallel with build-image to save time.
+  validate-prod:
+    runs-on: ubuntu-latest
+    environment: demo
+    needs: [test]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup CDK Environment
+        uses: ./.github/actions/setup-cdk
+        with:
+          aws-role-arn: ${{ secrets.DEMO_AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.DEMO_AWS_REGION }}
+          role-session-name: GitHubActions-Demo
+
+      - name: Validate CDK Synthesis (Prod Profile)
+        working-directory: cdk
+        run: npm run synth:prod
+
+      - name: Validate Change Set
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          if [[ "$COMMIT_MSG" == *"[force-deploy]"* ]]; then
+            echo "🚨 Force deploy detected - skipping change set validation"
+          else
+            ./scripts/github/validate-changeset.sh TAK-${{ vars.DEMO_STACK_NAME }}-TAKTeamManager
+          fi
+
+  # Deploy the demo environment with the production profile for testing, using
+  # the freshly built image.
+  deploy-and-test:
+    runs-on: ubuntu-latest
+    environment: demo
+    needs: [validate-prod, build-image]
+    outputs:
+      image-tag: ${{ needs.build-image.outputs.image-tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup CDK Environment
+        uses: ./.github/actions/setup-cdk
+        with:
+          aws-role-arn: ${{ secrets.DEMO_AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.DEMO_AWS_REGION }}
+          role-session-name: GitHubActions-Demo
+
+      - name: Configure Database Context
+        id: db-config
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          # By default demo uses the cheaper dev-test database sizing even when
+          # deploying the prod profile, for faster/cheaper runs. Put
+          # [use-prod-db] in the commit message to exercise the real prod DB
+          # sizing instead. These flat --context keys override the cdk.json
+          # env block (applyContextOverrides in bin/cdk.ts).
+          if [[ "$COMMIT_MSG" != *"[use-prod-db]"* ]]; then
+            echo "🔄 Using dev-test database settings for faster deployment"
+            echo "db-context=--context instanceClass=db.serverless --context instanceCount=1 --context enablePerformanceInsights=false --context monitoringInterval=0 --context backupRetentionDays=7 --context deleteProtection=false" >> $GITHUB_OUTPUT
+          else
+            echo "🚀 Using production database settings"
+            echo "db-context=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy Demo with Prod Profile
+        working-directory: cdk
+        run: npm run cdk deploy -- --context envType=prod --context usePreBuiltImages=true --context imageTag=${{ needs.build-image.outputs.image-tag }} --context useS3ConfigFile=true ${{ steps.db-config.outputs.db-context }} --require-approval never
+
+      - name: Wait for Testing Period
+        run: sleep ${{ vars.DEMO_TEST_DURATION || '300' }}
+
+      - name: Run Automated Tests
+        run: |
+          echo "Placeholder for automated tests"
+          # TODO: health checks / integration tests against the deployed demo URL.
+
+  # Always revert demo back to its dev-test profile, regardless of test result,
+  # so the environment is left consistent and cheap.
+  revert-to-dev-test:
+    runs-on: ubuntu-latest
+    environment: demo
+    needs: [deploy-and-test]
+    if: always()
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup CDK Environment
+        uses: ./.github/actions/setup-cdk
+        with:
+          aws-role-arn: ${{ secrets.DEMO_AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.DEMO_AWS_REGION }}
+          role-session-name: GitHubActions-Demo
+
+      - name: Validate CDK Synthesis (Dev-Test Profile)
+        working-directory: cdk
+        run: npm run synth:dev
+
+      - name: Revert Demo to Dev-Test Profile
+        working-directory: cdk
+        run: npm run cdk deploy -- --context envType=dev-test --context usePreBuiltImages=true --context imageTag=${{ needs.deploy-and-test.outputs.image-tag }} --context useS3ConfigFile=true --require-approval never

@@ -6,6 +6,8 @@ cdk.out
 !jest.config.js
 # keep the OIDC-setup Lambda's own JS (it is source, not a build artifact)
 !src/oidc-setup/*.js
+# keep the secret-generator Lambda's own JS (also source, not a build artifact)
+!src/secret-generator/*.js
 
 # Local CDK context cache (account-specific lookups)
 cdk.context.json
