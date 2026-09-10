@@ -34,6 +34,15 @@ Dependency stack names are derived from the single shared `stackName` (e.g.
 - **tak-infra** *(only when `app.deviceManagementEnabled`)*: `TakServerUrl`
   (:8443), `TakCertEnrollment` (:8446), `TakAdminCertSecretArn`.
 
+> **Note:** both `deviceManagementEnabled` and `offlineMapsEnabled` now default
+> to `true` in `cdk.json` for BOTH the `dev-test` and `prod` profiles. So the
+> tak-infra exports above and base-infra's map-downloads bucket are effectively
+> REQUIRED for a normal deploy — the target account must have tak-infra deployed
+> and those exports present, or the deploy fails with a "No export named ..."
+> error. Set the flag to `false` (in `cdk.json` or via `--context
+> deviceManagementEnabled=false` / `--context offlineMapsEnabled=false`) to
+> deploy without those dependencies.
+
 ## Container configuration (two layers)
 
 Matching this app's `.env.example` deployment model:
