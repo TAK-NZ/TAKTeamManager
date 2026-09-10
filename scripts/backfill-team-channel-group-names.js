@@ -1,0 +1,255 @@
+'use strict';
+
+/**
+ * One-off backfill: reconciles existing primary Team_Channel Authentik
+ * groups (`tak_Teams - ...`) whose names are STALE or COLLIDED, after the fix
+ * that (1) composes an Organisation's `country_code` into the derived group
+ * name and (2) renames the group when a team is renamed.
+ *
+ * MUST RUN AFTER THE FIX IS DEPLOYED. This script recomputes each channel's
+ * correct group name via the SAME shared helper the fixed code uses
+ * (`server/utils/teamChannelGroupName.js`). Run against the OLD code it would
+ * reproduce the old, wrong (and colliding) names, so it is only meaningful
+ * once the fixed helper is present — which it is, in this same change.
+ *
+ * Two drift classes it repairs, per primary team channel whose freshly
+ * derived name differs from its stored `channels.display_name`:
+ *
+ *   1. RENAME — the channel's `authentik_group_id` is set and is NOT shared
+ *      with any other channel. The group simply carries a stale name (Bug 1:
+ *      a team was renamed and nothing renamed its group). Fix: update the
+ *      local `channels.name`/`display_name`/`description`, then enqueue a
+ *      `rename_team_channel_group` so the worker PATCHes the Authentik group
+ *      `name` — exactly what `Team.update` now does for a fresh rename.
+ *
+ *   2. COLLISION — the channel's `authentik_group_id` is SHARED by more than
+ *      one channel (Bug 2: two Organisations sharing a `callsign_prefix`
+ *      under different `country_code`s both derived `tak_Teams - CDEM` and
+ *      were pointed at ONE group). A rename cannot split one group into two.
+ *      Fix: update each colliding channel's local name, NULL its
+ *      `authentik_group_id`, and enqueue a `reconcile_team_channel_group` so
+ *      the worker create-or-reuses a group under each channel's now-DISTINCT
+ *      correct name and writes the new pk back. The old shared group is left
+ *      in place; once every collided channel has been repointed it becomes an
+ *      orphan that `scripts/cleanup-orphaned-team-groups.js` can remove.
+ *
+ * A channel with a NULL `authentik_group_id` (group never reconciled) whose
+ * name is stale is treated as a RECONCILE too: its local name is corrected
+ * and a `reconcile_team_channel_group` is enqueued to create the group under
+ * the correct name.
+ *
+ * Idempotency & safety:
+ *   - DRY-RUN BY DEFAULT: reports the per-channel plan (current name → new
+ *     name, and rename vs reconcile) and does nothing unless run with
+ *     `--apply`.
+ *   - Only PRIMARY team channels (`is_primary = true`, `team_id NOT NULL`) are
+ *     considered — a custom channel's name is independent of the team name.
+ *   - Enqueues via `EventPublisher.publishOperation` (correct priority /
+ *     correlation), the same path `Team.update`/`createTeamChannel` use. The
+ *     worker handlers are idempotent, so re-running only re-converges.
+ *   - Local `channels` rows are updated FIRST (inside `--apply`) so a
+ *     re-run sees the corrected name and enqueues nothing further for an
+ *     already-repaired channel.
+ *
+ * Usage:
+ *   node scripts/backfill-team-channel-group-names.js            # dry run
+ *   node scripts/backfill-team-channel-group-names.js --apply    # repair
+ */
+
+// Load .env exactly like server/index.js and the sibling scripts do.
+require('dotenv').config();
+
+const pool = require('../server/config/database');
+const EventPublisher = require('../server/services/EventPublisher');
+const { toAsciiIdentifier } = require('../server/utils/asciiNormalize');
+const { resolveChannelFolderSeparator } = require('../server/utils/channelFolderSeparator');
+const { deriveTeamChannelName } = require('../server/utils/teamChannelGroupName');
+
+function parseArgs(argv) {
+  const args = { apply: false };
+  for (const arg of argv.slice(2)) {
+    if (arg === '--apply') args.apply = true;
+  }
+  return args;
+}
+
+// Every PRIMARY team channel, joined to its team's own name/parent flag and
+// to its Organisation's callsign_prefix/country_code (resolved by walking to
+// the root of each team's ancestor chain). This is the exact set of
+// primitives the shared name helper needs, mirroring
+// `Team.renameTeamChannelGroups`' own query.
+async function loadPrimaryTeamChannels() {
+  const result = await pool.query(`
+    WITH RECURSIVE anc AS (
+      SELECT id AS start_id, id, callsign_prefix, country_code, parent_team_id
+      FROM teams
+      UNION ALL
+      SELECT a.start_id, p.id, p.callsign_prefix, p.country_code, p.parent_team_id
+      FROM teams p JOIN anc a ON p.id = a.parent_team_id
+    ),
+    roots AS (
+      SELECT start_id AS team_id, callsign_prefix AS root_prefix, country_code AS root_country_code
+      FROM anc
+      WHERE parent_team_id IS NULL
+    )
+    SELECT t.id AS team_id, t.name AS team_name, t.parent_team_id,
+           r.root_prefix, r.root_country_code,
+           c.id AS channel_id, c.display_name, c.authentik_group_id
+    FROM teams t
+    JOIN roots r ON r.team_id = t.id
+    JOIN channels c ON c.team_id = t.id AND c.is_primary = true
+    ORDER BY t.id
+  `);
+  return result.rows;
+}
+
+async function main() {
+  const args = parseArgs(process.argv);
+  const out = (line) => process.stdout.write(line + '\n');
+
+  out('Backfill: reconcile stale/collided team-channel Authentik group names');
+  out(args.apply ? 'MODE: APPLY (local names updated + ops enqueued)'
+                 : 'MODE: DRY RUN (no changes; pass --apply to repair)');
+  out('');
+
+  const separator = resolveChannelFolderSeparator();
+  const channels = await loadPrimaryTeamChannels();
+
+  // Count how many channels share each non-null Authentik group id, so a
+  // stale channel pointing at a SHARED group is repaired by reconcile (split
+  // into its own group), not by a rename (which would rename the one shared
+  // group both point at).
+  const groupIdRefCount = new Map();
+  for (const row of channels) {
+    if (row.authentik_group_id != null) {
+      const key = String(row.authentik_group_id);
+      groupIdRefCount.set(key, (groupIdRefCount.get(key) || 0) + 1);
+    }
+  }
+
+  const plan = [];
+  for (const row of channels) {
+    const { channelName, authentikGroupName } = deriveTeamChannelName({
+      rootPrefix: row.root_prefix,
+      rootCountryCode: row.root_country_code,
+      teamName: row.team_name,
+      isSubTeam: row.parent_team_id !== null,
+      separator,
+      toAsciiIdentifier
+    });
+
+    if (channelName === row.display_name) {
+      continue; // Already correct.
+    }
+
+    const shared =
+      row.authentik_group_id != null &&
+      (groupIdRefCount.get(String(row.authentik_group_id)) || 0) > 1;
+    // A shared group id (collision) OR a not-yet-reconciled channel (null id)
+    // must go through reconcile (create-or-reuse a distinct group and write
+    // the pk back); a uniquely-owned group id is a plain rename.
+    const action = shared || row.authentik_group_id == null ? 'reconcile' : 'rename';
+
+    plan.push({
+      channelId: row.channel_id,
+      teamId: row.team_id,
+      oldName: row.display_name,
+      newName: channelName,
+      authentikGroupName,
+      description: `Users from ${channelName} (Location sharing enabled)`,
+      channelDbName: channelName.toLowerCase().replace(/[^a-z0-9-]/g, '-'),
+      groupId: row.authentik_group_id,
+      action
+    });
+  }
+
+  out(`Primary team channels scanned: ${channels.length}`);
+  out(`Channels needing repair:       ${plan.length}`);
+  const renameCount = plan.filter((p) => p.action === 'rename').length;
+  const reconcileCount = plan.filter((p) => p.action === 'reconcile').length;
+  out(`  rename (unique group, stale name): ${renameCount}`);
+  out(`  reconcile (collision / no group):  ${reconcileCount}`);
+  out('');
+
+  if (plan.length === 0) {
+    out('Nothing to repair. All primary team-channel names are already correct.');
+    await pool.end();
+    process.exit(0);
+  }
+
+  for (const p of plan) {
+    out(`  [${p.action}] channel ${p.channelId} (team ${p.teamId})`);
+    out(`      ${JSON.stringify(p.oldName)} -> ${JSON.stringify(p.newName)}`);
+    out(`      group name: ${p.authentikGroupName}${p.groupId ? ` (current pk ${p.groupId})` : ' (no pk yet)'}`);
+  }
+  out('');
+
+  if (!args.apply) {
+    out('Dry run complete. Re-run with --apply to update local names and enqueue the ops above.');
+    await pool.end();
+    process.exit(0);
+  }
+
+  let enqueued = 0;
+  let failed = 0;
+  for (const p of plan) {
+    try {
+      if (p.action === 'reconcile') {
+        // Correct the local name AND null the (shared/absent) group id so the
+        // idempotent reconcile handler creates-or-reuses the correctly-named
+        // group and writes the fresh pk back (its write-back is guarded on
+        // `authentik_group_id IS NULL`).
+        await pool.query(
+          'UPDATE channels SET name = $1, display_name = $2, description = $3, authentik_group_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $4',
+          [p.channelDbName, p.newName, p.description, p.channelId]
+        );
+        const id = await EventPublisher.publishOperation(
+          'reconcile_team_channel_group',
+          { channel_id: p.channelId, authentik_group_name: p.authentikGroupName, description: p.description },
+          null
+        );
+        out(`  ✓ channel ${p.channelId}: local name updated, group id cleared, reconcile enqueued as op ${id}`);
+      } else {
+        // Unique group id, stale name: correct the local name and rename the
+        // one group in place.
+        await pool.query(
+          'UPDATE channels SET name = $1, display_name = $2, description = $3, updated_at = CURRENT_TIMESTAMP WHERE id = $4',
+          [p.channelDbName, p.newName, p.description, p.channelId]
+        );
+        const id = await EventPublisher.publishOperation(
+          'rename_team_channel_group',
+          { channel_id: p.channelId, authentik_group_name: p.authentikGroupName, description: p.description },
+          null
+        );
+        out(`  ✓ channel ${p.channelId}: local name updated, rename enqueued as op ${id}`);
+      }
+      enqueued++;
+    } catch (error) {
+      failed++;
+      process.stderr.write(
+        `  ✗ channel ${p.channelId} (team ${p.teamId}): ${error && error.message ? error.message : error}\n`
+      );
+    }
+  }
+
+  out('\nSummary:');
+  out(`  repaired (ops enqueued): ${enqueued}`);
+  out(`  failed:                  ${failed}`);
+  out('\nNote: for COLLISION repairs the old shared Authentik group is left in place.');
+  out('Once every collided channel has been repointed, run');
+  out('  node scripts/cleanup-orphaned-team-groups.js');
+  out('to remove any now-orphaned shared group(s).');
+
+  await pool.end();
+  process.exit(failed > 0 ? 1 : 0);
+}
+
+main().catch(async (error) => {
+  process.stderr.write(`Backfill error: ${error && error.stack ? error.stack : error}\n`);
+  try {
+    await pool.end();
+  } catch {
+    // ignore pool teardown errors during a failure exit
+  }
+  process.exit(1);
+});
