@@ -21,7 +21,8 @@ jest.mock('../server/config/database', () => ({
   end: jest.fn().mockResolvedValue(undefined)
 }));
 jest.mock('../server/services/EventPublisher', () => ({
-  publishOperation: jest.fn().mockResolvedValue('op-id')
+  publishOperation: jest.fn().mockResolvedValue('op-id'),
+  publishReconcileOwnedGroup: jest.fn().mockResolvedValue('reconcile-op-id')
 }));
 
 const pool = require('../server/config/database');
@@ -101,47 +102,56 @@ describe('backfill-team-channel-group-names collision-split', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     EventPublisher.publishOperation.mockResolvedValue('op-id');
+    EventPublisher.publishReconcileOwnedGroup.mockResolvedValue('reconcile-op-id');
     pool.end.mockResolvedValue(undefined);
     process.env.CHANNEL_FOLDER_SEPARATOR = ' - ';
   });
 
-  it('DRY RUN: reports one collision-split for the non-keeper and enqueues nothing', async () => {
+  it('DRY RUN: reports both collision members (split + keeper) and enqueues nothing', async () => {
     mockLoad(COLLIDED_ROWS);
 
     const { stdout } = await runScript([]);
 
-    // Channel 12 (USA-CDEM, higher id) is the split; channel 11 (keeper) and
-    // channel 16 (unique, correct) are left out of the plan.
+    // Both collided channels appear: 12 as a split, 11 as the keeper. The
+    // unique, correct FENZ channel (16) is left out entirely.
     expect(stdout).toContain('channel 12');
     expect(stdout).toContain('collision-split');
+    expect(stdout).toContain('channel 11');
+    expect(stdout).toContain('collision-keeper');
+    expect(stdout).toContain('membership reconcile');
     expect(stdout).not.toContain('channel 16');
     expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+    expect(EventPublisher.publishReconcileOwnedGroup).not.toHaveBeenCalled();
   });
 
-  it('APPLY: splits the non-keeper (NULLs its group id, enqueues reconcile) and leaves the keeper untouched', async () => {
+  it('APPLY: splits the non-keeper and enqueues a MEMBERSHIP reconcile for BOTH the split and the keeper', async () => {
     mockLoad(COLLIDED_ROWS);
 
     await runScript(['--apply']);
 
     // The non-keeper (channel 12) has its group id NULLed locally.
-    const updateCall = pool.query.mock.calls.find(
+    const nullUpdate = pool.query.mock.calls.find(
       ([sql, params]) => typeof sql === 'string' && sql.includes('UPDATE channels SET') && sql.includes('authentik_group_id = NULL') && params && params[params.length - 1] === 12
     );
-    expect(updateCall).toBeDefined();
+    expect(nullUpdate).toBeDefined();
 
-    // Exactly one reconcile enqueued, for channel 12, under the DISTINCT
-    // USA-CDEM group name.
-    const reconcileCalls = EventPublisher.publishOperation.mock.calls.filter(([op]) => op === 'reconcile_team_channel_group');
-    expect(reconcileCalls).toHaveLength(1);
-    expect(reconcileCalls[0][1]).toMatchObject({
-      channel_id: 12,
-      authentik_group_name: 'tak_Teams - USA-CDEM'
-    });
+    // Channel 12 gets a group-identity reconcile under the DISTINCT USA-CDEM name.
+    const identityReconciles = EventPublisher.publishOperation.mock.calls.filter(([op]) => op === 'reconcile_team_channel_group');
+    expect(identityReconciles).toHaveLength(1);
+    expect(identityReconciles[0][1]).toMatchObject({ channel_id: 12, authentik_group_name: 'tak_Teams - USA-CDEM' });
 
-    // The keeper (channel 11) is NOT touched: no rename/reconcile for it, and
-    // no UPDATE nulling its group id.
-    const anyForKeeper = EventPublisher.publishOperation.mock.calls.some(([, payload]) => payload && payload.channel_id === 11);
-    expect(anyForKeeper).toBe(false);
+    // Channel 11 (keeper) gets a rename (idempotent on its already-correct name).
+    const renames = EventPublisher.publishOperation.mock.calls.filter(([op]) => op === 'rename_team_channel_group');
+    expect(renames).toHaveLength(1);
+    expect(renames[0][1]).toMatchObject({ channel_id: 11, authentik_group_name: 'tak_Teams - CHL-CDEM' });
+
+    // CRITICAL: a MEMBERSHIP reconcile_owned_group is enqueued for BOTH
+    // collided channels (11 the keeper AND 12 the split), so the keeper's
+    // wrong members and the split's empty group both get corrected.
+    const memberReconciles = EventPublisher.publishReconcileOwnedGroup.mock.calls.map(([payload]) => payload);
+    const memberChannelIds = memberReconciles.map((p) => p.channel_id).sort((a, b) => a - b);
+    expect(memberChannelIds).toEqual([11, 12]);
+    memberReconciles.forEach((p) => expect(p.group_kind).toBe('team_channel'));
   });
 
   it('is a clean no-op when there are no collisions and no name drift', async () => {
@@ -151,5 +161,6 @@ describe('backfill-team-channel-group-names collision-split', () => {
 
     expect(stdout).toContain('Nothing to repair');
     expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+    expect(EventPublisher.publishReconcileOwnedGroup).not.toHaveBeenCalled();
   });
 });
