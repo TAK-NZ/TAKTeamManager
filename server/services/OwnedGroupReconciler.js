@@ -56,6 +56,7 @@ const {
   isBulkGroupReconcileEnabled,
   isBulkGroupReconcileDryRun
 } = require('../config/bulkGroupReconcile');
+const { resolvePinnedPks } = require('../config/pinnedGroupMembers');
 
 const AUTHENTIK_URL = () => process.env.AUTHENTIK_URL;
 const AUTHENTIK_TOKEN = () => process.env.AUTHENTIK_API_TOKEN;
@@ -112,13 +113,24 @@ async function desiredBchReadMembers(bchChannelId, client = pool) {
   const members = usersResult.rows.map((r) => String(r.authentik_user_id));
 
   const saResult = await client.query(
-    `SELECT service_account_id FROM bch_channels WHERE id = $1`,
+    `SELECT category, service_account_id FROM bch_channels WHERE id = $1`,
     [bchChannelId]
   );
   const serviceAccountId = saResult.rows[0]?.service_account_id;
   if (serviceAccountId !== null && serviceAccountId !== undefined) {
     members.push(String(serviceAccountId));
   }
+
+  // Pinned members (best-effort, additive): PINNED_MEMBERS_BCH targets the
+  // READ group of BCH-CATEGORY channels only (not UTL/XtraTools). A pinned
+  // user who is already a member (every user is a BCH-read target) is a
+  // dedup no-op; the pin matters for a principal NOT in the local `users`
+  // table (e.g. an admin resolved live from Authentik).
+  if (saResult.rows[0]?.category === 'BCH') {
+    const pinned = await resolvePinnedPks('bch');
+    members.push(...pinned);
+  }
+
   return dedupe(members);
 }
 
@@ -133,14 +145,25 @@ async function desiredBchReadMembers(bchChannelId, client = pool) {
  */
 async function desiredBchWriteMembers(bchChannelId, client = pool) {
   const saResult = await client.query(
-    `SELECT service_account_id FROM bch_channels WHERE id = $1`,
+    `SELECT category, service_account_id FROM bch_channels WHERE id = $1`,
     [bchChannelId]
   );
   const serviceAccountId = saResult.rows[0]?.service_account_id;
-  if (serviceAccountId === null || serviceAccountId === undefined) {
-    return [];
+  const members = [];
+  if (serviceAccountId !== null && serviceAccountId !== undefined) {
+    members.push(String(serviceAccountId));
   }
-  return [String(serviceAccountId)];
+
+  // Pinned members (best-effort, additive): PINNED_MEMBERS_XTRATOOLS targets
+  // the WRITE group of UTL-CATEGORY (XtraTools) channels only. This group is
+  // otherwise service-account-only (no humans), so a pin here is the sole way
+  // to grant a human write access to XtraTools without a team membership.
+  if (saResult.rows[0]?.category === 'UTL') {
+    const pinned = await resolvePinnedPks('xtratools');
+    members.push(...pinned);
+  }
+
+  return dedupe(members);
 }
 
 /**
@@ -204,7 +227,16 @@ async function desiredRegionMembers(regionChannelId, client = pool) {
       AND COALESCE(org.flag, false) = true
     `
   );
-  return dedupe(result.rows.map((r) => String(r.authentik_user_id)));
+  const members = result.rows.map((r) => String(r.authentik_user_id));
+
+  // Pinned members (best-effort, additive): PINNED_MEMBERS_RESPONSE /
+  // PINNED_MEMBERS_SUPPORT target their own tier's region groups. `tier` was
+  // validated to be exactly 'response' or 'support' above, so it maps
+  // directly to the pin category.
+  const pinned = await resolvePinnedPks(tier);
+  members.push(...pinned);
+
+  return dedupe(members);
 }
 
 /**
