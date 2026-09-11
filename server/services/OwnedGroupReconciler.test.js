@@ -28,6 +28,14 @@ jest.mock('../config/bulkGroupReconcile', () => ({
   isBulkGroupReconcileDryRun: () => mockDryRun()
 }));
 
+// Pinned owned-group members: mocked so the union behaviour is deterministic
+// and never hits the Authentik lookup. Defaults to [] (no pins) in beforeEach,
+// so every existing desired-set test is unaffected.
+const mockResolvePinnedPks = jest.fn();
+jest.mock('../config/pinnedGroupMembers', () => ({
+  resolvePinnedPks: (category) => mockResolvePinnedPks(category)
+}));
+
 // getDirectAdmins is exercised through the real CloudTakAgencyGroup module,
 // which queries the pool we already mock -- so we let it run against mockQuery.
 const reconciler = require('./OwnedGroupReconciler');
@@ -43,6 +51,8 @@ beforeEach(() => {
   mockRun.mockImplementation((_opts, fn) => fn());
   // Default: dry-run OFF (so PATCH paths are exercised unless a test opts in).
   mockDryRun.mockReturnValue(false);
+  // Default: no pinned members (so existing desired-set tests are unaffected).
+  mockResolvePinnedPks.mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -143,6 +153,76 @@ describe('desiredRegionMembers', () => {
     expect(caught.classification).toBe('permanent');
     // Only the tier lookup ran; the member query never did.
     expect(mockQuery).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('pinned members union into desired sets', () => {
+  it('desiredBchReadMembers unions PINNED_MEMBERS_BCH only for a BCH-category channel', async () => {
+    mockResolvePinnedPks.mockResolvedValue(['42']);
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ authentik_user_id: 1 }] }) // active users
+      .mockResolvedValueOnce({ rows: [{ category: 'BCH', service_account_id: 99 }] }); // channel row
+
+    const members = await reconciler.desiredBchReadMembers(7);
+
+    expect(members.sort()).toEqual(['1', '42', '99'].sort());
+    expect(mockResolvePinnedPks).toHaveBeenCalledWith('bch');
+  });
+
+  it('desiredBchReadMembers does NOT union pins for a UTL-category channel (BCH pins are BCH-only)', async () => {
+    mockResolvePinnedPks.mockResolvedValue(['42']);
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ authentik_user_id: 1 }] })
+      .mockResolvedValueOnce({ rows: [{ category: 'UTL', service_account_id: null }] });
+
+    const members = await reconciler.desiredBchReadMembers(14);
+
+    expect(members).toEqual(['1']);
+    expect(mockResolvePinnedPks).not.toHaveBeenCalled();
+  });
+
+  it('desiredBchWriteMembers unions PINNED_MEMBERS_XTRATOOLS only for a UTL-category channel', async () => {
+    mockResolvePinnedPks.mockResolvedValue(['42']);
+    mockQuery.mockResolvedValue({ rows: [{ category: 'UTL', service_account_id: null }] });
+
+    const members = await reconciler.desiredBchWriteMembers(14);
+
+    // UTL write group is otherwise empty; the pin becomes the sole member.
+    expect(members).toEqual(['42']);
+    expect(mockResolvePinnedPks).toHaveBeenCalledWith('xtratools');
+  });
+
+  it('desiredBchWriteMembers does NOT union pins for a BCH-category channel (keeps service-account-only)', async () => {
+    mockResolvePinnedPks.mockResolvedValue(['42']);
+    mockQuery.mockResolvedValue({ rows: [{ category: 'BCH', service_account_id: 99 }] });
+
+    const members = await reconciler.desiredBchWriteMembers(7);
+
+    expect(members).toEqual(['99']);
+    expect(mockResolvePinnedPks).not.toHaveBeenCalled();
+  });
+
+  it('desiredRegionMembers unions the tier-matching pin category', async () => {
+    mockResolvePinnedPks.mockResolvedValue(['42']);
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ tier: 'response' }] }) // tier lookup
+      .mockResolvedValueOnce({ rows: [{ authentik_user_id: 3 }] }); // members
+
+    const members = await reconciler.desiredRegionMembers(12);
+
+    expect(members.sort()).toEqual(['3', '42'].sort());
+    expect(mockResolvePinnedPks).toHaveBeenCalledWith('response');
+  });
+
+  it('an empty pin set leaves the desired set unchanged (BCH read)', async () => {
+    mockResolvePinnedPks.mockResolvedValue([]);
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ authentik_user_id: 1 }] })
+      .mockResolvedValueOnce({ rows: [{ category: 'BCH', service_account_id: 99 }] });
+
+    const members = await reconciler.desiredBchReadMembers(7);
+
+    expect(members.sort()).toEqual(['1', '99'].sort());
   });
 });
 
