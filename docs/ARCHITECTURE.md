@@ -238,3 +238,11 @@ Every dense table (Teams, Team Detail's tabs, Team Devices, Users, Devices) rend
 - `docs/END-USER-DOCS.md` — how a team member or team admin actually uses the product.
 
 Note: `.kiro/specs/` (ten completed feature specs) was removed once implemented; some older code comments still cite requirement/criterion numbers from those retired specs (e.g. `// device-management Requirement 5.3`) as historical provenance — the spec itself no longer exists, so treat the surrounding comment text as the source of truth.
+
+## Quick Links
+
+- **[Main README](../README.md)** - Complete project overview
+- **[Deployment Guide](DEPLOYMENT_GUIDE.md)** - Detailed deployment instructions
+- **[Quick Reference](QUICK_REFERENCE.md)** - Fast deployment commands and environment comparison
+- **[Configuration Guide](PARAMETERS.md)** - Complete configuration reference
+- **[End-User Guide](END-USER-DOCS.md)** - Day-to-day guide for members and team admins

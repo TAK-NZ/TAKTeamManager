@@ -1,133 +1,192 @@
 # TAK Team Manager
 
-Manage TAK teams, users, and channels via Authentik
+<p align=center>Team, user, and channel management for Team Awareness Kit (TAK) deployments
 
-## Features
+## Overview
 
-- **Authentik OAuth2 Integration** - SSO login for existing users
-- **Team Management** - Create/manage teams with hierarchical sub-teams
-- **User Management** - Create users in Authentik, assign to teams
-- **Channel Management** - Create/manage TAK channels (map to LDAP groups)
-- **Access Requests** - Unauthenticated interface for team join requests
-- **Approval System** - Team admins approve/deny user requests
-- **Mobile Responsive** - Works on mobile devices
+The [Team Awareness Kit (TAK)](https://tak.gov/solutions/emergency) provides Fire, Emergency Management, and First Responders an operationally agnostic tool for improved situational awareness and a common operational picture.
 
-## Tech Stack
+TAK Team Manager is the back-office web application for a complete TAK deployment. It manages TAK teams, users, and channels using [Authentik](https://goauthentik.io/) as the identity provider, with an optional TAK Server device-management integration for client-certificate enrollment and revocation - all while using [free and open source software](https://en.wikipedia.org/wiki/Free_and_open-source_software).
 
-- **Backend**: Node.js, Express.js, PostgreSQL
-- **Frontend**: React, Tailwind CSS, Vite
-- **Authentication**: Authentik OAuth2
-- **Integration**: Authentik REST API v3
+It is a Node/Express + PostgreSQL server with a React single-page-application client, served from a single origin (`team.tak.nz`) and deployed onto AWS ECS Fargate via AWS CDK, following the same conventions as the other TAK.NZ layers.
 
-## Development Setup
+It is specifically targeted at the deployment of [TAK.NZ](https://tak.nz) via a CI/CD pipeline. Nevertheless others interested in deploying a similar application can do so by adapting the configuration items.
 
-### Option 1: Docker (Recommended)
+### Architecture Layers
 
-1. Copy environment file:
+This application requires the base, authentication, and (for device management) TAK infrastructure layers, each deployed as a separate stack from its own repository.
+
+For the full layer diagram and deployment order across all TAK.NZ repositories, see the
+[TAK.NZ organization overview](https://github.com/TAK-NZ). That diagram is maintained in one place
+so it stays current as layers are added.
+
+## Quick Start
+
+### Prerequisites
+- [AWS Account](https://signin.aws.amazon.com/signup) with configured credentials
+- Base infrastructure stack (`TAK-<name>-BaseInfra`) must be deployed first
+- Authentication infrastructure stack (`TAK-<name>-AuthInfra`) must be deployed first
+- TAK server infrastructure stack (`TAK-<name>-TakInfra`) must be deployed first (required when device management is enabled - the default)
+- Public Route 53 hosted zone (e.g., `tak.nz`)
+- [Node.js](https://nodejs.org/) and npm installed
+- **For CI/CD deployment:** See [AWS & GitHub Setup Guide](docs/AWS_GITHUB_SETUP.md) for TAKTeamManager-specific GitHub Actions configuration
+
+### Installation & Deployment
+
 ```bash
-cp .env.example .env
+# 1. Install CDK dependencies
+cd cdk && npm install
+
+# 2. Bootstrap CDK (first time only)
+npx cdk bootstrap --profile your-aws-profile
+
+# 3. Deploy development environment
+npm run deploy:dev
+
+# 4. Deploy production environment
+npm run deploy:prod
 ```
 
-2. Configure `.env` with your Authentik details
+For running the application locally without AWS, see the [Deployment Guide](docs/DEPLOYMENT_GUIDE.md#local-development).
 
-3. Start with Docker:
+## Application Resources
+
+### Compute & Services
+- **ECS Fargate Service** - The app container (Express API + built SPA on one origin, port 3000) behind a dual-stack Application Load Balancer with a `GET /health` check
+- **Sync Worker** - A second ECS task (the same image with its command overridden) that drains the Authentik / TAK Server write queue and runs the device-management pollers
+- **Aurora PostgreSQL** - Serverless v2 (dev) or provisioned instances (prod), holding teams, users, channels, the sync queue, and audit logs
+
+### Integration
+- **Authentik** - OAuth2/OIDC single sign-on, plus a least-privilege management-API service account for user and group writes
+- **TAK Server** *(optional)* - Marti certadmin mutual-TLS integration for device certificate enrollment, polling, and revocation
+- **CloudTAK** *(optional)* - Agency-group mirroring into Authentik LDAP groups
+
+### Security & DNS
+- **AWS Secrets Manager** - JWT signing secret, credential-encryption key, database and Authentik credentials
+- **Route 53 Records** - `A`/`AAAA` alias at `team.<zone>`, dual-stack
+- **KMS Encryption** - Data encryption at rest and in transit (imported from BaseInfra)
+- **ACM Certificate** - SSL certificate (imported from BaseInfra)
+
+## Docker Image Strategy
+
+This application ships as a single Docker image (a two-stage build: `vite build` for the client, then a production Node runtime). The web process and the sync worker are the same image with different startup commands. The CDK stack uses a hybrid image strategy that supports both local building and pre-built ECR images.
+
+- **Strategy**: See [Docker Image Strategy Guide](docs/DOCKER_IMAGE_STRATEGY.md) for details
+- **CI/CD Mode**: Uses pre-built images from the BaseInfra artifacts ECR repo (`--context usePreBuiltImages=true`)
+- **Development Mode**: Builds the image locally from the repo-root `Dockerfile` via a CDK `DockerImageAsset`
+- **Automatic Fallback**: Selects the mode based on context parameters
+
+### Docker Images Used
+
+1. **TAK Team Manager**: Express API, built SPA, and the sync worker (one image, two commands)
+
+## Available Environments
+
+| Environment | Stack Name | Description | Domain |
+|-------------|------------|-------------|--------|
+| `dev-test` | `TAK-Dev-TAKTeamManager` | Cost-optimized development | `team.dev.tak.nz` |
+| `prod` | `TAK-Prod-TAKTeamManager` | High-availability production | `team.tak.nz` |
+
+## Development Workflow
+
+### NPM Scripts
+
+CDK deployment scripts run from the `cdk/` directory:
+
 ```bash
-docker compose up --build
+# From cdk/ - Environment-Specific Deployment
+npm run deploy:dev            # Deploy to dev-test
+npm run deploy:prod           # Deploy to production
+npm run synth:dev             # Preview dev infrastructure
+npm run synth:prod            # Preview prod infrastructure
+npm run cdk:diff:dev          # Show what would change in dev
+npm run cdk:diff:prod         # Show what would change in prod
+npm run cdk:bootstrap         # Bootstrap CDK in account
 ```
 
-4. Initialize database (first time only):
+Application development scripts run from the repository root:
+
 ```bash
-docker compose exec app node database/init.js
+# From repo root - Local Development
+npm run dev                   # Run server + client concurrently
+npm run server:dev            # Run the API with nodemon
+npm run build                 # Build the client bundle
+npm start                     # Run the production web process
+npm test                      # Run the server Jest suite
+npm run lint                  # Lint server, scripts, and database code
+
+# Database
+npm run migrate:up            # Apply migrations
+npm run migrate:create        # Scaffold a new migration
+
+# Docker (local, all-in-one)
+npm run docker:up             # Start postgres + app + sync worker
+npm run docker:init-db        # Initialize the database (first run)
 ```
 
-5. Access application at http://localhost:3000
-6. New users can request access at http://localhost:3000/request-access
+Client tests run from `client/` with their own Vitest runner (`cd client && npm test`).
 
-### Option 2: Local Development
+### Configuration System
 
-#### Prerequisites
+Deployment uses two complementary layers, both landing in the same running ECS task:
 
-- Node.js 18+
-- PostgreSQL 14+
-- Authentik instance
+- **AWS CDK context** - Infrastructure settings (stack name, hostname, database, ECS sizing, feature toggles) stored in [`cdk/cdk.json`](cdk/cdk.json) under the `context` section, version-controlled and overridable at deploy time with `--context`.
+- **Deployment config file** - Operations-editable runtime settings (SMTP, reCAPTCHA, feature flags, colour/role labels, tuning) uploaded to the shared S3 config bucket and loaded via `ecs.EnvironmentFile.fromBucket`. Edit by replacing the S3 object and restarting the task - no CDK redeploy.
 
-#### Backend Setup
+See the [Configuration Guide](docs/PARAMETERS.md) for the full reference and [`.env.example`](.env.example) for every variable the application reads.
 
-1. Install dependencies:
+#### Configuration Override Examples
 ```bash
-npm install
+# Override ECS task sizing
+npm run deploy:dev -- --context taskCpu=1024 --context desiredCount=3
+
+# Deploy without the TAK Server device-management dependency
+npm run deploy:dev -- --context deviceManagementEnabled=false
+
+# Use pre-built images instead of building locally
+npm run deploy:prod -- --context usePreBuiltImages=true
 ```
 
-2. Copy environment file:
-```bash
-cp .env.example .env
-```
+## 📚 Documentation
 
-3. Configure environment variables in `.env`:
-- Database connection details
-- Authentik URL and credentials
-- JWT secret
+- **[🚀 Deployment Guide](docs/DEPLOYMENT_GUIDE.md)** - Comprehensive deployment instructions, including local development
+- **[🏗️ Architecture Guide](docs/ARCHITECTURE.md)** - Technical architecture and design decisions
+- **[⚡ Quick Reference](docs/QUICK_REFERENCE.md)** - Fast deployment commands and environment comparison
+- **[⚙️ Configuration Guide](docs/PARAMETERS.md)** - Complete configuration management reference
+- **[🔧 AWS & GitHub Setup](docs/AWS_GITHUB_SETUP.md)** - CI/CD, GitHub Actions, and multi-account OIDC configuration
+- **[🐳 Docker Image Strategy](docs/DOCKER_IMAGE_STRATEGY.md)** - Hybrid image strategy for fast CI/CD and flexible development
+- **[👥 End-User Guide](docs/END-USER-DOCS.md)** - Day-to-day guide for team members and team admins
+- **[📈 Authentik Scaling Lessons](docs/authentik-scaling-lessons.md)** - Operational lessons from scaling against Authentik
+- **[🔬 Authentik Rate-Limit Profiling](docs/authentik-ratelimit-profiling.md)** - Measured evidence behind the rate-limit ceilings
+- **[📊 CloudWatch Metrics & Alarms](docs/cloudwatch-metrics.md)** - Metrics and alarms guidance for the CDK deployment
+- **[🗺️ Offline Maps Deployment](docs/offline-maps-deployment.md)** - AWS handoff for the offline-maps download feature
 
-4. Initialize database:
-```bash
-node database/init.js
-```
+## Security Features
 
-5. Start server:
-```bash
-npm run server:dev
-```
+### Enterprise-Grade Security
+- **🔑 KMS Encryption** - All data encrypted with customer-managed keys
+- **🛡️ Deny-by-Default Authorization** - An unmapped route is denied, never permitted; permissions resolve through a central registry
+- **🔒 Least-Privilege Integration** - A scoped Authentik service account with only the permissions the app calls, never a superuser token
+- **🔐 SSO Integration** - Single sign-on via Authentik OAuth2/OIDC, with server-signed session cookies
+- **📋 Feature Flags Inert by Default** - Every capability flag ships off and is true only for the exact string `'true'`
+- **🚦 Rate Limiting** - IP-keyed request limiters and a shared, cross-process throttle on Authentik management-API calls
 
-### Frontend Setup
+## Getting Help
 
-1. Navigate to client directory:
-```bash
-cd client
-```
+### Common Issues
+- **Base / Auth / TAK Infrastructure** - Ensure the required stacks are deployed first; device management additionally requires TakInfra
+- **Route53 Hosted Zone** - Ensure your domain's hosted zone exists before deployment
+- **AWS Permissions** - CDK requires broad permissions for CloudFormation operations
+- **Deployment config file** - The S3 config object must exist before the first deploy (an empty file is valid; SMTP is required for real use)
+- **Trusted proxy hops** - Behind the ALB, set `TRUSTED_PROXY_HOPS=1` (see the [Configuration Guide](docs/PARAMETERS.md)); the default `0` is correct only for local/dev
 
-2. Install dependencies:
-```bash
-npm install
-```
-
-3. Start development server:
-```bash
-npm run dev
-```
-
-### Full Development
-
-Run both backend and frontend:
-```bash
-npm run dev
-```
-
-## API Endpoints
-
-- `GET /api/auth/login` - OAuth2 login redirect
-- `GET /api/auth/callback` - OAuth2 callback
-- `GET /api/teams/my-teams` - Get user's teams
-- `POST /api/teams` - Create team
-- `POST /api/users` - Create user in Authentik
-- `POST /api/channels` - Create channel with LDAP groups
-- `POST /api/requests/team-access` - Submit access request (public)
-- `GET /api/requests/pending` - Get pending requests (admin)
-
-## Deployment
-
-The application is designed to run on AWS ECS Fargate with:
-- Application Load Balancer
-- RDS PostgreSQL
-- Secrets Manager for credentials
-
-Production hostname: **`team.tak.nz`**. The app is a single-origin SPA + API (one `FRONTEND_URL`/`APP_URL`, one OAuth2 `redirect_uri`, one session cookie), so it is served from exactly one hostname rather than split across several — Team Management, the Downloads page and the device Enrollment flow are all routes within the same bundle, not separate services. This follows the naming pattern of TAK-NZ's other `*.tak.nz` subdomains (`account`, `map`, `docs`) and replaces the standalone enrollment Lambda previously reachable at `devices.tak.nz`. CDK-based deployment of this hostname is a follow-up and not yet implemented.
-
-### When the CDK stack for the ALB is built: set `TRUSTED_PROXY_HOPS=1`
-
-The app trusts zero reverse-proxy hops by default (`TRUSTED_PROXY_HOPS=0`, see `.env.example`), which is correct for local/dev/test where nothing sits in front of it. Once this is actually deployed behind the ALB, set `TRUSTED_PROXY_HOPS=1` in that environment's config — otherwise `req.ip` resolves to the ALB's own address for every request, collapsing every `req.ip`-keyed rate limiter (`server/middleware/rateLimiters.js`'s `authFlowLimiter`, `requestAccessLimiter`, etc.) onto one shared bucket regardless of how many distinct real clients there are, and `helmet`'s HSTS/HTTPS detection misreads every request as plain HTTP. See `server/config/trustProxy.js`'s header comment for the full mechanism.
-
-This must be paired with an ECS security group rule restricting inbound traffic on the container port to the ALB's security group only (never `0.0.0.0/0` or a broad VPC CIDR) — the hop count alone doesn't stop a request that reaches the task directly from forging its own `X-Forwarded-For`. If a CDN (e.g. CloudFront) is ever added in front of the ALB, this becomes `2`, not `1`.
+### Support Resources
+- **AWS CDK Documentation** - https://docs.aws.amazon.com/cdk/
+- **Authentik Documentation** - https://goauthentik.io/docs/
+- **TAK.NZ Project** - https://github.com/TAK-NZ/
+- **Issue Tracking** - Use GitHub Issues for bug reports and feature requests
 
 ## License
 
-GNU Affero General Public License v3.0
+TAK.NZ is distributed under [AGPL-3.0-only](LICENSE)
+Copyright (C) 2026 - Christian Elsen, Team Awareness Kit New Zealand (TAK.NZ)
