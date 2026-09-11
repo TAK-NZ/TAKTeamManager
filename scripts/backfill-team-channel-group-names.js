@@ -42,6 +42,20 @@
  *      old shared group. Pure name-drift detection misses that entirely; the
  *      shared-`authentik_group_id` check is what catches it.
  *
+ *      MEMBERSHIP: splitting the group leaves the new group EMPTY, and the
+ *      keeper's retained group can hold members that belonged to a DIFFERENT
+ *      colliding org (observed live: the kept CHL-CDEM group held USA-CDEM's
+ *      member, and the new USA-CDEM group had none). The group-identity op
+ *      above does NOT touch membership (`reconcile_team_channel_group` only
+ *      creates/renames the group + writes pk/attributes). So for EVERY
+ *      channel in a collision (keeper AND split-off members) this also
+ *      enqueues a membership-authoritative `reconcile_owned_group`
+ *      {group_kind:'team_channel'}, which full-replaces the group with its
+ *      correct desired set. NOTE that op only WRITES when the Sync_Worker has
+ *      `BULK_GROUP_RECONCILE_ENABLED='true'`; if the reconciler is disabled,
+ *      the script prints a warning and the operator must correct each
+ *      collided group's membership manually.
+ *
  * A channel with a NULL `authentik_group_id` (group never reconciled) whose
  * name is stale is treated as a RECONCILE too: its local name is corrected
  * and a `reconcile_team_channel_group` is enqueued to create the group under
@@ -174,20 +188,34 @@ async function main() {
     const isCollisionKeeper =
       shared && collisionKeeperByGroupId.get(String(row.authentik_group_id)) === row.channel_id;
 
-    // A channel needs repair if its name drifted OR it is a NON-keeper member
-    // of a shared (collided) group. A collision keeper with a correct name is
-    // repaired ONLY if its group must be renamed (name drift) — otherwise the
-    // shared group already carries the keeper's correct name and nothing is
-    // needed for it.
-    if (!nameDrifted && !(shared && !isCollisionKeeper)) {
+    // A channel needs repair if ANY of:
+    //  - its name drifted (rename), OR
+    //  - it is a NON-keeper member of a shared group (split off), OR
+    //  - it is the KEEPER of a shared group (its retained group may hold the
+    //    WRONG members inherited from the collision, so its membership must
+    //    be re-synced even when its name already matches).
+    // Only a channel that is neither name-drifted nor part of any collision
+    // is left alone.
+    if (!nameDrifted && !shared) {
       continue;
     }
 
-    // Action:
+    // Every channel involved in a collision (keeper AND split-off members)
+    // needs a MEMBERSHIP reconcile: splitting the group leaves the new group
+    // empty, and the keeper's retained group can hold members that belonged
+    // to a DIFFERENT colliding org (observed live: the kept CHL-CDEM group
+    // held USA-CDEM's member). Group identity/name alone does not fix that.
+    const needsMembershipReconcile = shared;
+
+    // Action for the group's IDENTITY (name/pk/attributes):
     //  - a NON-keeper member of a shared group -> reconcile (split off into a
     //    distinct group), regardless of whether its name drifted.
     //  - a not-yet-reconciled channel (null id) -> reconcile.
-    //  - otherwise (unique group id, or the collision keeper) -> rename.
+    //  - otherwise (unique group id with a stale name, or the collision
+    //    keeper) -> rename. A keeper whose name already matches still emits a
+    //    rename: it is an idempotent no-op on the name but keeps the code
+    //    path uniform, and the membership reconcile below is what actually
+    //    repairs it.
     let action;
     if ((shared && !isCollisionKeeper) || row.authentik_group_id == null) {
       action = 'reconcile';
@@ -198,6 +226,7 @@ async function main() {
     plan.push({
       channelId: row.channel_id,
       teamId: row.team_id,
+      needsMembershipReconcile,
       oldName: row.display_name,
       newName: channelName,
       authentikGroupName,
@@ -205,7 +234,9 @@ async function main() {
       channelDbName: channelName.toLowerCase().replace(/[^a-z0-9-]/g, '-'),
       groupId: row.authentik_group_id,
       action,
-      reason: nameDrifted ? 'name-drift' : 'collision-split'
+      reason: (shared && !isCollisionKeeper)
+        ? 'collision-split'
+        : (isCollisionKeeper ? 'collision-keeper' : 'name-drift')
     });
   }
 
@@ -213,7 +244,7 @@ async function main() {
   out(`Channels needing repair:       ${plan.length}`);
   const renameCount = plan.filter((p) => p.action === 'rename').length;
   const reconcileCount = plan.filter((p) => p.action === 'reconcile').length;
-  const collisionCount = plan.filter((p) => p.reason === 'collision-split').length;
+  const collisionCount = plan.filter((p) => p.needsMembershipReconcile).length;
   out(`  rename (group renamed in place):        ${renameCount}`);
   out(`  reconcile (split off / no group):       ${reconcileCount}`);
   out(`  of which collision splits (name was OK): ${collisionCount}`);
@@ -226,7 +257,8 @@ async function main() {
   }
 
   for (const p of plan) {
-    out(`  [${p.action}] channel ${p.channelId} (team ${p.teamId}) [${p.reason}]`);
+    const memberNote = p.needsMembershipReconcile ? ' (+membership reconcile)' : '';
+    out(`  [${p.action}] channel ${p.channelId} (team ${p.teamId}) [${p.reason}]${memberNote}`);
     out(`      ${JSON.stringify(p.oldName)} -> ${JSON.stringify(p.newName)}`);
     out(`      group name: ${p.authentikGroupName}${p.groupId ? ` (current pk ${p.groupId})` : ' (no pk yet)'}`);
   }
@@ -271,6 +303,23 @@ async function main() {
         );
         out(`  ✓ channel ${p.channelId}: local name updated, rename enqueued as op ${id}`);
       }
+
+      // MEMBERSHIP repair for any channel involved in a collision. Splitting
+      // a shared group leaves the new group EMPTY, and the keeper's retained
+      // group can hold members that belonged to a different colliding org --
+      // neither is fixed by the group-identity op above. Enqueue a
+      // membership-authoritative `reconcile_owned_group{team_channel}` so the
+      // worker full-replaces each group with its correct desired member set
+      // (every direct + inherited team_memberships row on the channel's team).
+      // This op is IDEMPOTENT and coalesced, so enqueuing it for the keeper
+      // and every split member is safe.
+      if (p.needsMembershipReconcile) {
+        const memberOpId = await EventPublisher.publishReconcileOwnedGroup(
+          { group_kind: 'team_channel', channel_id: p.channelId },
+          null
+        );
+        out(`      + membership reconcile_owned_group enqueued as op ${memberOpId}`);
+      }
       enqueued++;
     } catch (error) {
       failed++;
@@ -283,10 +332,18 @@ async function main() {
   out('\nSummary:');
   out(`  repaired (ops enqueued): ${enqueued}`);
   out(`  failed:                  ${failed}`);
-  out('\nNote: for COLLISION repairs the old shared Authentik group is left in place.');
-  out('Once every collided channel has been repointed, run');
+  if (collisionCount > 0) {
+    out('\nIMPORTANT (collision repairs): the membership reconcile_owned_group ops');
+    out('above only WRITE membership when the Sync_Worker has BULK_GROUP_RECONCILE_ENABLED');
+    out("='true' (and BULK_GROUP_RECONCILE_DRY_RUN off). If the reconciler is DISABLED,");
+    out('the split-off group will be created EMPTY and the keeper may retain the wrong');
+    out("members -- verify each collided group's membership and correct it manually");
+    out('(a full-replace PATCH /core/groups/<pk>/ {"users":[...]}) if so.');
+  }
+  out('\nNote: for COLLISION repairs the old shared Authentik group is left in place');
+  out('as the KEEPER\'s group. If any split leaves a truly unreferenced group, run');
   out('  node scripts/cleanup-orphaned-team-groups.js');
-  out('to remove any now-orphaned shared group(s).');
+  out('to remove it.');
 
   await pool.end();
   process.exit(failed > 0 ? 1 : 0);
