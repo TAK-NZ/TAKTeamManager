@@ -12,26 +12,35 @@
  * reproduce the old, wrong (and colliding) names, so it is only meaningful
  * once the fixed helper is present — which it is, in this same change.
  *
- * Two drift classes it repairs, per primary team channel whose freshly
- * derived name differs from its stored `channels.display_name`:
+ * A channel needs repair if EITHER its freshly derived name differs from its
+ * stored `channels.display_name` (name drift) OR its `authentik_group_id` is
+ * SHARED with another channel (a collision), even when the name already
+ * matches. The repair classes:
  *
- *   1. RENAME — the channel's `authentik_group_id` is set and is NOT shared
- *      with any other channel. The group simply carries a stale name (Bug 1:
- *      a team was renamed and nothing renamed its group). Fix: update the
- *      local `channels.name`/`display_name`/`description`, then enqueue a
+ *   1. RENAME — a uniquely-owned group whose name is stale (Bug 1: a team was
+ *      renamed and nothing renamed its group). Fix: update the local
+ *      `channels.name`/`display_name`/`description`, then enqueue a
  *      `rename_team_channel_group` so the worker PATCHes the Authentik group
  *      `name` — exactly what `Team.update` now does for a fresh rename.
  *
- *   2. COLLISION — the channel's `authentik_group_id` is SHARED by more than
- *      one channel (Bug 2: two Organisations sharing a `callsign_prefix`
- *      under different `country_code`s both derived `tak_Teams - CDEM` and
- *      were pointed at ONE group). A rename cannot split one group into two.
- *      Fix: update each colliding channel's local name, NULL its
- *      `authentik_group_id`, and enqueue a `reconcile_team_channel_group` so
- *      the worker create-or-reuses a group under each channel's now-DISTINCT
- *      correct name and writes the new pk back. The old shared group is left
- *      in place; once every collided channel has been repointed it becomes an
- *      orphan that `scripts/cleanup-orphaned-team-groups.js` can remove.
+ *   2. COLLISION — two (or more) channels SHARE one `authentik_group_id`
+ *      (Bug 2: two Organisations sharing a `callsign_prefix` under different
+ *      `country_code`s both derived `tak_Teams - CDEM` and were pointed at
+ *      ONE group). A rename cannot split one group into two. Fix: keep the
+ *      shared group on ONE deterministic member (lowest channel id) and
+ *      RENAME it to that keeper's correct, now-unique name; every OTHER
+ *      member is RECONCILEd — its local name corrected, its
+ *      `authentik_group_id` NULLed, and a `reconcile_team_channel_group`
+ *      enqueued so the worker create-or-reuses a distinct correctly-named
+ *      group and writes the fresh pk back. The old shared group survives as
+ *      the keeper's group; no group is orphaned by a split.
+ *
+ *      CRITICALLY, a collision is detected INDEPENDENT of name drift: the
+ *      real-world aftermath of Bug 2 on an already-partly-fixed deployment is
+ *      exactly two channels whose local `display_name`s were corrected
+ *      (`Teams - CHL-CDEM`, `Teams - USA-CDEM`) yet STILL point at the one
+ *      old shared group. Pure name-drift detection misses that entirely; the
+ *      shared-`authentik_group_id` check is what catches it.
  *
  * A channel with a NULL `authentik_group_id` (group never reconciled) whose
  * name is stale is treated as a RECONCILE too: its local name is corrected
@@ -127,6 +136,26 @@ async function main() {
     }
   }
 
+  // For each SHARED (collided) group id, at most ONE channel may keep it;
+  // every other member must be split off into its own group. We pick the
+  // lowest channel id as the keeper deterministically. The keeper still gets
+  // a rename (its group is renamed to the keeper's correct, now-unique name);
+  // the rest get reconcile (a fresh distinct group). This is the ONLY way to
+  // repair a collision whose local names ALREADY match the derived names
+  // (Bug 2 aftermath: the `channels` rows were name-corrected but never
+  // repointed off the one shared Authentik group) — a case pure name-drift
+  // detection misses entirely.
+  const collisionKeeperByGroupId = new Map();
+  for (const row of channels) {
+    if (row.authentik_group_id == null) continue;
+    const key = String(row.authentik_group_id);
+    if ((groupIdRefCount.get(key) || 0) <= 1) continue; // not shared
+    const currentKeeper = collisionKeeperByGroupId.get(key);
+    if (currentKeeper == null || row.channel_id < currentKeeper) {
+      collisionKeeperByGroupId.set(key, row.channel_id);
+    }
+  }
+
   const plan = [];
   for (const row of channels) {
     const { channelName, authentikGroupName } = deriveTeamChannelName({
@@ -138,17 +167,33 @@ async function main() {
       toAsciiIdentifier
     });
 
-    if (channelName === row.display_name) {
-      continue; // Already correct.
-    }
-
+    const nameDrifted = channelName !== row.display_name;
     const shared =
       row.authentik_group_id != null &&
       (groupIdRefCount.get(String(row.authentik_group_id)) || 0) > 1;
-    // A shared group id (collision) OR a not-yet-reconciled channel (null id)
-    // must go through reconcile (create-or-reuse a distinct group and write
-    // the pk back); a uniquely-owned group id is a plain rename.
-    const action = shared || row.authentik_group_id == null ? 'reconcile' : 'rename';
+    const isCollisionKeeper =
+      shared && collisionKeeperByGroupId.get(String(row.authentik_group_id)) === row.channel_id;
+
+    // A channel needs repair if its name drifted OR it is a NON-keeper member
+    // of a shared (collided) group. A collision keeper with a correct name is
+    // repaired ONLY if its group must be renamed (name drift) — otherwise the
+    // shared group already carries the keeper's correct name and nothing is
+    // needed for it.
+    if (!nameDrifted && !(shared && !isCollisionKeeper)) {
+      continue;
+    }
+
+    // Action:
+    //  - a NON-keeper member of a shared group -> reconcile (split off into a
+    //    distinct group), regardless of whether its name drifted.
+    //  - a not-yet-reconciled channel (null id) -> reconcile.
+    //  - otherwise (unique group id, or the collision keeper) -> rename.
+    let action;
+    if ((shared && !isCollisionKeeper) || row.authentik_group_id == null) {
+      action = 'reconcile';
+    } else {
+      action = 'rename';
+    }
 
     plan.push({
       channelId: row.channel_id,
@@ -159,7 +204,8 @@ async function main() {
       description: `Users from ${channelName} (Location sharing enabled)`,
       channelDbName: channelName.toLowerCase().replace(/[^a-z0-9-]/g, '-'),
       groupId: row.authentik_group_id,
-      action
+      action,
+      reason: nameDrifted ? 'name-drift' : 'collision-split'
     });
   }
 
@@ -167,18 +213,20 @@ async function main() {
   out(`Channels needing repair:       ${plan.length}`);
   const renameCount = plan.filter((p) => p.action === 'rename').length;
   const reconcileCount = plan.filter((p) => p.action === 'reconcile').length;
-  out(`  rename (unique group, stale name): ${renameCount}`);
-  out(`  reconcile (collision / no group):  ${reconcileCount}`);
+  const collisionCount = plan.filter((p) => p.reason === 'collision-split').length;
+  out(`  rename (group renamed in place):        ${renameCount}`);
+  out(`  reconcile (split off / no group):       ${reconcileCount}`);
+  out(`  of which collision splits (name was OK): ${collisionCount}`);
   out('');
 
   if (plan.length === 0) {
-    out('Nothing to repair. All primary team-channel names are already correct.');
+    out('Nothing to repair. Every primary team channel has a correctly-named, uniquely-owned group.');
     await pool.end();
     process.exit(0);
   }
 
   for (const p of plan) {
-    out(`  [${p.action}] channel ${p.channelId} (team ${p.teamId})`);
+    out(`  [${p.action}] channel ${p.channelId} (team ${p.teamId}) [${p.reason}]`);
     out(`      ${JSON.stringify(p.oldName)} -> ${JSON.stringify(p.newName)}`);
     out(`      group name: ${p.authentikGroupName}${p.groupId ? ` (current pk ${p.groupId})` : ' (no pk yet)'}`);
   }

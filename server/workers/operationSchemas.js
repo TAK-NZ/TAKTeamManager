@@ -362,12 +362,23 @@ module.exports = {
   // for the same reason: a custom channel always has all three at creation
   // (Channel.createCustomChannel), but declaring them required here would
   // be needlessly brittle against that assumption ever changing.
+  // CloudTAK team-channel attributes: the `updateChannelGroup` handler now
+  // RE-DERIVES everything (team_id, display_name, description, and each
+  // group id) from the `channels` row by `channel_id`, and PATCHes the MAIN
+  // group with the full CloudTAK attribute set (agencyId/channelId/
+  // channelName/description) while the read/write pair keep description
+  // only. So `channel_id` is the ONLY required field. `description` and the
+  // group-id fields remain accepted-but-optional purely for backward
+  // compatibility with rows enqueued by the older `Channel.updateCustomChannel`
+  // payload shape (they are now ignored by the handler in favour of the
+  // row) -- and the Phase-2 custom-channel-creation enqueue sends just
+  // `{ channel_id }`.
   update_channel_group: {
     requiredFields: {
-      channel_id: 'number',
-      description: 'string'
+      channel_id: 'number'
     },
     optionalFields: {
+      description: 'string',
       authentik_group_id: 'string',
       authentik_read_group_id: 'string',
       authentik_write_group_id: 'string'

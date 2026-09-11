@@ -7,7 +7,7 @@ const { fetchWithTimeout } = require('../utils/fetchWithTimeout');
 const { toAsciiIdentifier } = require('../utils/asciiNormalize');
 const { isValidCountryCode, normaliseCountryCode } = require('../utils/isoCountry');
 const { resolveChannelFolderSeparator } = require('../utils/channelFolderSeparator');
-const { deriveTeamChannelName } = require('../utils/teamChannelGroupName');
+const { deriveTeamChannelName, teamChannelGroupAttributes } = require('../utils/teamChannelGroupName');
 
 /**
  * Requirement 2.2-2.3 (task 5.1): thrown by `Team.create` when the
@@ -2594,8 +2594,52 @@ class Team {
           'INSERT INTO channels (name, display_name, description, team_id, authentik_group_id, is_primary) VALUES ($1, $2, $3, $4, $5, true) RETURNING *',
           [channelDbName, channelName, description, teamId, group.pk]
         );
-        
-        return channelResult.rows[0];
+        const channel = channelResult.rows[0];
+
+        // CloudTAK team-channel attributes: the group was POSTed with only
+        // `description` above, because the channel's own id (`channelId`)
+        // is not known until the INSERT just above. Now that it is, PATCH
+        // the group's attributes with the COMPLETE CloudTAK set
+        // (agencyId/channelId/channelName/description) so a teamed group
+        // carries what CloudTAK expects. The deferred/failure paths do this
+        // via `reconcileTeamChannelGroup` instead (the channel id is known
+        // there too). A transient PATCH failure must not fail team creation
+        // -- the channel row and its group id are already persisted, and a
+        // later reconcile/backfill re-applies the attributes -- so it is
+        // logged and swallowed, matching this method's other post-insert
+        // best-effort work.
+        try {
+          const attributes = teamChannelGroupAttributes({
+            teamId,
+            channelId: channel.id,
+            channelName,
+            description
+          });
+          const attrResponse = await fetchWithTimeout(
+            `${process.env.AUTHENTIK_URL}/api/v3/core/groups/${group.pk}/`,
+            {
+              method: 'PATCH',
+              headers: {
+                'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({ attributes })
+            }
+          );
+          if (!attrResponse.ok) {
+            logger.error(
+              { teamId, channelId: channel.id, groupId: group.pk, status: attrResponse.status },
+              'Failed to PATCH CloudTAK attributes onto team channel group; a later reconcile/backfill will re-apply them'
+            );
+          }
+        } catch (attrError) {
+          logger.error(
+            { err: attrError, teamId, channelId: channel.id, groupId: group.pk },
+            'Error PATCHing CloudTAK attributes onto team channel group; a later reconcile/backfill will re-apply them'
+          );
+        }
+
+        return channel;
       } catch (authentikError) {
         // Bugfix (orphaned Authentik team groups): the synchronous
         // group-create above failed (e.g. an Authentik timeout or rate

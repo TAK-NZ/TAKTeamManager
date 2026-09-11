@@ -1772,14 +1772,28 @@ describe('Team.createTeamChannel Authentik group creation/reconciliation', () =>
       return Promise.resolve({ rows: [] });
     });
 
-    global.fetch = jest.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({ pk: 'new-group-pk' })
+    global.fetch = jest.fn().mockImplementation((url, options) => {
+      if (options?.method === 'PATCH') {
+        return Promise.resolve({ ok: true, status: 200 });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ pk: 'new-group-pk' }) });
     });
 
     const result = await Team.createTeamChannel(10);
 
-    expect(global.fetch).toHaveBeenCalledTimes(1);
+    // One POST to create the group, then one PATCH to set the CloudTAK
+    // attributes now that the channel id (3) is known.
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    const patchCall = global.fetch.mock.calls.find(([, o]) => o?.method === 'PATCH');
+    expect(patchCall[0]).toContain('/core/groups/new-group-pk/');
+    expect(JSON.parse(patchCall[1].body)).toEqual({
+      attributes: {
+        agencyId: 10,
+        channelId: 3,
+        channelName: 'Teams - FENZ',
+        description: 'Users from Fire and Emergency New Zealand (FENZ) (Location sharing enabled)'
+      }
+    });
     const insertCall = pool.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO channels'));
     expect(insertCall[1][4]).toBe('new-group-pk');
     expect(result).toEqual({ id: 3, authentik_group_id: 'new-group-pk' });
@@ -1882,14 +1896,22 @@ describe('Team.createTeamChannel Authentik group creation/reconciliation', () =>
       return Promise.resolve({ rows: [] });
     });
 
-    global.fetch = jest.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({ pk: 'new-group-pk' })
+    global.fetch = jest.fn().mockImplementation((url, options) => {
+      if (options?.method === 'PATCH') {
+        return Promise.resolve({ ok: true, status: 200 });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ pk: 'new-group-pk' }) });
     });
 
     await Team.createTeamChannel(10);
 
-    expect(global.fetch).toHaveBeenCalledTimes(1);
+    // The synchronous create still happens: one POST to create the group,
+    // then one PATCH to set the CloudTAK attributes (channel id now known).
+    // The point of this guard is that it did NOT take the defer/reconcile
+    // path.
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    const postCall = global.fetch.mock.calls.find(([, o]) => o?.method === 'POST' || o?.method === undefined);
+    expect(postCall).toBeDefined();
     expect(EventPublisher.publishOperation).not.toHaveBeenCalledWith(
       'reconcile_team_channel_group',
       expect.anything(),

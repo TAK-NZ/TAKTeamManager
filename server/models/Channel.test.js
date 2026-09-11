@@ -389,7 +389,28 @@ describe('Channel.createCustomChannel: add_user_to_group enqueue (bugfix: silent
       null,
       client
     );
-    expect(EventPublisher.publishOperation).toHaveBeenCalledTimes(3);
+    // 3 add_user_to_group + 1 update_channel_group (CloudTAK attributes for
+    // the main group, enqueued once per creation on the same client).
+    const addCalls = EventPublisher.publishOperation.mock.calls.filter(([op]) => op === 'add_user_to_group');
+    expect(addCalls).toHaveLength(3);
+    const updateCalls = EventPublisher.publishOperation.mock.calls.filter(([op]) => op === 'update_channel_group');
+    expect(updateCalls).toHaveLength(1);
+    expect(EventPublisher.publishOperation).toHaveBeenCalledTimes(4);
+  });
+
+  it('enqueues update_channel_group (CloudTAK attributes) with just { channel_id } on the transactional client, once per creation', async () => {
+    mockAuthentikGroupCreationSuccess();
+    const client = buildMockClient(0);
+    pool.connect.mockResolvedValue(client);
+
+    await Channel.createCustomChannel(7, 'Radio', [{ userId: 42, permission: 'read' }]);
+
+    const updateCalls = EventPublisher.publishOperation.mock.calls.filter(([op]) => op === 'update_channel_group');
+    expect(updateCalls).toHaveLength(1);
+    const [, payload, createdBy, passedClient] = updateCalls[0];
+    expect(payload).toEqual({ channel_id: expect.any(Number) });
+    expect(createdBy).toBeNull();
+    expect(passedClient).toBe(client);
   });
 
   it('adds the channel_memberships row via addMember AND enqueues add_user_to_group for the SAME member -- neither happens without the other', async () => {
@@ -432,7 +453,12 @@ describe('Channel.createCustomChannel: add_user_to_group enqueue (bugfix: silent
     const channel = await Channel.createCustomChannel(7, 'Radio', [{ userId: 42, permission: 'read' }]);
 
     expect(channel.id).toBe(501);
-    expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
+    // No add_user_to_group (no resolvable group id), but the
+    // update_channel_group CloudTAK-attributes enqueue still happens once.
+    const addCalls = EventPublisher.publishOperation.mock.calls.filter(([op]) => op === 'add_user_to_group');
+    expect(addCalls).toHaveLength(0);
+    const updateCalls = EventPublisher.publishOperation.mock.calls.filter(([op]) => op === 'update_channel_group');
+    expect(updateCalls).toHaveLength(1);
     expect(mockLoggerInstance.warn).toHaveBeenCalledWith(
       expect.objectContaining({ channelId: 501, userId: 42, permission: 'read' }),
       expect.stringContaining('Skipped add_user_to_group enqueue')
