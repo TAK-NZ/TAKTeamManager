@@ -125,6 +125,7 @@ function requireGroupId(groupUuid, groupKind, logContext) {
 // matching the created group.
 const { toAsciiIdentifier } = require('../utils/asciiNormalize');
 const { resolveChannelFolderSeparator } = require('../utils/channelFolderSeparator');
+const { teamChannelGroupAttributes } = require('../utils/teamChannelGroupName');
 // Requirement 25 (task 47.1): the Retention_Cleanup_Job, running on its
 // own scheduled interval (default 24h) inside the Sync_Worker process,
 // started/stopped alongside the poll loop, health server, and expiry
@@ -2468,11 +2469,15 @@ class SyncWorker {
    * @param {{channel_id: number, authentik_group_name: string, description?: string}} payload
    */
   async reconcileTeamChannelGroup(payload) {
-    const { channel_id, authentik_group_name, description } = payload;
+    const { channel_id, authentik_group_name } = payload;
 
-    // Step 1: load the channel row.
+    // Step 1: load the channel row. Also load team_id/display_name/
+    // description so the group is created with the COMPLETE CloudTAK
+    // attribute set (agencyId/channelId/channelName/description) rather
+    // than description alone -- the payload's own `description` is a
+    // fallback only.
     const channelResult = await this.pool.query(
-      'SELECT id, authentik_group_id FROM channels WHERE id = $1',
+      'SELECT id, team_id, display_name, description, authentik_group_id FROM channels WHERE id = $1',
       [channel_id]
     );
     const channel = channelResult.rows[0];
@@ -2493,6 +2498,16 @@ class SyncWorker {
       return;
     }
 
+    // The full CloudTAK attribute set, re-derived from the row (single
+    // source of truth). Falls back to the payload description only when the
+    // row has none.
+    const attributes = teamChannelGroupAttributes({
+      teamId: channel.team_id,
+      channelId: channel.id,
+      channelName: channel.display_name,
+      description: channel.description ?? payload.description
+    });
+
     // Step 3: create-or-reuse the group by name (mirrors
     // Team.createTeamChannel / ensureCloudTakGroup).
     let group;
@@ -2504,7 +2519,7 @@ class SyncWorker {
       },
       body: JSON.stringify({
         name: authentik_group_name,
-        attributes: { description: description ?? '' }
+        attributes
       })
     });
 
@@ -2529,6 +2544,30 @@ class SyncWorker {
         { channelId: channel_id, authentikGroupName: authentik_group_name, groupId: group.pk },
         'Reused existing Authentik group while reconciling a team channel'
       );
+
+      // A REUSED group kept its old attributes (the create POST body above
+      // never applied). PATCH the full CloudTAK attribute set onto it so a
+      // reused group converges to the same shape a freshly-created one has.
+      // (On the create branch the POST already set them, so this is skipped
+      // there.) A failure here is retryable via the normal path.
+      const attrResponse = await fetchWithTimeout(
+        `${process.env.AUTHENTIK_URL}/api/v3/core/groups/${group.pk}/`,
+        {
+          method: 'PATCH',
+          headers: {
+            'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ attributes })
+        }
+      );
+      if (!attrResponse.ok && attrResponse.status !== 404) {
+        const classification = classifyFailure(attrResponse.status);
+        throw new AuthentikApiError(
+          `Failed to set CloudTAK attributes on reused team channel group ${group.pk}: ${attrResponse.status} ${attrResponse.statusText}`,
+          classification
+        );
+      }
     }
 
     // Step 4: write the pk back, without clobbering a value another path
@@ -2570,10 +2609,10 @@ class SyncWorker {
    * @param {{channel_id: number, authentik_group_name: string, description?: string}} payload
    */
   async renameTeamChannelGroup(payload) {
-    const { channel_id, authentik_group_name, description } = payload;
+    const { channel_id, authentik_group_name } = payload;
 
     const channelResult = await this.pool.query(
-      'SELECT id, authentik_group_id FROM channels WHERE id = $1',
+      'SELECT id, team_id, display_name, description, authentik_group_id FROM channels WHERE id = $1',
       [channel_id]
     );
     const channel = channelResult.rows[0];
@@ -2595,13 +2634,21 @@ class SyncWorker {
       return;
     }
 
-    // Only `name` (and `description`, when supplied) change on a rename —
-    // never membership. The name is already ASCII-normalized upstream by the
-    // shared teamChannelGroupName helper.
-    const requestBody = { name: authentik_group_name };
-    if (description != null) {
-      requestBody.attributes = { description };
-    }
+    // A rename changes `name` -- never membership. Send the COMPLETE
+    // CloudTAK attribute set alongside the new name: Authentik's PATCH
+    // replaces the whole `attributes` dict, so omitting agencyId/channelId/
+    // channelName here would wipe them off the group. Re-derived from the
+    // row (single source of truth); `channelName` tracks the new
+    // display_name the rename just wrote.
+    const requestBody = {
+      name: authentik_group_name,
+      attributes: teamChannelGroupAttributes({
+        teamId: channel.team_id,
+        channelId: channel.id,
+        channelName: channel.display_name,
+        description: channel.description ?? payload.description
+      })
+    };
 
     const response = await fetchWithTimeout(
       `${process.env.AUTHENTIK_URL}/api/v3/core/groups/${channel.authentik_group_id}/`,
@@ -2654,30 +2701,71 @@ class SyncWorker {
    * (nothing further to reconcile for that id) exactly like
    * `removeTeamChannelGroup`'s own 404 handling, and processing
    * continues with the next group id.
+   *
+   * CloudTAK attributes: the channel's MAIN group (`authentik_group_id`) --
+   * a custom channel's read/write group, or a primary team channel's sole
+   * group -- gets the COMPLETE CloudTAK attribute set
+   * (agencyId/channelId/channelName/description). The `_READ`/`_WRITE`
+   * groups are NOT team-channel "main" groups and keep description-only, as
+   * before. Everything is re-derived from the `channels` row (single source
+   * of truth), so the enqueue payload only needs `channel_id`; the legacy
+   * payload fields (`description`, group ids) are ignored when the row is
+   * present.
    */
   async updateChannelGroup(payload) {
-    const { channel_id, description } = payload;
+    const { channel_id } = payload;
 
-    const groupIds = [
-      payload.authentik_group_id,
-      payload.authentik_read_group_id,
-      payload.authentik_write_group_id
-    ].filter((groupId) => groupId != null);
+    const channelResult = await this.pool.query(
+      'SELECT id, team_id, display_name, description, authentik_group_id, authentik_read_group_id, authentik_write_group_id FROM channels WHERE id = $1',
+      [channel_id]
+    );
+    const channel = channelResult.rows[0];
+    if (!channel) {
+      logger.info(
+        { channelId: channel_id },
+        'Channel no longer exists; update_channel_group is a no-op'
+      );
+      return;
+    }
 
-    for (const groupId of groupIds) {
+    const description = channel.description ?? '';
+
+    // The MAIN group carries the full CloudTAK attribute set; the read/write
+    // pair carry description only. Paired here as [groupId, attributes] so a
+    // single loop keeps the shared 404/retry handling.
+    const targets = [];
+    if (channel.authentik_group_id != null) {
+      targets.push([
+        channel.authentik_group_id,
+        teamChannelGroupAttributes({
+          teamId: channel.team_id,
+          channelId: channel.id,
+          channelName: channel.display_name,
+          description
+        })
+      ]);
+    }
+    if (channel.authentik_read_group_id != null) {
+      targets.push([channel.authentik_read_group_id, { description }]);
+    }
+    if (channel.authentik_write_group_id != null) {
+      targets.push([channel.authentik_write_group_id, { description }]);
+    }
+
+    for (const [groupId, attributes] of targets) {
       const response = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/${groupId}/`, {
         method: 'PATCH',
         headers: {
           'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ attributes: { description } })
+        body: JSON.stringify({ attributes })
       });
 
       if (response.status === 404) {
         logger.debug(
           { channelId: channel_id, groupId },
-          'Custom channel Authentik group not found; skipping description update for this group id'
+          'Custom channel Authentik group not found; skipping attribute update for this group id'
         );
         continue;
       }

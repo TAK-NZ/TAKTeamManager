@@ -1,6 +1,7 @@
 const {
   composeEffectiveRootPrefix,
-  deriveTeamChannelName
+  deriveTeamChannelName,
+  teamChannelGroupAttributes
 } = require('./teamChannelGroupName');
 const { toAsciiIdentifier } = require('./asciiNormalize');
 
@@ -78,5 +79,62 @@ describe('deriveTeamChannelName', () => {
     });
     expect(channelName).toBe('Teams - FENZ - Ngā Tai ki te Puku');
     expect(authentikGroupName).toBe('tak_Teams - FENZ - Nga Tai ki te Puku');
+  });
+});
+
+describe('teamChannelGroupAttributes', () => {
+  it('builds the CloudTAK attribute set with numeric agencyId/channelId', () => {
+    expect(
+      teamChannelGroupAttributes({
+        teamId: 1,
+        channelId: 1,
+        channelName: 'Teams - AWS',
+        description: 'Users from Amazon Web Services (Location sharing enabled)'
+      })
+    ).toEqual({
+      agencyId: 1,
+      channelId: 1,
+      channelName: 'Teams - AWS',
+      description: 'Users from Amazon Web Services (Location sharing enabled)'
+    });
+  });
+
+  it('coerces string ids (route params / SQL text) to numbers', () => {
+    const attrs = teamChannelGroupAttributes({
+      teamId: '7',
+      channelId: '42',
+      channelName: 'Teams - FENZ - Southland',
+      description: 'x'
+    });
+    expect(attrs.agencyId).toBe(7);
+    expect(attrs.channelId).toBe(42);
+    expect(typeof attrs.agencyId).toBe('number');
+    expect(typeof attrs.channelId).toBe('number');
+  });
+
+  it('agencyId and channelId are independent (equal only by coincidence)', () => {
+    const attrs = teamChannelGroupAttributes({
+      teamId: 3,
+      channelId: 99,
+      channelName: 'Teams - X - Custom',
+      description: 'y'
+    });
+    expect(attrs.agencyId).toBe(3);
+    expect(attrs.channelId).toBe(99);
+  });
+
+  it('normalizes a nullish description to an empty string so the key is always present', () => {
+    expect(teamChannelGroupAttributes({ teamId: 1, channelId: 1, channelName: 'n', description: null }).description).toBe('');
+    expect(teamChannelGroupAttributes({ teamId: 1, channelId: 1, channelName: 'n' }).description).toBe('');
+  });
+
+  it('channelName is the human display name (macrons preserved), not the ASCII group name', () => {
+    const attrs = teamChannelGroupAttributes({
+      teamId: 2,
+      channelId: 5,
+      channelName: 'Teams - FENZ - Ngā Tai ki te Puku',
+      description: 'z'
+    });
+    expect(attrs.channelName).toBe('Teams - FENZ - Ngā Tai ki te Puku');
   });
 });

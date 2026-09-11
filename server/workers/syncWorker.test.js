@@ -1244,15 +1244,15 @@ describe('SyncWorker Authentik failure classification wiring', () => {
     // to a captured result. `channelRow` is what the channel SELECT returns.
     function mockChannelQueries(channelRow) {
       worker.pool.query = jest.fn().mockImplementation((sql) => {
-        if (typeof sql === 'string' && sql.includes('SELECT id, authentik_group_id FROM channels')) {
+        if (typeof sql === 'string' && sql.includes('FROM channels WHERE id = $1')) {
           return Promise.resolve({ rows: channelRow ? [channelRow] : [] });
         }
         return Promise.resolve({ rows: [] });
       });
     }
 
-    it('creates a fresh group and writes its pk back onto the channel, then completes', async () => {
-      mockChannelQueries({ id: 10, authentik_group_id: null });
+    it('creates a fresh group (with full CloudTAK attributes) and writes its pk back onto the channel, then completes', async () => {
+      mockChannelQueries({ id: 10, team_id: 5, display_name: 'Teams - LSAR', description: 'desc', authentik_group_id: null });
       global.fetch = jest.fn().mockImplementation((url, options) => {
         if (options?.method === 'POST') {
           return Promise.resolve({ ok: true, status: 201, json: () => Promise.resolve({ pk: 'fresh-pk-1' }) });
@@ -1262,11 +1262,18 @@ describe('SyncWorker Authentik failure classification wiring', () => {
 
       await worker.executeOperationSafely({ ...baseOperation });
 
-      // POSTed a create for the intended group name.
-      expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining('/core/groups/'),
-        expect.objectContaining({ method: 'POST' })
-      );
+      // POSTed a create for the intended group name, carrying the full
+      // CloudTAK attribute set derived from the channel row.
+      const postCall = global.fetch.mock.calls.find(([, o]) => o?.method === 'POST');
+      expect(postCall).toBeDefined();
+      const postBody = JSON.parse(postCall[1].body);
+      expect(postBody.name).toBe('tak_Teams - LSAR');
+      expect(postBody.attributes).toEqual({
+        agencyId: 5,
+        channelId: 10,
+        channelName: 'Teams - LSAR',
+        description: 'desc'
+      });
       // Wrote the pk back onto the channel row (guarded on IS NULL).
       const updateCall = worker.pool.query.mock.calls.find(
         ([sql]) => typeof sql === 'string' && sql.includes('UPDATE channels SET authentik_group_id')
@@ -1280,11 +1287,14 @@ describe('SyncWorker Authentik failure classification wiring', () => {
       expect(completedCall).toBeDefined();
     });
 
-    it('reuses an existing group (looked up by name) when the create POST conflicts, and writes that pk back', async () => {
-      mockChannelQueries({ id: 10, authentik_group_id: null });
+    it('reuses an existing group (looked up by name), PATCHes its attributes, and writes that pk back', async () => {
+      mockChannelQueries({ id: 10, team_id: 5, display_name: 'Teams - LSAR', description: 'desc', authentik_group_id: null });
       global.fetch = jest.fn().mockImplementation((url, options) => {
         if (options?.method === 'POST') {
           return Promise.resolve({ ok: false, status: 400, statusText: 'Bad Request' });
+        }
+        if (options?.method === 'PATCH') {
+          return Promise.resolve({ ok: true, status: 200 });
         }
         return Promise.resolve({
           ok: true,
@@ -1294,6 +1304,12 @@ describe('SyncWorker Authentik failure classification wiring', () => {
 
       await worker.executeOperationSafely({ ...baseOperation });
 
+      // A reused group gets the full attribute set PATCHed onto it.
+      const patchCall = global.fetch.mock.calls.find(([u, o]) => o?.method === 'PATCH' && u.includes('/core/groups/existing-pk-9/'));
+      expect(patchCall).toBeDefined();
+      expect(JSON.parse(patchCall[1].body)).toEqual({
+        attributes: { agencyId: 5, channelId: 10, channelName: 'Teams - LSAR', description: 'desc' }
+      });
       const updateCall = worker.pool.query.mock.calls.find(
         ([sql]) => typeof sql === 'string' && sql.includes('UPDATE channels SET authentik_group_id')
       );
@@ -1301,7 +1317,7 @@ describe('SyncWorker Authentik failure classification wiring', () => {
     });
 
     it('is a no-op success (no fetch, no update) when the channel already has a group id', async () => {
-      mockChannelQueries({ id: 10, authentik_group_id: 'already-set-pk' });
+      mockChannelQueries({ id: 10, team_id: 5, display_name: 'Teams - LSAR', description: 'desc', authentik_group_id: 'already-set-pk' });
       global.fetch = jest.fn();
 
       await worker.executeOperationSafely({ ...baseOperation });
@@ -1360,15 +1376,15 @@ describe('SyncWorker Authentik failure classification wiring', () => {
 
     function mockChannelQueries(channelRow) {
       worker.pool.query = jest.fn().mockImplementation((sql) => {
-        if (typeof sql === 'string' && sql.includes('SELECT id, authentik_group_id FROM channels')) {
+        if (typeof sql === 'string' && sql.includes('FROM channels WHERE id = $1')) {
           return Promise.resolve({ rows: channelRow ? [channelRow] : [] });
         }
         return Promise.resolve({ rows: [] });
       });
     }
 
-    it('PATCHes the group name (and description) then completes', async () => {
-      mockChannelQueries({ id: 10, authentik_group_id: 'group-pk-1' });
+    it('PATCHes the group name AND the full CloudTAK attribute set, then completes', async () => {
+      mockChannelQueries({ id: 10, team_id: 7, display_name: 'Teams - NZDF - HADR', description: 'desc', authentik_group_id: 'group-pk-1' });
       global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 200 });
 
       await worker.executeOperationSafely({ ...baseOperation });
@@ -1378,9 +1394,16 @@ describe('SyncWorker Authentik failure classification wiring', () => {
         expect.objectContaining({ method: 'PATCH' })
       );
       const [, options] = global.fetch.mock.calls[0];
+      // The whole-dict PATCH carries name + all four attributes so a rename
+      // never wipes agencyId/channelId/channelName.
       expect(JSON.parse(options.body)).toEqual({
         name: 'tak_Teams - NZDF - HADR',
-        attributes: { description: 'desc' }
+        attributes: {
+          agencyId: 7,
+          channelId: 10,
+          channelName: 'Teams - NZDF - HADR',
+          description: 'desc'
+        }
       });
       const completedCall = worker.pool.query.mock.calls.find(
         ([sql]) => typeof sql === 'string' && sql.includes('status') && sql.includes('completed')
@@ -1433,13 +1456,14 @@ describe('SyncWorker Authentik failure classification wiring', () => {
   });
 
   /**
-   * Bugfix (Channels tab has no edit action, and no way to add/edit a
-   * custom channel's Authentik/LDAP description): `updateChannelGroup`
-   * PATCHes each non-null Authentik group id carried on the payload
-   * with the new description, following the exact same
-   * fetch/`AuthentikApiError`/`classifyFailure` pattern -- including
-   * 404-is-a-no-op handling per group id -- as `removeTeamChannelGroup`
-   * immediately above, since it iterates the same three group-id fields.
+   * `updateChannelGroup` now RE-DERIVES everything from the `channels` row
+   * by `channel_id`: it PATCHes the MAIN group (`authentik_group_id`) with
+   * the full CloudTAK attribute set (agencyId/channelId/channelName/
+   * description) and the read/write pair with description only. The payload
+   * carries just `channel_id` (older payloads may still carry description/
+   * group ids, which are now ignored in favour of the row). Same
+   * fetch/`AuthentikApiError`/`classifyFailure` + 404-is-a-no-op handling
+   * as before.
    */
   describe('updateChannelGroup', () => {
     const baseOperation = {
@@ -1448,99 +1472,143 @@ describe('SyncWorker Authentik failure classification wiring', () => {
       retry_count: 0,
       max_retries: 48,
       correlation_id: 'corr-update-channel-1',
-      payload: { channel_id: 10, description: 'New description', authentik_group_id: 'group-pk-555' }
+      payload: { channel_id: 10 }
     };
 
-    it('completes successfully (one markOperationCompleted UPDATE) when the single group PATCH succeeds', async () => {
+    // Route the handler's channel SELECT to `channelRow`; the terminal
+    // status UPDATE (contains 'status = ' / 'failure_category') falls
+    // through to the default.
+    function mockChannelQueries(channelRow) {
+      worker.pool.query = jest.fn().mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('FROM channels WHERE id = $1')) {
+          return Promise.resolve({ rows: channelRow ? [channelRow] : [] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+    }
+
+    it('PATCHes the MAIN group with the full CloudTAK attribute set, then completes', async () => {
+      mockChannelQueries({
+        id: 10,
+        team_id: 3,
+        display_name: 'Teams - AWS - Ops',
+        description: 'New description',
+        authentik_group_id: 'group-pk-555',
+        authentik_read_group_id: null,
+        authentik_write_group_id: null
+      });
       global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 200 });
 
       await worker.executeOperationSafely({ ...baseOperation });
 
       expect(global.fetch).toHaveBeenCalledTimes(1);
-      expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining('/core/groups/group-pk-555/'),
-        expect.objectContaining({
-          method: 'PATCH',
-          body: JSON.stringify({ attributes: { description: 'New description' } })
-        })
+      const [url, options] = global.fetch.mock.calls[0];
+      expect(url).toContain('/core/groups/group-pk-555/');
+      expect(options.method).toBe('PATCH');
+      expect(JSON.parse(options.body)).toEqual({
+        attributes: {
+          agencyId: 3,
+          channelId: 10,
+          channelName: 'Teams - AWS - Ops',
+          description: 'New description'
+        }
+      });
+      const completedCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('completed')
       );
-      expect(worker.pool.query).toHaveBeenCalledTimes(1);
-      const [sql, params] = worker.pool.query.mock.calls[0];
-      expect(sql).toContain('completed');
-      expect(params[0]).toBe('completed');
+      expect(completedCall[1][0]).toBe('completed');
     });
 
-    it('patches each non-null group id (rw + read + write) when present, and completes successfully', async () => {
+    it('gives the MAIN group full attributes but the read/write pair description-only, then completes', async () => {
+      mockChannelQueries({
+        id: 11,
+        team_id: 4,
+        display_name: 'Teams - X - Custom',
+        description: 'Updated',
+        authentik_group_id: 'group-pk-200',
+        authentik_read_group_id: 'group-pk-201',
+        authentik_write_group_id: 'group-pk-202'
+      });
       global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 200 });
-      const operation = {
-        ...baseOperation,
-        payload: {
-          channel_id: 11,
-          description: 'Updated',
-          authentik_group_id: 'group-pk-200',
-          authentik_read_group_id: 'group-pk-201',
-          authentik_write_group_id: 'group-pk-202'
-        }
-      };
 
-      await worker.executeOperationSafely(operation);
+      await worker.executeOperationSafely({ ...baseOperation });
 
       expect(global.fetch).toHaveBeenCalledTimes(3);
-      for (const groupId of ['group-pk-200', 'group-pk-201', 'group-pk-202']) {
-        expect(global.fetch).toHaveBeenCalledWith(
-          expect.stringContaining(`/core/groups/${groupId}/`),
-          expect.objectContaining({ method: 'PATCH' })
-        );
-      }
-      expect(worker.pool.query).toHaveBeenCalledTimes(1);
-      expect(worker.pool.query.mock.calls[0][1][0]).toBe('completed');
+      const bodyFor = (pk) => {
+        const call = global.fetch.mock.calls.find(([u]) => u.includes(`/core/groups/${pk}/`));
+        return JSON.parse(call[1].body);
+      };
+      expect(bodyFor('group-pk-200')).toEqual({
+        attributes: { agencyId: 4, channelId: 11, channelName: 'Teams - X - Custom', description: 'Updated' }
+      });
+      expect(bodyFor('group-pk-201')).toEqual({ attributes: { description: 'Updated' } });
+      expect(bodyFor('group-pk-202')).toEqual({ attributes: { description: 'Updated' } });
+      const completedCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('completed')
+      );
+      expect(completedCall[1][0]).toBe('completed');
+    });
+
+    it('is a no-op success when the channel no longer exists', async () => {
+      mockChannelQueries(null);
+      global.fetch = jest.fn();
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      expect(global.fetch).not.toHaveBeenCalled();
+      const completedCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('completed')
+      );
+      expect(completedCall[1][0]).toBe('completed');
     });
 
     it('treats a 404 response for a group id as an already-absent group (success, not a failure)', async () => {
+      mockChannelQueries({ id: 10, team_id: 3, display_name: 'n', description: 'd', authentik_group_id: 'group-pk-555' });
       global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 404, statusText: 'Not Found' });
 
       await worker.executeOperationSafely({ ...baseOperation });
 
-      expect(worker.pool.query).toHaveBeenCalledTimes(1);
-      const [sql, params] = worker.pool.query.mock.calls[0];
-      expect(sql).toContain('completed');
-      expect(params[0]).toBe('completed');
+      const completedCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('completed')
+      );
+      expect(completedCall[1][0]).toBe('completed');
     });
 
-    it('results in a markPermanentlyFailed-style UPDATE (failed/permanent, no next_retry_at/retry_count) on a 4xx response other than 404', async () => {
+    it('results in a markPermanentlyFailed-style UPDATE on a 4xx response other than 404', async () => {
+      mockChannelQueries({ id: 10, team_id: 3, display_name: 'n', description: 'd', authentik_group_id: 'group-pk-555' });
       global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 400, statusText: 'Bad Request', text: async () => 'Bad Request' });
 
       await worker.executeOperationSafely({ ...baseOperation });
 
-      expect(worker.pool.query).toHaveBeenCalledTimes(1);
-      const [sql, params] = worker.pool.query.mock.calls[0];
-      expect(sql).toContain('failure_category');
-      expect(sql).not.toContain('next_retry_at');
-      expect(sql).not.toContain('retry_count');
-      expect(params[0]).toBe('failed');
-      expect(params[1]).toBe('permanent');
+      const failedCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('failure_category')
+      );
+      expect(failedCall[1][0]).toBe('failed');
+      expect(failedCall[1][1]).toBe('permanent');
     });
 
-    it('results in the existing handleOperationError retryable path on a 5xx response', async () => {
+    it('results in the retryable path on a 5xx response', async () => {
+      mockChannelQueries({ id: 10, team_id: 3, display_name: 'n', description: 'd', authentik_group_id: 'group-pk-555' });
       global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 503, statusText: 'Service Unavailable', text: async () => 'Service Unavailable' });
 
       await worker.executeOperationSafely({ ...baseOperation });
 
-      expect(worker.pool.query).toHaveBeenCalledTimes(1);
-      const [sql, params] = worker.pool.query.mock.calls[0];
-      expect(sql).toContain('next_retry_at');
-      expect(params[0]).toBe('pending');
+      const retryCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('next_retry_at')
+      );
+      expect(retryCall[1][0]).toBe('pending');
     });
 
     it('treats a rejected fetch (network error) as retryable', async () => {
+      mockChannelQueries({ id: 10, team_id: 3, display_name: 'n', description: 'd', authentik_group_id: 'group-pk-555' });
       global.fetch = jest.fn().mockRejectedValue(new Error('ECONNREFUSED'));
 
       await worker.executeOperationSafely({ ...baseOperation });
 
-      expect(worker.pool.query).toHaveBeenCalledTimes(1);
-      const [sql, params] = worker.pool.query.mock.calls[0];
-      expect(sql).toContain('next_retry_at');
-      expect(params[0]).toBe('pending');
+      const retryCall = worker.pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('next_retry_at')
+      );
+      expect(retryCall[1][0]).toBe('pending');
     });
   });
 

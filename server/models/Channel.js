@@ -591,6 +591,23 @@ class Channel {
       }
     }
 
+    // CloudTAK team-channel attributes: the rw (main) group was POSTed in
+    // Phase 1 with description only, because the channel's own id
+    // (`channelId`) is not known until the INSERT above. Now that it is,
+    // enqueue an `update_channel_group` op (on this same transactional
+    // client, so it commits/rolls back atomically with the channel row) so
+    // the worker PATCHes the MAIN group with the full CloudTAK attribute
+    // set (agencyId/channelId/channelName/description). The handler
+    // re-derives everything from the row, so the payload only needs
+    // `channel_id`. The `_READ`/`_WRITE` groups are untouched by this
+    // (they are not "main" groups).
+    await EventPublisher.publishOperation(
+      'update_channel_group',
+      { channel_id: channel.id },
+      null,
+      client
+    );
+
     return channel;
   }
 }

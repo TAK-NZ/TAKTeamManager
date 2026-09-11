@@ -76,7 +76,51 @@ function deriveTeamChannelName({
   return { channelName, authentikGroupName };
 }
 
+/**
+ * Builds the `attributes` object CloudTAK expects on a team-owned "main"
+ * Authentik group — the primary team channel's group AND a custom channel's
+ * read/write (main) group. NOT the custom channel's `_READ`/`_WRITE` groups,
+ * and NOT any global/BCH/region group.
+ *
+ * WHY THIS EXISTS. Authentik's PATCH on a group's `attributes` replaces the
+ * WHOLE dict, not a merge (see tak-server-integration.md). Every site that
+ * writes a main group's attributes must therefore write the COMPLETE set, or
+ * a later partial write silently drops keys CloudTAK relies on. Centralising
+ * the object here means create, reconcile, rename and the custom-channel edit
+ * all emit an identical shape — a missing key can't drift in at one site.
+ *
+ * KEYS (exactly what CloudTAK expects):
+ *   - `agencyId`   NUMBER — the owning Team id (`channels.team_id`).
+ *   - `channelId`  NUMBER — the channel's own id (`channels.id`); unique per
+ *                  channel, so two channels never share it. For a custom
+ *                  channel this is the channel row's id, applied only to its
+ *                  main group.
+ *   - `channelName` STRING — the human display name (`channels.display_name`,
+ *                  macrons preserved), NOT the ASCII-normalized group `name`.
+ *   - `description` STRING — the group description (`channels.description`).
+ *
+ * `agencyId`/`channelId` are coerced to numbers (route params and some call
+ * sites carry strings); a nullish `description` becomes `''` so the key is
+ * always present.
+ *
+ * @param {object} params
+ * @param {number|string} params.teamId      the owning Team id.
+ * @param {number|string} params.channelId   the channel's own id.
+ * @param {string} params.channelName        the human display name.
+ * @param {string|null|undefined} params.description
+ * @returns {{agencyId: number, channelId: number, channelName: string, description: string}}
+ */
+function teamChannelGroupAttributes({ teamId, channelId, channelName, description }) {
+  return {
+    agencyId: Number(teamId),
+    channelId: Number(channelId),
+    channelName,
+    description: description ?? ''
+  };
+}
+
 module.exports = {
   composeEffectiveRootPrefix,
-  deriveTeamChannelName
+  deriveTeamChannelName,
+  teamChannelGroupAttributes
 };
