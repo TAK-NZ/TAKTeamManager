@@ -87,6 +87,7 @@ const EventPublisher = require('../server/services/EventPublisher');
 const { toAsciiIdentifier } = require('../server/utils/asciiNormalize');
 const { resolveChannelFolderSeparator } = require('../server/utils/channelFolderSeparator');
 const { deriveTeamChannelName } = require('../server/utils/teamChannelGroupName');
+const { LOCATION_SHARING_DESCRIPTION_SUFFIX } = require('../server/config/constants');
 
 function parseArgs(argv) {
   const args = { apply: false };
@@ -230,7 +231,7 @@ async function main() {
       oldName: row.display_name,
       newName: channelName,
       authentikGroupName,
-      description: `Users from ${channelName} (Location sharing enabled)`,
+      description: `Users from ${channelName}${LOCATION_SHARING_DESCRIPTION_SUFFIX}`,
       channelDbName: channelName.toLowerCase().replace(/[^a-z0-9-]/g, '-'),
       groupId: row.authentik_group_id,
       action,

@@ -2080,8 +2080,12 @@ class SyncWorker {
       [region_channel_id]
     );
     
-    const description = channelResult.rows[0]?.description || channel_name;
-    const authentikDescription = `${description} (Bi-directional location sharing)`;
+    // Use the STORED description verbatim: the location-sharing suffix now
+    // lives IN region_channels.description (appended once at create time by
+    // GlobalChannelService.createRegionChannel), so it must NOT be appended
+    // again here -- doing so would double it. Falls back to channel_name only
+    // when the row somehow has no description.
+    const authentikDescription = channelResult.rows[0]?.description || channel_name;
     
     const groupResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/groups/`, {
       method: 'POST',
@@ -2242,7 +2246,12 @@ class SyncWorker {
     }
     
     const separator = resolveChannelFolderSeparator();
-    const authentikDescription = `${description} (Bi-directional location sharing)`;
+    // Use the payload description verbatim: the location-sharing suffix now
+    // lives IN the stored region_channels.description (appended once by
+    // GlobalChannelService.createRegionChannel/updateRegionChannel), and the
+    // enqueue site passes that stored value, so it must NOT be appended again
+    // here.
+    const authentikDescription = description;
     const requestBody = {
       // ASCII-normalized, matching createRegionChannelGroup.
       name: `tak_${tierPrefix}${separator}${toAsciiIdentifier(channel_name)}`,
@@ -4455,8 +4464,13 @@ class SyncWorker {
 
           let description = channelName;
           if (group.attributes?.description) {
-            // Remove the "(Bi-directional location sharing)" suffix if present
-            description = group.attributes.description.replace(' (Bi-directional location sharing)', '');
+            // Use the Authentik group's description VERBATIM (including the
+            // location-sharing suffix, which now lives IN the stored
+            // description as the single source of truth). Previously this
+            // stripped the suffix so the DB stayed suffix-free; that is no
+            // longer correct -- the suffix must round-trip into the local
+            // region_channels.description so /dashboard shows it too.
+            description = group.attributes.description;
           }
 
           // Check if this channel already exists in database. Scoped to

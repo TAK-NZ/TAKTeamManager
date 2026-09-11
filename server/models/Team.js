@@ -2,7 +2,7 @@ const pool = require('../config/database');
 const logger = require('../config/logger').createLogger('Team');
 const EventPublisher = require('../services/EventPublisher');
 const { isCloudTakEnabled } = require('../config/cloudtak');
-const { MAX_TEAM_DEPTH } = require('../config/constants');
+const { MAX_TEAM_DEPTH, LOCATION_SHARING_DESCRIPTION_SUFFIX } = require('../config/constants');
 const { fetchWithTimeout } = require('../utils/fetchWithTimeout');
 const { toAsciiIdentifier } = require('../utils/asciiNormalize');
 const { isValidCountryCode, normaliseCountryCode } = require('../utils/isoCountry');
@@ -2416,7 +2416,7 @@ class Team {
         continue;
       }
 
-      const description = `Users from ${channelName} (Location sharing enabled)`;
+      const description = `Users from ${channelName}${LOCATION_SHARING_DESCRIPTION_SUFFIX}`;
       const channelDbName = channelName.toLowerCase().replace(/[^a-z0-9-]/g, '-');
 
       // Update the local channel row FIRST so every read site and any
@@ -2524,7 +2524,7 @@ class Team {
         toAsciiIdentifier
       });
 
-      const description = `Users from ${team.display_name} (Location sharing enabled)`;
+      const description = `Users from ${team.display_name}${LOCATION_SHARING_DESCRIPTION_SUFFIX}`;
       const channelDbName = channelName.toLowerCase().replace(/[^a-z0-9-]/g, '-');
 
       // Bulk-import fast path: skip the synchronous Authentik call(s)

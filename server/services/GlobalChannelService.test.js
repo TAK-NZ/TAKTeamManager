@@ -362,8 +362,10 @@ describe('GlobalChannelService.createRegionChannel', () => {
       ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO region_channels')
     );
     expect(insertCall).toBeDefined();
-    // name, display_name, description, tier, created_by
-    expect(insertCall[1]).toEqual(['Northland', 'Northland', 'x', 'response', 7]);
+    // name, display_name, description, tier, created_by. The location-sharing
+    // suffix is appended to the STORED description (single source of truth,
+    // so it reaches Authentik/LDAP and /dashboard alike).
+    expect(insertCall[1]).toEqual(['Northland', 'Northland', 'x (Bi-directional location sharing)', 'response', 7]);
   });
 
   it('publishes create_region_channel_group with the tier included in the payload', async () => {

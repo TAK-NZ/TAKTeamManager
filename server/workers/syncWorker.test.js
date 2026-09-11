@@ -2493,6 +2493,33 @@ describe('SyncWorker Authentik failure classification wiring', () => {
       expect(body.name).toBe('tak_Response - Auckland');
     });
 
+    // Unified location-sharing suffix: the suffix now lives IN the stored
+    // region_channels.description (appended once by
+    // GlobalChannelService.createRegionChannel), so the worker must send the
+    // stored value VERBATIM -- it must NOT append "(Bi-directional location
+    // sharing)" a second time.
+    it('sends the stored description verbatim (does NOT re-append the location-sharing suffix)', async () => {
+      worker.pool.query = jest.fn().mockImplementation((sql) => {
+        if (typeof sql === 'string' && sql.includes('SELECT description FROM region_channels')) {
+          return Promise.resolve({ rows: [{ description: 'Activities in Auckland (Bi-directional location sharing)' }] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 201,
+        json: () => Promise.resolve({ pk: 'grp-auckland' })
+      });
+
+      await worker.executeOperationSafely({ ...baseOperation });
+
+      const [, options] = global.fetch.mock.calls[0];
+      const body = JSON.parse(options.body);
+      expect(body.attributes.description).toBe('Activities in Auckland (Bi-directional location sharing)');
+      // No doubling.
+      expect(body.attributes.description).not.toMatch(/Bi-directional location sharing\).*Bi-directional location sharing/);
+    });
+
     // Special-character bugfix (Māori macrons): a macron region name is
     // ASCII-normalized into the group name TAK consumes.
     it('ASCII-normalizes a macron region name in the group name', async () => {
