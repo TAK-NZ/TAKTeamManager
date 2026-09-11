@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const CredentialEncryptionService = require('./CredentialEncryptionService');
 const authentikService = require('./authentik');
 const logger = require('../config/logger').createLogger('GlobalChannelService');
-const { REGION_CHANNEL_TIER_PREFIX, REGION_CHANNEL_TIER_DESCRIPTION_QUALIFIER, BCH_CHANNEL_CATEGORY_PREFIX } = require('../config/constants');
+const { REGION_CHANNEL_TIER_PREFIX, REGION_CHANNEL_TIER_DESCRIPTION_QUALIFIER, BCH_CHANNEL_CATEGORY_PREFIX, LOCATION_SHARING_DESCRIPTION_SUFFIX } = require('../config/constants');
 const { buildRegionSeedWorkItems } = require('../config/regions');
 const { resolveChannelFolderSeparator } = require('../utils/channelFolderSeparator');
 // Bugfix (service-account provisioning/naming): the single source of
@@ -159,7 +159,19 @@ class GlobalChannelService {
     }
 
     const client = await pool.connect();
-    
+
+    // Store the location-sharing suffix IN the description (single source of
+    // truth): the SAME value is later pushed verbatim to the Authentik/LDAP
+    // group and returned to the /dashboard channel tree. This is the sole
+    // region-channel INSERT site, and every caller (the manual-create route
+    // and the seed path) passes only a BASE description, so appending here
+    // covers both uniformly. Guarded against a double-append in case a
+    // caller ever passes a description that already carries the suffix.
+    const baseDescription = channelData.description || '';
+    const description = baseDescription.endsWith(LOCATION_SHARING_DESCRIPTION_SUFFIX)
+      ? baseDescription
+      : `${baseDescription}${LOCATION_SHARING_DESCRIPTION_SUFFIX}`;
+
     try {
       await client.query('BEGIN');
       
@@ -174,7 +186,7 @@ class GlobalChannelService {
       `, [
         channelData.name,
         channelData.name,
-        channelData.description,
+        description,
         channelData.tier,
         createdBy
       ]);
@@ -892,7 +904,16 @@ class GlobalChannelService {
 
   async updateRegionChannel(channelId, channelData, updatedBy) {
     const client = await pool.connect();
-    
+
+    // Keep the location-sharing suffix IN the stored description on edit too
+    // (single source of truth), append-once guarded -- mirrors
+    // createRegionChannel. The worker then writes this stored value verbatim
+    // to the Authentik group.
+    const baseDescription = channelData.description || '';
+    const description = baseDescription.endsWith(LOCATION_SHARING_DESCRIPTION_SUFFIX)
+      ? baseDescription
+      : `${baseDescription}${LOCATION_SHARING_DESCRIPTION_SUFFIX}`;
+
     try {
       await client.query('BEGIN');
       
@@ -900,13 +921,13 @@ class GlobalChannelService {
         UPDATE region_channels 
         SET name = $1, description = $2
         WHERE id = $3
-      `, [channelData.name, channelData.description, channelId]);
+      `, [channelData.name, description, channelId]);
       
       // Queue operation to update Authentik group
       await EventPublisher.publishOperation('update_region_channel_group', {
         region_channel_id: channelId,
         channel_name: channelData.name,
-        description: channelData.description
+        description
       }, updatedBy);
       
       await client.query('COMMIT');

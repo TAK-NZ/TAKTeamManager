@@ -89,13 +89,13 @@ describe('teamChannelGroupAttributes', () => {
         teamId: 1,
         channelId: 1,
         channelName: 'Teams - AWS',
-        description: 'Users from Amazon Web Services (Location sharing enabled)'
+        description: 'Users from Amazon Web Services (Bi-directional location sharing)'
       })
     ).toEqual({
       agencyId: 1,
       channelId: 1,
       channelName: 'Teams - AWS',
-      description: 'Users from Amazon Web Services (Location sharing enabled)'
+      description: 'Users from Amazon Web Services (Bi-directional location sharing)'
     });
   });
 

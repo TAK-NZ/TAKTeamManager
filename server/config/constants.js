@@ -144,10 +144,34 @@ const BCH_CHANNEL_CATEGORY_PREFIX = Object.freeze({
   UTL: 'XtraTools'
 });
 
+/**
+ * The trailing qualifier appended to a Team / Response / Support channel's
+ * STORED `description` (e.g. `Users from Teams - FENZ (Bi-directional
+ * location sharing)`). "Bi-directional" is deliberate: these are read/write
+ * channels, so a member both sees others' locations and shares their own --
+ * the phrase says WHAT the channel does, not merely that a feature is on.
+ *
+ * SINGLE SOURCE OF TRUTH. Because the suffix is stored IN the description
+ * column (not appended only at Authentik-write time), the SAME string
+ * reaches three places verbatim: the Authentik/LDAP group's
+ * `attributes.description`, the `/dashboard` channel tree, and the local DB
+ * row. Every site that builds one of these descriptions must use this
+ * constant so the wording can never drift between them. It is stored
+ * exactly ONCE per description -- helpers append it when building a fresh
+ * description, and the Authentik write uses the stored value verbatim (no
+ * second append), so there is no risk of doubling.
+ *
+ * Leading space included so callers concatenate `${base}${SUFFIX}` cleanly.
+ * NOTE: custom channels are intentionally OUT of scope -- their
+ * `Custom channel: ...` descriptions carry no location-sharing qualifier.
+ */
+const LOCATION_SHARING_DESCRIPTION_SUFFIX = ' (Bi-directional location sharing)';
+
 module.exports = {
   MAX_TEAM_DEPTH,
   TAK_COLOR_NAMES,
   REGION_CHANNEL_TIER_PREFIX,
   REGION_CHANNEL_TIER_DESCRIPTION_QUALIFIER,
-  BCH_CHANNEL_CATEGORY_PREFIX
+  BCH_CHANNEL_CATEGORY_PREFIX,
+  LOCATION_SHARING_DESCRIPTION_SUFFIX
 };

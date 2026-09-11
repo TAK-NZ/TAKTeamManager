@@ -1791,7 +1791,7 @@ describe('Team.createTeamChannel Authentik group creation/reconciliation', () =>
         agencyId: 10,
         channelId: 3,
         channelName: 'Teams - FENZ',
-        description: 'Users from Fire and Emergency New Zealand (FENZ) (Location sharing enabled)'
+        description: 'Users from Fire and Emergency New Zealand (FENZ) (Bi-directional location sharing)'
       }
     });
     const insertCall = pool.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO channels'));
@@ -3886,7 +3886,7 @@ describe('Team.update renames the Authentik team-channel group on a name change 
     expect(renameCalls[0][1]).toEqual({
       channel_id: 42,
       authentik_group_name: 'tak_Teams - NZDF - HADR',
-      description: 'Users from Teams - NZDF - HADR (Location sharing enabled)'
+      description: 'Users from Teams - NZDF - HADR (Bi-directional location sharing)'
     });
     // Enqueued on the default pool (no transactional client).
     expect(renameCalls[0][2]).toBeNull();

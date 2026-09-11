@@ -101,7 +101,7 @@ describe('GET /api/channels/descriptions', () => {
     mockUserGroups = ['tak_Teams - FENZ - Southland District'];
     mockTables({
       channels: [
-        { display_name: 'Teams - FENZ - Southland District', description: 'Users from FENZ - Southland District (Location sharing enabled)' }
+        { display_name: 'Teams - FENZ - Southland District', description: 'Users from FENZ - Southland District (Bi-directional location sharing)' }
       ]
     });
 
@@ -112,7 +112,7 @@ describe('GET /api/channels/descriptions', () => {
     expect(res.body.channels[0]).toMatchObject({
       name: 'tak_Teams - FENZ - Southland District',
       display_name: 'Teams - FENZ - Southland District',
-      description: 'Users from FENZ - Southland District (Location sharing enabled)'
+      description: 'Users from FENZ - Southland District (Bi-directional location sharing)'
     });
   });
 
