@@ -246,7 +246,8 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
               COALESCE(root.root_callsign_prefix, root.root_name, '') || ' - ' || t.name
             ELSE t.name
           END AS team_name,
-          COALESCE(certs.live_certificate_count, 0) AS live_certificate_count
+          COALESCE(certs.live_certificate_count, 0) AS live_certificate_count,
+          dev_seen.device_last_seen_at AS device_last_seen_at
         FROM users u
         LEFT JOIN user_cache uc ON uc.authentik_id = u.authentik_user_id::text
         LEFT JOIN team_memberships tm ON tm.user_id = u.id AND tm.inherited_from_team_id IS NULL
@@ -258,6 +259,27 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
           WHERE user_id IS NOT NULL AND revoked = false
           GROUP BY user_id
         ) certs ON certs.user_id = u.id
+        -- The most recent time ANY of this user's TAK devices was seen
+        -- connecting to TAK Server, surfaced under "Last Login" on /users.
+        -- Sourced from tak_devices.last_seen_at (SubscriptionPoller is its
+        -- single writer, from TAK Server's reported lastEventTime) -- the
+        -- SAME column the Dashboard's per-device "Last Seen" reads, so the
+        -- two cannot drift on what the value means; here it is aggregated to
+        -- one MAX per user. Deliberately NOT filtered by revoked, unlike the
+        -- live_certificate_count join above: a device's last-seen instant is
+        -- a true historical fact regardless of whether its certificate was
+        -- later revoked, so a separate derived table is used rather than
+        -- overloading the certs join (whose revoked=false filter would wrongly
+        -- hide it). A NULL means TAK Server retains no entry for any of the
+        -- user's devices -- the client renders that as "never seen", matching
+        -- DeviceListRow's own null-Last_Seen fallback. Aggregated here in the
+        -- same single batched query (no N+1), exactly as certs is.
+        LEFT JOIN (
+          SELECT user_id, MAX(last_seen_at) AS device_last_seen_at
+          FROM tak_devices
+          WHERE user_id IS NOT NULL
+          GROUP BY user_id
+        ) dev_seen ON dev_seen.user_id = u.id
         WHERE u.is_team_device = false
           AND u.account_status <> 'orphaned'
           AND NOT (u.username LIKE ANY($2::text[]))
@@ -351,6 +373,12 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
         // refreshed each periodic sync). null => never logged in / not yet
         // synced; the /users page renders that as "Never".
         last_login: row.last_login ?? null,
+        // The most recent time any of this user's TAK devices was seen
+        // connecting to TAK Server (MAX of tak_devices.last_seen_at). null =>
+        // no device has ever been seen (or the feature is unused); the /users
+        // page renders that as "never seen", shown under last_login and only
+        // while device management is reachable client-side.
+        device_last_seen_at: row.device_last_seen_at ?? null,
         account_status: row.account_status ?? null,
         team_name: row.team_name ?? null,
         team_id: row.team_id ?? null,

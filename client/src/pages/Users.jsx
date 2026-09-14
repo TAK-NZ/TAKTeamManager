@@ -697,6 +697,25 @@ export default function Users({ user }) {
                         )}
                       </span>
                     </p>
+                    {/* The mobile-card twin of the desktop table's "Last seen"
+                        line: the most recent time any of this user's TAK
+                        devices was seen (device_last_seen_at). Same gating
+                        (`devicesEnabled`), same field, same 'never seen'
+                        fallback and DATE_TIME precision -- the two renders must
+                        not diverge on what this value means. */}
+                    {devicesEnabled && (
+                      <p className="text-gray-500 dark:text-gray-400">
+                        Last seen:{' '}
+                        <span className="text-gray-900 dark:text-gray-100">
+                          <FormattedDate
+                            value={targetUser.device_last_seen_at}
+                            fallback="never seen"
+                            precision={DATE_PRECISION.DATE_TIME}
+                            side={TOOLTIP_SIDES.LEFT}
+                          />
+                        </span>
+                      </p>
+                    )}
                   </div>
                   {/* Status signal: same "only when there's something to say"
                       rule as the desktop table's inline badge -- nothing for an
@@ -894,15 +913,42 @@ export default function Users({ user }) {
                           preserves each caller's fallback rather than
                           relocating it. If anyone wants it, it is a one-line
                           change with its own justification. */}
-                      {targetUser.last_login ? (
-                        <FormattedDate
-                          value={targetUser.last_login}
-                          fallback=""
-                          precision={DATE_PRECISION.DATE}
-                          side={TOOLTIP_SIDES.LEFT}
-                        />
-                      ) : (
-                        'Never'
+                      <div>
+                        {targetUser.last_login ? (
+                          <FormattedDate
+                            value={targetUser.last_login}
+                            fallback=""
+                            precision={DATE_PRECISION.DATE}
+                            side={TOOLTIP_SIDES.LEFT}
+                          />
+                        ) : (
+                          'Never'
+                        )}
+                      </div>
+                      {/* Under the Authentik last-login: the most recent time
+                          any of this user's TAK devices was seen connecting to
+                          TAK Server (device_last_seen_at, a MAX over the user's
+                          tak_devices.last_seen_at -- the SAME column and
+                          semantics the Dashboard's per-device "Last Seen"
+                          shows). Only rendered while device management is
+                          reachable (`devicesEnabled`), matching how every other
+                          device affordance on this page is gated; the label is
+                          always present so the value is not a bare, unexplained
+                          second date. `never seen` is DeviceListRow's own
+                          null-Last_Seen fallback, reused here for the same
+                          "TAK Server retains no entry" meaning. DATE_TIME
+                          precision (not DATE) mirrors the Dashboard's Last Seen,
+                          where the time of day matters for a live-ish signal. */}
+                      {devicesEnabled && (
+                        <div className="text-xs text-gray-400 dark:text-gray-500">
+                          Last seen:{' '}
+                          <FormattedDate
+                            value={targetUser.device_last_seen_at}
+                            fallback="never seen"
+                            precision={DATE_PRECISION.DATE_TIME}
+                            side={TOOLTIP_SIDES.LEFT}
+                          />
+                        </div>
                       )}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
