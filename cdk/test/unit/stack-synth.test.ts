@@ -62,6 +62,36 @@ describe('database safety shape (prod vs dev-test)', () => {
       })
     });
   });
+
+  // The cdk.json engineVersion string must actually reach the rendered
+  // template. This is the guard against the previous silent-fallback bug,
+  // where a version the typed enum didn't expose (e.g. 18.4) quietly deployed
+  // a hardcoded default instead. Both envs are pinned to 18.4.
+  it.each([['dev-test'], ['prod']] as const)(
+    '%s renders EngineVersion 18.4 from the configured engineVersion',
+    (envType) => {
+      const { template } = synthTemplate(envType);
+      template.hasResourceProperties('AWS::RDS::DBCluster', {
+        Engine: 'aurora-postgresql',
+        EngineVersion: '18.4'
+      });
+    }
+  );
+});
+
+describe('stack description', () => {
+  // Sibling TAK.NZ stacks (e.g. CloudTAK) set a CloudFormation stack
+  // Description; this stack previously omitted it. Assert it is present so it
+  // shows up in the CloudFormation console alongside the other stacks.
+  it.each([['dev-test'], ['prod']] as const)(
+    '%s sets a CloudFormation stack Description',
+    (envType) => {
+      const { template } = synthTemplate(envType);
+      expect(template.toJSON().Description).toBe(
+        'TAK Team Manager Application Layer - Team, User and Channel Management'
+      );
+    }
+  );
 });
 
 describe('feature-flag-gated wiring', () => {

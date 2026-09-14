@@ -16,6 +16,32 @@ export interface DatabaseProps {
 }
 
 /**
+ * Resolve the configured `engineVersion` string (from cdk.json) to an
+ * `AuroraPostgresEngineVersion`.
+ *
+ * Known versions map to the typed enum member so we inherit CDK's built-in
+ * feature metadata. Any version the installed aws-cdk-lib does not yet expose
+ * a constant for (e.g. "18.4", which is GA on Aurora but has no `VER_18_4`
+ * member as of aws-cdk-lib 2.269.0) falls through to `AuroraPostgresEngineVersion.of(full, major)`,
+ * the CDK-sanctioned escape hatch for naming an arbitrary engine version. This
+ * keeps the config value authoritative instead of silently deploying a
+ * hardcoded default.
+ */
+export function resolveAuroraPostgresVersion(engineVersion: string): rds.AuroraPostgresEngineVersion {
+  const known: Record<string, rds.AuroraPostgresEngineVersion> = {
+    '16.6': rds.AuroraPostgresEngineVersion.VER_16_6,
+    '17.4': rds.AuroraPostgresEngineVersion.VER_17_4
+  };
+  if (known[engineVersion]) {
+    return known[engineVersion];
+  }
+  // Fall back to an explicitly-named version. The major version is the part
+  // before the first dot (e.g. "18.4" -> major "18").
+  const major = engineVersion.split('.')[0];
+  return rds.AuroraPostgresEngineVersion.of(engineVersion, major);
+}
+
+/**
  * Aurora PostgreSQL cluster for TAK Team Manager, matching the pattern used by
  * auth-infra / tak-infra / CloudTAK: Serverless v2 in dev-test, provisioned
  * instances in prod, storage encrypted with the imported BaseInfra KMS key,
@@ -37,10 +63,10 @@ export class Database extends Construct {
     const dbConfig = envConfig.database;
     const prefix = `TAK-${envConfig.stackName}-TAKTeamManager`;
 
-    // Aurora Postgres engine version (defaults to 17.4, else 16.6).
-    const engineVersion = dbConfig.engineVersion === '16.6'
-      ? rds.AuroraPostgresEngineVersion.VER_16_6
-      : rds.AuroraPostgresEngineVersion.VER_17_4;
+    // Aurora Postgres engine version, resolved from the cdk.json config value.
+    // Known versions use the typed enum; anything newer (e.g. 18.4) is named
+    // explicitly via AuroraPostgresEngineVersion.of(). See the resolver above.
+    const engineVersion = resolveAuroraPostgresVersion(dbConfig.engineVersion);
     const engine = rds.DatabaseClusterEngine.auroraPostgres({ version: engineVersion });
 
     // Master credential — generated, stored in Secrets Manager (KMS-encrypted).

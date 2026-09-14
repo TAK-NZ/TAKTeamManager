@@ -38,7 +38,10 @@ export interface TakTeamManagerStackProps extends cdk.StackProps {
 
 export class TakTeamManagerStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: TakTeamManagerStackProps) {
-    super(scope, id, props);
+    super(scope, id, {
+      ...props,
+      description: 'TAK Team Manager Application Layer - Team, User and Channel Management',
+    });
 
     const { envConfig } = props;
     const stackNameComponent = envConfig.stackName;
