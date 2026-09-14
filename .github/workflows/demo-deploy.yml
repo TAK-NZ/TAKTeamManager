@@ -24,6 +24,17 @@ on:
       - '*.md'
       - '.gitignore'
   workflow_dispatch:
+    inputs:
+      force_deploy:
+        description: 'Skip the change-set replacement guard (equivalent to [force-deploy] in a commit message). Use only after confirming the change set introduces no dangerous replacements.'
+        required: false
+        type: boolean
+        default: false
+      use_prod_db:
+        description: 'Deploy with production DB sizing instead of the cheaper dev-test sizing (equivalent to [use-prod-db] in a commit message).'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   id-token: write
@@ -66,9 +77,13 @@ jobs:
 
       - name: Validate Change Set
         env:
+          # On a push, the override comes from the commit message. On a manual
+          # workflow_dispatch run there is no head_commit (COMMIT_MSG is empty),
+          # so the force_deploy input is the way to skip the guard from the UI.
           COMMIT_MSG: ${{ github.event.head_commit.message }}
+          FORCE_DEPLOY_INPUT: ${{ github.event.inputs.force_deploy }}
         run: |
-          if [[ "$COMMIT_MSG" == *"[force-deploy]"* ]]; then
+          if [[ "$FORCE_DEPLOY_INPUT" == "true" || "$COMMIT_MSG" == *"[force-deploy]"* ]]; then
             echo "🚨 Force deploy detected - skipping change set validation"
           else
             ./scripts/github/validate-changeset.sh TAK-${{ vars.DEMO_STACK_NAME }}-TAKTeamManager
@@ -97,18 +112,20 @@ jobs:
         id: db-config
         env:
           COMMIT_MSG: ${{ github.event.head_commit.message }}
+          USE_PROD_DB_INPUT: ${{ github.event.inputs.use_prod_db }}
         run: |
           # By default demo uses the cheaper dev-test database sizing even when
           # deploying the prod profile, for faster/cheaper runs. Put
-          # [use-prod-db] in the commit message to exercise the real prod DB
-          # sizing instead. These flat --context keys override the cdk.json
-          # env block (applyContextOverrides in bin/cdk.ts).
-          if [[ "$COMMIT_MSG" != *"[use-prod-db]"* ]]; then
-            echo "🔄 Using dev-test database settings for faster deployment"
-            echo "db-context=--context instanceClass=db.serverless --context instanceCount=1 --context enablePerformanceInsights=false --context monitoringInterval=0 --context backupRetentionDays=7 --context deleteProtection=false" >> $GITHUB_OUTPUT
-          else
+          # [use-prod-db] in the commit message -- or set the use_prod_db input
+          # on a manual run (there is no head_commit on workflow_dispatch) -- to
+          # exercise the real prod DB sizing instead. These flat --context keys
+          # override the cdk.json env block (applyContextOverrides in bin/cdk.ts).
+          if [[ "$USE_PROD_DB_INPUT" == "true" || "$COMMIT_MSG" == *"[use-prod-db]"* ]]; then
             echo "🚀 Using production database settings"
             echo "db-context=" >> $GITHUB_OUTPUT
+          else
+            echo "🔄 Using dev-test database settings for faster deployment"
+            echo "db-context=--context instanceClass=db.serverless --context instanceCount=1 --context enablePerformanceInsights=false --context monitoringInterval=0 --context backupRetentionDays=7 --context deleteProtection=false" >> $GITHUB_OUTPUT
           fi
 
       - name: Deploy Demo with Prod Profile
