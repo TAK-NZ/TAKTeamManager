@@ -52,25 +52,35 @@ export function filterDestinationTeams(teams, excludedTeamId) {
 }
 
 /**
- * Requirement 15.9 (and the caveat that makes it work): the
+ * Requirement 15.9: a Global_Manager is always offered EVERY team, so the
+ * dialog falls back to the all-teams branch of `GET /api/teams/my-teams`
+ * for any Global_Manager -- not only one whose Organisation-scoped list
+ * came back empty.
+ *
+ * This is the fix for a Global_Manager who ALSO belongs to a Team: the
  * Organisation-scoped call resolves the caller's OWN Organisation from
- * their first `team_memberships` row, so it returns an empty list for a
- * caller with no membership of their own -- which a Global_Manager may
- * well be. Only then, and only for a Global_Manager, does the dialog fall
- * back to the all-teams branch of `GET /api/teams/my-teams`.
+ * their first `team_memberships` row, so such a caller gets a NON-empty
+ * scoped list (just their own Organisation's teams). Gating the fallback
+ * on that list being empty therefore silently scoped a Global_Manager down
+ * to their own Organisation -- they could only transfer to / filter by
+ * their own Org's teams, not every team. `user.isAdmin` is a reliable
+ * Global_Manager signal (the server aliases both `isAdmin` and
+ * `is_global_manager` to the same cached `is_admin` column), so a
+ * Global_Manager always takes the all-teams branch here.
  *
  * Requirement 15.8 still holds for everyone else: the fallback is
  * unreachable for a non-admin caller, because the all-teams branch is
- * itself admin-gated server-side, so a non-admin with an empty scoped list
- * simply keeps the empty list.
+ * itself admin-gated server-side, so a non-admin keeps their scoped list.
  *
  * @param {Array<object>|null|undefined} scopedTeams the result of the
- *   `scope: 'organisation'` call.
+ *   `scope: 'organisation'` call. Retained in the signature (callers still
+ *   pass it) but no longer consulted -- a Global_Manager falls back
+ *   regardless of what the scoped list contained.
  * @param {{isAdmin?: boolean}|null|undefined} user the operating user.
  * @returns {boolean}
  */
 export function shouldFallBackToAllTeams(scopedTeams, user) {
-  return (!Array.isArray(scopedTeams) || scopedTeams.length === 0) && !!user?.isAdmin
+  return !!user?.isAdmin
 }
 
 /**
@@ -315,9 +325,11 @@ export default function TransferMemberDialog({ member, team, user, onClose, onCo
   const isGlobalAdmin = !!user?.isAdmin
 
   // Requirements 15.2, 15.8, 15.9: the Organisation-scoped list is the
-  // primary source (server-side Visible_Branch filtering plus server-side
-  // Organisation narrowing), with the all-teams fallback reached only on an
-  // empty scoped list for a Global_Manager.
+  // primary source for a non-admin (server-side Visible_Branch filtering
+  // plus server-side Organisation narrowing). A Global_Manager instead
+  // always takes the all-teams fallback (shouldFallBackToAllTeams), so they
+  // can transfer to ANY team -- not just their own Organisation's, which is
+  // all the scoped list returns for a Global_Manager who belongs to a Team.
   useEffect(() => {
     let isMounted = true
 

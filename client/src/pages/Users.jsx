@@ -11,7 +11,7 @@ import MemberEditRow, {
   isValidMemberCallsignSuffix,
   DEFAULT_TAK_ROLE_VALUES
 } from '../components/MemberEditRow'
-import TransferMemberDialog from '../components/TransferMemberDialog'
+import TransferMemberDialog, { shouldFallBackToAllTeams } from '../components/TransferMemberDialog'
 import SuspendAccountDialog from '../components/SuspendAccountDialog'
 import { describeAccountStatusBadge } from '../utils/accountStatusBadge'
 import { isValidNewUserEmail, extractCallsignSuffixServerError } from '../utils/newUserForm'
@@ -143,9 +143,10 @@ export default function Users({ user }) {
   const [teamFilter, setTeamFilter] = useState('')
   const [lastNameFilter, setLastNameFilter] = useState('')
 
-  // Teams the caller may filter by, loaded once (Organisation-scoped, same
-  // source the Create/Transfer dialogs use). A Global_Manager with no team of
-  // their own falls back to every team, exactly as those dialogs do.
+  // Teams the caller may filter by, loaded once. Same source the
+  // Create/Transfer dialogs use: Organisation-scoped for a non-admin, but a
+  // Global_Manager always falls back to every team (shouldFallBackToAllTeams),
+  // exactly as those dialogs do.
   const [filterTeams, setFilterTeams] = useState([])
 
   // Pagination follow-up: mirrors Devices.jsx's own fetchDevices exactly --
@@ -202,9 +203,11 @@ export default function Users({ user }) {
     }
   }, [])
 
-  // Load the teams the caller may filter by, once. Organisation-scoped (the
-  // same source the Create/Transfer dialogs use); a Global_Manager with no
-  // team of their own falls back to every team, exactly as those dialogs do.
+  // Load the teams the caller may filter by, once. Organisation-scoped for a
+  // non-admin (the same source the Create/Transfer dialogs use); a
+  // Global_Manager always falls back to every team, exactly as those dialogs
+  // do -- INCLUDING one who belongs to a Team, whose scoped list is non-empty
+  // (this is the fix for a Global_Manager being scoped to their own Org).
   // Failure is non-fatal: the Team filter simply stays empty (the list still
   // works, just without that one narrowing control).
   useEffect(() => {
@@ -213,7 +216,10 @@ export default function Users({ user }) {
       try {
         const scopedResponse = await teamsAPI.getMyTeams({ scope: 'organisation' })
         let teams = scopedResponse.data?.teams || []
-        if (teams.length === 0 && user?.isAdmin) {
+        // Only `isAdmin` is consulted, so the effect depends on that field
+        // alone (not the whole `user` object) -- matching the dep array below
+        // and TransferMemberDialog's own `{ isAdmin: ... }` call shape.
+        if (shouldFallBackToAllTeams(teams, { isAdmin: user?.isAdmin })) {
           const allResponse = await teamsAPI.getMyTeams()
           teams = allResponse.data?.teams || []
         }
@@ -427,11 +433,12 @@ export default function Users({ user }) {
     try {
       // Organisation-scoped list of teams the caller may add a user to,
       // matching TransferMemberDialog's own primary source; a
-      // Global_Manager with no team of their own falls back to every
-      // team exactly as that dialog does.
+      // Global_Manager always falls back to every team exactly as that
+      // dialog does (shouldFallBackToAllTeams), even when they belong to a
+      // Team and so have a non-empty scoped list.
       const scopedResponse = await teamsAPI.getMyTeams({ scope: 'organisation' })
       let teams = scopedResponse.data?.teams || []
-      if (teams.length === 0 && user?.isAdmin) {
+      if (shouldFallBackToAllTeams(teams, user)) {
         const allResponse = await teamsAPI.getMyTeams()
         teams = allResponse.data?.teams || []
       }
