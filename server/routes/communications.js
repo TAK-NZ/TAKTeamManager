@@ -223,7 +223,10 @@ router.post('/test-email', authenticateToken, authorize, [
     await emailService.sendEmail(
       targetEmail,
       templateKey || DEFAULT_TEST_EMAIL_TEMPLATE_KEY,
-      variables || {}
+      variables || {},
+      // Global_Manager-triggered test send: record the actor. There is no
+      // single subject user (targetEmail is arbitrary), so no targetUserId.
+      { actorUserId: req.user?.userId ?? null }
     );
 
     res.json({ message: 'Test email sent successfully', targetEmail });
