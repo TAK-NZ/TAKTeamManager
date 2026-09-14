@@ -3,6 +3,7 @@ import { PlusIcon, MagnifyingGlassIcon, XMarkIcon, ChevronUpIcon, ChevronDownIco
 import toast from 'react-hot-toast'
 import { usersAPI, teamsAPI, configAPI } from '../services/api'
 import FormattedDate, { DATE_PRECISION, TOOLTIP_SIDES } from '../components/FormattedDate'
+import { NEVER_SEEN_LABEL } from '../components/DeviceListRow'
 import UserDevicesModal, { useDeviceManagementEnabled } from '../components/UserDevicesModal'
 import BulkImportUsersDialog from '../components/BulkImportUsersDialog'
 import MemberActions from '../components/MemberActions'
@@ -700,7 +701,7 @@ export default function Users({ user }) {
                     {/* The mobile-card twin of the desktop table's "Last seen"
                         line: the most recent time any of this user's TAK
                         devices was seen (device_last_seen_at). Same gating
-                        (`devicesEnabled`), same field, same 'never seen'
+                        (`devicesEnabled`), same field, same NEVER_SEEN_LABEL
                         fallback and DATE_TIME precision -- the two renders must
                         not diverge on what this value means. */}
                     {devicesEnabled && (
@@ -709,7 +710,7 @@ export default function Users({ user }) {
                         <span className="text-gray-900 dark:text-gray-100">
                           <FormattedDate
                             value={targetUser.device_last_seen_at}
-                            fallback="never seen"
+                            fallback={NEVER_SEEN_LABEL}
                             precision={DATE_PRECISION.DATE_TIME}
                             side={TOOLTIP_SIDES.LEFT}
                           />
@@ -934,9 +935,10 @@ export default function Users({ user }) {
                           reachable (`devicesEnabled`), matching how every other
                           device affordance on this page is gated; the label is
                           always present so the value is not a bare, unexplained
-                          second date. `never seen` is DeviceListRow's own
-                          null-Last_Seen fallback, reused here for the same
-                          "TAK Server retains no entry" meaning. DATE_TIME
+                          second date. The null fallback is DeviceListRow's own
+                          exported NEVER_SEEN_LABEL, reused here (not a copied
+                          literal) for the same "TAK Server retains no entry"
+                          meaning, so the two surfaces cannot drift. DATE_TIME
                           precision (not DATE) mirrors the Dashboard's Last Seen,
                           where the time of day matters for a live-ish signal. */}
                       {devicesEnabled && (
@@ -944,7 +946,7 @@ export default function Users({ user }) {
                           Last seen:{' '}
                           <FormattedDate
                             value={targetUser.device_last_seen_at}
-                            fallback="never seen"
+                            fallback={NEVER_SEEN_LABEL}
                             precision={DATE_PRECISION.DATE_TIME}
                             side={TOOLTIP_SIDES.LEFT}
                           />
