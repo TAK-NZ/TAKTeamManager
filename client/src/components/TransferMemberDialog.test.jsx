@@ -130,20 +130,21 @@ describe('TransferMemberDialog pure helpers', () => {
   })
 
   describe('shouldFallBackToAllTeams (Reqs 15.8, 15.9)', () => {
-    it('falls back only on an empty scoped list for an admin', () => {
+    it('falls back on an empty scoped list for an admin', () => {
       expect(shouldFallBackToAllTeams([], { isAdmin: true })).toBe(true)
     })
 
-    it('does not fall back when the scoped list is non-empty, even for an admin', () => {
-      expect(shouldFallBackToAllTeams(ORG_TEAMS, { isAdmin: true })).toBe(false)
+    it('STILL falls back for an admin whose scoped list is non-empty (a Global_Manager who belongs to a Team gets every team, not just their own Org)', () => {
+      expect(shouldFallBackToAllTeams(ORG_TEAMS, { isAdmin: true })).toBe(true)
     })
 
-    it('does not fall back for a non-admin with an empty scoped list (Req 15.8)', () => {
+    it('does not fall back for a non-admin, whatever the scoped list (Req 15.8)', () => {
       expect(shouldFallBackToAllTeams([], { isAdmin: false })).toBe(false)
+      expect(shouldFallBackToAllTeams(ORG_TEAMS, { isAdmin: false })).toBe(false)
       expect(shouldFallBackToAllTeams([], undefined)).toBe(false)
     })
 
-    it('treats a missing scoped list as empty', () => {
+    it('does not consult the scoped list at all -- admin status alone decides', () => {
       expect(shouldFallBackToAllTeams(undefined, { isAdmin: true })).toBe(true)
       expect(shouldFallBackToAllTeams(undefined, { isAdmin: false })).toBe(false)
     })
@@ -465,9 +466,20 @@ describe('TransferMemberDialog (mounted)', () => {
     expect(optionValues()).toEqual([])
   })
 
-  it('does not fall back for an admin whose scoped list is non-empty (Req 15.9)', async () => {
+  it('STILL falls back to the all-teams call for an admin whose scoped list is non-empty -- a Global_Manager who belongs to a Team must be able to transfer to ANY team, not just their own Org (Req 15.9)', async () => {
+    // Both calls resolve to a list via the default mock; the point is that the
+    // second (all-teams) call is made at all despite the first being non-empty.
+    teamsAPI.getMyTeams
+      .mockResolvedValueOnce({ data: { teams: [ORG_TEAMS[0]] } })
+      .mockResolvedValueOnce({ data: { teams: ORG_TEAMS } })
+
     await mount({ user: { isAdmin: true } })
-    expect(teamsAPI.getMyTeams).toHaveBeenCalledTimes(1)
+
+    expect(teamsAPI.getMyTeams).toHaveBeenCalledTimes(2)
+    expect(teamsAPI.getMyTeams).toHaveBeenNthCalledWith(1, { scope: 'organisation' })
+    expect(teamsAPI.getMyTeams).toHaveBeenNthCalledWith(2)
+    // The rendered options come from the all-teams call, not the scoped one.
+    expect(optionValues()).toEqual(expect.arrayContaining(['1', '3']))
   })
 
   it('refreshes the Member_List and closes on a 200 completed response (Req 15.5)', async () => {

@@ -120,6 +120,19 @@ describe('BulkTransferDialog (mounted)', () => {
     expect(optionValues()).toEqual(expect.arrayContaining(['1', '3']))
   })
 
+  it('STILL falls back to the all-teams call for a Global_Manager whose scoped list is non-empty (belongs to a Team) -- so they can transfer to ANY team, not just their own Org', async () => {
+    teamsAPI.getMyTeams
+      .mockResolvedValueOnce({ data: { teams: [ORG_TEAMS[0]] } })
+      .mockResolvedValueOnce({ data: { teams: ORG_TEAMS } })
+
+    await mount({ user: { isAdmin: true } })
+
+    expect(teamsAPI.getMyTeams).toHaveBeenCalledTimes(2)
+    expect(teamsAPI.getMyTeams).toHaveBeenNthCalledWith(1, { scope: 'organisation' })
+    expect(teamsAPI.getMyTeams).toHaveBeenNthCalledWith(2)
+    expect(optionValues()).toEqual(expect.arrayContaining(['1', '3']))
+  })
+
   it('calls bulkTransfer with every selected member id and the chosen destination team', async () => {
     usersAPI.bulkTransfer.mockResolvedValue({
       data: {
