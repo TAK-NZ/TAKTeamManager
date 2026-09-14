@@ -220,6 +220,87 @@ describe('Users Last Login cell renders through FormattedDate (task 6.7)', () =>
   })
 })
 
+// The device "Last seen" line rendered UNDER "Last Login": the most recent
+// time any of the user's TAK devices was seen connecting to TAK Server
+// (device_last_seen_at, GET /api/users' MAX of tak_devices.last_seen_at). It
+// is gated on device management being reachable (the `probeEnabled` reachability
+// probe -> `useDeviceManagementEnabled`), the same gate every other device
+// affordance on this page uses, and reuses DeviceListRow's own 'never seen'
+// null fallback so the /users aggregate and the Dashboard's per-device value
+// cannot drift on what an absent Last_Seen means.
+describe('Users device "Last seen" line (under Last Login)', () => {
+  let container
+  let root
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    vi.clearAllMocks()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    configAPI.getPublic.mockResolvedValue({ data: {} })
+    setDisplayTimezone('UTC')
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    vi.restoreAllMocks()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+    setDisplayTimezone(DEFAULT_DISPLAY_TIMEZONE)
+  })
+
+  const mountWith = async (users) => {
+    usersAPI.getAll.mockResolvedValue({ data: { users } })
+    root = createRoot(container)
+    await act(async () => {
+      root.render(<Users />)
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+  }
+
+  const lastLoginCell = () => container.querySelectorAll('tbody tr td')[3]
+
+  it('is NOT rendered at all when device management is not reachable', async () => {
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false })
+    await mountWith([userRow({ device_last_seen_at: '2026-03-10T09:15:00.000Z' })])
+
+    // No "Last seen:" label anywhere, and the Last Login cell still holds only
+    // the login date -- the device value must not leak in when the feature is
+    // off, even if the API happened to include it on the row.
+    expect(container.textContent).not.toContain('Last seen:')
+    expect(lastLoginCell().textContent).toBe('2026-03-12')
+  })
+
+  it('renders the device last-seen date-time under Last Login when device management is reachable', async () => {
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: true })
+    await mountWith([userRow({ device_last_seen_at: '2026-03-10T09:15:00.000Z' })])
+
+    expect(container.textContent).toContain('Last seen:')
+    // DATE_TIME precision in the installed UTC zone -- the calendar day plus a
+    // time of day, distinct from Last Login's date-only render.
+    expect(lastLoginCell().textContent).toContain('2026-03-10')
+    expect(lastLoginCell().textContent).toContain('2026-03-12') // the login date is still there above it
+    // The raw ISO value never reaches the page.
+    expect(container.textContent).not.toContain('2026-03-10T09:15:00.000Z')
+  })
+
+  it('renders the DeviceListRow "never seen" fallback when the user has no device last-seen', async () => {
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: true })
+    await mountWith([userRow({ device_last_seen_at: null })])
+
+    expect(container.textContent).toContain('Last seen:')
+    expect(lastLoginCell().textContent).toContain('never seen')
+  })
+})
+
 // Sorting by "User" (name) and "Last Login" -- the two columns clicking a
 // header now sorts by, mirroring TeamDetail.jsx's own click-to-sort/
 // click-again-to-reverse convention (handleSort/getSortIcon). Unit and

@@ -514,6 +514,7 @@ describe('GET /api/users scoped-caller examples (task 10.4)', () => {
       direct_membership_org_id: 7,
       team_name: null,
       live_certificate_count: 0,
+      device_last_seen_at: null,
       total_count: 1,
       ...overrides,
     };
