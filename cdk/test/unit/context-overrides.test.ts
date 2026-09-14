@@ -24,7 +24,7 @@ function baseConfig(): ContextEnvironmentConfig {
     database: {
       instanceClass: 'db.serverless',
       instanceCount: 1,
-      engineVersion: '17.4',
+      engineVersion: '18.4',
       allocatedStorage: 20,
       maxAllocatedStorage: 100,
       enablePerformanceInsights: false,
@@ -128,7 +128,7 @@ describe('applyContextOverrides', () => {
   it('returns a config that still carries every base field the overrides did not touch', () => {
     const result = applyContextOverrides(withContext({ stackName: 'Demo' }), baseConfig());
     // Untouched nested values survive the merge.
-    expect(result.database.engineVersion).toBe('17.4');
+    expect(result.database.engineVersion).toBe('18.4');
     expect(result.ecs.taskMemory).toBe(1024);
     expect(result.general.removalPolicy).toBe('DESTROY');
   });
