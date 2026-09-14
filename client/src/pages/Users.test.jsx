@@ -153,12 +153,18 @@ describe('Users Last Login cell renders through FormattedDate (task 6.7)', () =>
     return id ? document.getElementById(id) : null
   }
 
-  it('renders the date-only string in the installed zone, unchanged', async () => {
+  it('renders the Acct (Authentik last-login) value as a labelled date-TIME in the installed zone', async () => {
     await mountWith([userRow()])
 
-    // `formatDate`, so the calendar day in the installed zone and no time of
-    // day -- exactly what this cell rendered before the adoption.
-    expect(lastLoginCell().textContent).toBe('2026-03-12')
+    // With device management unreachable (this block's beforeEach), the cell
+    // shows only the Acct line: an "Acct: " label plus the last_login rendered
+    // at DATE_TIME precision (a calendar day AND a time of day), no longer the
+    // bare date-only string it used to be.
+    expect(lastLoginCell().textContent).toContain('Acct:')
+    expect(lastLoginCell().textContent).toContain('2026-03-12')
+    // A time-of-day component is present (HH:MM), distinguishing DATE_TIME from
+    // the old date-only render.
+    expect(lastLoginCell().textContent).toMatch(/\d{2}:\d{2}/)
     // The raw ISO value the row carries must not reach the page.
     expect(container.textContent).not.toContain(REPORTED_INSTANT)
   })
@@ -201,34 +207,37 @@ describe('Users Last Login cell renders through FormattedDate (task 6.7)', () =>
       host.dispatchEvent(new PointerEvent('pointerout', { bubbles: true }))
     })
     expect(tooltipOf()).toBeNull()
-    expect(lastLoginCell().textContent).toBe('2026-03-12')
+    expect(lastLoginCell().textContent).toContain('2026-03-12')
   })
 
-  // Decision 13, pinned rather than described. The absent case takes the
-  // ternary's own false branch and renders `'Never'`; the present-but-
-  // unparseable case takes the TRUTHY branch and renders the helper's default
-  // `''`. Both carry no disclosure host at all (Criterion 2.7).
+  // Decision 13, still pinned. The absent case takes the Acct ternary's false
+  // branch and renders 'Never'; the present-but-unparseable case takes the
+  // TRUTHY branch and renders the helper's default '' (so the cell shows just
+  // the 'Acct: ' label). Both carry no disclosure host at all (Criterion 2.7).
+  // The cell now carries an 'Acct: ' label prefix, so the expected string is
+  // matched with toContain rather than exact equality.
   it.each([
-    ['an absent last_login (the ternary\'s own branch)', null, 'Never'],
-    ['a present-but-unparseable last_login', 'not-a-date', '']
-  ])('renders %s as %o with no disclosure host', async (_name, lastLogin, expected) => {
+    ['an absent last_login (the ternary\'s own branch)', null, 'Acct: Never'],
+    ['a present-but-unparseable last_login', 'not-a-date', 'Acct:']
+  ])('renders %s with no disclosure host', async (_name, lastLogin, expected) => {
     await mountWith([userRow({ last_login: lastLogin })])
 
-    expect(lastLoginCell().textContent).toBe(expected)
+    expect(lastLoginCell().textContent).toContain(expected)
     expect(hostOf()).toBeNull()
     expect(container.querySelector('[aria-describedby]')).toBeNull()
   })
 })
 
-// The device "Last seen" line rendered UNDER "Last Login": the most recent
-// time any of the user's TAK devices was seen connecting to TAK Server
-// (device_last_seen_at, GET /api/users' MAX of tak_devices.last_seen_at). It
-// is gated on device management being reachable (the `probeEnabled` reachability
-// probe -> `useDeviceManagementEnabled`), the same gate every other device
-// affordance on this page uses, and reuses DeviceListRow's own 'never seen'
-// null fallback so the /users aggregate and the Dashboard's per-device value
-// cannot drift on what an absent Last_Seen means.
-describe('Users device "Last seen" line (under Last Login)', () => {
+// The last-activity cell shows two labelled timestamps: "TAK:" (the most
+// recent time any of the user's TAK devices was seen connecting to TAK Server,
+// device_last_seen_at) FIRST, then "Acct:" (the Authentik last-login). The TAK
+// line is gated on device management being reachable (the `probeEnabled`
+// reachability probe -> `useDeviceManagementEnabled`), the same gate every
+// other device affordance on this page uses; when the feature is off only the
+// Acct line remains. The TAK null value reuses DeviceListRow's own 'never seen'
+// fallback so the /users aggregate and the Dashboard's per-device value cannot
+// drift on what an absent Last_Seen means.
+describe('Users last-activity cell (TAK device last-seen + Acct last-login)', () => {
   let container
   let root
 
@@ -268,44 +277,52 @@ describe('Users device "Last seen" line (under Last Login)', () => {
 
   const lastLoginCell = () => container.querySelectorAll('tbody tr td')[3]
 
-  it('is NOT rendered at all when device management is not reachable', async () => {
+  it('shows no TAK line when device management is not reachable, leaving only the Acct line', async () => {
     deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: false })
     await mountWith([userRow({ device_last_seen_at: '2026-03-10T09:15:00.000Z' })])
 
-    // No "Last seen:" label anywhere, and the Last Login cell still holds only
-    // the login date -- the device value must not leak in when the feature is
-    // off, even if the API happened to include it on the row.
-    expect(container.textContent).not.toContain('Last seen:')
-    expect(lastLoginCell().textContent).toBe('2026-03-12')
+    // No "TAK:" label anywhere, and the device value must not leak in when the
+    // feature is off, even if the API happened to include it on the row. Only
+    // the Acct (last_login) line remains.
+    expect(lastLoginCell().textContent).not.toContain('TAK:')
+    expect(container.textContent).not.toContain('2026-03-10')
+    expect(lastLoginCell().textContent).toContain('Acct:')
+    expect(lastLoginCell().textContent).toContain('2026-03-12')
   })
 
-  it('renders the device last-seen date-time under Last Login when device management is reachable', async () => {
+  it('shows the TAK line FIRST, then Acct, both as date-times, when device management is reachable', async () => {
     deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: true })
     await mountWith([userRow({ device_last_seen_at: '2026-03-10T09:15:00.000Z' })])
 
-    expect(container.textContent).toContain('Last seen:')
-    // DATE_TIME precision in the installed UTC zone -- the calendar day plus a
-    // time of day, distinct from Last Login's date-only render.
-    expect(lastLoginCell().textContent).toContain('2026-03-10')
-    expect(lastLoginCell().textContent).toContain('2026-03-12') // the login date is still there above it
+    const text = lastLoginCell().textContent
+    expect(text).toContain('TAK:')
+    expect(text).toContain('Acct:')
+    // Both rendered at DATE_TIME precision in the installed UTC zone.
+    expect(text).toContain('2026-03-10') // TAK (device last-seen)
+    expect(text).toContain('2026-03-12') // Acct (last_login)
+    // TAK is rendered before Acct.
+    expect(text.indexOf('TAK:')).toBeLessThan(text.indexOf('Acct:'))
     // The raw ISO value never reaches the page.
     expect(container.textContent).not.toContain('2026-03-10T09:15:00.000Z')
   })
 
-  it('renders the DeviceListRow "never seen" fallback when the user has no device last-seen', async () => {
+  it('renders the DeviceListRow "never seen" fallback for a null TAK device last-seen', async () => {
     deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: true })
     await mountWith([userRow({ device_last_seen_at: null })])
 
-    expect(container.textContent).toContain('Last seen:')
+    expect(lastLoginCell().textContent).toContain('TAK:')
     expect(lastLoginCell().textContent).toContain('never seen')
   })
 })
 
-// Sorting by "User" (name) and "Last Login" -- the two columns clicking a
-// header now sorts by, mirroring TeamDetail.jsx's own click-to-sort/
-// click-again-to-reverse convention (handleSort/getSortIcon). Unit and
-// Status are not sortable yet -- out of scope for this change.
-describe('Users sortable columns (User, Last Login)', () => {
+// Sorting mirrors TeamDetail.jsx's click-to-sort/click-again-to-reverse
+// convention (handleSort/getSortIcon). The sortable targets are: the "User"
+// (name) header, and -- inside the last-activity header -- two independent
+// sort buttons, "TAK" (device_last_seen_at) and "Acct" (last_login). This
+// block runs with device management UNREACHABLE, so only the Acct button is
+// present; the TAK button's own sort behaviour is covered in its own block
+// below. Unit and Status are not sortable yet -- out of scope.
+describe('Users sortable columns (User, Acct last-login)', () => {
   let container
   let root
 
@@ -345,7 +362,9 @@ describe('Users sortable columns (User, Last Login)', () => {
   }
 
   const userNameHeader = () => Array.from(container.querySelectorAll('thead th')).find((th) => th.textContent.trim() === 'User')
-  const lastLoginHeader = () => Array.from(container.querySelectorAll('thead th')).find((th) => th.textContent.trim() === 'Last Login')
+  // The Acct last-login sort target is now a <button> inside the last-activity
+  // <th>, located by its stable accessible name rather than by header text.
+  const acctSortButton = () => container.querySelector('button[aria-label="Sort by account last login"]')
   const bodyRowNames = () => Array.from(container.querySelectorAll('tbody tr')).map((tr) => tr.querySelector('td:first-child .text-sm.font-medium').textContent)
 
   it('defaults to ascending by name (case-insensitively) on initial load, with the User header\'s sort icon already shown', async () => {
@@ -357,7 +376,7 @@ describe('Users sortable columns (User, Last Login)', () => {
 
     expect(bodyRowNames()).toEqual(['Alice', 'Bob', 'charlie'])
     expect(userNameHeader().querySelector('svg')).not.toBeNull()
-    expect(lastLoginHeader().querySelector('svg')).toBeNull()
+    expect(acctSortButton().querySelector('svg')).toBeNull()
   })
 
   it('reverses to descending on a first click of the (already-active) User header', async () => {
@@ -391,7 +410,7 @@ describe('Users sortable columns (User, Last Login)', () => {
     expect(bodyRowNames()).toEqual(['Alice', 'Bob', 'Charlie'])
   })
 
-  it('switching to the Last Login header sorts ascending regardless of the User column\'s prior direction', async () => {
+  it('switching to the Acct sort button sorts ascending regardless of the User column\'s prior direction', async () => {
     await mountWith([
       userRow({ pk: 1, name: 'Charlie', last_login: '2026-03-10T00:00:00.000Z' }),
       userRow({ pk: 2, name: 'Alice', last_login: '2026-03-12T00:00:00.000Z' }),
@@ -407,11 +426,11 @@ describe('Users sortable columns (User, Last Login)', () => {
       userNameHeader().dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
     await act(async () => {
-      lastLoginHeader().dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      acctSortButton().dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
 
     expect(bodyRowNames()).toEqual(['Charlie', 'Bob', 'Alice'])
-    expect(lastLoginHeader().querySelector('svg')).not.toBeNull()
+    expect(acctSortButton().querySelector('svg')).not.toBeNull()
     expect(userNameHeader().querySelector('svg')).toBeNull()
   })
 
@@ -422,7 +441,7 @@ describe('Users sortable columns (User, Last Login)', () => {
     ])
 
     await act(async () => {
-      lastLoginHeader().dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      acctSortButton().dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
 
     expect(bodyRowNames()).toEqual(['Alice', 'Charlie'])
@@ -435,7 +454,94 @@ describe('Users sortable columns (User, Last Login)', () => {
     ])
 
     await act(async () => {
-      lastLoginHeader().dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      acctSortButton().dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+
+    expect(bodyRowNames()).toEqual(['Alice', 'Charlie'])
+  })
+})
+
+// The TAK sort target (device_last_seen_at) inside the last-activity header,
+// present only while device management is reachable. Sorts the fetched page by
+// the device last-seen timestamp, independently of the Acct (last_login) sort,
+// with the same NaN-as-earliest handling.
+describe('Users TAK last-seen sort (device management reachable)', () => {
+  let container
+  let root
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    vi.clearAllMocks()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    deviceManagementAPI.probeEnabled.mockResolvedValue({ enabled: true })
+    configAPI.getPublic.mockResolvedValue({ data: {} })
+    setDisplayTimezone('UTC')
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount()
+      })
+      root = null
+    }
+    container.remove()
+    vi.restoreAllMocks()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+    setDisplayTimezone(DEFAULT_DISPLAY_TIMEZONE)
+  })
+
+  const mountWith = async (users) => {
+    usersAPI.getAll.mockResolvedValue({ data: { users } })
+    root = createRoot(container)
+    await act(async () => {
+      root.render(<Users />)
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+  }
+
+  const takSortButton = () => container.querySelector('button[aria-label="Sort by TAK last seen"]')
+  const acctSortButton = () => container.querySelector('button[aria-label="Sort by account last login"]')
+  const bodyRowNames = () => Array.from(container.querySelectorAll('tbody tr')).map((tr) => tr.querySelector('td:first-child .text-sm.font-medium').textContent)
+
+  it('renders both TAK and Acct sort buttons when device management is reachable', async () => {
+    await mountWith([userRow()])
+    expect(takSortButton()).not.toBeNull()
+    expect(acctSortButton()).not.toBeNull()
+  })
+
+  it('sorts ascending by device_last_seen_at when the TAK button is clicked, independently of last_login order', async () => {
+    // last_login order is deliberately the REVERSE of device_last_seen_at
+    // order, so a result that matches the TAK order proves it sorted by the
+    // TAK field and not by last_login.
+    await mountWith([
+      userRow({ pk: 1, name: 'Charlie', last_login: '2026-03-12T00:00:00.000Z', device_last_seen_at: '2026-03-10T00:00:00.000Z' }),
+      userRow({ pk: 2, name: 'Alice', last_login: '2026-03-10T00:00:00.000Z', device_last_seen_at: '2026-03-12T00:00:00.000Z' }),
+      userRow({ pk: 3, name: 'Bob', last_login: '2026-03-11T00:00:00.000Z', device_last_seen_at: '2026-03-11T00:00:00.000Z' })
+    ])
+
+    await act(async () => {
+      takSortButton().dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+
+    // Ascending by device_last_seen_at: Charlie (10th) < Bob (11th) < Alice (12th).
+    expect(bodyRowNames()).toEqual(['Charlie', 'Bob', 'Alice'])
+    expect(takSortButton().querySelector('svg')).not.toBeNull()
+    expect(acctSortButton().querySelector('svg')).toBeNull()
+  })
+
+  it('sorts a "never seen" (absent device_last_seen_at) row as the earliest ascending', async () => {
+    await mountWith([
+      userRow({ pk: 1, name: 'Charlie', device_last_seen_at: '2026-03-10T00:00:00.000Z' }),
+      userRow({ pk: 2, name: 'Alice', device_last_seen_at: null })
+    ])
+
+    await act(async () => {
+      takSortButton().dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
 
     expect(bodyRowNames()).toEqual(['Alice', 'Charlie'])
@@ -499,7 +605,7 @@ describe('Users column layout (no avatar, Callsign column)', () => {
     const headers = Array.from(container.querySelectorAll('thead th')).map((th) => th.textContent.trim())
     expect(headers).toContain('Callsign')
     // The Status column was removed, so the order is
-    // User(0) | Callsign(1) | Unit(2) | Last Login(3) | Actions(4).
+    // User(0) | Callsign(1) | Unit(2) | Last activity/TAK+Acct(3) | Actions(4).
     expect(headers).not.toContain('Status')
     const cells = container.querySelectorAll('tbody tr td')
     expect(cells).toHaveLength(5)

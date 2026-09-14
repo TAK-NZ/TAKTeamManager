@@ -126,7 +126,8 @@ export default function Users({ user }) {
   const [createError, setCreateError] = useState(null)
   const [creatingUser, setCreatingUser] = useState(false)
 
-  // Sorting by "User" (name) or "Last Login", mirroring TeamDetail.jsx's
+  // Sorting by "User" (name), TAK last-seen (device_last_seen_at) or Acct
+  // last-login (last_login), mirroring TeamDetail.jsx's
   // own sortField/sortDirection + handleSort/getSortIcon convention
   // (clicking the active column's header flips direction; clicking a
   // different column switches to it, ascending). Only these two columns
@@ -241,13 +242,16 @@ export default function Users({ user }) {
   // concern, exactly like Devices.jsx's own `sortedDevices`.
   //
   // `name` sorts case-insensitively as a string, matching
-  // TeamDetail.jsx's own `filterAndSort`. `last_login` sorts as a
-  // timestamp: an absent/unparseable value (`Date.parse` -> `NaN`) is
-  // treated as the earliest possible time (`-Infinity`) rather than
-  // `NaN` itself, since `NaN` compares false against everything and
-  // would leave a "Never" row's position undefined relative to its
-  // neighbours -- this way "Never" rows sort first ascending, last
-  // descending, consistent with them being the oldest activity.
+  // TeamDetail.jsx's own `filterAndSort`. The two date columns --
+  // `last_login` (the Acct/Authentik last-login) and `device_last_seen_at`
+  // (the TAK device last-seen) -- both sort as timestamps: an absent/
+  // unparseable value (`Date.parse` -> `NaN`) is treated as the earliest
+  // possible time (`-Infinity`) rather than `NaN` itself, since `NaN`
+  // compares false against everything and would leave a fallback-rendered
+  // row (Acct "Never", or the TAK NEVER_SEEN_LABEL) with an undefined
+  // position relative to its neighbours -- this way those rows sort first
+  // ascending, last descending, consistent with them being the oldest/
+  // least-recent activity.
   //
   // Performance-hardening: memoized against [users, sortField,
   // sortDirection] so an unrelated re-render (e.g. opening an edit row,
@@ -258,9 +262,15 @@ export default function Users({ user }) {
       ? [...users].sort((a, b) => {
           let aValue
           let bValue
-          if (sortField === 'last_login') {
-            const aTime = Date.parse(a.last_login)
-            const bTime = Date.parse(b.last_login)
+          // Both date columns (Acct = last_login, TAK = device_last_seen_at)
+          // sort as timestamps: an absent/unparseable value (Date.parse ->
+          // NaN) is treated as the earliest possible time (-Infinity), so a
+          // fallback-rendered row (Acct "Never", or the TAK NEVER_SEEN_LABEL)
+          // sorts first ascending, last descending, consistent with it being
+          // the oldest/least-recent activity.
+          if (sortField === 'last_login' || sortField === 'device_last_seen_at') {
+            const aTime = Date.parse(a[sortField])
+            const bTime = Date.parse(b[sortField])
             aValue = Number.isNaN(aTime) ? -Infinity : aTime
             bValue = Number.isNaN(bTime) ? -Infinity : bTime
           } else {
@@ -683,30 +693,14 @@ export default function Users({ user }) {
                     <p className="text-gray-500 dark:text-gray-400 text-right">
                       Unit: <span className="text-gray-900 dark:text-gray-100">{targetUser.team_name || 'Not assigned'}</span>
                     </p>
-                    <p className="text-gray-500 dark:text-gray-400">
-                      Last login:{' '}
-                      <span className="text-gray-900 dark:text-gray-100">
-                        {targetUser.last_login ? (
-                          <FormattedDate
-                            value={targetUser.last_login}
-                            fallback=""
-                            precision={DATE_PRECISION.DATE}
-                            side={TOOLTIP_SIDES.LEFT}
-                          />
-                        ) : (
-                          'Never'
-                        )}
-                      </span>
-                    </p>
-                    {/* The mobile-card twin of the desktop table's "Last seen"
-                        line: the most recent time any of this user's TAK
-                        devices was seen (device_last_seen_at). Same gating
-                        (`devicesEnabled`), same field, same NEVER_SEEN_LABEL
-                        fallback and DATE_TIME precision -- the two renders must
-                        not diverge on what this value means. */}
+                    {/* Mobile-card twin of the desktop last-activity cell:
+                        TAK (device last-seen) FIRST and gated on
+                        `devicesEnabled`, then Acct (Authentik last-login),
+                        both DATE_TIME so the two renders can't diverge on what
+                        either value means or how it reads. */}
                     {devicesEnabled && (
                       <p className="text-gray-500 dark:text-gray-400">
-                        Last seen:{' '}
+                        TAK:{' '}
                         <span className="text-gray-900 dark:text-gray-100">
                           <FormattedDate
                             value={targetUser.device_last_seen_at}
@@ -717,6 +711,21 @@ export default function Users({ user }) {
                         </span>
                       </p>
                     )}
+                    <p className="text-gray-500 dark:text-gray-400">
+                      Acct:{' '}
+                      <span className="text-gray-900 dark:text-gray-100">
+                        {targetUser.last_login ? (
+                          <FormattedDate
+                            value={targetUser.last_login}
+                            fallback=""
+                            precision={DATE_PRECISION.DATE_TIME}
+                            side={TOOLTIP_SIDES.LEFT}
+                          />
+                        ) : (
+                          'Never'
+                        )}
+                      </span>
+                    </p>
                   </div>
                   {/* Status signal: same "only when there's something to say"
                       rule as the desktop table's inline badge -- nothing for an
@@ -795,13 +804,42 @@ export default function Users({ user }) {
                       text badge next to the user's name (shown ONLY for a
                       non-active state), carried in TEXT per the accessibility
                       rule -- never a colour-only row highlight. */}
-                  <th
-                    onClick={() => handleSort('last_login')}
-                    className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-600"
-                  >
-                    <div className="flex items-center space-x-1">
-                      <span>Last Login</span>
-                      {getSortIcon('last_login')}
+                  {/* Last-activity column. It carries TWO independent
+                      timestamps -- TAK (the most recent time any of the user's
+                      TAK devices connected to TAK Server, device_last_seen_at)
+                      and Acct (the user's last login to Authentik, last_login)
+                      -- so a single header sort key would be ambiguous.
+                      Instead each is its own clickable sort target, stacked to
+                      mirror the two stacked values in the cell below; the
+                      active one carries the direction chevron. The TAK target
+                      is only offered while device management is reachable
+                      (`devicesEnabled`) -- with the feature off there is no TAK
+                      value to sort by, so only Acct remains, matching the
+                      cell's own feature-off fallback. Each target is a real
+                      <button> (keyboard-operable, unlike the old clickable
+                      <th>), styled to read as a small header label. */}
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                    <div className="flex flex-col items-start space-y-1">
+                      {devicesEnabled && (
+                        <button
+                          type="button"
+                          onClick={() => handleSort('device_last_seen_at')}
+                          aria-label="Sort by TAK last seen"
+                          className="flex items-center space-x-1 uppercase tracking-wider hover:text-gray-700 dark:hover:text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded"
+                        >
+                          <span>TAK</span>
+                          {getSortIcon('device_last_seen_at')}
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => handleSort('last_login')}
+                        aria-label="Sort by account last login"
+                        className="flex items-center space-x-1 uppercase tracking-wider hover:text-gray-700 dark:hover:text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded"
+                      >
+                        <span>Acct</span>
+                        {getSortIcon('last_login')}
+                      </button>
                     </div>
                   </th>
                   <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
@@ -888,62 +926,36 @@ export default function Users({ user }) {
                     </td>
                     {/* Status column removed -- the status signal is the inline
                         text badge beside the name (above). */}
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                      {/* Date_Render_Position 6 (Criteria 2.1, 2.2, 2.3): the
-                          Last Login value renders through the ONE shared
-                          FormattedDate, so it acquires the Date_Tooltip with
-                          the same behaviour as every other date in the app.
-                          `side` is LEFT because this is the second-to-last
-                          cell of a horizontally scrolling table (Criterion
-                          3.5) -- a tooltip pushed past the container's left
-                          edge is clipped AND unreachable, so trailing columns
-                          open leftward from `right-full`.
+                    {/* Last-activity cell: two labelled timestamps, both
+                        rendered through the ONE shared FormattedDate so each
+                        acquires the Date_Tooltip. `side` is LEFT because this
+                        is the second-to-last cell of a horizontally scrolling
+                        table (Criterion 3.5) -- a tooltip pushed past the
+                        container's left edge is clipped AND unreachable, so
+                        trailing columns open leftward from `right-full`.
 
-                          THE TERNARY STAYS, and `fallback` is the helper's own
-                          `''` rather than `'Never'` (design.md Decision 13).
-                          Folding the string into the prop reads better and
-                          CHANGES what this page renders: a `last_login` that
-                          is present but unparseable takes the truthy branch
-                          today and renders the EMPTY STRING, because
-                          `formatDate`'s default fallback is `''`. Passing
-                          `fallback="Never"` would render `Never` for that
-                          value instead. That is arguably the better product
-                          decision, which is exactly why it does not belong in
-                          a change whose Criterion 2.3 promises the same string
-                          character for character and whose Criterion 2.4
-                          preserves each caller's fallback rather than
-                          relocating it. If anyone wants it, it is a one-line
-                          change with its own justification. */}
-                      <div>
-                        {targetUser.last_login ? (
-                          <FormattedDate
-                            value={targetUser.last_login}
-                            fallback=""
-                            precision={DATE_PRECISION.DATE}
-                            side={TOOLTIP_SIDES.LEFT}
-                          />
-                        ) : (
-                          'Never'
-                        )}
-                      </div>
-                      {/* Under the Authentik last-login: the most recent time
-                          any of this user's TAK devices was seen connecting to
-                          TAK Server (device_last_seen_at, a MAX over the user's
-                          tak_devices.last_seen_at -- the SAME column and
-                          semantics the Dashboard's per-device "Last Seen"
-                          shows). Only rendered while device management is
-                          reachable (`devicesEnabled`), matching how every other
-                          device affordance on this page is gated; the label is
-                          always present so the value is not a bare, unexplained
-                          second date. The null fallback is DeviceListRow's own
-                          exported NEVER_SEEN_LABEL, reused here (not a copied
-                          literal) for the same "TAK Server retains no entry"
-                          meaning, so the two surfaces cannot drift. DATE_TIME
-                          precision (not DATE) mirrors the Dashboard's Last Seen,
-                          where the time of day matters for a live-ish signal. */}
+                        TAK  = device_last_seen_at, the most recent time any of
+                               the user's TAK devices connected to TAK Server
+                               (MAX over the user's tak_devices.last_seen_at --
+                               the SAME column/semantics the Dashboard's
+                               per-device "Last Seen" shows). Shown FIRST, and
+                               only while device management is reachable
+                               (`devicesEnabled`), matching every other device
+                               affordance on this page. Null renders through
+                               DeviceListRow's exported NEVER_SEEN_LABEL (not a
+                               copied literal), so the two surfaces cannot drift.
+                        Acct = last_login, the user's last login to Authentik.
+                               Now DATE_TIME (was DATE) so it reads as a real
+                               instant with a time of day and zone, matching TAK;
+                               a null/absent value shows "Never" via the ternary.
+
+                        Both use DATE_TIME. When the feature is off only Acct
+                        is rendered, matching the header's own feature-off
+                        fallback to an Acct-only sort. */}
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                       {devicesEnabled && (
-                        <div className="text-xs text-gray-400 dark:text-gray-500">
-                          Last seen:{' '}
+                        <div>
+                          <span className="text-gray-400 dark:text-gray-500">TAK: </span>
                           <FormattedDate
                             value={targetUser.device_last_seen_at}
                             fallback={NEVER_SEEN_LABEL}
@@ -952,6 +964,19 @@ export default function Users({ user }) {
                           />
                         </div>
                       )}
+                      <div>
+                        <span className="text-gray-400 dark:text-gray-500">Acct: </span>
+                        {targetUser.last_login ? (
+                          <FormattedDate
+                            value={targetUser.last_login}
+                            fallback=""
+                            precision={DATE_PRECISION.DATE_TIME}
+                            side={TOOLTIP_SIDES.LEFT}
+                          />
+                        ) : (
+                          'Never'
+                        )}
+                      </div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                       {/* Users-page-action-parity: the SAME Edit/Resend
