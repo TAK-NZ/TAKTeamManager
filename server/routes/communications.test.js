@@ -291,7 +291,7 @@ describe('POST /api/communications/test-email', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.targetEmail).toBe('admin@example.com');
-    expect(mockSendEmail).toHaveBeenCalledWith('admin@example.com', 'admin_notification_digest', {});
+    expect(mockSendEmail).toHaveBeenCalledWith('admin@example.com', 'admin_notification_digest', {}, { actorUserId: 1 });
   });
 
   it('honors an explicit templateKey/variables override', async () => {
@@ -306,7 +306,7 @@ describe('POST /api/communications/test-email', () => {
       });
 
     expect(res.status).toBe(200);
-    expect(mockSendEmail).toHaveBeenCalledWith('admin@example.com', 'access_request_approved', { admin_name: 'Alice' });
+    expect(mockSendEmail).toHaveBeenCalledWith('admin@example.com', 'access_request_approved', { admin_name: 'Alice' }, { actorUserId: 1 });
   });
 
   it('rejects a missing targetEmail with 400 and never calls sendEmail', async () => {

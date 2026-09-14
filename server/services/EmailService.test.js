@@ -21,6 +21,16 @@ jest.mock('../config/database', () => ({
   query: jest.fn()
 }));
 
+// The audit-write helper is mocked so the tests assert WHAT EmailService
+// records (action / actor / target / details) without coupling to the raw
+// audit_logs INSERT SQL. writeAuditLog's own best-effort-vs-transaction
+// behaviour is the helper's concern, tested elsewhere.
+jest.mock('../utils/auditLog', () => ({
+  writeAuditLog: jest.fn().mockResolvedValue(undefined)
+}));
+
+const { writeAuditLog } = require('../utils/auditLog');
+
 const mockSendMail = jest.fn();
 const mockCreateTransport = jest.fn().mockImplementation(() => ({
   sendMail: mockSendMail
@@ -197,6 +207,105 @@ describe('EmailService', () => {
         service.sendEmail('user@example.com', 'some_template')
       ).rejects.toThrow('SMTP server unreachable');
     });
+  })
+
+  // Every outbound email is audited from this single choke point, so a new
+  // send site is covered automatically and the trail records both what went
+  // out and what failed to.
+  describe('audit logging', () => {
+    it('writes an email.sent audit row after a successful send, with recipient/templateKey/messageId in details', async () => {
+      pool.query.mockResolvedValue({
+        rows: [{ subject_template: 'Subj', body_template: 'Body' }]
+      });
+      mockSendMail.mockResolvedValue({ messageId: 'msg-999' });
+
+      await service.sendEmail('user@example.com', 'some_template', {})
+
+      expect(writeAuditLog).toHaveBeenCalledTimes(1);
+      expect(writeAuditLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'email.sent',
+          resourceType: 'email',
+          userId: null,       // no context supplied -> background/no-actor
+          resourceId: null,   // no target user supplied
+          details: expect.objectContaining({
+            recipient: 'user@example.com',
+            templateKey: 'some_template',
+            messageId: 'msg-999'
+          })
+        })
+      );
+    });
+
+    it('threads the caller context (actorUserId -> userId, targetUserId -> resourceId) onto the audit row', async () => {
+      pool.query.mockResolvedValue({
+        rows: [{ subject_template: 'Subj', body_template: 'Body' }]
+      });
+
+      await service.sendEmail('user@example.com', 'some_template', {}, { actorUserId: 7, targetUserId: 42 })
+
+      expect(writeAuditLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'email.sent',
+          resourceType: 'email',
+          userId: 7,
+          resourceId: 42
+        })
+      );
+    });
+
+    it('writes an email.send_failed audit row (with the error) when the transport throws, before re-throwing', async () => {
+      pool.query.mockResolvedValue({
+        rows: [{ subject_template: 'Subj', body_template: 'Body' }]
+      });
+      mockSendMail.mockRejectedValue(new Error('SMTP server unreachable'));
+
+      await expect(
+        service.sendEmail('user@example.com', 'some_template', {}, { actorUserId: 7, targetUserId: 42 })
+      ).rejects.toThrow('SMTP server unreachable');
+
+      expect(writeAuditLog).toHaveBeenCalledTimes(1);
+      expect(writeAuditLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'email.send_failed',
+          resourceType: 'email',
+          userId: 7,
+          resourceId: 42,
+          details: expect.objectContaining({
+            recipient: 'user@example.com',
+            templateKey: 'some_template',
+            error: 'SMTP server unreachable'
+          })
+        })
+      );
+    });
+
+    it('does NOT write an audit row when the template is missing (nothing was sent)', async () => {
+      pool.query.mockResolvedValue({ rows: [] });
+
+      await expect(
+        service.sendEmail('user@example.com', 'missing_template')
+      ).rejects.toThrow('Email template not found: missing_template');
+
+      // A missing template throws BEFORE the transport is touched -- there is
+      // no send attempt to record, sent or failed.
+      expect(writeAuditLog).not.toHaveBeenCalled();
+    });
+
+    it('still returns the send result when the audit write itself rejects (audit is best-effort, never load-bearing)', async () => {
+      pool.query.mockResolvedValue({
+        rows: [{ subject_template: 'Subj', body_template: 'Body' }]
+      });
+      mockSendMail.mockResolvedValue({ messageId: 'msg-abc' });
+      // A rejecting audit write must NOT turn a delivered email into a thrown
+      // error -- the send already happened. (The real writeAuditLog swallows
+      // its own failure; auditEmail catches too, so this holds regardless.)
+      writeAuditLog.mockRejectedValueOnce(new Error('audit down'));
+
+      const result = await service.sendEmail('user@example.com', 'some_template');
+
+      expect(result).toEqual({ messageId: 'msg-abc' });
+    });
   });
 
   describe('replaceVariables', () => {
@@ -260,6 +369,28 @@ describe('EmailService', () => {
 
       delete process.env.PASSWORD_RESET_URL;
       delete process.env.ACCOUNT_LOGIN_URL;
+    });
+
+    it('threads the audit context through to the email.sent row', async () => {
+      pool.query.mockResolvedValue({
+        rows: [{ subject_template: 'Approved', body_template: 'Body' }]
+      });
+
+      await service.sendApprovalEmail(
+        'user@example.com',
+        { teamPath: 'FENZ', username: 'user@example.com' },
+        { actorUserId: 11, targetUserId: 22 }
+      );
+
+      expect(writeAuditLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'email.sent',
+          resourceType: 'email',
+          userId: 11,
+          resourceId: 22,
+          details: expect.objectContaining({ templateKey: 'access_request_approved' })
+        })
+      );
     });
   });
 

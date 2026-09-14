@@ -245,7 +245,9 @@ class RequestApprovalService {
               firstName: request.requested_first_name || request.requester_first_name || '',
               callsign: '',  // non-new_account requests don't generate a callsign
               additionalDetails
-            }
+            },
+            // The approving admin is the actor on the email's audit row.
+            { actorUserId: adminId ?? null }
           );
         } catch (emailErr) {
           getLogger().error({ err: emailErr }, 'Failed to send approval email');
@@ -321,7 +323,9 @@ class RequestApprovalService {
               firstName: request.requested_first_name || request.requester_first_name || '',
               callsign: attributes?.callsign || '',
               additionalDetails
-            }
+            },
+            // The approving admin is the actor on the email's audit row.
+            { actorUserId: adminId ?? null }
           );
         } catch (postCommitError) {
           // Logged, not thrown: the approval itself already committed
@@ -679,7 +683,9 @@ class RequestApprovalService {
             teamPath: denialTeamPath,
             firstName: request.requested_first_name || request.requester_first_name || '',
             denialReason
-          }
+          },
+          // The denying admin is the actor on the email's audit row.
+          { actorUserId: adminId ?? null }
         );
       } catch (emailErr) {
         getLogger().error({ err: emailErr }, 'Failed to send denial email');

@@ -1329,7 +1329,7 @@ router.post('/create-and-add', authenticateToken, authorize, [
       username: email,
       callsign: attributes?.callsign || 'Will be assigned',
       firstName
-    });
+    }, { actorUserId: req.user?.userId ?? null, targetUserId: localUserId ?? null });
   } catch (emailErr) {
     getLogger().error({ err: emailErr }, 'Failed to send welcome email to new user');
     welcomeEmailSent = false;
@@ -2251,7 +2251,7 @@ async function sendWelcomeEmailToUser(userId, teamId, actingUserId) {
     username: user.email,
     callsign: user.tak_callsign || 'Will be assigned',
     firstName: user.first_name || ''
-  });
+  }, { actorUserId: actingUserId ?? null, targetUserId: parseInt(userId, 10) });
 
   try {
     await pool.query(
