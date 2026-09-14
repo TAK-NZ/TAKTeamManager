@@ -165,7 +165,7 @@ If you have questions, contact your team administrator.$tpl$,
       'Notification when access request is approved'),
       
       ('access_request_denied', 'Your TAK Team Manager access request has been denied',
-      'Your request to {{request_description}} has been denied by {{admin_name}}.\n\nReason: {{denial_reason}}\n\nIf you have questions, please contact your team administrator.',
+      'Hi {{first_name}},\n\nYour request for access to {{team_path}} has been denied.\n\nReason: {{denial_reason}}\n\nIf you have questions, please contact your team administrator.',
       'Notification when access request is denied'),
       
       ('admin_notification_digest', 'TAK Team Manager - Pending Requests Digest',
