@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { PlusIcon, MagnifyingGlassIcon, XMarkIcon, ChevronUpIcon, ChevronDownIcon, ArrowUpTrayIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import { usersAPI, teamsAPI, configAPI } from '../services/api'
@@ -157,8 +157,9 @@ export default function Users({ user }) {
   // into state (page/pageSize/total), rather than trusting the locally
   // held page/pageSize as still current. `search` narrows server-side via
   // Authentik's own search param (GET /api/users' doc comment), so the
-  // client no longer filters `name`/`email`/`username` in memory -- see
-  // `sortedUsers` below, which now only sorts, never filters.
+  // client no longer filters `name`/`email`/`username` in memory. Sorting is
+  // server-side too now (see handleSort / fetchUsers), so the render maps over
+  // `users` directly with no client-side sort or filter pass.
   const fetchUsers = useCallback(async () => {
     setLoading(true)
     try {
@@ -169,7 +170,12 @@ export default function Users({ user }) {
         // Server-side filters; `stripEmptyParams` in usersAPI.getAll drops an
         // empty string, so '' means "no filter" without sending a literal.
         teamId: teamFilter || undefined,
-        lastNameInitial: lastNameFilter || undefined
+        lastNameInitial: lastNameFilter || undefined,
+        // Server-side sort: the whole dataset is ordered in SQL before
+        // pagination, so a sort change re-fetches (both are in the dep array
+        // below) rather than reordering only the current page.
+        sortField,
+        sortDirection
       })
       setUsers(response.data?.users || response.data || [])
       setPagination((prev) => response.data?.pagination || prev)
@@ -180,7 +186,7 @@ export default function Users({ user }) {
     } finally {
       setLoading(false)
     }
-  }, [pagination.page, pagination.pageSize, searchQuery, teamFilter, lastNameFilter])
+  }, [pagination.page, pagination.pageSize, searchQuery, teamFilter, lastNameFilter, sortField, sortDirection])
 
   useEffect(() => {
     fetchUsers()
@@ -253,42 +259,23 @@ export default function Users({ user }) {
   // ascending, last descending, consistent with them being the oldest/
   // least-recent activity.
   //
-  // Performance-hardening: memoized against [users, sortField,
-  // sortDirection] so an unrelated re-render (e.g. opening an edit row,
-  // a dialog, or updating takRoleValues) does not re-sort the fetched
-  // page from scratch.
-  const sortedUsers = useMemo(() => (
-    sortField
-      ? [...users].sort((a, b) => {
-          let aValue
-          let bValue
-          // Both date columns (Acct = last_login, TAK = device_last_seen_at)
-          // sort as timestamps: an absent/unparseable value (Date.parse ->
-          // NaN) is treated as the earliest possible time (-Infinity), so a
-          // fallback-rendered row (Acct "Never", or the TAK NEVER_SEEN_LABEL)
-          // sorts first ascending, last descending, consistent with it being
-          // the oldest/least-recent activity.
-          if (sortField === 'last_login' || sortField === 'device_last_seen_at') {
-            const aTime = Date.parse(a[sortField])
-            const bTime = Date.parse(b[sortField])
-            aValue = Number.isNaN(aTime) ? -Infinity : aTime
-            bValue = Number.isNaN(bTime) ? -Infinity : bTime
-          } else {
-            aValue = (a[sortField] || '').toLowerCase()
-            bValue = (b[sortField] || '').toLowerCase()
-          }
+  // Sorting is SERVER-SIDE (GET /api/users' sortField/sortDirection params,
+  // applied in SQL before LIMIT/OFFSET), so `users` is already the correctly
+  // ordered current page and the render maps over it directly. A former
+  // client-side re-sort was removed: it only reordered the fetched page and
+  // so could never move a user from a later page onto this one when the sort
+  // changed -- the whole dataset must be re-ordered on the server and
+  // re-paginated, which fetchUsers now triggers on any sortField/
+  // sortDirection change.
 
-          if (sortDirection === 'asc') {
-            return aValue < bValue ? -1 : aValue > bValue ? 1 : 0
-          }
-          return aValue > bValue ? -1 : aValue < bValue ? 1 : 0
-        })
-      : users
-  ), [users, sortField, sortDirection])
-
+  // Changing the sort re-orders the ENTIRE dataset server-side, so the page
+  // must reset to 1 -- the row that belongs at the top may currently live on
+  // a later page. Flipping direction on the active field, or switching field
+  // (always starting ascending), mirrors the previous click-to-sort UX.
   const handleSort = (field) => {
     setSortDirection(sortField === field && sortDirection === 'asc' ? 'desc' : 'asc')
     setSortField(field)
+    setPagination((prev) => ({ ...prev, page: 1 }))
   }
 
   const getSortIcon = (field) => {
@@ -637,7 +624,7 @@ export default function Users({ user }) {
           <div className="text-center py-12">
             <p role="alert" className="text-red-600 dark:text-red-400">{error}</p>
           </div>
-        ) : sortedUsers.length === 0 ? (
+        ) : users.length === 0 ? (
           <div className="text-center py-12">
             <p className="text-gray-500 dark:text-gray-400">No users found.</p>
           </div>
@@ -652,7 +639,7 @@ export default function Users({ user }) {
               `describeAccountStatusBadge` badge, same "wrap MemberEditRow
               in a one-column mini table" treatment for a row mid-edit. */}
           <div className="sm:hidden divide-y divide-gray-200 dark:divide-gray-700">
-            {sortedUsers.map((targetUser) => (
+            {users.map((targetUser) => (
               editingUserId === targetUser.pk ? (
                 <div key={targetUser.pk} className="overflow-x-auto">
                   <table className="min-w-full">
@@ -848,7 +835,7 @@ export default function Users({ user }) {
                 </tr>
               </thead>
               <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                {sortedUsers.map((targetUser) => (
+                {users.map((targetUser) => (
                   editingUserId === targetUser.pk ? (
                     <MemberEditRow
                       key={targetUser.pk}
@@ -1052,7 +1039,7 @@ export default function Users({ user }) {
 
         {/* Pagination follow-up: Previous/Page-N-of-M/Next footer,
             mirroring Devices.jsx's/AuditLogs.jsx's own convention exactly. */}
-        {!loading && !error && sortedUsers.length > 0 && (
+        {!loading && !error && users.length > 0 && (
           <div className="mt-6 flex flex-wrap items-center justify-between gap-2">
             <div className="text-sm text-gray-500 dark:text-gray-400">
               Showing {formatNumber((pagination.page - 1) * pagination.pageSize + 1)} to{' '}
