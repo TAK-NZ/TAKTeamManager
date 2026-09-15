@@ -951,6 +951,23 @@ function createDeviceTable(rows) {
  */
 function backPoolWith(table) {
   pool.query.mockImplementation(async (sql, params) => {
+    // Statistics/DAU capture: recordDailyActivity() inserts one
+    // device_daily_activity row per (today, matched non-revoked client_uid)
+    // for a CONNECTED entry. It runs alongside the UPDATE in the per-uid loop;
+    // recognise it here (returning a plausible rowCount) so it does not throw
+    // into the per-uid catch and inflate `failed`. The dedicated
+    // recordDailyActivity unit test asserts its SQL/params precisely; here we
+    // only need the run-loop counts to stay correct.
+    if (typeof sql === 'string' && sql.includes('INSERT INTO device_daily_activity')) {
+      const [clientUids] = params;
+      let rowCount = 0;
+      for (const clientUid of clientUids || []) {
+        const row = table.get(clientUid);
+        if (row && !row.revoked) rowCount += 1;
+      }
+      return { rowCount };
+    }
+
     if (typeof sql !== 'string' || !sql.includes('UPDATE tak_devices')) {
       throw new Error(`Unexpected statement issued by SubscriptionPoller: ${sql}`);
     }
@@ -1950,5 +1967,43 @@ describe('SubscriptionPoller.run live-subscriptions freshening', () => {
 
     expect(lastSeenUpdateCalls()).toHaveLength(1);
     expect(unreportedSweepCalls()).toHaveLength(1);
+  });
+});
+
+/**
+ * Statistics/DAU capture: recordDailyActivity() records one
+ * device_daily_activity row per (today-in-display-tz, client_uid) for the
+ * non-revoked device rows matching the candidates. Called from the run loop
+ * only for a CONNECTED entry (asserted via the run-level behaviour that the
+ * insert targets device_daily_activity).
+ */
+describe('SubscriptionPoller.recordDailyActivity (Statistics/DAU capture)', () => {
+  const ORIGINAL_TZ = process.env.DISPLAY_TIMEZONE;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.DISPLAY_TIMEZONE = 'Pacific/Auckland';
+    pool.query.mockResolvedValue({ rowCount: 1 });
+  });
+
+  afterEach(() => {
+    if (ORIGINAL_TZ === undefined) delete process.env.DISPLAY_TIMEZONE;
+    else process.env.DISPLAY_TIMEZONE = ORIGINAL_TZ;
+  });
+
+  it('inserts into device_daily_activity for non-revoked matching devices, keyed on today in the display timezone', async () => {
+    const poller = new SubscriptionPoller({ takServerService: {}, pool });
+
+    await poller.recordDailyActivity(['uid-1', 'uid-1 (Web)']);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    const [sql, params] = pool.query.mock.calls[0];
+    expect(sql).toContain('INSERT INTO device_daily_activity');
+    expect(sql).toContain('(now() AT TIME ZONE $2)::date');
+    expect(sql).toContain('FROM tak_devices d');
+    expect(sql).toContain('d.revoked = false'); // a revoked device is never "active"
+    expect(sql).toContain('ON CONFLICT (day, client_uid) DO NOTHING'); // idempotent per poll/day
+    expect(params[0]).toEqual(['uid-1', 'uid-1 (Web)']); // the candidate uids
+    expect(params[1]).toBe('Pacific/Auckland');
   });
 });

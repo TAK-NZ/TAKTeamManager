@@ -312,6 +312,15 @@ const routes = {
   'GET /api/audit-logs': ['audit_log:read'],
   'GET /api/audit-logs/export.csv': ['audit_log:read'],
 
+  // --- /api/statistics (server/routes/statistics.js) ---
+  // Global_Manager-only time series for the Statistics page (daily active
+  // users/team-devices connecting to TAK Server, plus the daily snapshot of
+  // the four /admin totals). 'statistics:read' is NOT in
+  // roleDefaults.authenticated_user, so only the global_manager wildcard
+  // satisfies it -- the same deployment-wide-view gate shape as
+  // audit_log:read / admin:stats:read.
+  'GET /api/statistics': ['statistics:read'],
+
   // --- /api/communications (server/routes/communications.js) ---
   // Requirement 30.4: Global_Manager-only GET/PUT surface for editing
   // existing email_templates rows' subject_template/body_template

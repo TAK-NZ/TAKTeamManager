@@ -19,6 +19,7 @@ import GlobalChannels from './pages/GlobalChannels'
 import Login from './pages/Login'
 import Admin from './pages/Admin'
 import AuditLogs from './pages/AuditLogs'
+import Statistics from './pages/Statistics'
 import EnrollmentView from './pages/EnrollmentView'
 import DeviceMgmtGate from './components/DeviceMgmtGate'
 import Downloads from './pages/Downloads'
@@ -255,6 +256,7 @@ function App() {
           <Route path="/global-channels" element={<GlobalChannels user={user} />} />
           <Route path="/admin" element={<Admin user={user} />} />
           <Route path="/audit-logs" element={<AuditLogs user={user} />} />
+          <Route path="/statistics" element={<Statistics user={user} />} />
           <Route path="/enrollment" element={<DeviceMgmtGate><EnrollmentView /></DeviceMgmtGate>} />
           <Route path="/downloads" element={<Downloads />} />
           {/* Catch-all: an unknown path would otherwise render the Layout

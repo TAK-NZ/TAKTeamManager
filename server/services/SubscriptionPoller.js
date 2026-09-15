@@ -425,12 +425,21 @@ class SubscriptionPoller {
         // may legitimately match twice (`<base> (Web)` and `<base> (ETL)`,
         // Requirement 22.8); the arithmetic is unchanged, the meaning is
         // "rows matched" rather than "reported uids matched".
+        const candidates = candidateClientUids(clientUid);
         const result = await this.recordLastSeen(
-          candidateClientUids(clientUid),
+          candidates,
           lastEventTime,
           connected
         );
         counts.updated += result?.rowCount || 0;
+
+        // Statistics/DAU: record today's activity for a CONNECTED entry only.
+        // Same candidate set the last-seen write used; the insert itself
+        // filters to real, non-revoked device rows and is idempotent per day.
+        // Inside this same try so a failure is isolated to this uid's poll.
+        if (connected) {
+          await this.recordDailyActivity(candidates);
+        }
       } catch (error) {
         // One bad row must not cost the rest of this poll its updates.
         counts.failed += 1;
@@ -598,6 +607,44 @@ class SubscriptionPoller {
               END
         WHERE client_uid = ANY($1::text[])`,
       [clientUids, lastEventTime, connected]
+    );
+  }
+
+  /**
+   * Statistics/DAU capture: record that the Device_Table rows matching
+   * `clientUids` were observed CONNECTED today, as one `device_daily_activity`
+   * row per (day, client_uid). The day is the CURRENT calendar day in the
+   * DISPLAY timezone (DISPLAY_TIMEZONE, default Pacific/Auckland) -- computed
+   * in SQL via `(now() AT TIME ZONE $tz)::date` so it matches every other
+   * user-visible date and needs no app-side date math -- and the rows written
+   * are exactly the non-revoked `tak_devices` rows the same poll just marked
+   * connected (a revoked device is never "active"). `INSERT ... ON CONFLICT DO
+   * NOTHING` makes the ~288 polls/day collapse to one row per device per day.
+   *
+   * BEST-EFFORT and self-contained: called only for a connected reported uid,
+   * inside the per-uid try/catch in `run()`, so a failure here is logged and
+   * costs only this uid's activity row for this poll -- it never throws out of
+   * the poll (Requirements 3.8, 14.1) and never affects the last-seen/connected
+   * writes, which have already happened.
+   *
+   * Inserting from a SELECT over `tak_devices` (rather than the raw candidate
+   * strings) means only client_uids that are REAL, non-revoked device rows are
+   * recorded -- so the DAU read can always resolve each recorded client_uid
+   * back to a user via `tak_devices.user_id`.
+   *
+   * @param {Array<string>} clientUids the reported uid's Candidate_Client_Uids.
+   * @returns {Promise<{rowCount: number}>}
+   */
+  async recordDailyActivity(clientUids) {
+    const displayTimezone = process.env.DISPLAY_TIMEZONE || 'Pacific/Auckland';
+    return this.pool.query(
+      `INSERT INTO device_daily_activity (day, client_uid)
+       SELECT (now() AT TIME ZONE $2)::date, d.client_uid
+         FROM tak_devices d
+        WHERE d.client_uid = ANY($1::text[])
+          AND d.revoked = false
+       ON CONFLICT (day, client_uid) DO NOTHING`,
+      [clientUids, displayTimezone]
     );
   }
 
