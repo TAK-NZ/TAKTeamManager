@@ -57,6 +57,7 @@ const {
   isBulkGroupReconcileDryRun
 } = require('../config/bulkGroupReconcile');
 const { resolvePinnedPks } = require('../config/pinnedGroupMembers');
+const { isIgnoredAuthentikUsername, getIgnoredUsernamePrefixes } = require('../config/authentikSyncIgnore');
 
 const AUTHENTIK_URL = () => process.env.AUTHENTIK_URL;
 const AUTHENTIK_TOKEN = () => process.env.AUTHENTIK_API_TOKEN;
@@ -263,6 +264,113 @@ function dedupe(arr) {
 }
 
 // ---------------------------------------------------------------------------
+// Ignored-prefix member PRESERVATION.
+//
+// A user whose Authentik username matches AUTHENTIK_SYNC_IGNORED_USERNAME_
+// PREFIXES (e.g. `etl-`, service accounts) is deliberately NOT materialised
+// as a local `users` row (authentikSync.syncSingleUser skips it). Every
+// desired-set query above is DB-computed, so it can never include an ignored
+// user -- and the full-replace PATCH would therefore STRIP such a user from a
+// group they were added to out-of-band. That contradicts the whole point of
+// the ignore list: a user TTM is told to ignore is one it must not touch.
+//
+// The fix, applied uniformly to EVERY owned-group family via replaceGroupMembers
+// below: before the full replace, read the group's CURRENT members, keep those
+// whose username matches an ignored prefix, and union their pks into the
+// desired set. This is:
+//   - ADDITIVE ONLY -- it can only KEEP an ignored user who is ALREADY in the
+//     group; it never adds an ignored user that isn't there, and never affects
+//     a non-ignored user (who is still governed entirely by the DB desired set).
+//   - FAIL-CLOSED -- if the current-member read fails, we cannot prove the
+//     replace won't strip an ignored user, so the caller throws (retryable) and
+//     issues NO PATCH, consistent with the module's existing fail-closed
+//     invariant on a thrown desired-set query.
+//   - SKIPPED entirely when no ignored prefixes are configured (the common
+//     case), so it adds no per-group read then.
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetch a group's CURRENT members from Authentik as { pk, username } pairs.
+ * Reads the group detail's `users_obj` (the expanded member list, which
+ * carries `pk` + `username`), via the shared rate limiter's READ lane.
+ *
+ * @param {string} groupUuid
+ * @returns {Promise<Array<{pk: string, username: string}>>}
+ * @throws {AuthentikApiError} on a non-2xx / network failure (classified) --
+ *   the caller treats this as fail-closed (no PATCH).
+ */
+async function fetchGroupMemberUsernames(groupUuid) {
+  let response;
+  try {
+    response = await authentikRequest.run({ kind: 'read' }, () =>
+      fetchWithTimeout(
+        `${AUTHENTIK_URL()}/api/v3/core/groups/${encodeURIComponent(groupUuid)}/?include_users=true`,
+        {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${AUTHENTIK_TOKEN()}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      )
+    );
+  } catch (err) {
+    throw new AuthentikApiError(
+      `Failed to read current members of group ${groupUuid}: ${err.message}`,
+      classifyFailure(err)
+    );
+  }
+
+  if (!response.ok) {
+    throw new AuthentikApiError(
+      `Failed to read current members of group ${groupUuid}: ${response.status} ${response.statusText}`,
+      classifyFailure(response.status)
+    );
+  }
+
+  const body = await response.json();
+  const usersObj = Array.isArray(body?.users_obj) ? body.users_obj : [];
+  return usersObj
+    .filter((u) => u && u.pk !== null && u.pk !== undefined && typeof u.username === 'string')
+    .map((u) => ({ pk: String(u.pk), username: u.username }));
+}
+
+/**
+ * Union the pks of any CURRENTLY-PRESENT ignored-prefix members into
+ * `desiredPks`, so the full replace does not strip them. Returns the desired
+ * set unchanged (and issues no read) when no ignored prefixes are configured.
+ *
+ * @param {string} groupUuid
+ * @param {string[]} desiredPks  the DB-computed desired set.
+ * @param {object} logContext
+ * @returns {Promise<string[]>} the desired set with preserved ignored members
+ *   unioned in.
+ * @throws {AuthentikApiError} if the current-member read fails (fail-closed).
+ */
+async function preserveIgnoredMembers(groupUuid, desiredPks, logContext = {}) {
+  // No configured prefixes -> nothing to preserve, and no reason to spend a
+  // read on every group.
+  if (getIgnoredUsernamePrefixes().length === 0) {
+    return desiredPks;
+  }
+
+  const currentMembers = await fetchGroupMemberUsernames(groupUuid);
+  const preserved = currentMembers
+    .filter((m) => isIgnoredAuthentikUsername(m.username))
+    .map((m) => m.pk);
+
+  if (preserved.length === 0) {
+    return desiredPks;
+  }
+
+  logger.info(
+    { ...logContext, groupUuid, preservedCount: preserved.length },
+    'Preserving ignored-prefix members already in the group (not stripping them from an owned group)'
+  );
+  return dedupe([...desiredPks, ...preserved]);
+}
+
+// ---------------------------------------------------------------------------
 // The full-replace PATCH primitive.
 // ---------------------------------------------------------------------------
 
@@ -280,7 +388,15 @@ function dedupe(arr) {
  */
 async function replaceGroupMembers(groupUuid, memberPks, logContext = {}) {
   const dryRun = isBulkGroupReconcileDryRun();
-  const numericPks = memberPks.map((pk) => Number(pk)).filter((n) => Number.isFinite(n));
+
+  // Preserve any currently-present ignored-prefix members (e.g. `etl-`
+  // service accounts) so the full replace never strips a user TTM was told
+  // to ignore. Additive-only and fail-closed: a read failure here throws
+  // (retryable) and no PATCH is issued. Runs before the dry-run branch too,
+  // so the dry-run log reflects the set that WOULD be written.
+  const preservedPks = await preserveIgnoredMembers(groupUuid, memberPks, logContext);
+
+  const numericPks = preservedPks.map((pk) => Number(pk)).filter((n) => Number.isFinite(n));
 
   if (dryRun) {
     logger.info(
@@ -332,6 +448,8 @@ module.exports = {
   desiredRegionMembers,
   desiredCloudTakMembers,
   replaceGroupMembers,
+  preserveIgnoredMembers,
+  fetchGroupMemberUsernames,
   // re-exported for the worker handler's convenience
   isBulkGroupReconcileEnabled,
   isBulkGroupReconcileDryRun,

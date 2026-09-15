@@ -309,3 +309,119 @@ describe('replaceGroupMembers', () => {
     });
   });
 });
+
+// Ignored-prefix member PRESERVATION: an owned-group full replace must NOT
+// strip a currently-present user whose username matches AUTHENTIK_SYNC_
+// IGNORED_USERNAME_PREFIXES (e.g. an `etl-` service account), because such a
+// user is deliberately unmaterialised locally and so is never in the
+// DB-computed desired set. The reconciler reads current members and unions
+// the ignored ones' pks back into the replace.
+describe('replaceGroupMembers: ignored-prefix member preservation', () => {
+  // A GET group-detail response carrying an expanded members list.
+  const groupDetail = (usersObj) => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ pk: 'grp-uuid', users_obj: usersObj })
+  });
+
+  beforeEach(() => {
+    mockDryRun.mockReturnValue(false);
+    process.env.AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES = 'etl-,svc-';
+  });
+
+  it('does NOT read current members or preserve anything when no ignored prefixes are configured', async () => {
+    delete process.env.AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES;
+    global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 200 });
+
+    await reconciler.replaceGroupMembers('grp-uuid', ['10', '11']);
+
+    // One call only -- the PATCH. No preservation GET.
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    const [, options] = global.fetch.mock.calls[0];
+    expect(options.method).toBe('PATCH');
+    expect(JSON.parse(options.body)).toEqual({ users: [10, 11] });
+  });
+
+  it('unions a currently-present ignored-prefix member into the PATCH so it is not stripped', async () => {
+    // Current members: a normal user (10, in the desired set), and an out-of-
+    // band `etl-` account (99, NOT in the desired set). Desired set is [10].
+    global.fetch = jest.fn().mockImplementation((url, options) => {
+      if ((options?.method ?? 'GET') === 'GET') {
+        return Promise.resolve(groupDetail([
+          { pk: 10, username: 'alice' },
+          { pk: 99, username: 'etl-nightly' }
+        ]));
+      }
+      return Promise.resolve({ ok: true, status: 200 });
+    });
+
+    await reconciler.replaceGroupMembers('grp-uuid', ['10']);
+
+    const patchCall = global.fetch.mock.calls.find(([, o]) => o?.method === 'PATCH');
+    expect(patchCall).toBeDefined();
+    // 99 (etl-) preserved alongside the desired 10.
+    expect(JSON.parse(patchCall[1].body).users.sort()).toEqual([10, 99]);
+    // The GET went through the READ lane, the PATCH through the WRITE lane.
+    expect(mockRun.mock.calls.map((c) => c[0].kind)).toEqual(
+      expect.arrayContaining(['read', 'write'])
+    );
+  });
+
+  it('does NOT preserve a non-ignored current member that is absent from the desired set (still removed)', async () => {
+    // Current members include a plain user (77) who is NOT in the desired set
+    // and NOT ignored -- the whole point of the full replace is to remove them.
+    global.fetch = jest.fn().mockImplementation((url, options) => {
+      if ((options?.method ?? 'GET') === 'GET') {
+        return Promise.resolve(groupDetail([
+          { pk: 10, username: 'alice' },
+          { pk: 77, username: 'bob' }
+        ]));
+      }
+      return Promise.resolve({ ok: true, status: 200 });
+    });
+
+    await reconciler.replaceGroupMembers('grp-uuid', ['10']);
+
+    const patchCall = global.fetch.mock.calls.find(([, o]) => o?.method === 'PATCH');
+    expect(JSON.parse(patchCall[1].body).users).toEqual([10]);
+  });
+
+  it('is FAIL-CLOSED: a failed current-member read throws (retryable) and issues NO PATCH', async () => {
+    global.fetch = jest.fn().mockImplementation((url, options) => {
+      if ((options?.method ?? 'GET') === 'GET') {
+        return Promise.resolve({ ok: false, status: 503, statusText: 'Service Unavailable' });
+      }
+      return Promise.resolve({ ok: true, status: 200 });
+    });
+
+    let caught;
+    try {
+      await reconciler.replaceGroupMembers('grp-uuid', ['10']);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(AuthentikApiError);
+    expect(caught.classification).toBe('retryable');
+    // No PATCH was issued -- only the (failed) GET.
+    const patchCall = global.fetch.mock.calls.find(([, o]) => o?.method === 'PATCH');
+    expect(patchCall).toBeUndefined();
+  });
+
+  it('DRY-RUN still preserves ignored members in the logged set and issues no write', async () => {
+    mockDryRun.mockReturnValue(true);
+    global.fetch = jest.fn().mockImplementation((url, options) => {
+      if ((options?.method ?? 'GET') === 'GET') {
+        return Promise.resolve(groupDetail([{ pk: 99, username: 'etl-nightly' }]));
+      }
+      return Promise.resolve({ ok: true, status: 200 });
+    });
+
+    const result = await reconciler.replaceGroupMembers('grp-uuid', ['10']);
+
+    // Preservation read happens even in dry-run (so the logged count reflects
+    // what WOULD be written), but no PATCH is issued.
+    expect(result).toEqual({ patched: false, dryRun: true, memberCount: 2 });
+    const patchCall = global.fetch.mock.calls.find(([, o]) => o?.method === 'PATCH');
+    expect(patchCall).toBeUndefined();
+  });
+});
