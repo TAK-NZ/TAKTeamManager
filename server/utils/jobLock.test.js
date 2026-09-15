@@ -149,6 +149,7 @@ describe('withJobLock', () => {
       [
         'CALLSIGN_POLLER',
         'CERT_EXPIRY_NOTIFICATION',
+        'DAILY_STATS_SNAPSHOT',
         'DEVICE_SYNC',
         'OWNED_GROUP_SWEEP',
         'RETENTION_CLEANUP',

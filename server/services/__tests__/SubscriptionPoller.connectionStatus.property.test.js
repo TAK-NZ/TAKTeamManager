@@ -363,6 +363,16 @@ function snapshot(table) {
 function createModelPool(table, log) {
   return {
     query: jest.fn(async (sql, params = []) => {
+      // Statistics/DAU capture: the poller's recordDailyActivity() inserts one
+      // device_daily_activity row per connected entry alongside the UPDATE.
+      // It is a known, modelled statement (not an unexpected one) and is
+      // separately unit-tested; record it so the counts below can account for
+      // it, but it is not a tak_devices UPDATE so it returns here.
+      if (typeof sql === 'string' && sql.includes('INSERT INTO device_daily_activity')) {
+        log.dailyActivityInserts = (log.dailyActivityInserts || 0) + 1;
+        return { rowCount: 0 };
+      }
+
       if (typeof sql !== 'string' || !sql.includes('UPDATE tak_devices')) {
         log.unmodelled.push(String(sql));
         return { rowCount: 0 };
@@ -547,7 +557,12 @@ describe('Property 17: One poll writes current status for every reported UID, in
       // Nothing unscoped by `client_uid`, and nothing this model could not read.
       expect(log.unscoped).toEqual([]);
       expect(log.unmodelled).toEqual([]);
-      expect(pool.query).toHaveBeenCalledTimes(reportedUids.length + 1);
+      // One UPDATE per reported uid + one unreported sweep, PLUS one
+      // device_daily_activity INSERT per connected entry (the DAU capture,
+      // counted in the model pool above).
+      expect(pool.query).toHaveBeenCalledTimes(
+        reportedUids.length + 1 + (log.dailyActivityInserts || 0)
+      );
 
       // --- the resulting state ---
 

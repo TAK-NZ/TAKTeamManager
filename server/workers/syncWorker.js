@@ -131,6 +131,10 @@ const { teamChannelGroupAttributes } = require('../utils/teamChannelGroupName');
 // started/stopped alongside the poll loop, health server, and expiry
 // scheduler below (see `start()`/`stop()`), per design.md's Section 20.
 const RetentionCleanupJob = require('../services/RetentionCleanupJob');
+// Statistics page: the Daily_Stats_Snapshot_Job, started/stopped alongside
+// the other scheduled jobs. Writes one daily_stats row per day (the four
+// /admin totals) so the Statistics page can chart their history.
+const DailyStatsSnapshotJob = require('../services/DailyStatsSnapshotJob');
 // Authentik scaling (Phase 3): the periodic anti-drift sweep, started/
 // stopped alongside the other scheduled jobs. Its own `start()` gates on
 // both OWNED_GROUP_SWEEP_ENABLED and BULK_GROUP_RECONCILE_ENABLED, so it is
@@ -510,6 +514,12 @@ class SyncWorker {
     // health server (see `start()`/`stop()` below).
     this.retentionCleanupJob = new RetentionCleanupJob();
 
+    // Statistics page: the daily snapshot of the four /admin totals into
+    // `daily_stats`. Constructed unconditionally (no timer/I/O at
+    // construction, like the jobs around it); its `start()` runs one snapshot
+    // immediately then on its own interval.
+    this.dailyStatsSnapshotJob = new DailyStatsSnapshotJob();
+
     // Authentik scaling (Phase 3): the anti-drift sweep, constructed
     // unconditionally (no timer/I/O at construction) like the jobs above;
     // its `start()` self-gates on the sweep + reconcile flags.
@@ -595,6 +605,10 @@ class SyncWorker {
     // sync_operations/audit_logs retention cleanup runs on its own
     // (default 24h) cadence independent of the poll loop.
     this.retentionCleanupJob.start();
+
+    // Statistics page: start the daily snapshot job (its own single-runner
+    // advisory lock keeps only one worker writing today's row per tick).
+    this.dailyStatsSnapshotJob.start();
 
     // Authentik scaling (Phase 3): start the anti-drift sweep. Its own
     // `start()` no-ops unless OWNED_GROUP_SWEEP_ENABLED and
@@ -749,6 +763,9 @@ class SyncWorker {
     // Requirement 25 (task 47.1): stop the retention cleanup job
     // alongside the health server.
     this.retentionCleanupJob.stop();
+
+    // Statistics page: stop the daily snapshot job alongside the others.
+    this.dailyStatsSnapshotJob.stop();
 
     // Authentik scaling (Phase 3): stop the anti-drift sweep alongside the
     // other scheduled jobs.

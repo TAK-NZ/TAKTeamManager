@@ -8,6 +8,7 @@ import {
   ClipboardDocumentListIcon,
   SignalIcon,
   DocumentMagnifyingGlassIcon,
+  ChartBarIcon,
   Bars3Icon,
   XMarkIcon,
   CogIcon,
@@ -98,6 +99,9 @@ const getNavigation = (user, deviceMgmtEnabled) => {
   if (user?.is_global_manager) {
     baseNavigation.push({ name: 'Global Channels', href: '/global-channels', icon: SignalIcon })
     baseNavigation.push({ name: 'Audit Log', href: '/audit-logs', icon: DocumentMagnifyingGlassIcon })
+    // Statistics sits directly under Audit Log: both are Global_Manager-only
+    // deployment-wide views.
+    baseNavigation.push({ name: 'Statistics', href: '/statistics', icon: ChartBarIcon })
   }
   
   if (user?.isAdmin) {

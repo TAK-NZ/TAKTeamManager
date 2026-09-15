@@ -503,6 +503,14 @@ export const auditLogsAPI = {
   },
 };
 
+// --- Statistics page (Global_Manager-only) ---
+
+export const statisticsAPI = {
+  // window: one of 8 | 30 | 90 | 365 (days). The server validates against its
+  // own allow-list and 400s anything else; we send it through as-is.
+  get: (window) => api.get('/statistics', { params: stripEmptyParams({ window }) }),
+};
+
 // --- Sign-up flow APIs (signup-flow-rework spec) ---
 
 export const signupAPI = {

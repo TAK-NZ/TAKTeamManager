@@ -170,6 +170,7 @@ app.set('trust proxy', getTrustProxyHops());
   app.use('/api/operations', require('./routes/operations'));
   app.use('/api/global-channels', require('./routes/globalChannels'));
   app.use('/api/audit-logs', require('./routes/auditLogs'));
+  app.use('/api/statistics', require('./routes/statistics'));
   app.use('/api/settings', require('./routes/settings'));
   app.use('/api/communications', require('./routes/communications'));
   app.use('/api/devices', require('./routes/devices'));
