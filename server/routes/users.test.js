@@ -174,6 +174,78 @@ describe('GET /api/users (local-sourced list)', () => {
     expect(res.body.pagination.total).toBe(4237);
   });
 
+  // Server-side sort: the ORDER BY is built in SQL from a frozen allow-list
+  // (never the raw query param) and applied BEFORE LIMIT/OFFSET, so it orders
+  // the whole filtered dataset, not just the current page. NULLS ordering
+  // reproduces the former client sort's "-Infinity for an absent date"
+  // (nulls first ascending, last descending), and a base.pk tiebreaker keeps
+  // pagination deterministic.
+  describe('sorting (sortField / sortDirection)', () => {
+    it('defaults to sorting by LOWER(username) ASC NULLS FIRST with a pk tiebreaker when no sort params are given', async () => {
+      pool.query.mockResolvedValue({ rows: [] });
+
+      const res = await request(app).get('/api/users');
+
+      expect(res.status).toBe(200);
+      const [sql] = pool.query.mock.calls[0];
+      expect(sql).toContain('ORDER BY LOWER(base.username) ASC NULLS FIRST, base.pk ASC');
+    });
+
+    it('sorts by last_login DESC NULLS LAST when asked (Acct, most-recent first)', async () => {
+      pool.query.mockResolvedValue({ rows: [] });
+
+      const res = await request(app).get('/api/users').query({ sortField: 'last_login', sortDirection: 'desc' });
+
+      expect(res.status).toBe(200);
+      const [sql] = pool.query.mock.calls[0];
+      expect(sql).toContain('ORDER BY base.last_login DESC NULLS LAST, base.pk ASC');
+    });
+
+    it('sorts by device_last_seen_at ASC NULLS FIRST when asked (TAK)', async () => {
+      pool.query.mockResolvedValue({ rows: [] });
+
+      const res = await request(app).get('/api/users').query({ sortField: 'device_last_seen_at', sortDirection: 'asc' });
+
+      expect(res.status).toBe(200);
+      const [sql] = pool.query.mock.calls[0];
+      expect(sql).toContain('ORDER BY base.device_last_seen_at ASC NULLS FIRST, base.pk ASC');
+    });
+
+    it('rejects an out-of-allow-list sortField with 400 and never runs the query (no SQL-injection surface)', async () => {
+      pool.query.mockResolvedValue({ rows: [] });
+
+      const res = await request(app).get('/api/users').query({ sortField: 'username; DROP TABLE users' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/Invalid sortField/);
+      expect(pool.query).not.toHaveBeenCalled();
+    });
+
+    it('rejects an invalid sortDirection with 400 before the query runs', async () => {
+      pool.query.mockResolvedValue({ rows: [] });
+
+      const res = await request(app).get('/api/users').query({ sortField: 'name', sortDirection: 'sideways' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/Invalid sortDirection/);
+      expect(pool.query).not.toHaveBeenCalled();
+    });
+
+    it('the raw sortField value is never interpolated into the SQL (only the resolved allow-list expression is)', async () => {
+      pool.query.mockResolvedValue({ rows: [] });
+
+      // A valid field with a hostile-looking direction case is normalised;
+      // and a valid field resolves to its trusted expression, never the raw
+      // key spelling. Assert the resolved expression is present and the query
+      // ran exactly once.
+      const res = await request(app).get('/api/users').query({ sortField: 'name', sortDirection: 'DESC' });
+
+      expect(res.status).toBe(200);
+      const [sql] = pool.query.mock.calls[0];
+      expect(sql).toContain('ORDER BY LOWER(base.username) DESC NULLS LAST, base.pk ASC');
+    });
+  });
+
   it('returns total 0 and an empty list when no rows match', async () => {
     pool.query.mockResolvedValue({ rows: [] });
 

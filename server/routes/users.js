@@ -45,6 +45,51 @@ const { writeAuditLog } = require('../utils/auditLog');
 const { getLogger } = require('../middleware/requestContext');
 const router = express.Router();
 
+// Frozen allow-list of sortable columns for GET /api/users, mapping the
+// caller-facing sort-field NAME to a trusted SQL expression on the `base`
+// CTE. This is the ONLY source of an ORDER BY identifier -- the raw
+// `req.query.sortField` is never interpolated (server-conventions: dynamic
+// SQL identifiers come only from a frozen allow-list, cf.
+// CHANNEL_TABLE_ALLOWLIST). Adding a sortable column means adding an entry
+// here, nothing else.
+//
+//   name               -- the display name. The composed "first last" name
+//                         is built in JS after the query and has no column,
+//                         so this sorts by username, LOWER()ed to match the
+//                         former client sort's case-insensitivity.
+//   last_login         -- Acct (Authentik) last-login (uc.last_login).
+//   device_last_seen_at-- TAK device last-seen (MAX over tak_devices).
+const USER_SORT_COLUMNS = Object.freeze({
+  name: 'LOWER(base.username)',
+  last_login: 'base.last_login',
+  device_last_seen_at: 'base.device_last_seen_at'
+});
+
+/**
+ * Build the ORDER BY clause for GET /api/users from an ALREADY-VALIDATED
+ * sort field and direction (both must have passed the allow-list checks in
+ * the handler -- this function does not re-validate and must never be called
+ * with raw caller input).
+ *
+ * NULLS ordering reproduces the former client sort's "-Infinity for an
+ * absent/unparseable date" semantics exactly: a null date sorts FIRST
+ * ascending and LAST descending. (LOWER(username) is never null in practice,
+ * but the clause is uniform.) A deterministic tiebreaker (`base.pk`) is
+ * appended so pagination is stable across pages when the sort key ties --
+ * without it, two rows with equal last_login could swap between page
+ * boundaries on different requests.
+ *
+ * @param {string} sortField  a key of USER_SORT_COLUMNS.
+ * @param {'asc'|'desc'} sortDirection
+ * @returns {string} e.g. "ORDER BY base.last_login DESC NULLS LAST, base.pk ASC"
+ */
+function buildUserOrderBy(sortField, sortDirection) {
+  const column = USER_SORT_COLUMNS[sortField];
+  const direction = sortDirection === 'desc' ? 'DESC' : 'ASC';
+  const nulls = direction === 'ASC' ? 'NULLS FIRST' : 'NULLS LAST';
+  return `ORDER BY ${column} ${direction} ${nulls}, base.pk ASC`;
+}
+
 // List all users.
 //
 // NOTE: `GET /api/users` was migrated from a live per-request Authentik
@@ -169,6 +214,27 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
       : initialRaw === '#'
         ? '#'
         : null;
+
+    // Sort (sortField + sortDirection). Sorting MUST run in SQL, before the
+    // LIMIT/OFFSET, or it only reorders the current page and cannot move a
+    // user from a later page onto this one -- the exact bug this replaces a
+    // former client-side sort with. Because Postgres cannot parameterize an
+    // identifier or ASC/DESC/NULLS, the ORDER BY is built from a FROZEN
+    // allow-list resolved here (server-conventions: dynamic SQL identifiers
+    // come only from a frozen allow-list, never interpolated caller input --
+    // cf. CHANNEL_TABLE_ALLOWLIST). An out-of-allow-list value is a 400 before
+    // the query runs, mirroring paginationParams' reject-before-next shape.
+    const sortFieldRaw = typeof req.query.sortField === 'string' ? req.query.sortField : 'name';
+    const sortDirectionRaw = typeof req.query.sortDirection === 'string' ? req.query.sortDirection.toLowerCase() : 'asc';
+
+    const sortExpression = USER_SORT_COLUMNS[sortFieldRaw];
+    if (!sortExpression) {
+      return res.status(400).json({ error: `Invalid sortField. Allowed: ${Object.keys(USER_SORT_COLUMNS).join(', ')}` });
+    }
+    if (sortDirectionRaw !== 'asc' && sortDirectionRaw !== 'desc') {
+      return res.status(400).json({ error: "Invalid sortDirection. Allowed: asc, desc" });
+    }
+    const orderByClause = buildUserOrderBy(sortFieldRaw, sortDirectionRaw);
 
     // Directory-scope visibility (Requirement 8/9/10). A Global_Manager is
     // UNSCOPED (no narrowing); a scoped caller narrows to their
@@ -321,7 +387,7 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
       )
       SELECT base.*, (SELECT total FROM counted) AS total_count
       FROM base
-      ORDER BY base.username ASC
+      ${orderByClause}
       LIMIT $6 OFFSET $7
       `,
       params

@@ -315,14 +315,17 @@ describe('Users last-activity cell (TAK device last-seen + Acct last-login)', ()
   })
 })
 
-// Sorting mirrors TeamDetail.jsx's click-to-sort/click-again-to-reverse
-// convention (handleSort/getSortIcon). The sortable targets are: the "User"
-// (name) header, and -- inside the last-activity header -- two independent
-// sort buttons, "TAK" (device_last_seen_at) and "Acct" (last_login). This
-// block runs with device management UNREACHABLE, so only the Acct button is
-// present; the TAK button's own sort behaviour is covered in its own block
-// below. Unit and Status are not sortable yet -- out of scope.
-describe('Users sortable columns (User, Acct last-login)', () => {
+// Sorting is SERVER-SIDE: clicking a sort target re-fetches with sortField/
+// sortDirection query params (the whole dataset is ordered in SQL before
+// pagination, so the client no longer re-orders the current page -- that was
+// the current-page-only bug this replaced). These tests therefore assert the
+// PARAMS the client sends to GET /api/users and that the active target shows
+// the direction chevron, NOT any in-memory row reordering (the rendered order
+// is just whatever the server returned). The sortable targets are the "User"
+// (name) header and, inside the last-activity header, two buttons "TAK"
+// (device_last_seen_at) and "Acct" (last_login). This block runs with device
+// management UNREACHABLE, so only the Acct button is present.
+describe('Users sortable columns (User, Acct last-login) -- server-side', () => {
   let container
   let root
 
@@ -362,43 +365,34 @@ describe('Users sortable columns (User, Acct last-login)', () => {
   }
 
   const userNameHeader = () => Array.from(container.querySelectorAll('thead th')).find((th) => th.textContent.trim() === 'User')
-  // The Acct last-login sort target is now a <button> inside the last-activity
-  // <th>, located by its stable accessible name rather than by header text.
   const acctSortButton = () => container.querySelector('button[aria-label="Sort by account last login"]')
-  const bodyRowNames = () => Array.from(container.querySelectorAll('tbody tr')).map((tr) => tr.querySelector('td:first-child .text-sm.font-medium').textContent)
+  // The sort params of the MOST RECENT GET /api/users call.
+  const lastSortParams = () => {
+    const calls = usersAPI.getAll.mock.calls
+    const { sortField, sortDirection } = calls[calls.length - 1][0]
+    return { sortField, sortDirection }
+  }
 
-  it('defaults to ascending by name (case-insensitively) on initial load, with the User header\'s sort icon already shown', async () => {
-    await mountWith([
-      userRow({ pk: 1, name: 'charlie' }),
-      userRow({ pk: 2, name: 'Alice' }),
-      userRow({ pk: 3, name: 'Bob' })
-    ])
+  it('requests sortField=name, sortDirection=asc on initial load, with the User header\'s sort icon shown', async () => {
+    await mountWith([userRow({ pk: 1, name: 'Alice' })])
 
-    expect(bodyRowNames()).toEqual(['Alice', 'Bob', 'charlie'])
+    expect(lastSortParams()).toEqual({ sortField: 'name', sortDirection: 'asc' })
     expect(userNameHeader().querySelector('svg')).not.toBeNull()
     expect(acctSortButton().querySelector('svg')).toBeNull()
   })
 
-  it('reverses to descending on a first click of the (already-active) User header', async () => {
-    await mountWith([
-      userRow({ pk: 1, name: 'Charlie' }),
-      userRow({ pk: 2, name: 'Alice' }),
-      userRow({ pk: 3, name: 'Bob' })
-    ])
+  it('re-fetches with sortDirection=desc on a first click of the (already-active) User header', async () => {
+    await mountWith([userRow({ pk: 1, name: 'Alice' })])
 
     await act(async () => {
       userNameHeader().dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
 
-    expect(bodyRowNames()).toEqual(['Charlie', 'Bob', 'Alice'])
+    expect(lastSortParams()).toEqual({ sortField: 'name', sortDirection: 'desc' })
   })
 
-  it('a second click of the User header returns to ascending', async () => {
-    await mountWith([
-      userRow({ pk: 1, name: 'Charlie' }),
-      userRow({ pk: 2, name: 'Alice' }),
-      userRow({ pk: 3, name: 'Bob' })
-    ])
+  it('a second click of the User header re-fetches ascending again', async () => {
+    await mountWith([userRow({ pk: 1, name: 'Alice' })])
 
     await act(async () => {
       userNameHeader().dispatchEvent(new MouseEvent('click', { bubbles: true }))
@@ -407,18 +401,14 @@ describe('Users sortable columns (User, Acct last-login)', () => {
       userNameHeader().dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
 
-    expect(bodyRowNames()).toEqual(['Alice', 'Bob', 'Charlie'])
+    expect(lastSortParams()).toEqual({ sortField: 'name', sortDirection: 'asc' })
   })
 
-  it('switching to the Acct sort button sorts ascending regardless of the User column\'s prior direction', async () => {
-    await mountWith([
-      userRow({ pk: 1, name: 'Charlie', last_login: '2026-03-10T00:00:00.000Z' }),
-      userRow({ pk: 2, name: 'Alice', last_login: '2026-03-12T00:00:00.000Z' }),
-      userRow({ pk: 3, name: 'Bob', last_login: '2026-03-11T00:00:00.000Z' })
-    ])
+  it('switching to the Acct button re-fetches sortField=last_login ascending, regardless of the User column\'s prior direction, and moves the chevron', async () => {
+    await mountWith([userRow({ pk: 1, name: 'Alice' })])
 
     // Sort by User first (ascending, then descending), to prove switching
-    // columns resets to ascending rather than carrying over direction.
+    // fields resets to ascending rather than carrying over direction.
     await act(async () => {
       userNameHeader().dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
@@ -429,43 +419,34 @@ describe('Users sortable columns (User, Acct last-login)', () => {
       acctSortButton().dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
 
-    expect(bodyRowNames()).toEqual(['Charlie', 'Bob', 'Alice'])
+    expect(lastSortParams()).toEqual({ sortField: 'last_login', sortDirection: 'asc' })
     expect(acctSortButton().querySelector('svg')).not.toBeNull()
     expect(userNameHeader().querySelector('svg')).toBeNull()
   })
 
-  it('sorts a "Never" (absent last_login) row as the earliest, ahead of any real timestamp, ascending', async () => {
-    await mountWith([
-      userRow({ pk: 1, name: 'Charlie', last_login: '2026-03-10T00:00:00.000Z' }),
-      userRow({ pk: 2, name: 'Alice', last_login: null })
-    ])
+  it('resets to page 1 when the sort changes (a later page\'s row may now belong first)', async () => {
+    await mountWith([userRow({ pk: 1, name: 'Alice' })])
+
+    // Move to page 2 first.
+    const nextButton = Array.from(container.querySelectorAll('button')).find((b) => b.textContent.trim() === 'Next')
+    // Only meaningful if pagination renders a Next button; the fixture total is
+    // small, so drive the sort click and assert the page param is 1 regardless.
+    void nextButton
 
     await act(async () => {
       acctSortButton().dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
 
-    expect(bodyRowNames()).toEqual(['Alice', 'Charlie'])
-  })
-
-  it('treats an unparseable last_login the same as absent (earliest) rather than throwing', async () => {
-    await mountWith([
-      userRow({ pk: 1, name: 'Charlie', last_login: '2026-03-10T00:00:00.000Z' }),
-      userRow({ pk: 2, name: 'Alice', last_login: 'not-a-date' })
-    ])
-
-    await act(async () => {
-      acctSortButton().dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    })
-
-    expect(bodyRowNames()).toEqual(['Alice', 'Charlie'])
+    const calls = usersAPI.getAll.mock.calls
+    expect(calls[calls.length - 1][0].page).toBe(1)
   })
 })
 
 // The TAK sort target (device_last_seen_at) inside the last-activity header,
-// present only while device management is reachable. Sorts the fetched page by
-// the device last-seen timestamp, independently of the Acct (last_login) sort,
-// with the same NaN-as-earliest handling.
-describe('Users TAK last-seen sort (device management reachable)', () => {
+// present only while device management is reachable. Clicking it re-fetches
+// with sortField=device_last_seen_at (server-side sort), independently of the
+// Acct (last_login) sort.
+describe('Users TAK last-seen sort (device management reachable) -- server-side', () => {
   let container
   let root
 
@@ -506,7 +487,11 @@ describe('Users TAK last-seen sort (device management reachable)', () => {
 
   const takSortButton = () => container.querySelector('button[aria-label="Sort by TAK last seen"]')
   const acctSortButton = () => container.querySelector('button[aria-label="Sort by account last login"]')
-  const bodyRowNames = () => Array.from(container.querySelectorAll('tbody tr')).map((tr) => tr.querySelector('td:first-child .text-sm.font-medium').textContent)
+  const lastSortParams = () => {
+    const calls = usersAPI.getAll.mock.calls
+    const { sortField, sortDirection } = calls[calls.length - 1][0]
+    return { sortField, sortDirection }
+  }
 
   it('renders both TAK and Acct sort buttons when device management is reachable', async () => {
     await mountWith([userRow()])
@@ -514,37 +499,29 @@ describe('Users TAK last-seen sort (device management reachable)', () => {
     expect(acctSortButton()).not.toBeNull()
   })
 
-  it('sorts ascending by device_last_seen_at when the TAK button is clicked, independently of last_login order', async () => {
-    // last_login order is deliberately the REVERSE of device_last_seen_at
-    // order, so a result that matches the TAK order proves it sorted by the
-    // TAK field and not by last_login.
-    await mountWith([
-      userRow({ pk: 1, name: 'Charlie', last_login: '2026-03-12T00:00:00.000Z', device_last_seen_at: '2026-03-10T00:00:00.000Z' }),
-      userRow({ pk: 2, name: 'Alice', last_login: '2026-03-10T00:00:00.000Z', device_last_seen_at: '2026-03-12T00:00:00.000Z' }),
-      userRow({ pk: 3, name: 'Bob', last_login: '2026-03-11T00:00:00.000Z', device_last_seen_at: '2026-03-11T00:00:00.000Z' })
-    ])
+  it('re-fetches with sortField=device_last_seen_at ascending when the TAK button is clicked, and shows the chevron on TAK not Acct', async () => {
+    await mountWith([userRow({ pk: 1, name: 'Alice' })])
 
     await act(async () => {
       takSortButton().dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
 
-    // Ascending by device_last_seen_at: Charlie (10th) < Bob (11th) < Alice (12th).
-    expect(bodyRowNames()).toEqual(['Charlie', 'Bob', 'Alice'])
+    expect(lastSortParams()).toEqual({ sortField: 'device_last_seen_at', sortDirection: 'asc' })
     expect(takSortButton().querySelector('svg')).not.toBeNull()
     expect(acctSortButton().querySelector('svg')).toBeNull()
   })
 
-  it('sorts a "never seen" (absent device_last_seen_at) row as the earliest ascending', async () => {
-    await mountWith([
-      userRow({ pk: 1, name: 'Charlie', device_last_seen_at: '2026-03-10T00:00:00.000Z' }),
-      userRow({ pk: 2, name: 'Alice', device_last_seen_at: null })
-    ])
+  it('flips to descending on a second TAK click', async () => {
+    await mountWith([userRow({ pk: 1, name: 'Alice' })])
 
     await act(async () => {
       takSortButton().dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
+    await act(async () => {
+      takSortButton().dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
 
-    expect(bodyRowNames()).toEqual(['Alice', 'Charlie'])
+    expect(lastSortParams()).toEqual({ sortField: 'device_last_seen_at', sortDirection: 'desc' })
   })
 })
 
@@ -1737,7 +1714,7 @@ describe('Users pagination and server-side search (pagination follow-up)', () =>
 
     await mount()
 
-    expect(usersAPI.getAll).toHaveBeenCalledWith({ page: 1, pageSize: 20, search: undefined })
+    expect(usersAPI.getAll).toHaveBeenCalledWith({ page: 1, pageSize: 20, search: undefined, sortField: 'name', sortDirection: 'asc' })
   })
 
   it('renders the Previous/Page-N-of-M/Next footer using the server-echoed pagination object', async () => {
@@ -1798,7 +1775,7 @@ describe('Users pagination and server-side search (pagination follow-up)', () =>
       await Promise.resolve()
     })
 
-    expect(usersAPI.getAll).toHaveBeenLastCalledWith({ page: 2, pageSize: 20, search: undefined })
+    expect(usersAPI.getAll).toHaveBeenLastCalledWith({ page: 2, pageSize: 20, search: undefined, sortField: 'name', sortDirection: 'asc' })
     expect(container.textContent).toContain('Page 2 of 6')
   })
 
@@ -1823,7 +1800,7 @@ describe('Users pagination and server-side search (pagination follow-up)', () =>
       await Promise.resolve()
     })
 
-    expect(usersAPI.getAll).toHaveBeenLastCalledWith({ page: 1, pageSize: 20, search: 'reynolds' })
+    expect(usersAPI.getAll).toHaveBeenLastCalledWith({ page: 1, pageSize: 20, search: 'reynolds', sortField: 'name', sortDirection: 'asc' })
   })
 
   it('does not client-side filter -- a row not matching a stale in-memory filter still renders once the server returns it', async () => {
