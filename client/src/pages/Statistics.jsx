@@ -31,56 +31,97 @@ const WINDOW_OPTIONS = [8, 30, 90, 365]
 
 // Series metadata: the key on each data row, the human label (also the
 // accessible name, since recharts renders SVG and colour alone must never
-// carry meaning), and a distinct stroke colour. Split into the two charts.
-const DAU_SERIES = [
-  { key: 'dau_users', label: 'Users', color: '#2563eb' },
-  { key: 'dau_team_devices', label: 'Team devices', color: '#059669' },
-]
+// carry meaning), and a distinct stroke colour. Each chart pairs a LEFT-axis
+// series with a RIGHT-axis series so two magnitudes that differ by an order
+// of magnitude (e.g. a handful of team devices vs hundreds of users) each get
+// a readable scale, instead of the smaller one being flattened against a
+// shared axis. Series -> side is kept CONSISTENT across charts (team devices
+// always left, users always right) so a viewer does not re-learn the axes per
+// chart.
+const DAU_LEFT = { key: 'dau_team_devices', label: 'Team devices', color: '#059669' }
+const DAU_RIGHT = { key: 'dau_users', label: 'Users', color: '#2563eb' }
 
-const TOTAL_SERIES = [
-  { key: 'total_users', label: 'Users', color: '#2563eb' },
-  { key: 'total_teams', label: 'Teams', color: '#7c3aed' },
-  { key: 'total_team_devices', label: 'Team devices', color: '#059669' },
-  { key: 'total_channels', label: 'Channels', color: '#d97706' },
-]
+const TOTAL_DEVICES_LEFT = { key: 'total_team_devices', label: 'Team devices', color: '#059669' }
+const TOTAL_USERS_RIGHT = { key: 'total_users', label: 'Users', color: '#2563eb' }
+
+const TOTAL_TEAMS_LEFT = { key: 'total_teams', label: 'Teams', color: '#7c3aed' }
+const TOTAL_CHANNELS_RIGHT = { key: 'total_channels', label: 'Channels', color: '#d97706' }
 
 /**
- * One labelled line chart. `connectNulls={false}` so a day with no snapshot
- * (null total) renders as a gap rather than a misleading straight line -- a
- * missing data point is not zero. A legend names every series in text, and
- * the wrapping figure carries an accessible name, so the chart's meaning
- * never rests on colour alone.
+ * A dual-Y-axis line chart: one series on the LEFT axis, one on the RIGHT,
+ * each on its own independent scale. This is used deliberately for two series
+ * whose magnitudes differ a lot, so neither is flattened.
+ *
+ * Reading a dual-axis chart is easy to get wrong (two lines "crossing" means
+ * nothing when they are on different scales), so each axis is LABELLED with
+ * its series name and colour-matched to its line -- but the meaning never
+ * rests on colour: the legend names both series, each axis carries its
+ * series name as text, and the tooltip shows both real values. `yAxisId`
+ * binds each line to its own axis. `connectNulls={false}` so a day with no
+ * snapshot renders as a gap, not a misleading straight line (a missing point
+ * is not zero).
  */
-function SeriesChart({ title, description, data, series }) {
+function DualAxisChart({ title, description, data, left, right }) {
   return (
-    <figure className="card" aria-label={title}>
+    <figure className="card" aria-label={`${title}: ${left.label} (left axis), ${right.label} (right axis)`}>
       <figcaption>
         <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">{title}</h2>
         {description ? (
           <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">{description}</p>
         ) : null}
+        {/* The axis assignment stated in TEXT, so which series is on which
+            scale never depends on reading colour off the chart. */}
+        <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+          Left axis: {left.label}. Right axis: {right.label}. Each has its own scale.
+        </p>
       </figcaption>
       <div className="mt-4" style={{ width: '100%', height: 300 }}>
         <ResponsiveContainer>
           <LineChart data={data} margin={{ top: 8, right: 16, bottom: 8, left: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#9ca3af" strokeOpacity={0.3} />
             <XAxis dataKey="day" tick={{ fontSize: 12 }} minTickGap={24} />
-            <YAxis allowDecimals={false} tick={{ fontSize: 12 }} width={40} />
+            <YAxis
+              yAxisId="left"
+              orientation="left"
+              allowDecimals={false}
+              tick={{ fontSize: 12 }}
+              width={44}
+              stroke={left.color}
+              label={{ value: left.label, angle: -90, position: 'insideLeft', style: { fontSize: 12, fill: left.color } }}
+            />
+            <YAxis
+              yAxisId="right"
+              orientation="right"
+              allowDecimals={false}
+              tick={{ fontSize: 12 }}
+              width={44}
+              stroke={right.color}
+              label={{ value: right.label, angle: 90, position: 'insideRight', style: { fontSize: 12, fill: right.color } }}
+            />
             <Tooltip />
             <Legend />
-            {series.map((s) => (
-              <Line
-                key={s.key}
-                type="monotone"
-                dataKey={s.key}
-                name={s.label}
-                stroke={s.color}
-                strokeWidth={2}
-                dot={false}
-                connectNulls={false}
-                isAnimationActive={false}
-              />
-            ))}
+            <Line
+              yAxisId="left"
+              type="monotone"
+              dataKey={left.key}
+              name={`${left.label} (left)`}
+              stroke={left.color}
+              strokeWidth={2}
+              dot={false}
+              connectNulls={false}
+              isAnimationActive={false}
+            />
+            <Line
+              yAxisId="right"
+              type="monotone"
+              dataKey={right.key}
+              name={`${right.label} (right)`}
+              stroke={right.color}
+              strokeWidth={2}
+              dot={false}
+              connectNulls={false}
+              isAnimationActive={false}
+            />
           </LineChart>
         </ResponsiveContainer>
       </div>
@@ -193,17 +234,26 @@ export default function Statistics({ user }) {
         </div>
       ) : (
         <>
-          <SeriesChart
+          <DualAxisChart
             title="Daily active (TAK Server connections)"
             description="Distinct users and team devices that connected to the TAK Server each day."
             data={series}
-            series={DAU_SERIES}
+            left={DAU_LEFT}
+            right={DAU_RIGHT}
           />
-          <SeriesChart
-            title="Totals over time"
-            description="Daily snapshot of total users, teams, team devices, and channels. Days before capture began may be approximate or absent."
+          <DualAxisChart
+            title="Total users and team devices over time"
+            description="Daily snapshot. Days before capture began may be approximate or absent."
             data={series}
-            series={TOTAL_SERIES}
+            left={TOTAL_DEVICES_LEFT}
+            right={TOTAL_USERS_RIGHT}
+          />
+          <DualAxisChart
+            title="Total teams and channels over time"
+            description="Daily snapshot. Days before capture began may be approximate or absent."
+            data={series}
+            left={TOTAL_TEAMS_LEFT}
+            right={TOTAL_CHANNELS_RIGHT}
           />
         </>
       )}

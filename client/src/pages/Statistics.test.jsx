@@ -94,19 +94,27 @@ describe('Statistics page', () => {
     expect(statisticsAPI.get).toHaveBeenCalledWith(30)
   })
 
-  it('renders both charts wired to the DAU and totals series', async () => {
+  it('renders three dual-axis charts wired to all six series', async () => {
     await mount(GLOBAL_MANAGER)
 
     const seriesKeys = Array.from(container.querySelectorAll('[data-series-key]')).map(
       (el) => el.getAttribute('data-series-key')
     )
-    // DAU chart (2 series) + totals chart (4 series).
+    // DAU (team devices + users) + Totals A (team devices + users) + Totals B
+    // (teams + channels): all six series appear across the three charts.
     expect(seriesKeys).toEqual(
       expect.arrayContaining([
         'dau_users', 'dau_team_devices',
         'total_users', 'total_teams', 'total_team_devices', 'total_channels'
       ])
     )
+
+    // Three dual-axis charts: each states its left/right axis assignment in
+    // TEXT (so the scale a series is on never depends on reading colour).
+    const axisNotes = container.textContent.match(/Left axis: .*?Right axis: /g) || []
+    expect(axisNotes).toHaveLength(3)
+    expect(container.textContent).toContain('Left axis: Team devices. Right axis: Users.')
+    expect(container.textContent).toContain('Left axis: Teams. Right axis: Channels.')
   })
 
   it('re-fetches with the chosen window when a window button is clicked', async () => {
