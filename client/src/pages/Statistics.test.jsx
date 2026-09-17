@@ -148,3 +148,114 @@ describe('Statistics page', () => {
     expect(container.textContent).toContain('Failed to load statistics')
   })
 })
+
+// Auto-refresh on the shared visibility-paused 60s interval, matching the
+// Dashboard/Admin cards. Fake timers so the interval and the "immediate
+// refresh on becoming visible" transition are observable.
+describe('Statistics auto-refresh (visibility-paused)', () => {
+  let container
+  let root
+  let tabHidden
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    vi.clearAllMocks()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    statisticsAPI.get.mockResolvedValue({ data: { window: 30, series: SERIES } })
+    // Control document.hidden for the visibilitychange transitions.
+    tabHidden = false
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => tabHidden })
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => { root.unmount() })
+      root = null
+    }
+    container.remove()
+    vi.restoreAllMocks()
+    vi.useRealTimers()
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+  })
+
+  const mount = async (user) => {
+    root = createRoot(container)
+    await act(async () => { root.render(<Statistics user={user} />) })
+    await act(async () => { await Promise.resolve() })
+  }
+
+  const fireVisibilityChange = async (hidden) => {
+    tabHidden = hidden
+    await act(async () => {
+      document.dispatchEvent(new Event('visibilitychange'))
+      await Promise.resolve()
+    })
+  }
+
+  it('re-fetches on the 60s interval while the tab is visible', async () => {
+    await mount(GLOBAL_MANAGER)
+    expect(statisticsAPI.get).toHaveBeenCalledTimes(1) // first load
+
+    await act(async () => {
+      vi.advanceTimersByTime(60000)
+      await Promise.resolve()
+    })
+    expect(statisticsAPI.get).toHaveBeenCalledTimes(2) // one interval tick
+    // The auto-refresh keeps the currently-selected window.
+    expect(statisticsAPI.get).toHaveBeenLastCalledWith(30)
+  })
+
+  it('pauses the interval while the tab is hidden and refreshes immediately when it becomes visible again', async () => {
+    await mount(GLOBAL_MANAGER)
+    expect(statisticsAPI.get).toHaveBeenCalledTimes(1)
+
+    await fireVisibilityChange(true) // hidden -> interval cleared
+    await act(async () => {
+      vi.advanceTimersByTime(180000) // 3 intervals while hidden
+      await Promise.resolve()
+    })
+    expect(statisticsAPI.get).toHaveBeenCalledTimes(1) // no fetch while hidden
+
+    await fireVisibilityChange(false) // visible again -> immediate refresh
+    expect(statisticsAPI.get).toHaveBeenCalledTimes(2)
+  })
+
+  it('a failed background refresh does NOT clear the charts or show an error (keeps last good data)', async () => {
+    await mount(GLOBAL_MANAGER)
+    // The charts rendered from the first (successful) load.
+    expect(container.querySelectorAll('[data-series-key]').length).toBeGreaterThan(0)
+
+    // Next (background) refresh fails.
+    statisticsAPI.get.mockRejectedValue(new Error('transient'))
+    await act(async () => {
+      vi.advanceTimersByTime(60000)
+      await Promise.resolve()
+    })
+
+    // Charts still present, no error surfaced -- a background failure never
+    // blanks rendered data.
+    expect(container.querySelectorAll('[data-series-key]').length).toBeGreaterThan(0)
+    expect(container.textContent).not.toContain('Failed to load statistics')
+  })
+
+  it('clears the interval and the visibilitychange listener on unmount', async () => {
+    const removeEventListener = vi.spyOn(document, 'removeEventListener')
+    await mount(GLOBAL_MANAGER)
+
+    await act(async () => { root.unmount() })
+    root = null
+
+    expect(removeEventListener).toHaveBeenCalledWith('visibilitychange', expect.any(Function))
+
+    // No further fetches after unmount, on the interval or on a visibilitychange.
+    const callsAtUnmount = statisticsAPI.get.mock.calls.length
+    await act(async () => {
+      vi.advanceTimersByTime(120000)
+      await Promise.resolve()
+    })
+    expect(statisticsAPI.get).toHaveBeenCalledTimes(callsAtUnmount)
+  })
+})

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { ChartBarIcon } from '@heroicons/react/24/outline'
 import {
   LineChart,
@@ -11,6 +11,7 @@ import {
   ResponsiveContainer,
 } from 'recharts'
 import { statisticsAPI } from '../services/api'
+import { startVisibilityPausedRefresh } from '../utils/visibilityPausedRefresh'
 
 /**
  * Global_Manager-only Statistics page: time-series charts of daily active
@@ -139,37 +140,59 @@ export default function Statistics({ user }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
-  useEffect(() => {
+  // One fetcher for the current window, stable per (isGlobalManager, window).
+  // `showLoading` is true for a foreground fetch (first load / window change),
+  // which shows the spinner and surfaces a load error; false for a background
+  // auto-refresh, which must NOT blank the charts, re-raise the spinner, or
+  // replace the rendered series with an error -- the client convention that a
+  // failed background refresh never clears rendered data. A background refresh
+  // failure is only logged; the last good series stays on screen.
+  const fetchStatistics = useCallback(async ({ showLoading } = { showLoading: true }) => {
     if (!isGlobalManager) {
       return
     }
-
-    let isMounted = true
-    setLoading(true)
-    setError(null)
-
-    statisticsAPI.get(windowDays)
-      .then((response) => {
-        if (isMounted) {
-          setSeries(response.data?.series || [])
-        }
-      })
-      .catch((err) => {
-        console.error('Failed to fetch statistics:', err)
-        if (isMounted) {
-          setError(`Failed to load statistics: ${err.message}`)
-        }
-      })
-      .finally(() => {
-        if (isMounted) {
-          setLoading(false)
-        }
-      })
-
-    return () => {
-      isMounted = false
+    if (showLoading) {
+      setLoading(true)
+      setError(null)
+    }
+    try {
+      const response = await statisticsAPI.get(windowDays)
+      setSeries(response.data?.series || [])
+      if (showLoading) {
+        setError(null)
+      }
+    } catch (err) {
+      console.error('Failed to fetch statistics:', err)
+      if (showLoading) {
+        setError(`Failed to load statistics: ${err.message}`)
+      }
+    } finally {
+      if (showLoading) {
+        setLoading(false)
+      }
     }
   }, [isGlobalManager, windowDays])
+
+  // First load and every window change: a foreground fetch (spinner + error).
+  useEffect(() => {
+    fetchStatistics({ showLoading: true })
+  }, [fetchStatistics])
+
+  // Keep the charts current on the shared visibility-paused 60s interval (the
+  // same mechanism the Dashboard/Admin cards use). Separate from the
+  // first-load effect above so mounting still performs exactly one fetch --
+  // startVisibilityPausedRefresh only SCHEDULES subsequent refreshes. These
+  // are BACKGROUND refreshes (no spinner, no chart-clearing on failure).
+  // Re-subscribed when the fetcher identity changes (i.e. the window changes),
+  // so the interval always refreshes the currently-selected window.
+  useEffect(() => {
+    if (!isGlobalManager) {
+      return undefined
+    }
+    return startVisibilityPausedRefresh(() => {
+      fetchStatistics({ showLoading: false })
+    })
+  }, [isGlobalManager, fetchStatistics])
 
   if (!isGlobalManager) {
     return (
