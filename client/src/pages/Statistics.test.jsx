@@ -115,12 +115,19 @@ describe('Statistics page', () => {
       ])
     )
 
-    // Three dual-axis charts: each states its left/right axis assignment in
-    // TEXT (so the scale a series is on never depends on reading colour).
-    const axisNotes = container.textContent.match(/Left axis: .*?Right axis: /g) || []
-    expect(axisNotes).toHaveLength(3)
-    expect(container.textContent).toContain('Left axis: Team devices. Right axis: Users.')
-    expect(container.textContent).toContain('Left axis: Teams. Right axis: Channels.')
+    // Three dual-axis charts, each a <figure> whose aria-label states the
+    // left/right axis assignment for screen readers (the accessible signal
+    // that survives; the on-chart axis labels carry it visually).
+    const figureLabels = Array.from(container.querySelectorAll('figure')).map(
+      (el) => el.getAttribute('aria-label')
+    )
+    expect(figureLabels).toHaveLength(3)
+    expect(figureLabels).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('Team devices (left axis), Users (right axis)'),
+        expect.stringContaining('Teams (left axis), Channels (right axis)')
+      ])
+    )
   })
 
   it('re-fetches with the chosen window when a window button is clicked', async () => {

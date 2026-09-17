@@ -56,10 +56,11 @@ const TOTAL_CHANNELS_RIGHT = { key: 'total_channels', label: 'Channels', color: 
  * nothing when they are on different scales), so each axis is LABELLED with
  * its series name and colour-matched to its line -- but the meaning never
  * rests on colour: the legend names both series, each axis carries its
- * series name as text, and the tooltip shows both real values. `yAxisId`
- * binds each line to its own axis. `connectNulls={false}` so a day with no
- * snapshot renders as a gap, not a misleading straight line (a missing point
- * is not zero).
+ * series name as visible text, the figure's `aria-label` states the
+ * left/right axis assignment for screen readers, and the tooltip shows both
+ * real values. `yAxisId` binds each line to its own axis.
+ * `connectNulls={false}` so a day with no snapshot renders as a gap, not a
+ * misleading straight line (a missing point is not zero).
  */
 function DualAxisChart({ title, description, data, left, right }) {
   return (
@@ -69,11 +70,6 @@ function DualAxisChart({ title, description, data, left, right }) {
         {description ? (
           <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">{description}</p>
         ) : null}
-        {/* The axis assignment stated in TEXT, so which series is on which
-            scale never depends on reading colour off the chart. */}
-        <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-          Left axis: {left.label}. Right axis: {right.label}. Each has its own scale.
-        </p>
       </figcaption>
       <div className="mt-4" style={{ width: '100%', height: 300 }}>
         <ResponsiveContainer>
