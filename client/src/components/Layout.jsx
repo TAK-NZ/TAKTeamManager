@@ -75,12 +75,6 @@ const getNavigation = (user, deviceMgmtEnabled) => {
   // entries below), rather than after them, since it is unconditional.
   baseNavigation.push({ name: 'Tasks', href: '/tasks', icon: ClipboardDocumentListIcon })
 
-  // Statistics is open to every authenticated user (it shows only
-  // deployment-wide aggregate counts, no per-user detail), so it sits in the
-  // unconditional nav alongside Tasks rather than behind the Global_Manager
-  // gate below.
-  baseNavigation.push({ name: 'Statistics', href: '/statistics', icon: ChartBarIcon })
-
   // Bugfix: this gate used to check only isAdmin/is_global_manager
   // (Global_Manager), leaving a plain Team_Admin -- who IS authorized
   // server-side, see below -- with no way to reach either page from the
@@ -106,7 +100,14 @@ const getNavigation = (user, deviceMgmtEnabled) => {
     baseNavigation.push({ name: 'Global Channels', href: '/global-channels', icon: SignalIcon })
     baseNavigation.push({ name: 'Audit Log', href: '/audit-logs', icon: DocumentMagnifyingGlassIcon })
   }
-  
+
+  // Statistics keeps its original position (immediately after Audit Log) but
+  // is visible to EVERY authenticated user, not just a Global_Manager -- it
+  // shows only deployment-wide aggregate counts. Pushed unconditionally here
+  // rather than inside the Global_Manager block above, so who sees it changed
+  // without its place in the menu changing.
+  baseNavigation.push({ name: 'Statistics', href: '/statistics', icon: ChartBarIcon })
+
   if (user?.isAdmin) {
     baseNavigation.push({ name: 'Admin', href: '/admin', icon: CogIcon })
   }
