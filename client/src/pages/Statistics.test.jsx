@@ -80,14 +80,20 @@ describe('Statistics page', () => {
     await act(async () => { await Promise.resolve() })
   }
 
-  it('shows Access Denied and never calls the API for a non-Global_Manager', async () => {
-    await mount({ id: 2, is_global_manager: false })
+  it('is open to a plain (non-admin) authenticated user: fetches and renders, no Access-Denied', async () => {
+    // The page is reachable by every authenticated user (aggregate counts
+    // only); there is no client-side role gate and the server grants
+    // statistics:read to all authenticated users.
+    await mount({ id: 2, is_global_manager: false, isAdmin: false, isTeamAdmin: false })
 
-    expect(container.textContent).toContain('Access Denied')
-    expect(statisticsAPI.get).not.toHaveBeenCalled()
+    expect(container.textContent).not.toContain('Access Denied')
+    expect(statisticsAPI.get).toHaveBeenCalledTimes(1)
+    expect(statisticsAPI.get).toHaveBeenCalledWith(30)
+    // Charts render for a plain user just as they do for an admin.
+    expect(container.querySelectorAll('[data-series-key]').length).toBeGreaterThan(0)
   })
 
-  it('fetches the default 30-day window on mount for a Global_Manager', async () => {
+  it('fetches the default 30-day window on mount', async () => {
     await mount(GLOBAL_MANAGER)
 
     expect(statisticsAPI.get).toHaveBeenCalledTimes(1)

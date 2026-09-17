@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback } from 'react'
-import { ChartBarIcon } from '@heroicons/react/24/outline'
 import {
   LineChart,
   Line,
@@ -131,16 +130,21 @@ function DualAxisChart({ title, description, data, left, right }) {
 }
 
 export default function Statistics({ user }) {
-  // Belt-and-braces auth guard, computed before any fetch state/effect (same
-  // discipline as AuditLogs.jsx). The server enforces statistics:read.
-  const isGlobalManager = Boolean(user?.is_global_manager)
+  // The Statistics page is open to EVERY authenticated user (member, team
+  // admin, global admin): it shows only deployment-wide AGGREGATE counts (no
+  // per-user or per-team detail), so there is nothing to scope per viewer and
+  // no page-level role gate. The server still enforces the `statistics:read`
+  // permission, which is granted to every authenticated user. `user` is kept
+  // in the signature for consistency with the other page components even
+  // though the page no longer branches on it.
+  void user
 
   const [windowDays, setWindowDays] = useState(30)
   const [series, setSeries] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
-  // One fetcher for the current window, stable per (isGlobalManager, window).
+  // One fetcher for the current window, stable per window.
   // `showLoading` is true for a foreground fetch (first load / window change),
   // which shows the spinner and surfaces a load error; false for a background
   // auto-refresh, which must NOT blank the charts, re-raise the spinner, or
@@ -148,9 +152,6 @@ export default function Statistics({ user }) {
   // failed background refresh never clears rendered data. A background refresh
   // failure is only logged; the last good series stays on screen.
   const fetchStatistics = useCallback(async ({ showLoading } = { showLoading: true }) => {
-    if (!isGlobalManager) {
-      return
-    }
     if (showLoading) {
       setLoading(true)
       setError(null)
@@ -171,7 +172,7 @@ export default function Statistics({ user }) {
         setLoading(false)
       }
     }
-  }, [isGlobalManager, windowDays])
+  }, [windowDays])
 
   // First load and every window change: a foreground fetch (spinner + error).
   useEffect(() => {
@@ -186,25 +187,10 @@ export default function Statistics({ user }) {
   // Re-subscribed when the fetcher identity changes (i.e. the window changes),
   // so the interval always refreshes the currently-selected window.
   useEffect(() => {
-    if (!isGlobalManager) {
-      return undefined
-    }
     return startVisibilityPausedRefresh(() => {
       fetchStatistics({ showLoading: false })
     })
-  }, [isGlobalManager, fetchStatistics])
-
-  if (!isGlobalManager) {
-    return (
-      <div className="text-center py-12">
-        <ChartBarIcon className="mx-auto h-12 w-12 text-gray-400" />
-        <h3 className="mt-2 text-sm font-medium text-gray-900 dark:text-gray-100">Access Denied</h3>
-        <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-          You need global admin privileges to access this page.
-        </p>
-      </div>
-    )
-  }
+  }, [fetchStatistics])
 
   return (
     <div className="space-y-6">
@@ -266,14 +252,14 @@ export default function Statistics({ user }) {
           />
           <DualAxisChart
             title="Total users and team devices over time"
-            description="Daily snapshot. Days before capture began may be approximate or absent."
+            description="Daily snapshot."
             data={series}
             left={TOTAL_DEVICES_LEFT}
             right={TOTAL_USERS_RIGHT}
           />
           <DualAxisChart
             title="Total teams and channels over time"
-            description="Daily snapshot. Days before capture began may be approximate or absent."
+            description="Daily snapshot."
             data={series}
             left={TOTAL_TEAMS_LEFT}
             right={TOTAL_CHANNELS_RIGHT}
