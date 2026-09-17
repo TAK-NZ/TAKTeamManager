@@ -99,11 +99,15 @@ const getNavigation = (user, deviceMgmtEnabled) => {
   if (user?.is_global_manager) {
     baseNavigation.push({ name: 'Global Channels', href: '/global-channels', icon: SignalIcon })
     baseNavigation.push({ name: 'Audit Log', href: '/audit-logs', icon: DocumentMagnifyingGlassIcon })
-    // Statistics sits directly under Audit Log: both are Global_Manager-only
-    // deployment-wide views.
-    baseNavigation.push({ name: 'Statistics', href: '/statistics', icon: ChartBarIcon })
   }
-  
+
+  // Statistics keeps its original position (immediately after Audit Log) but
+  // is visible to EVERY authenticated user, not just a Global_Manager -- it
+  // shows only deployment-wide aggregate counts. Pushed unconditionally here
+  // rather than inside the Global_Manager block above, so who sees it changed
+  // without its place in the menu changing.
+  baseNavigation.push({ name: 'Statistics', href: '/statistics', icon: ChartBarIcon })
+
   if (user?.isAdmin) {
     baseNavigation.push({ name: 'Admin', href: '/admin', icon: CogIcon })
   }

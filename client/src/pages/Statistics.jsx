@@ -1,5 +1,4 @@
-import { useState, useEffect } from 'react'
-import { ChartBarIcon } from '@heroicons/react/24/outline'
+import { useState, useEffect, useCallback } from 'react'
 import {
   LineChart,
   Line,
@@ -11,6 +10,7 @@ import {
   ResponsiveContainer,
 } from 'recharts'
 import { statisticsAPI } from '../services/api'
+import { startVisibilityPausedRefresh } from '../utils/visibilityPausedRefresh'
 
 /**
  * Global_Manager-only Statistics page: time-series charts of daily active
@@ -56,10 +56,11 @@ const TOTAL_CHANNELS_RIGHT = { key: 'total_channels', label: 'Channels', color: 
  * nothing when they are on different scales), so each axis is LABELLED with
  * its series name and colour-matched to its line -- but the meaning never
  * rests on colour: the legend names both series, each axis carries its
- * series name as text, and the tooltip shows both real values. `yAxisId`
- * binds each line to its own axis. `connectNulls={false}` so a day with no
- * snapshot renders as a gap, not a misleading straight line (a missing point
- * is not zero).
+ * series name as visible text, the figure's `aria-label` states the
+ * left/right axis assignment for screen readers, and the tooltip shows both
+ * real values. `yAxisId` binds each line to its own axis.
+ * `connectNulls={false}` so a day with no snapshot renders as a gap, not a
+ * misleading straight line (a missing point is not zero).
  */
 function DualAxisChart({ title, description, data, left, right }) {
   return (
@@ -69,11 +70,6 @@ function DualAxisChart({ title, description, data, left, right }) {
         {description ? (
           <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">{description}</p>
         ) : null}
-        {/* The axis assignment stated in TEXT, so which series is on which
-            scale never depends on reading colour off the chart. */}
-        <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-          Left axis: {left.label}. Right axis: {right.label}. Each has its own scale.
-        </p>
       </figcaption>
       <div className="mt-4" style={{ width: '100%', height: 300 }}>
         <ResponsiveContainer>
@@ -130,58 +126,67 @@ function DualAxisChart({ title, description, data, left, right }) {
 }
 
 export default function Statistics({ user }) {
-  // Belt-and-braces auth guard, computed before any fetch state/effect (same
-  // discipline as AuditLogs.jsx). The server enforces statistics:read.
-  const isGlobalManager = Boolean(user?.is_global_manager)
+  // The Statistics page is open to EVERY authenticated user (member, team
+  // admin, global admin): it shows only deployment-wide AGGREGATE counts (no
+  // per-user or per-team detail), so there is nothing to scope per viewer and
+  // no page-level role gate. The server still enforces the `statistics:read`
+  // permission, which is granted to every authenticated user. `user` is kept
+  // in the signature for consistency with the other page components even
+  // though the page no longer branches on it.
+  void user
 
   const [windowDays, setWindowDays] = useState(30)
   const [series, setSeries] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
+  // One fetcher for the current window, stable per window.
+  // `showLoading` is true for a foreground fetch (first load / window change),
+  // which shows the spinner and surfaces a load error; false for a background
+  // auto-refresh, which must NOT blank the charts, re-raise the spinner, or
+  // replace the rendered series with an error -- the client convention that a
+  // failed background refresh never clears rendered data. A background refresh
+  // failure is only logged; the last good series stays on screen.
+  const fetchStatistics = useCallback(async ({ showLoading } = { showLoading: true }) => {
+    if (showLoading) {
+      setLoading(true)
+      setError(null)
+    }
+    try {
+      const response = await statisticsAPI.get(windowDays)
+      setSeries(response.data?.series || [])
+      if (showLoading) {
+        setError(null)
+      }
+    } catch (err) {
+      console.error('Failed to fetch statistics:', err)
+      if (showLoading) {
+        setError(`Failed to load statistics: ${err.message}`)
+      }
+    } finally {
+      if (showLoading) {
+        setLoading(false)
+      }
+    }
+  }, [windowDays])
+
+  // First load and every window change: a foreground fetch (spinner + error).
   useEffect(() => {
-    if (!isGlobalManager) {
-      return
-    }
+    fetchStatistics({ showLoading: true })
+  }, [fetchStatistics])
 
-    let isMounted = true
-    setLoading(true)
-    setError(null)
-
-    statisticsAPI.get(windowDays)
-      .then((response) => {
-        if (isMounted) {
-          setSeries(response.data?.series || [])
-        }
-      })
-      .catch((err) => {
-        console.error('Failed to fetch statistics:', err)
-        if (isMounted) {
-          setError(`Failed to load statistics: ${err.message}`)
-        }
-      })
-      .finally(() => {
-        if (isMounted) {
-          setLoading(false)
-        }
-      })
-
-    return () => {
-      isMounted = false
-    }
-  }, [isGlobalManager, windowDays])
-
-  if (!isGlobalManager) {
-    return (
-      <div className="text-center py-12">
-        <ChartBarIcon className="mx-auto h-12 w-12 text-gray-400" />
-        <h3 className="mt-2 text-sm font-medium text-gray-900 dark:text-gray-100">Access Denied</h3>
-        <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-          You need global admin privileges to access this page.
-        </p>
-      </div>
-    )
-  }
+  // Keep the charts current on the shared visibility-paused 60s interval (the
+  // same mechanism the Dashboard/Admin cards use). Separate from the
+  // first-load effect above so mounting still performs exactly one fetch --
+  // startVisibilityPausedRefresh only SCHEDULES subsequent refreshes. These
+  // are BACKGROUND refreshes (no spinner, no chart-clearing on failure).
+  // Re-subscribed when the fetcher identity changes (i.e. the window changes),
+  // so the interval always refreshes the currently-selected window.
+  useEffect(() => {
+    return startVisibilityPausedRefresh(() => {
+      fetchStatistics({ showLoading: false })
+    })
+  }, [fetchStatistics])
 
   return (
     <div className="space-y-6">
@@ -243,14 +248,14 @@ export default function Statistics({ user }) {
           />
           <DualAxisChart
             title="Total users and team devices over time"
-            description="Daily snapshot. Days before capture began may be approximate or absent."
+            description="Daily snapshot."
             data={series}
             left={TOTAL_DEVICES_LEFT}
             right={TOTAL_USERS_RIGHT}
           />
           <DualAxisChart
             title="Total teams and channels over time"
-            description="Daily snapshot. Days before capture began may be approximate or absent."
+            description="Daily snapshot."
             data={series}
             left={TOTAL_TEAMS_LEFT}
             right={TOTAL_CHANNELS_RIGHT}

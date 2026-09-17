@@ -313,12 +313,14 @@ const routes = {
   'GET /api/audit-logs/export.csv': ['audit_log:read'],
 
   // --- /api/statistics (server/routes/statistics.js) ---
-  // Global_Manager-only time series for the Statistics page (daily active
-  // users/team-devices connecting to TAK Server, plus the daily snapshot of
-  // the four /admin totals). 'statistics:read' is NOT in
-  // roleDefaults.authenticated_user, so only the global_manager wildcard
-  // satisfies it -- the same deployment-wide-view gate shape as
-  // audit_log:read / admin:stats:read.
+  // Time series for the Statistics page (daily active users/team-devices
+  // connecting to TAK Server, plus the daily snapshot of the four /admin
+  // totals). Reachable by EVERY authenticated user: 'statistics:read' is a
+  // static grant in roleDefaults.authenticated_user below. Unlike the
+  // Global_Manager-only audit_log:read / admin:stats:read, this exposes ONLY
+  // deployment-wide aggregate counts (no per-user or per-team detail) and
+  // takes no request-supplied subject to scope, so it is safe to grant
+  // broadly.
   'GET /api/statistics': ['statistics:read'],
 
   // --- /api/communications (server/routes/communications.js) ---
@@ -671,7 +673,15 @@ const roleDefaults = {
     // the maps are globally shared with no per-user scoping, and a caller can
     // only name a catalog id (never a raw S3 key), so there is no row-scoped
     // resolver a static grant could bypass.
-    'offline_maps:read'
+    'offline_maps:read',
+    // Statistics page (server/routes/statistics.js): deployment-wide
+    // AGGREGATE counts only (daily active users/team-devices connecting to
+    // TAK Server, and daily totals of users/teams/team-devices/channels) --
+    // no per-user or per-team detail, and no request-supplied subject to
+    // scope (only a fixed window enum). Granted to EVERY authenticated user;
+    // a static grant is safe because there is no row a resolver could scope
+    // and nothing per-viewer to widen.
+    'statistics:read'
   ]
 };
 
