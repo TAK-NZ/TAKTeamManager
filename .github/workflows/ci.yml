@@ -39,15 +39,18 @@ jobs:
   # added over the bare command is riding out a transient endpoint blip instead of
   # turning it into a red build. See scripts/ci-audit.js for the full rationale.
   #
-  # Exceptions record: as of this workflow's creation, no documented/reviewed exceptions
-  # record exists anywhere in this repository (checked for "audit" / "exceptions" files
-  # at the repo root and in `.kiro/specs/production-hardening/design.md`; design.md's
-  # Dependency Hygiene section directs a straightforward `npm audit --audit-level=high`
-  # with no exceptions-file mechanism called for). Per Requirement 20.3, `npm audit
-  # --audit-level=high`'s own severity-threshold behavior is used directly: every
-  # high/critical finding fails the build unless a documented exceptions record is
-  # introduced in a future change, at which point this job would need updating to consult
-  # it before failing.
+  # Exceptions record: `scripts/ci-audit.js` carries a small, documented allowlist
+  # (AUDIT_EXCEPTIONS) of high/critical advisories that have been individually reviewed
+  # and accepted because NO upgrade can remediate them -- the advisory range covers the
+  # latest published release of the dependency, so there is no version to bump to, and
+  # npm's only "fix" is a nonsensical major DOWNGRADE of an unrelated parent. Each entry
+  # is keyed by its stable GHSA id with a written reason, so a NEW advisory on the same
+  # package still fails the build: the allowlist accepts specific, named findings, never
+  # a package forever. As of this change the entries are GHSA-86w9-cpqp-85rv (node-forge,
+  # exact-pinned, no patched release) and GHSA-vfj7-8cjw-p6xm (braces, build-time/dev
+  # tooling only, latest braces is still in-range). Everything else: per Requirement 20.3
+  # every high/critical finding fails the build. See scripts/ci-audit.js for the full
+  # rationale and the current list.
   security-audit:
     name: Dependency Audit (${{ matrix.tree }})
     runs-on: ubuntu-latest
