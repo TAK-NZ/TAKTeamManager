@@ -434,14 +434,14 @@ describe('GlobalChannelService.seedRegionChannels', () => {
     service = new GlobalChannelService();
   });
 
-  it('builds a 37-item work list: 16 standard regions x 2 tiers, plus Chatham Islands x 2 tiers, plus All of New Zealand, North Island and South Island coordination-only', async () => {
+  it('builds a 37-item work list: 16 standard regions x 2 tiers, plus Chatham Islands x 2 tiers, plus All of New Zealand, All of North Island and All of South Island coordination-only', async () => {
     // No existing rows -- every work item is created.
     pool.query.mockResolvedValue({ rows: [] });
 
     const result = await service.seedRegionChannels(7);
 
     expect(result).toEqual({ created: 37, skipped: 0, failed: 0 });
-    // 16 * 2 + 2 (Chatham both tiers) + 3 (All of NZ, North Island, South Island coordination only) = 37
+    // 16 * 2 + 2 (Chatham both tiers) + 3 (All of NZ, All of North Island, All of South Island coordination only) = 37
     expect(mockClient.query.mock.calls.filter(
       ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO region_channels')
     )).toHaveLength(37);
@@ -461,7 +461,7 @@ describe('GlobalChannelService.seedRegionChannels', () => {
     expect(insertedTiersForNzWide).toEqual(['coordination']);
   });
 
-  it('seeds "North Island" and "South Island" as coordination tier only, never response', async () => {
+  it('seeds "All of North Island" and "All of South Island" as coordination tier only, never response', async () => {
     pool.query.mockResolvedValue({ rows: [] });
     await service.seedRegionChannels(7);
     const tiersFor = (name) => mockClient.query.mock.calls
@@ -469,8 +469,8 @@ describe('GlobalChannelService.seedRegionChannels', () => {
       .map(([, params]) => params)
       .filter((params) => params[0] === name)
       .map((params) => params[3]);
-    expect(tiersFor('North Island')).toEqual(['coordination']);
-    expect(tiersFor('South Island')).toEqual(['coordination']);
+    expect(tiersFor('All of North Island')).toEqual(['coordination']);
+    expect(tiersFor('All of South Island')).toEqual(['coordination']);
   });
   it('seeds "Chatham Islands" for both tiers', async () => {
     pool.query.mockResolvedValue({ rows: [] });

@@ -124,6 +124,9 @@ function requireGroupId(groupUuid, groupKind, logContext) {
 // rules, which must produce the IDENTICAL string or the LDAP rule stops
 // matching the created group.
 const { toAsciiIdentifier } = require('../utils/asciiNormalize');
+// Shared with AuthentikSyncService's region-group-name reconcile, so the name it
+// compares against is byte-identical to the one updateRegionChannelGroup writes.
+const { buildRegionGroupName } = require('../utils/regionGroupName');
 const { resolveChannelFolderSeparator } = require('../utils/channelFolderSeparator');
 const { teamChannelGroupAttributes } = require('../utils/teamChannelGroupName');
 // Requirement 25 (task 47.1): the Retention_Cleanup_Job, running on its
@@ -2271,7 +2274,7 @@ class SyncWorker {
     const authentikDescription = description;
     const requestBody = {
       // ASCII-normalized, matching createRegionChannelGroup.
-      name: `tak_${tierPrefix}${separator}${toAsciiIdentifier(channel_name)}`,
+      name: buildRegionGroupName(tier, channel_name, separator),
       attributes: { 
         channel_type: 'region',
         description: authentikDescription

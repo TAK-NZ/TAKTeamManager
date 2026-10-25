@@ -449,7 +449,7 @@ router.get('/region/seed-status', authenticateToken, authorize, async (req, res)
 
 // Seed the standard set of Response/Coordination region channels (global
 // managers only): the 16 ISO 3166-2:NZ regions (both tiers) plus Chatham
-// Islands (both tiers) plus All of New Zealand, North Island and South Island
+// Islands (both tiers) plus All of New Zealand, All of North Island and All of South Island
 // (coordination tier only) -- see
 // server/config/regions.js and GlobalChannelService.seedRegionChannels's
 // own doc comment. Idempotent: safe to call again after some channels

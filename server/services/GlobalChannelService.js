@@ -238,7 +238,7 @@ class GlobalChannelService {
    * region-channel-tiers: pre-seeds the standard set of Response/Coordination
    * region channels -- the 16 ISO 3166-2:NZ regions (both tiers) plus the
    * two Special_Regions (`server/config/regions.js`'s `SPECIAL_REGIONS`:
-   * Chatham Islands, both tiers; All of New Zealand, North Island and South Island, coordination tier only),
+   * Chatham Islands, both tiers; All of New Zealand, All of North Island and All of South Island, coordination tier only),
    * for a total of 37 channels on a deployment with none of them yet.
    *
    * Idempotent, per-row: for each (name, tier) pair, a case-insensitive

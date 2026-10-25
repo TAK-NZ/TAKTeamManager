@@ -926,7 +926,7 @@ export default function GlobalChannels({ user }) {
             <p>• <strong>Sync Existing Channels:</strong> Import BCH, Response and Coordination channels that already exist in Authentik</p>
             <p>• <strong>Reconcile Global Channel Membership:</strong> Force an immediate reconcile of every active global channel&apos;s membership against the current users. Runs automatically in the background; use this to apply changes now rather than waiting for the next sweep.</p>
             {regionSeedComplete !== true && (
-              <p>• <strong>Seed Standard Region Channels:</strong> Create the standard set of Response/Coordination channels for every NZ region, Chatham Islands, and All of New Zealand, North Island and South Island (coordination only) -- safe to run again, only fills in any missing channels</p>
+              <p>• <strong>Seed Standard Region Channels:</strong> Create the standard set of Response/Coordination channels for every NZ region, Chatham Islands, and All of New Zealand, All of North Island and All of South Island (coordination only) -- safe to run again, only fills in any missing channels</p>
             )}
           </div>
         </div>
@@ -1109,7 +1109,7 @@ export default function GlobalChannels({ user }) {
                 Seed Standard Region Channels
               </h3>
               <p className="text-gray-600 dark:text-gray-400 mb-6">
-                This will create up to 37 Response/Coordination channels (every NZ region and Chatham Islands, plus All of New Zealand, North Island and South Island as coordination-only) that don't already exist. Existing channels are left unchanged. Continue?
+                This will create up to 37 Response/Coordination channels (every NZ region and Chatham Islands, plus All of New Zealand, All of North Island and All of South Island as coordination-only) that don't already exist. Existing channels are left unchanged. Continue?
               </p>
               <div className="flex justify-end space-x-3">
                 <button

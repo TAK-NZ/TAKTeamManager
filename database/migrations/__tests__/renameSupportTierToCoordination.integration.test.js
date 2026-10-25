@@ -10,12 +10,14 @@
  *   - rewrites `tier: 'support'` in NON-TERMINAL queued `sync_operations`
  *     payloads (and leaves completed history alone), so a queued operation is
  *     not permanently failed by the worker after the rename;
- *   - enqueues exactly one in-place `update_region_channel_group` per
- *     coordination channel that already has an Authentik `group_id`;
+ *   - does NOT enqueue any Authentik group rename (that is done by the
+ *     periodic `AuthentikSyncService.reconcileRegionChannelGroupNames`, which
+ *     is robust to old Sync_Worker tasks running during a deploy);
  *   - reverses cleanly on `down`.
  *
- * METHOD: run the full chain up, step the migration back down (so the schema
- * is in its pre-rename shape), seed old-shape rows, then run it up again.
+ * METHOD: run the full chain up, step back down through this migration and
+ * every migration after it (so the schema is in its pre-rename shape), seed
+ * old-shape rows, then run the chain up again.
  * That avoids naming any other migration file, so a future baseline squash
  * only means this guard is skipped once the migration file is folded in.
  *
@@ -35,6 +37,11 @@ const {
 const MIGRATIONS_DIR = path.join(__dirname, '..');
 const MIGRATION_FILE = '1790500000000_rename-support-tier-to-coordination.cjs';
 const migrationPresent = fs.existsSync(path.join(MIGRATIONS_DIR, MIGRATION_FILE));
+// This migration plus every later one, so `down` lands on the pre-rename shape
+// however many migrations are stacked on top of it.
+const STEPS_FROM_THIS_MIGRATION = migrationPresent
+  ? fs.readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith('.cjs') && f >= MIGRATION_FILE).length
+  : 0;
 
 const ORIGINAL_ENV = {
   DB_HOST: process.env.DB_HOST,
@@ -82,7 +89,7 @@ describeIfPresent('rename support tier -> coordination migration', () => {
   beforeAll(async () => {
     pool = await createThrowawayDatabase(DB_NAME, 'The support->coordination rename guard');
     runMigrationChain(DB_NAME, MIGRATIONS_DIR);
-    runMigrationChain(DB_NAME, MIGRATIONS_DIR, { direction: 'down', count: 1 });
+    runMigrationChain(DB_NAME, MIGRATIONS_DIR, { direction: 'down', count: STEPS_FROM_THIS_MIGRATION });
     await seedOldShape();
     runMigrationChain(DB_NAME, MIGRATIONS_DIR);
   }, 180000);
@@ -106,7 +113,7 @@ describeIfPresent('rename support tier -> coordination migration', () => {
       pool.query(`INSERT INTO region_channels (name, display_name, tier) VALUES ('X', 'X', 'support')`)
     ).rejects.toThrow(/region_channels_tier_check/);
     await expect(
-      pool.query(`INSERT INTO region_channels (name, display_name, tier) VALUES ('North Island', 'North Island', 'coordination')`)
+      pool.query(`INSERT INTO region_channels (name, display_name, tier) VALUES ('Probe', 'Probe', 'coordination')`)
     ).resolves.toBeDefined();
   });
 
@@ -122,7 +129,7 @@ describeIfPresent('rename support tier -> coordination migration', () => {
   });
 
   it('rewrites the description qualifier only where it was the stock text', async () => {
-    const { rows } = await pool.query(`SELECT name, description FROM region_channels WHERE tier = 'coordination' AND name <> 'North Island' ORDER BY name`);
+    const { rows } = await pool.query(`SELECT name, description FROM region_channels WHERE tier = 'coordination' AND name <> 'Probe' ORDER BY name`);
     expect(rows).toEqual([
       { name: 'Auckland', description: 'Auckland (Coordination - All Agencies)' },
       { name: 'Otago', description: 'Otago (Coordination - All Agencies)' },
@@ -153,20 +160,15 @@ describeIfPresent('rename support tier -> coordination migration', () => {
     ]);
   });
 
-  it('enqueues one in-place group rename per coordination channel that has an Authentik group', async () => {
+  it('does not enqueue any Authentik group rename (the periodic reconcile owns that)', async () => {
     const { rows } = await pool.query(
-      `SELECT payload FROM sync_operations WHERE operation_type = 'update_region_channel_group' ORDER BY id`
+      `SELECT count(*)::int AS n FROM sync_operations WHERE operation_type = 'update_region_channel_group'`
     );
-    // Otago has no group_id, so it is correctly absent.
-    expect(rows.map((r) => r.payload.channel_name).sort()).toEqual(['Auckland', 'Waikato']);
-    for (const { payload } of rows) {
-      expect(typeof payload.region_channel_id).toBe('number');
-      expect(typeof payload.description).toBe('string');
-    }
+    expect(rows[0].n).toBe(0);
   });
 
   it('down reverses the schema and data rewrites', async () => {
-    runMigrationChain(DB_NAME, MIGRATIONS_DIR, { direction: 'down', count: 1 });
+    runMigrationChain(DB_NAME, MIGRATIONS_DIR, { direction: 'down', count: STEPS_FROM_THIS_MIGRATION });
     const { rows: tiers } = await pool.query(`SELECT DISTINCT tier FROM region_channels ORDER BY tier`);
     expect(tiers.map((t) => t.tier)).toEqual(['response', 'support']);
     const { rows: cols } = await pool.query(

@@ -5,6 +5,8 @@ const { createLogger } = require('../config/logger');
 const { normaliseAuthentikEmail } = require('../utils/authentikEmail');
 const { isIgnoredAuthentikUsername } = require('../config/authentikSyncIgnore');
 const EventPublisher = require('./EventPublisher');
+const { resolveChannelFolderSeparator } = require('../utils/channelFolderSeparator');
+const { selectRegionGroupRenames } = require('../utils/regionGroupName');
 // Authentik scaling (Phase 1): the periodic reconciliation sweep is another
 // Authentik load source (a full paginated user + group fetch every cycle,
 // plus a per-user attribute PATCH on drift). Route its calls through the
@@ -202,6 +204,9 @@ class AuthentikSyncService {
         );
       }
 
+      // Self-healing region-group names. Runs on the same success path, with
+      // the group map this run already fetched, and never fails the sync.
+      await this.reconcileRegionChannelGroupNames(groupMap);
       // Update sync status. The cache sync itself succeeded, so status is
       // 'success' either way -- but when the sweep was SKIPPED for an
       // incomplete fetch, `error_message` carries that skip reason (instead of
@@ -225,6 +230,75 @@ class AuthentikSyncService {
       );
     } finally {
       this.isRunning = false;
+    }
+  }
+
+  /**
+   * Converges the Authentik group name of every region channel onto the name
+   * the CURRENT code expects (`tak_<TierPrefix> - <Name>`).
+   *
+   * WHY THIS EXISTS. A region channel's group name is derived from code (the
+   * tier prefix in `REGION_CHANNEL_TIER_PREFIX`), so changing a prefix leaves
+   * every existing group with a stale name. A one-shot rename queued by a
+   * migration is not reliable: the Sync_Worker service deliberately runs old
+   * and new tasks side by side during a deploy (and production runs two), and
+   * an old task that claims the operation after the database has changed
+   * either fails it permanently or renames the group to its existing name. A
+   * convergent check has no such window: whatever an old task did or failed
+   * to do, the next run compares real names to expected names and queues the
+   * difference again.
+   *
+   * SAFETY. Only groups that are PRESENT in the fetched map are considered,
+   * so a group deleted in Authentik, or a short fetch, never causes a rename.
+   * The rename itself is the normal queued `update_region_channel_group`
+   * operation (retry, backoff, rate limiting, audit trail). A channel that
+   * already has a pending or processing rename is skipped so a slow queue
+   * does not accumulate duplicates. A failure here is logged and swallowed:
+   * it must never fail the user sync.
+   *
+   * @param {Record<string,string>} groupMap Authentik group pk -> current name
+   * @returns {Promise<number>} the number of rename operations enqueued
+   */
+  async reconcileRegionChannelGroupNames(groupMap) {
+    try {
+      const { rows: channels } = await db.query(
+        `SELECT id, name, description, tier, group_id
+           FROM region_channels
+          WHERE group_id IS NOT NULL`
+      );
+      const renames = selectRegionGroupRenames(channels, groupMap, resolveChannelFolderSeparator());
+      if (renames.length === 0) {
+        return 0;
+      }
+
+      const { rows: inFlight } = await db.query(
+        `SELECT DISTINCT (payload ->> 'region_channel_id')::int AS region_channel_id
+           FROM sync_operations
+          WHERE operation_type = 'update_region_channel_group'
+            AND status IN ('pending', 'processing')
+            AND (payload ->> 'region_channel_id')::int = ANY($1::int[])`,
+        [renames.map(({ channel }) => channel.id)]
+      );
+      const alreadyQueued = new Set(inFlight.map((row) => row.region_channel_id));
+
+      let enqueued = 0;
+      for (const { channel, expectedName, currentName } of renames) {
+        if (alreadyQueued.has(channel.id)) continue;
+        await EventPublisher.publishOperation('update_region_channel_group', {
+          region_channel_id: channel.id,
+          channel_name: channel.name,
+          description: channel.description || ''
+        }, null);
+        enqueued++;
+        logger.info(
+          { regionChannelId: channel.id, currentName, expectedName },
+          'Region channel group name is stale; enqueued an in-place rename'
+        );
+      }
+      return enqueued;
+    } catch (error) {
+      logger.error({ err: error }, 'Region channel group name reconcile failed; continuing');
+      return 0;
     }
   }
 

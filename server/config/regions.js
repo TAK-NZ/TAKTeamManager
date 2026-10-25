@@ -37,7 +37,7 @@ const NZ_REGIONS = Object.freeze([
 /**
  * Special_Regions (region-channel-tiers): the National_Channels
  * geographies outside the 16 standard regions (Chatham Islands, All of New
- * Zealand, North Island, South Island), each with which tiers
+ * Zealand, All of North Island, All of South Island), each with which tiers
  * `seedRegionChannels` creates a channel for.
  *
  * - Chatham Islands: BOTH tiers, like every standard region -- it is
@@ -50,7 +50,7 @@ const NZ_REGIONS = Object.freeze([
  *   channel would be an ES-only inner-circle channel for an event that,
  *   by definition, already involves the outer circle, which is not a
  *   coherent channel to seed.
- * - North Island / South Island: COORDINATION ONLY, for the same reason
+ * - All of North Island / All of South Island: COORDINATION ONLY, for the same reason
  *   -- an island-wide coordination space across the regions of that island
  *   has no ES-only inner-circle counterpart. Like every Coordination
  *   channel they are gated by `teams.coordination_channel_access`.
@@ -58,8 +58,8 @@ const NZ_REGIONS = Object.freeze([
 const SPECIAL_REGIONS = Object.freeze([
   { name: 'Chatham Islands', tiers: ['response', 'coordination'] },
   { name: 'All of New Zealand', tiers: ['coordination'] },
-  { name: 'North Island', tiers: ['coordination'] },
-  { name: 'South Island', tiers: ['coordination'] }
+  { name: 'All of North Island', tiers: ['coordination'] },
+  { name: 'All of South Island', tiers: ['coordination'] }
 ]);
 
 /**

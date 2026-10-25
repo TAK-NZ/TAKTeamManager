@@ -21,20 +21,18 @@
  *     and be failed permanently.
  *
  * AUTHENTIK GROUP RENAME. This migration only touches the local database. The
- * existing Authentik groups are still named `tak_Support - <region>`. To
- * rename them IN PLACE (same group pk, so memberships are preserved) the
- * migration enqueues one `update_region_channel_group` Sync_Operation per
- * coordination channel that already has a `group_id`; the Sync_Worker's
- * handler PATCHes the group name from the tier prefix in
- * `server/config/constants.js`.
+ * existing Authentik groups are still named `tak_Support - <region>` until
+ * `AuthentikSyncService.reconcileRegionChannelGroupNames` renames them IN
+ * PLACE (same group pk, so memberships are preserved) on a periodic sync. That
+ * check compares each region channel's real group name with the name the
+ * current code expects, so it converges regardless of deploy order.
  *
- * DEPLOY ORDER HAZARD. That handler computes the new name from the prefix in
- * the code the WORKER is running. If an old worker (still carrying the
- * 'Support' prefix) drains one of these operations before it is replaced, it
- * PATCHes the group to its existing name, marks the operation completed, and
- * the rename silently never happens. Make sure no old-code Sync_Worker is
- * running once this migration has committed, or re-run the rename afterwards
- * (e.g. by editing any region channel, which re-enqueues the same operation).
+ * WHY NOT ENQUEUE THE RENAME HERE. An earlier version of this migration queued
+ * one `update_region_channel_group` operation per channel. That is not
+ * reliable: the Sync_Worker service deliberately runs old and new tasks side
+ * by side during a deploy, and an old task that claims the operation after
+ * this migration has changed the data fails it permanently (it does not know
+ * the 'coordination' tier). A convergent check has no such window.
  */
 exports.shorthands = undefined;
 
@@ -71,19 +69,6 @@ exports.up = (pgm) => {
        SET payload = jsonb_set(payload, '{tier}', '"coordination"'::jsonb)
      WHERE payload ->> 'tier' = 'support'
        AND status IN ('pending', 'processing', 'failed');
-
-    -- 6. Enqueue the in-place Authentik group rename for each existing channel.
-    INSERT INTO public.sync_operations (operation_type, payload, created_by)
-    SELECT 'update_region_channel_group',
-           jsonb_build_object(
-             'region_channel_id', rc.id,
-             'channel_name', rc.name,
-             'description', COALESCE(rc.description, '')
-           ),
-           rc.created_by
-      FROM public.region_channels rc
-     WHERE rc.tier = 'coordination'
-       AND rc.group_id IS NOT NULL;
   `);
 };
 
