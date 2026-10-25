@@ -2539,7 +2539,7 @@ describe('SyncWorker Authentik failure classification wiring', () => {
       expect([...body.name].every((ch) => ch.codePointAt(0) <= 0x7f)).toBe(true);
     });
 
-    it("names the created group with the tier's prefix (tak_Support for tier 'support')", async () => {
+    it("names the created group with the tier's prefix (tak_Coordination for tier 'coordination')", async () => {
       global.fetch = jest.fn().mockResolvedValue({
         ok: true,
         status: 201,
@@ -2548,12 +2548,12 @@ describe('SyncWorker Authentik failure classification wiring', () => {
 
       await worker.executeOperationSafely({
         ...baseOperation,
-        payload: { ...baseOperation.payload, tier: 'support' }
+        payload: { ...baseOperation.payload, tier: 'coordination' }
       });
 
       const [, options] = global.fetch.mock.calls[0];
       const body = JSON.parse(options.body);
-      expect(body.name).toBe('tak_Support - Auckland');
+      expect(body.name).toBe('tak_Coordination - Auckland');
     });
 
     // region-channel-tiers: an invalid/missing tier is a permanent
@@ -2652,7 +2652,7 @@ describe('SyncWorker Authentik failure classification wiring', () => {
       // Region channels are a SINGLE Authentik group per channel (no
       // "_READ" pair like BCH channels have -- see the region-matching
       // fix in syncExistingGlobalChannels). region-channel-tiers: the
-      // prefix is now tier-specific (tak_Response/tak_Support), not the
+      // prefix is now tier-specific (tak_Response/tak_Coordination), not the
       // former single untiered tak_Regions.
       const page1Groups = [
         { pk: 'g1', name: `tak_Response${separator}North`, attributes: {} }
@@ -2841,7 +2841,7 @@ describe('SyncWorker Authentik failure classification wiring', () => {
 /**
  * region-channel-tiers (task 8): assignUserToGlobalChannels resolves a
  * user's Organisation via their Direct_Membership, reads
- * response_channel_access/support_channel_access off it, diffs the
+ * response_channel_access/coordination_channel_access off it, diffs the
  * user's REAL current Authentik group membership (scoped to only the
  * groups this reconcile owns) against the target set, and both adds AND
  * removes as needed. Rewritten in task 8 to remove the old
@@ -2893,10 +2893,10 @@ describe('SyncWorker.assignUserToGlobalChannels', () => {
     worker.pool.query = routePool({
       directMembershipRows: [{ team_id: 5 }],
       bchReadGroupIds: [901],
-      regionRows: [{ group_id: 701, tier: 'response' }, { group_id: 702, tier: 'support' }]
+      regionRows: [{ group_id: 701, tier: 'response' }, { group_id: 702, tier: 'coordination' }]
     });
     Team.getAncestorChain.mockResolvedValue([
-      { id: 1, parent_team_id: null, response_channel_access: true, support_channel_access: false }
+      { id: 1, parent_team_id: null, response_channel_access: true, coordination_channel_access: false }
     ]);
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
@@ -2909,18 +2909,18 @@ describe('SyncWorker.assignUserToGlobalChannels', () => {
     expect(worker.removeUserFromGroup).not.toHaveBeenCalled();
   });
 
-  it('removes the user from the support group when their Organisation has support_channel_access=false but they are currently a member', async () => {
+  it('removes the user from the coordination group when their Organisation has coordination_channel_access=false but they are currently a member', async () => {
     worker.pool.query = routePool({
       directMembershipRows: [{ team_id: 5 }],
       bchReadGroupIds: [901],
-      regionRows: [{ group_id: 701, tier: 'response' }, { group_id: 702, tier: 'support' }]
+      regionRows: [{ group_id: 701, tier: 'response' }, { group_id: 702, tier: 'coordination' }]
     });
     Team.getAncestorChain.mockResolvedValue([
-      { id: 1, parent_team_id: null, response_channel_access: false, support_channel_access: false }
+      { id: 1, parent_team_id: null, response_channel_access: false, coordination_channel_access: false }
     ]);
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ groups: [901, 702] }) // currently has BCH + support, but the flag is now off
+      json: async () => ({ groups: [901, 702] }) // currently has BCH + coordination, but the flag is now off
     });
 
     await worker.assignUserToGlobalChannels({ target_user_id: 1 });
@@ -2933,10 +2933,10 @@ describe('SyncWorker.assignUserToGlobalChannels', () => {
     worker.pool.query = routePool({
       directMembershipRows: [{ team_id: 5 }],
       bchReadGroupIds: [901],
-      regionRows: [{ group_id: 701, tier: 'response' }, { group_id: 702, tier: 'support' }]
+      regionRows: [{ group_id: 701, tier: 'response' }, { group_id: 702, tier: 'coordination' }]
     });
     Team.getAncestorChain.mockResolvedValue([
-      { id: 1, parent_team_id: null, response_channel_access: false, support_channel_access: false }
+      { id: 1, parent_team_id: null, response_channel_access: false, coordination_channel_access: false }
     ]);
     const UNRELATED_TEAM_GROUP_ID = 12345;
     global.fetch = jest.fn().mockResolvedValue({
@@ -2963,7 +2963,7 @@ describe('SyncWorker.assignUserToGlobalChannels', () => {
     worker.pool.query = routePool({
       directMembershipRows: [], // no Direct_Membership row at all
       bchReadGroupIds: [901],
-      regionRows: [{ group_id: 701, tier: 'response' }, { group_id: 702, tier: 'support' }]
+      regionRows: [{ group_id: 701, tier: 'response' }, { group_id: 702, tier: 'coordination' }]
     });
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
@@ -2984,7 +2984,7 @@ describe('SyncWorker.assignUserToGlobalChannels', () => {
       regionRows: []
     });
     Team.getAncestorChain.mockResolvedValue([
-      { id: 1, parent_team_id: null, response_channel_access: false, support_channel_access: false }
+      { id: 1, parent_team_id: null, response_channel_access: false, coordination_channel_access: false }
     ]);
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
@@ -3043,10 +3043,10 @@ describe('SyncWorker.assignUserToGlobalChannels', () => {
     worker.pool.query = routePool({
       directMembershipRows: [{ team_id: 5 }],
       bchReadGroupIds: [901],
-      regionRows: [{ group_id: 701, tier: 'response' }, { group_id: 702, tier: 'support' }]
+      regionRows: [{ group_id: 701, tier: 'response' }, { group_id: 702, tier: 'coordination' }]
     });
     Team.getAncestorChain.mockResolvedValue([
-      { id: 1, parent_team_id: null, response_channel_access: true, support_channel_access: true }
+      { id: 1, parent_team_id: null, response_channel_access: true, coordination_channel_access: true }
     ]);
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
@@ -3059,7 +3059,7 @@ describe('SyncWorker.assignUserToGlobalChannels', () => {
 
     await expect(worker.assignUserToGlobalChannels({ target_user_id: 1 })).resolves.toBeUndefined();
 
-    // All three target groups (bch + response + support) were attempted
+    // All three target groups (bch + response + coordination) were attempted
     // despite the first one failing.
     expect(worker.addUserToGroup).toHaveBeenCalledTimes(3);
     expect(mockLoggerInstance.error).toHaveBeenCalled();
@@ -3072,7 +3072,7 @@ describe('SyncWorker.assignUserToGlobalChannels', () => {
       regionRows: []
     });
     Team.getAncestorChain.mockResolvedValue([
-      { id: 1, parent_team_id: null, response_channel_access: false, support_channel_access: false }
+      { id: 1, parent_team_id: null, response_channel_access: false, coordination_channel_access: false }
     ]);
     global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 500, statusText: 'Internal Server Error' });
 
@@ -3133,7 +3133,7 @@ describe('SyncWorker.resyncOrgChannelTierAccess', () => {
     Team.getOrganisationTeams.mockResolvedValue([]);
     worker.pool.query = jest.fn().mockResolvedValue({ rows: [] });
 
-    await worker.resyncOrgChannelTierAccess({ organisation_id: 999, tier: 'support' });
+    await worker.resyncOrgChannelTierAccess({ organisation_id: 999, tier: 'coordination' });
 
     expect(EventPublisher.publishBulkOperation).not.toHaveBeenCalled();
     expect(EventPublisher.publishOperationsBatch).not.toHaveBeenCalled();
@@ -3143,7 +3143,7 @@ describe('SyncWorker.resyncOrgChannelTierAccess', () => {
     Team.getOrganisationTeams.mockResolvedValue([{ id: 1 }]);
     worker.pool.query = jest.fn().mockResolvedValue({ rows: [] });
 
-    await worker.resyncOrgChannelTierAccess({ organisation_id: 1, tier: 'support' });
+    await worker.resyncOrgChannelTierAccess({ organisation_id: 1, tier: 'coordination' });
 
     expect(EventPublisher.publishBulkOperation).not.toHaveBeenCalled();
     expect(EventPublisher.publishOperationsBatch).not.toHaveBeenCalled();

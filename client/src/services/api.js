@@ -244,7 +244,7 @@ export const teamsAPI = {
   getCallsignLevelOptions: (id) => api.get(`/teams/${id}/callsign-level-options`),
   updateMember: (teamId, userId, data) => api.patch(`/teams/${teamId}/members/${userId}`, data),
   // region-channel-tiers: Global_Manager-only, Organisation-only. data:
-  // { responseChannelAccess?, supportChannelAccess? } -- deliberately a
+  // { responseChannelAccess?, coordinationChannelAccess? } -- deliberately a
   // SEPARATE endpoint from `update()` above (server/routes/teams.js's
   // `team:channel_access:manage` permission has no Team_Admin fallback,
   // unlike `team:update`).
@@ -458,9 +458,9 @@ export const globalChannelsAPI = {
   assignAllUsers: () => api.post('/global-channels/assign-all-users'),
   deleteChannel: (channelType, channelId) => api.delete(`/global-channels/${channelType}/${channelId}`),
   syncExistingChannels: () => api.post('/global-channels/sync-existing'),
-  // region-channel-tiers: seeds the standard 35-channel Response/Support
-  // set (16 regions x 2 tiers + Chatham Islands x 2 tiers + National
-  // support-only) -- see server/services/GlobalChannelService.
+  // region-channel-tiers: seeds the standard 37-channel Response/Coordination
+  // set (16 regions x 2 tiers + Chatham Islands x 2 tiers + 3 National
+  // coordination-only) -- see server/services/GlobalChannelService.
   // seedRegionChannels's own doc comment.
   seedRegionChannels: () => api.post('/global-channels/seed-regions'),
   // region-channel-tiers (bugfix): backs the "hide Seed button once

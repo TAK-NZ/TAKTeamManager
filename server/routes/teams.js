@@ -603,14 +603,14 @@ router.put('/:teamId', authenticateToken, authorize, [
   }
 });
 
-// Update an Organisation's Response/Support channel-tier access flags.
+// Update an Organisation's Response/Coordination channel-tier access flags.
 // Global_Manager-only (Requirement: 'team:channel_access:manage' is
 // deliberately NOT 'team:update' -- see the Permission_Registry entry's
 // comment), no Team_Admin fallback: a Team_Admin of this very Organisation
 // cannot reach this route even for their own Organisation.
 router.put('/:teamId/channel-access', authenticateToken, authorize, [
   body('responseChannelAccess').optional().isBoolean(),
-  body('supportChannelAccess').optional().isBoolean()
+  body('coordinationChannelAccess').optional().isBoolean()
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -628,22 +628,22 @@ router.put('/:teamId/channel-access', authenticateToken, authorize, [
       return res.status(404).json({ error: 'Team not found' });
     }
 
-    // response_channel_access/support_channel_access are Organisation-only
+    // response_channel_access/coordination_channel_access are Organisation-only
     // (Team.update rejects a Sub_Team supplying either with a typed
     // ChannelTierAccessSubTeamError, mapped to 400 below as defense in
     // depth), but checking here too lets this route return a clearer,
     // request-shape-specific message before ever calling Team.update.
     if (team.parent_team_id !== null) {
       return res.status(400).json({
-        error: 'Response/Support channel access can only be set on an Organisation, not a Sub_Team'
+        error: 'Response/Coordination channel access can only be set on an Organisation, not a Sub_Team'
       });
     }
 
-    const { responseChannelAccess, supportChannelAccess } = req.body;
+    const { responseChannelAccess, coordinationChannelAccess } = req.body;
 
-    if (responseChannelAccess === undefined && supportChannelAccess === undefined) {
+    if (responseChannelAccess === undefined && coordinationChannelAccess === undefined) {
       return res.status(400).json({
-        error: 'At least one of responseChannelAccess or supportChannelAccess must be supplied'
+        error: 'At least one of responseChannelAccess or coordinationChannelAccess must be supplied'
       });
     }
 
@@ -655,18 +655,18 @@ router.put('/:teamId/channel-access', authenticateToken, authorize, [
     const responseChanged =
       responseChannelAccess !== undefined &&
       Boolean(responseChannelAccess) !== Boolean(team.response_channel_access);
-    const supportChanged =
-      supportChannelAccess !== undefined &&
-      Boolean(supportChannelAccess) !== Boolean(team.support_channel_access);
+    const coordinationChanged =
+      coordinationChannelAccess !== undefined &&
+      Boolean(coordinationChannelAccess) !== Boolean(team.coordination_channel_access);
 
     const updatedTeam = await Team.update(req.params.teamId, {
       response_channel_access: responseChannelAccess,
-      support_channel_access: supportChannelAccess
+      coordination_channel_access: coordinationChannelAccess
     });
 
     // Enqueue one reconciliation Sync_Operation per tier that actually
     // changed, resolving every user under this Organisation's tree and
-    // adding/removing their Response/Support group membership to match
+    // adding/removing their Response/Coordination group membership to match
     // the new flag state (see syncWorker's resync_org_channel_tier_access
     // handler). Enqueued OUTSIDE any transaction (Team.update itself does
     // not run in one), matching the fire-and-forget enqueue pattern
@@ -675,8 +675,8 @@ router.put('/:teamId/channel-access', authenticateToken, authorize, [
     // the flag update itself, since the flag is the source of truth and a
     // missed reconciliation is self-healed by the next explicit sync.
     const reconcileEnabled = isBulkGroupReconcileEnabled();
-    for (const tier of ['response', 'support']) {
-      const changed = tier === 'response' ? responseChanged : supportChanged;
+    for (const tier of ['response', 'coordination']) {
+      const changed = tier === 'response' ? responseChanged : coordinationChanged;
       if (!changed) continue;
       try {
         if (reconcileEnabled) {
@@ -711,7 +711,7 @@ router.put('/:teamId/channel-access', authenticateToken, authorize, [
           parseInt(req.params.teamId, 10),
           JSON.stringify({
             response_channel_access: updatedTeam.response_channel_access,
-            support_channel_access: updatedTeam.support_channel_access
+            coordination_channel_access: updatedTeam.coordination_channel_access
           })
         ]
       );

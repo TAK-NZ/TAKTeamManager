@@ -1574,7 +1574,7 @@ describe('PUT /api/teams/:teamId/channel-access', () => {
       id: 5,
       parent_team_id: 1,
       response_channel_access: null,
-      support_channel_access: null
+      coordination_channel_access: null
     });
 
     const res = await request(app)
@@ -1591,7 +1591,7 @@ describe('PUT /api/teams/:teamId/channel-access', () => {
       id: 42,
       parent_team_id: null,
       response_channel_access: false,
-      support_channel_access: true
+      coordination_channel_access: true
     });
 
     const res = await request(app).put('/api/teams/42/channel-access').send({});
@@ -1606,7 +1606,7 @@ describe('PUT /api/teams/:teamId/channel-access', () => {
       id: 42,
       parent_team_id: null,
       response_channel_access: false,
-      support_channel_access: true
+      coordination_channel_access: true
     });
     Team.update.mockRejectedValue(new Team.ChannelTierAccessSubTeamError('responseChannelAccess'));
 
@@ -1619,30 +1619,30 @@ describe('PUT /api/teams/:teamId/channel-access', () => {
     expect(res.body.team).toBeUndefined();
   });
 
-  it('passes both flags through to Team.update as response_channel_access/support_channel_access', async () => {
+  it('passes both flags through to Team.update as response_channel_access/coordination_channel_access', async () => {
     Team.findById.mockResolvedValue({
       id: 42,
       parent_team_id: null,
       response_channel_access: false,
-      support_channel_access: false
+      coordination_channel_access: false
     });
     Team.update.mockResolvedValue({
       id: 42,
       response_channel_access: true,
-      support_channel_access: true
+      coordination_channel_access: true
     });
 
     const res = await request(app)
       .put('/api/teams/42/channel-access')
-      .send({ responseChannelAccess: true, supportChannelAccess: true });
+      .send({ responseChannelAccess: true, coordinationChannelAccess: true });
 
     expect(res.status).toBe(200);
     expect(Team.update).toHaveBeenCalledWith(
       '42',
-      expect.objectContaining({ response_channel_access: true, support_channel_access: true })
+      expect.objectContaining({ response_channel_access: true, coordination_channel_access: true })
     );
     expect(res.body.team).toEqual(
-      expect.objectContaining({ response_channel_access: true, support_channel_access: true })
+      expect.objectContaining({ response_channel_access: true, coordination_channel_access: true })
     );
   });
 
@@ -1651,17 +1651,17 @@ describe('PUT /api/teams/:teamId/channel-access', () => {
       id: 42,
       parent_team_id: null,
       response_channel_access: false,
-      support_channel_access: true
+      coordination_channel_access: true
     });
     Team.update.mockResolvedValue({
       id: 42,
       response_channel_access: true, // changed: false -> true
-      support_channel_access: true // unchanged: stays true
+      coordination_channel_access: true // unchanged: stays true
     });
 
     const res = await request(app)
       .put('/api/teams/42/channel-access')
-      .send({ responseChannelAccess: true, supportChannelAccess: true });
+      .send({ responseChannelAccess: true, coordinationChannelAccess: true });
 
     expect(res.status).toBe(200);
     expect(EventPublisher.publishOperation).toHaveBeenCalledTimes(1);
@@ -1677,17 +1677,17 @@ describe('PUT /api/teams/:teamId/channel-access', () => {
       id: 42,
       parent_team_id: null,
       response_channel_access: false,
-      support_channel_access: true
+      coordination_channel_access: true
     });
     Team.update.mockResolvedValue({
       id: 42,
       response_channel_access: false,
-      support_channel_access: true
+      coordination_channel_access: true
     });
 
     const res = await request(app)
       .put('/api/teams/42/channel-access')
-      .send({ responseChannelAccess: false, supportChannelAccess: true });
+      .send({ responseChannelAccess: false, coordinationChannelAccess: true });
 
     expect(res.status).toBe(200);
     expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
@@ -1698,17 +1698,17 @@ describe('PUT /api/teams/:teamId/channel-access', () => {
       id: 42,
       parent_team_id: null,
       response_channel_access: false,
-      support_channel_access: true
+      coordination_channel_access: true
     });
     Team.update.mockResolvedValue({
       id: 42,
       response_channel_access: true,
-      support_channel_access: false
+      coordination_channel_access: false
     });
 
     const res = await request(app)
       .put('/api/teams/42/channel-access')
-      .send({ responseChannelAccess: true, supportChannelAccess: false });
+      .send({ responseChannelAccess: true, coordinationChannelAccess: false });
 
     expect(res.status).toBe(200);
     expect(EventPublisher.publishOperation).toHaveBeenCalledTimes(2);
@@ -1719,7 +1719,7 @@ describe('PUT /api/teams/:teamId/channel-access', () => {
     );
     expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
       'resync_org_channel_tier_access',
-      { organisation_id: 42, tier: 'support' },
+      { organisation_id: 42, tier: 'coordination' },
       1
     );
   });
@@ -1729,12 +1729,12 @@ describe('PUT /api/teams/:teamId/channel-access', () => {
       id: 42,
       parent_team_id: null,
       response_channel_access: false,
-      support_channel_access: true
+      coordination_channel_access: true
     });
     Team.update.mockResolvedValue({
       id: 42,
       response_channel_access: true,
-      support_channel_access: true
+      coordination_channel_access: true
     });
     EventPublisher.publishOperation.mockRejectedValue(new Error('queue unavailable'));
 
@@ -1751,12 +1751,12 @@ describe('PUT /api/teams/:teamId/channel-access', () => {
       id: 42,
       parent_team_id: null,
       response_channel_access: false,
-      support_channel_access: true
+      coordination_channel_access: true
     });
     Team.update.mockResolvedValue({
       id: 42,
       response_channel_access: true,
-      support_channel_access: true
+      coordination_channel_access: true
     });
 
     await request(app)
@@ -1772,7 +1772,7 @@ describe('PUT /api/teams/:teamId/channel-access', () => {
       'team.channel_access.update',
       'team',
       42,
-      JSON.stringify({ response_channel_access: true, support_channel_access: true })
+      JSON.stringify({ response_channel_access: true, coordination_channel_access: true })
     ]);
   });
 });

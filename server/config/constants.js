@@ -56,11 +56,11 @@ const TAK_COLOR_NAMES = Object.freeze([
 
 /**
  * region-channel-tiers: maps a `region_channels.tier` value ('response' or
- * 'support') to the Authentik group-name prefix used for that tier
- * (`tak_Response...`/`tak_Support...`). 'response' is the ES-only
+ * 'coordination') to the Authentik group-name prefix used for that tier
+ * (`tak_Response...`/`tak_Coordination...`). 'response' is the ES-only
  * Emergency_Response inner circle, gated by `teams.response_channel_access`;
- * 'support' is the all-agency outer circle, gated by
- * `teams.support_channel_access` and the direct continuation of what the
+ * 'coordination' is the all-agency outer circle, gated by
+ * `teams.coordination_channel_access` and the direct continuation of what the
  * former single, untiered Region channel already did.
  *
  * Single source of truth shared by `server/services/GlobalChannelService.js`
@@ -72,7 +72,7 @@ const TAK_COLOR_NAMES = Object.freeze([
  */
 const REGION_CHANNEL_TIER_PREFIX = Object.freeze({
   response: 'Response',
-  support: 'Support'
+  coordination: 'Coordination'
 });
 
 /**
@@ -81,10 +81,10 @@ const REGION_CHANNEL_TIER_PREFIX = Object.freeze({
  * `GlobalChannelService.seedRegionChannels` to build each seeded
  * channel's `description` as `"<name> (<qualifier>)"` -- e.g.
  * `"Auckland (Response - Emergency Services)"` vs.
- * `"Auckland (Support - All Agencies)"` -- rather than the bare region
+ * `"Auckland (Coordination - All Agencies)"` -- rather than the bare region
  * name alone, which was IDENTICAL for both tiers and gave a user no way
- * to tell "Response - Auckland" and "Support - Auckland" apart from
- * their description text (client's Response/Support card headings
+ * to tell "Response - Auckland" and "Coordination - Auckland" apart from
+ * their description text (client's Response/Coordination card headings
  * already use this same "Emergency Services"/"All Agencies" wording, so
  * this reuses it rather than inventing new terminology).
  *
@@ -94,7 +94,7 @@ const REGION_CHANNEL_TIER_PREFIX = Object.freeze({
  */
 const REGION_CHANNEL_TIER_DESCRIPTION_QUALIFIER = Object.freeze({
   response: 'Response - Emergency Services',
-  support: 'Support - All Agencies'
+  coordination: 'Coordination - All Agencies'
 });
 
 /**
@@ -145,7 +145,7 @@ const BCH_CHANNEL_CATEGORY_PREFIX = Object.freeze({
 });
 
 /**
- * The trailing qualifier appended to a Team / Response / Support channel's
+ * The trailing qualifier appended to a Team / Response / Coordination channel's
  * STORED `description` (e.g. `Users from Teams - FENZ (Bi-directional
  * location sharing)`). "Bi-directional" is deliberate: these are read/write
  * channels, so a member both sees others' locations and shares their own --

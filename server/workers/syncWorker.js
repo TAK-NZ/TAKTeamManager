@@ -18,7 +18,7 @@ const crypto = require('crypto');
 const pLimit = require('p-limit');
 const TeamMembershipService = require('../services/TeamMembershipService');
 // region-channel-tiers: resolves a user's Organisation (Ancestor_Chain
-// index 0) to read response_channel_access/support_channel_access, in
+// index 0) to read response_channel_access/coordination_channel_access, in
 // assignUserToGlobalChannels and the resync_org_channel_tier_access handler.
 const Team = require('../models/Team');
 // region-channel-tiers: resync_org_channel_tier_access fans out one
@@ -41,8 +41,8 @@ const { groupByEntityKey } = require('./entityGrouping');
 // dispatches to a handler.
 const operationSchemas = require('./operationSchemas');
 // region-channel-tiers: maps a region_channels.tier value ('response'/
-// 'support') to its Authentik group-name prefix (tak_Response.../
-// tak_Support...). Single source of truth shared with
+// 'coordination') to its Authentik group-name prefix (tak_Response.../
+// tak_Coordination...). Single source of truth shared with
 // GlobalChannelService.js -- see that constant's own doc comment in
 // server/config/constants.js.
 const { REGION_CHANNEL_TIER_PREFIX, BCH_CHANNEL_CATEGORY_PREFIX } = require('../config/constants');
@@ -2060,10 +2060,10 @@ class SyncWorker {
   // `region_channels` table -- only a `group_id` column, no read/write
   // pair like BCH channels have). There is no "_READ" counterpart group
   // for regions in Authentik; confirmed against the live schema and
-  // Authentik's actual `tak_Response - */tak_Support - *` groups, none of
+  // Authentik's actual `tak_Response - */tak_Coordination - *` groups, none of
   // which have a `_READ` sibling.
   //
-  // region-channel-tiers: `payload.tier` ('response'/'support') selects
+  // region-channel-tiers: `payload.tier` ('response'/'coordination') selects
   // the group-name prefix via REGION_CHANNEL_TIER_PREFIX --
   // GlobalChannelService.createRegionChannel always supplies it (it
   // validates the same set before ever enqueueing this operation), so an
@@ -4063,7 +4063,7 @@ class SyncWorker {
    * private team's members are treated IDENTICALLY to any other team's
    * for global-channel purposes -- private Team_Visibility is about
    * directory/listing scope, not about operational channel access) and
-   * to make Response/Support region-channel membership a genuine
+   * to make Response/Coordination region-channel membership a genuine
    * RECONCILE (add AND remove) driven by the user's Organisation's two
    * flags, rather than the former one-directional "always add" logic.
    *
@@ -4099,7 +4099,7 @@ class SyncWorker {
    * there is at most one, per the partial unique index) via
    * `Team.getAncestorChain(directTeamId)[0]`. A teamless user (no
    * Direct_Membership row) has no Organisation and therefore no
-   * Response/Support flags to satisfy -- they are reconciled toward
+   * Response/Coordination flags to satisfy -- they are reconciled toward
    * zero region-channel membership (any prior region-channel membership
    * is removed), while still keeping their unconditional BCH read access.
    */
@@ -4120,13 +4120,13 @@ class SyncWorker {
     `, [payload.target_user_id]);
 
     let responseChannelAccess = false;
-    let supportChannelAccess = false;
+    let coordinationChannelAccess = false;
     if (directMembershipResult.rows.length > 0) {
       const ancestorChain = await Team.getAncestorChain(directMembershipResult.rows[0].team_id);
       const organisation = ancestorChain[0];
       if (organisation) {
         responseChannelAccess = Boolean(organisation.response_channel_access);
-        supportChannelAccess = Boolean(organisation.support_channel_access);
+        coordinationChannelAccess = Boolean(organisation.coordination_channel_access);
       }
     }
 
@@ -4149,8 +4149,8 @@ class SyncWorker {
     const responseGroupIds = regionResult.rows
       .filter((row) => row.tier === 'response')
       .map((row) => row.group_id);
-    const supportGroupIds = regionResult.rows
-      .filter((row) => row.tier === 'support')
+    const coordinationGroupIds = regionResult.rows
+      .filter((row) => row.tier === 'coordination')
       .map((row) => row.group_id);
 
     // The full set of group ids this function is responsible for --
@@ -4158,14 +4158,14 @@ class SyncWorker {
     // below to scope "current membership" to ONLY the groups this
     // reconcile owns, so a user's Team/Sub_Team groups (or anything
     // else) can never appear in `toRemove`.
-    const managedGroupIds = new Set([...bchReadGroupIds, ...responseGroupIds, ...supportGroupIds]);
+    const managedGroupIds = new Set([...bchReadGroupIds, ...responseGroupIds, ...coordinationGroupIds]);
 
     // Target: BCH always, plus each tier's region groups only if the
     // Organisation's corresponding flag is true.
     const targetGroupIds = [
       ...bchReadGroupIds,
       ...(responseChannelAccess ? responseGroupIds : []),
-      ...(supportChannelAccess ? supportGroupIds : [])
+      ...(coordinationChannelAccess ? coordinationGroupIds : [])
     ];
 
     // Current: the user's actual Authentik group memberships, fetched
@@ -4225,7 +4225,7 @@ class SyncWorker {
       {
         target_user_id: payload.target_user_id,
         responseChannelAccess,
-        supportChannelAccess,
+        coordinationChannelAccess,
         added: toAdd.length,
         removed: toRemove.length
       },
@@ -4245,9 +4245,9 @@ class SyncWorker {
 
   /**
    * region-channel-tiers (task 9): reconciles a single Organisation's
-   * Response/Support region-channel membership after
+   * Response/Coordination region-channel membership after
    * `PUT /api/teams/:teamId/channel-access` changes one of
-   * `response_channel_access`/`support_channel_access` (`server/routes/
+   * `response_channel_access`/`coordination_channel_access` (`server/routes/
    * teams.js` enqueues this operation ONLY for the tier that actually
    * changed value, with payload `{ organisation_id, tier }`).
    *
@@ -4456,7 +4456,7 @@ class SyncWorker {
       }
       
       // Process Region channels (groups starting with 'tak_Response' or
-      // 'tak_Support' -- the two REGION_CHANNEL_TIER_PREFIX values).
+      // 'tak_Coordination' -- the two REGION_CHANNEL_TIER_PREFIX values).
       // Unlike BCH channels, region channels are a SINGLE Authentik group
       // per channel -- region_channels has only a `group_id` column, no
       // `read_group_id`/write-pair (confirmed against the baseline schema
@@ -4492,7 +4492,7 @@ class SyncWorker {
 
           // Check if this channel already exists in database. Scoped to
           // this group's OWN tier, not just by name: a "Waikato" Response
-          // channel and a "Waikato" Support channel are two distinct rows
+          // channel and a "Waikato" Coordination channel are two distinct rows
           // sharing a display name, so matching by name alone would
           // conflate them (and Authentik's own prefix already guarantees
           // this loop iteration is only ever looking at one tier's groups).

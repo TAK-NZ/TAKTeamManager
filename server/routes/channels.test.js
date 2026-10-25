@@ -179,7 +179,7 @@ describe('GET /api/channels/descriptions', () => {
     expect(byName['XtraTools - Shared']).toBe('The UTL one');
   });
 
-  // Bugfix (region-channel-tiers): a Response/Support channel's base
+  // Bugfix (region-channel-tiers): a Response/Coordination channel's base
   // name never started with the single literal 'Regions - ' prefix the
   // route used to check (that untiered prefix no longer exists in this
   // deployment at all), so every region channel fell through to the
@@ -200,30 +200,30 @@ describe('GET /api/channels/descriptions', () => {
     });
   });
 
-  it('returns the real local description for a Support-tier region channel, matched by name+tier with the "Support - " prefix stripped', async () => {
-    mockUserGroups = ['tak_Support - Auckland'];
+  it('returns the real local description for a Coordination-tier region channel, matched by name+tier with the "Coordination - " prefix stripped', async () => {
+    mockUserGroups = ['tak_Coordination - Auckland'];
     mockTables({
-      region: [{ name: 'Auckland', tier: 'support', description: 'Auckland (Support - All Agencies)' }]
+      region: [{ name: 'Auckland', tier: 'coordination', description: 'Auckland (Coordination - All Agencies)' }]
     });
 
     const res = await request(app).get('/api/channels/descriptions');
 
     expect(res.status).toBe(200);
     expect(res.body.channels[0]).toMatchObject({
-      name: 'tak_Support - Auckland',
-      display_name: 'Support - Auckland',
-      description: 'Auckland (Support - All Agencies)'
+      name: 'tak_Coordination - Auckland',
+      display_name: 'Coordination - Auckland',
+      description: 'Auckland (Coordination - All Agencies)'
     });
   });
 
-  // A same-named Response and Support channel are two distinct rows (per
+  // A same-named Response and Coordination channel are two distinct rows (per
   // UNIQUE(name, tier)) -- the lookup must never let one shadow the other.
-  it('does not conflate a Response and a Support channel that share the same underlying name', async () => {
-    mockUserGroups = ['tak_Response - Auckland', 'tak_Support - Auckland'];
+  it('does not conflate a Response and a Coordination channel that share the same underlying name', async () => {
+    mockUserGroups = ['tak_Response - Auckland', 'tak_Coordination - Auckland'];
     mockTables({
       region: [
         { name: 'Auckland', tier: 'response', description: 'The response one' },
-        { name: 'Auckland', tier: 'support', description: 'The support one' }
+        { name: 'Auckland', tier: 'coordination', description: 'The coordination one' }
       ]
     });
 
@@ -231,7 +231,7 @@ describe('GET /api/channels/descriptions', () => {
 
     const byName = Object.fromEntries(res.body.channels.map((c) => [c.display_name, c.description]));
     expect(byName['Response - Auckland']).toBe('The response one');
-    expect(byName['Support - Auckland']).toBe('The support one');
+    expect(byName['Coordination - Auckland']).toBe('The coordination one');
   });
 
   it('falls back to the literal "TAK Channel" string only when no matching local row has a description', async () => {

@@ -2873,7 +2873,7 @@ export default function TeamDetail({ user, refreshUser }) {
                         the button here but get a 403 on submit -- same
                         as any other `canManageTeam`-gated action on this
                         page that has no Team_Admin path server-side,
-                        e.g. Response/Support channel-tier flags in the
+                        e.g. Response/Coordination channel-tier flags in the
                         Edit dialog itself). */}
                     <div className="flex items-center justify-end space-x-3">
                       <Link

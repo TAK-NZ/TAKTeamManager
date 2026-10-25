@@ -2682,7 +2682,7 @@ describe('Team.create / Team.update country_code (Foreign_Partner Organisation c
  * `pseudonymous_usernames`/`country_code`) but, UNLIKE `country_code`/
  * `callsign_prefix`, is FREELY mutable on an existing Organisation at any
  * time -- there is no immutability guard, mirroring
- * `response_channel_access`/`support_channel_access`'s own shape exactly.
+ * `response_channel_access`/`coordination_channel_access`'s own shape exactly.
  */
 describe('Team.create / Team.update callsign_team_hyphenated (Callsign Team-segment separator toggle)', () => {
   beforeEach(() => {

@@ -389,9 +389,9 @@ describe('Dashboard folder tree tap targets (bugfix)', () => {
 })
 
 // Bugfix (top-level folder icons): the five recognized top-level channel
-// folder names (Teams, BCH, Response, Support, XtraTools) render a symbol
+// folder names (Teams, BCH, Response, Coordination, XtraTools) render a symbol
 // naming what they are, mirroring GlobalChannels.jsx's own section icons
-// (BCH/Response/Support/XtraTools) and Layout.jsx's "Orgs & Teams" nav icon
+// (BCH/Response/Coordination/XtraTools) and Layout.jsx's "Orgs & Teams" nav icon
 // (Teams). Every OTHER folder -- nested, or top-level but unrecognized --
 // keeps the existing generic FolderIcon/FolderOpenIcon pair.
 describe('Dashboard top-level folder icons (bugfix: top-level folder icons)', () => {
@@ -407,7 +407,7 @@ describe('Dashboard top-level folder icons (bugfix: top-level folder icons)', ()
 
     // One channel per recognized top-level name, plus an unrecognized
     // top-level name ("Ops") and a NESTED folder that coincidentally
-    // shares a recognized name ("Region - Support"), so the "only at the
+    // shares a recognized name ("Region - Coordination"), so the "only at the
     // top level" rule is exercised, not merely "only these five names".
     usersAPI.getMe.mockResolvedValue({
       data: {
@@ -417,10 +417,10 @@ describe('Dashboard top-level folder icons (bugfix: top-level folder icons)', ()
             'tak_teams_alpha',
             'tak_bch_alpha',
             'tak_response_alpha',
-            'tak_support_alpha',
+            'tak_coordination_alpha',
             'tak_xtratools_alpha',
             'tak_ops_alpha',
-            'tak_region_support_alpha'
+            'tak_region_coordination_alpha'
           ]
         },
         teams: []
@@ -432,10 +432,10 @@ describe('Dashboard top-level folder icons (bugfix: top-level folder icons)', ()
           { name: 'tak_teams_alpha', display_name: 'Teams - Alpha', description: 'd' },
           { name: 'tak_bch_alpha', display_name: 'BCH - Alpha', description: 'd' },
           { name: 'tak_response_alpha', display_name: 'Response - Alpha', description: 'd' },
-          { name: 'tak_support_alpha', display_name: 'Support - Alpha', description: 'd' },
+          { name: 'tak_coordination_alpha', display_name: 'Coordination - Alpha', description: 'd' },
           { name: 'tak_xtratools_alpha', display_name: 'XtraTools - Alpha', description: 'd' },
           { name: 'tak_ops_alpha', display_name: 'Ops - Alpha', description: 'd' },
-          { name: 'tak_region_support_alpha', display_name: 'Region - Support - Alpha', description: 'd' }
+          { name: 'tak_region_coordination_alpha', display_name: 'Region - Coordination - Alpha', description: 'd' }
         ]
       }
     })
@@ -482,6 +482,13 @@ describe('Dashboard top-level folder icons (bugfix: top-level folder icons)', ()
     return span.parentElement.querySelector('svg')
   }
 
+  // Every matching folder row's icon, in DOM order. Needed where a nested
+  // folder deliberately shares a recognized top-level name.
+  const folderIconsFor = (folderName) =>
+    Array.from(container.querySelectorAll('span'))
+      .filter((el) => el.textContent === folderName && el.className.includes('font-medium'))
+      .map((span) => span.parentElement.querySelector('svg'))
+
   it('renders RadioIcon (heroicons) for the top-level BCH folder', async () => {
     await mount()
     const icon = folderIconFor('BCH')
@@ -501,9 +508,9 @@ describe('Dashboard top-level folder icons (bugfix: top-level folder icons)', ()
     expect(icon.getAttribute('class')).toContain('tabler-icon-firetruck')
   })
 
-  it('renders Tabler IconBackhoe for the top-level Support folder', async () => {
+  it('renders Tabler IconBackhoe for the top-level Coordination folder', async () => {
     await mount()
-    const icon = folderIconFor('Support')
+    const icon = folderIconFor('Coordination')
     expect(icon).toBeTruthy()
     expect(icon.getAttribute('class')).toContain('tabler-icon-backhoe')
   })
@@ -529,11 +536,11 @@ describe('Dashboard top-level folder icons (bugfix: top-level folder icons)', ()
     expect(icon.getAttribute('class')).not.toContain('tabler-icon')
   })
 
-  it('keeps the generic FolderIcon for a NESTED folder that coincidentally shares a recognized name ("Support" nested under "Region")', async () => {
+  it('keeps the generic FolderIcon for a NESTED folder that coincidentally shares a recognized name ("Coordination" nested under "Region")', async () => {
     await mount()
 
     // "Region" is the top-level folder here; expand it to reach the
-    // nested "Support" folder underneath.
+    // nested "Coordination" folder underneath.
     const regionIcon = folderIconFor('Region')
     expect(regionIcon).toBeTruthy()
     const regionRow = regionIcon.closest('.cursor-pointer')
@@ -541,10 +548,16 @@ describe('Dashboard top-level folder icons (bugfix: top-level folder icons)', ()
       regionRow.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
 
-    const nestedIcon = folderIconFor('Support')
+    // Two "Coordination" rows now exist: the real top-level folder (sorts
+    // first, alphabetically before "Region") and the nested one under
+    // "Region", which renders immediately after its parent row.
+    const coordinationIcons = folderIconsFor('Coordination')
+    expect(coordinationIcons).toHaveLength(2)
+    expect(coordinationIcons[0].getAttribute('class')).toContain('tabler-icon-backhoe')
+    const nestedIcon = coordinationIcons[1]
     expect(nestedIcon).toBeTruthy()
-    // The NESTED "Support" must NOT get IconBackhoe -- that symbol is
-    // reserved for the top-level Support folder only.
+    // The NESTED "Coordination" must NOT get IconBackhoe -- that symbol is
+    // reserved for the top-level Coordination folder only.
     expect(nestedIcon.getAttribute('class')).not.toContain('tabler-icon')
   })
 })

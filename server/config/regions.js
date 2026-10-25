@@ -1,6 +1,6 @@
 /**
  * NZ_Regions (region-channel-tiers): the standing list of region names
- * `GlobalChannelService.seedRegionChannels` creates Response/Support
+ * `GlobalChannelService.seedRegionChannels` creates Response/Coordination
  * channel pairs for, matching docs.tak.nz's Channel Structure page
  * exactly -- ISO 3166-2:NZ subdivisions, root-first alphabetical order as
  * that page lists them, for both tiers.
@@ -35,24 +35,31 @@ const NZ_REGIONS = Object.freeze([
 ]);
 
 /**
- * Special_Regions (region-channel-tiers): the two National_Channels
- * geographies docs.tak.nz documents outside the 16 standard regions,
- * each with which tiers `seedRegionChannels` creates a channel for.
+ * Special_Regions (region-channel-tiers): the National_Channels
+ * geographies outside the 16 standard regions (Chatham Islands, All of New
+ * Zealand, North Island, South Island), each with which tiers
+ * `seedRegionChannels` creates a channel for.
  *
  * - Chatham Islands: BOTH tiers, like every standard region -- it is
  *   geographically isolated but functions as a normal (if isolated)
  *   region for a local incident, per the explicit product decision this
  *   feature was scoped against.
- * - All of New Zealand: SUPPORT ONLY. A country-scale event is exactly
- *   the case the Response/Support escalation model already treats as
- *   "everyone joins Support" -- a Response-tier "All of New Zealand"
+ * - All of New Zealand: COORDINATION ONLY. A country-scale event is exactly
+ *   the case the Response/Coordination escalation model already treats as
+ *   "everyone joins Coordination" -- a Response-tier "All of New Zealand"
  *   channel would be an ES-only inner-circle channel for an event that,
  *   by definition, already involves the outer circle, which is not a
  *   coherent channel to seed.
+ * - North Island / South Island: COORDINATION ONLY, for the same reason
+ *   -- an island-wide coordination space across the regions of that island
+ *   has no ES-only inner-circle counterpart. Like every Coordination
+ *   channel they are gated by `teams.coordination_channel_access`.
  */
 const SPECIAL_REGIONS = Object.freeze([
-  { name: 'Chatham Islands', tiers: ['response', 'support'] },
-  { name: 'All of New Zealand', tiers: ['support'] }
+  { name: 'Chatham Islands', tiers: ['response', 'coordination'] },
+  { name: 'All of New Zealand', tiers: ['coordination'] },
+  { name: 'North Island', tiers: ['coordination'] },
+  { name: 'South Island', tiers: ['coordination'] }
 ]);
 
 /**
@@ -66,13 +73,13 @@ const SPECIAL_REGIONS = Object.freeze([
  * always showing it) -- extracted here as the single source of truth so
  * neither caller can drift from the standing region/tier list above.
  *
- * @returns {Array<{name: string, tier: 'response'|'support'}>}
+ * @returns {Array<{name: string, tier: 'response'|'coordination'}>}
  */
 function buildRegionSeedWorkItems() {
   const workItems = [];
   for (const name of NZ_REGIONS) {
     workItems.push({ name, tier: 'response' });
-    workItems.push({ name, tier: 'support' });
+    workItems.push({ name, tier: 'coordination' });
   }
   for (const { name, tiers } of SPECIAL_REGIONS) {
     for (const tier of tiers) {

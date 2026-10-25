@@ -2,7 +2,7 @@
 
 /**
  * One-off backfill: normalizes the location-sharing suffix on existing
- * PRIMARY team-channel and Response/Support (region) channel descriptions to
+ * PRIMARY team-channel and Response/Coordination (region) channel descriptions to
  * the unified `(Bi-directional location sharing)`, and enqueues the matching
  * Authentik-sync op so each group's `attributes.description` (LDAP-visible)
  * and the /dashboard tree converge on the same stored value.
@@ -32,7 +32,7 @@
  *     suffix is skipped (no update, no enqueue).
  *   - Only the trailing `(Location sharing enabled)` qualifier is rewritten
  *     for team rows; any other description text is preserved. A region row's
- *     base text (incl. the seed's `(Response - ...)`/`(Support - ...)`
+ *     base text (incl. the seed's `(Response - ...)`/`(Coordination - ...)`
  *     qualifier) is preserved and the suffix appended after it.
  *   - Local rows are updated FIRST, then the sync op enqueued, so a re-run
  *     sees the corrected row and does nothing further.

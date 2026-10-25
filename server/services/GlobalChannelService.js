@@ -38,7 +38,7 @@ const CHANNEL_TABLE_ALLOWLIST = Object.freeze({
 
 // region_channels.tier (region-channel-tiers migration): REGION_CHANNEL_TIER_PREFIX
 // (imported above from server/config/constants.js, shared with
-// syncWorker.js) maps 'response'/'support' to the Authentik group-name
+// syncWorker.js) maps 'response'/'coordination' to the Authentik group-name
 // prefix for that tier, and doubles as the validation set every insert
 // path here checks a supplied tier against.
 
@@ -148,14 +148,14 @@ class GlobalChannelService {
   }
 
   // region-channel-tiers: `channelData.tier` must be 'response' or
-  // 'support' -- validated BEFORE any INSERT is attempted, mirroring the
+  // 'coordination' -- validated BEFORE any INSERT is attempted, mirroring the
   // CHANNEL_TABLE_ALLOWLIST guard's placement/shape above. Every insert
   // path (this method and seedRegionChannels) supplies a tier explicitly;
   // there is no default, matching the migration's own column (no DEFAULT).
   async createRegionChannel(channelData, createdBy) {
     const tierPrefix = REGION_CHANNEL_TIER_PREFIX[channelData.tier];
     if (!tierPrefix) {
-      throw new Error("Invalid channel tier: must be 'response' or 'support'");
+      throw new Error("Invalid channel tier: must be 'response' or 'coordination'");
     }
 
     const client = await pool.connect();
@@ -196,7 +196,7 @@ class GlobalChannelService {
       // Queue operation to create Authentik group. `tier` is passed
       // through so the Sync_Worker's createRegionChannelGroup handler
       // names the group with the correct tier prefix (tak_Response.../
-      // tak_Support...) without needing a separate DB lookup.
+      // tak_Coordination...) without needing a separate DB lookup.
       await EventPublisher.publishOperation('create_region_channel_group', {
         region_channel_id: channelId,
         channel_name: channelData.name,
@@ -208,7 +208,7 @@ class GlobalChannelService {
       // a `group_id` column, no read/write pair like BCH channels) -- there
       // is no "_READ" counterpart group for regions in Authentik. The
       // target_group_pattern's prefix is tier-specific (tak_Response.../
-      // tak_Support...), replacing the former single untiered tak_Regions
+      // tak_Coordination...), replacing the former single untiered tak_Regions
       // prefix.
       const separator = resolveChannelFolderSeparator();
       await client.query(`
@@ -235,11 +235,11 @@ class GlobalChannelService {
   }
 
   /**
-   * region-channel-tiers: pre-seeds the standard set of Response/Support
+   * region-channel-tiers: pre-seeds the standard set of Response/Coordination
    * region channels -- the 16 ISO 3166-2:NZ regions (both tiers) plus the
    * two Special_Regions (`server/config/regions.js`'s `SPECIAL_REGIONS`:
-   * Chatham Islands, both tiers; All of New Zealand, support tier only),
-   * for a total of 35 channels on a deployment with none of them yet.
+   * Chatham Islands, both tiers; All of New Zealand, North Island and South Island, coordination tier only),
+   * for a total of 37 channels on a deployment with none of them yet.
    *
    * Idempotent, per-row: for each (name, tier) pair, a case-insensitive
    * existence check runs BEFORE that row's `createRegionChannel` call, so
@@ -279,9 +279,9 @@ class GlobalChannelService {
         }
 
         // Bugfix: `description: name` alone was IDENTICAL for the
-        // response and support row of the same region (both just
+        // response and coordination row of the same region (both just
         // "Auckland"), giving a user no way to distinguish
-        // "Response - Auckland" from "Support - Auckland" from the
+        // "Response - Auckland" from "Coordination - Auckland" from the
         // description text alone. Appending the tier qualifier fixes
         // that for every SEEDED channel; a manually created region
         // channel's description remains entirely caller-supplied.
@@ -310,7 +310,7 @@ class GlobalChannelService {
    * one query per work item -- `seedRegionChannels` itself still checks
    * per-row before each individual create (needed there for its own
    * per-row create-or-skip control flow), but this read-only check has
-   * no such requirement and would be 35 round-trips otherwise.
+   * no such requirement and would be 37 round-trips otherwise.
    *
    * @returns {Promise<{missingCount: number, totalCount: number}>}
    */

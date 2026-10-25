@@ -26,7 +26,8 @@
  *   - PINNED_MEMBERS_BCH        -> BCH-category channels' READ group.
  *   - PINNED_MEMBERS_XTRATOOLS  -> UTL-category (XtraTools) channels' WRITE group.
  *   - PINNED_MEMBERS_RESPONSE   -> Response-tier region groups.
- *   - PINNED_MEMBERS_SUPPORT    -> Support-tier region groups.
+ *   - PINNED_MEMBERS_COORDINATION -> Coordination-tier region groups
+ *                                    (deprecated alias: PINNED_MEMBERS_SUPPORT).
  * (BCH read vs XtraTools write is deliberate: the concrete need was
  * read-only visibility of BCH feeds but write access to XtraTools data
  * packages.)
@@ -58,13 +59,16 @@ const PIN_ENV_VARS = Object.freeze({
   bch: 'PINNED_MEMBERS_BCH',
   xtratools: 'PINNED_MEMBERS_XTRATOOLS',
   response: 'PINNED_MEMBERS_RESPONSE',
-  support: 'PINNED_MEMBERS_SUPPORT'
+  coordination: 'PINNED_MEMBERS_COORDINATION'
 });
 
+/** Deprecated pre-rename name of the Coordination pin list. */
+const LEGACY_COORDINATION_ENV_VAR = 'PINNED_MEMBERS_SUPPORT';
+let legacyWarned = false;
 /**
  * Parse one pin category's usernames from the environment.
  *
- * @param {'bch'|'xtratools'|'response'|'support'} category
+ * @param {'bch'|'xtratools'|'response'|'coordination'} category
  * @param {NodeJS.ProcessEnv} [env=process.env]
  * @returns {string[]} trimmed, non-empty usernames; empty array when unset.
  */
@@ -73,7 +77,24 @@ function getPinnedUsernames(category, env = process.env) {
   if (!varName) {
     return [];
   }
-  const raw = env[varName];
+  let raw = env[varName];
+  // Deprecated alias: the Coordination tier was previously named "Support",
+  // and PINNED_MEMBERS_SUPPORT is still honoured when the new variable is
+  // unset, so an existing deployment's pins are not silently dropped by the
+  // rename. Remove once every environment has moved to the new name.
+  if ((typeof raw !== 'string' || raw.trim() === '') && category === 'coordination') {
+    const legacy = env[LEGACY_COORDINATION_ENV_VAR];
+    if (typeof legacy === 'string' && legacy.trim() !== '') {
+      if (!legacyWarned) {
+        legacyWarned = true;
+        logger.warn(
+          { legacy: LEGACY_COORDINATION_ENV_VAR, current: varName },
+          'Deprecated environment variable in use; rename it to the current name'
+        );
+      }
+      raw = legacy;
+    }
+  }
   if (typeof raw !== 'string' || raw.trim() === '') {
     return [];
   }
@@ -135,7 +156,7 @@ async function lookupPk(username) {
  * proceeds on its DB-derived set. Returns a deduped array of pk strings
  * (possibly empty).
  *
- * @param {'bch'|'xtratools'|'response'|'support'} category
+ * @param {'bch'|'xtratools'|'response'|'coordination'} category
  * @param {NodeJS.ProcessEnv} [env=process.env]
  * @returns {Promise<string[]>}
  */

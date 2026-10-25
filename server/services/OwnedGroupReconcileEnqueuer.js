@@ -107,12 +107,12 @@ async function enqueueAllGlobalChannelReconciles(createdBy = null, client = null
 
 /**
  * Enqueue a region reconcile for each active region channel of a given tier
- * ('response' | 'support'). This is the group-authoritative replacement for
+ * ('response' | 'coordination'). This is the group-authoritative replacement for
  * `resync_org_channel_tier_access`'s per-user fan-out: an Organisation's
  * tier-flag flip changes the desired membership of exactly that tier's
  * region groups, so one reconcile per such group recomputes them all
  * (`desiredRegionMembers` re-gates on the org flag for every org).
- * @param {'response'|'support'} tier
+ * @param {'response'|'coordination'} tier
  * @param {number|null} createdBy
  * @param {import('pg').PoolClient|null} [client]
  * @returns {Promise<number[]>}

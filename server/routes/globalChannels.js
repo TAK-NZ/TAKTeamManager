@@ -93,7 +93,7 @@ router.post('/bch', authenticateToken, authorize, [
 
 // Create region channel (global managers only)
 //
-// region-channel-tiers: `tier` ('response' or 'support') is now REQUIRED
+// region-channel-tiers: `tier` ('response' or 'coordination') is now REQUIRED
 // -- GlobalChannelService.createRegionChannel validates it against the
 // same two-value set the migration's CHECK constraint enforces and
 // throws before any INSERT if it's missing/invalid, so this route
@@ -103,7 +103,7 @@ router.post('/bch', authenticateToken, authorize, [
 router.post('/region', authenticateToken, authorize, [
   body('name').trim().isLength({ min: 1, max: 100 }),
   body('description').optional().trim().isLength({ max: 500 }),
-  body('tier').isIn(['response', 'support'])
+  body('tier').isIn(['response', 'coordination'])
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -430,7 +430,7 @@ router.put('/region/:channelId', authenticateToken, authorize, [
   }
 });
 
-// Bugfix: reports whether the standard Response/Support region-channel
+// Bugfix: reports whether the standard Response/Coordination region-channel
 // seed set (see the route below) is already complete, so the client can
 // hide the "Seed Standard Region Channels" action once there is nothing
 // left to seed instead of always showing it. Read-only, same
@@ -447,9 +447,10 @@ router.get('/region/seed-status', authenticateToken, authorize, async (req, res)
   }
 });
 
-// Seed the standard set of Response/Support region channels (global
+// Seed the standard set of Response/Coordination region channels (global
 // managers only): the 16 ISO 3166-2:NZ regions (both tiers) plus Chatham
-// Islands (both tiers) and All of New Zealand (support tier only) -- see
+// Islands (both tiers) plus All of New Zealand, North Island and South Island
+// (coordination tier only) -- see
 // server/config/regions.js and GlobalChannelService.seedRegionChannels's
 // own doc comment. Idempotent: safe to call again after some channels
 // already exist (e.g. a region was added to the standing list later);

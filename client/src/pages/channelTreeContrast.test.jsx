@@ -568,14 +568,14 @@ const BCH_CHANNELS = [
 ]
 
 // region-channel-tiers: GlobalChannels.jsx now renders TWO region-derived
-// sections (Response, Support) from this ONE fetch, filtering by
+// sections (Response, Coordination) from this ONE fetch, filtering by
 // `channel.tier` client-side -- see GlobalChannels.jsx's `responseChannels`/
-// `supportChannels`. One channel per tier, each under a folder-producing
+// `coordinationChannels`. One channel per tier, each under a folder-producing
 // name DISTINCT from the other, so each section's Folder_Row is measured
 // independently rather than the two coincidentally sharing one label.
 const REGION_CHANNELS = [
   { id: 2, name: 'North - Alpha', description: 'Alpha response channel', created_by_name: 'Ada', tier: 'response' },
-  { id: 3, name: 'South - Beta', description: 'Beta support channel', created_by_name: 'Ada', tier: 'support' }
+  { id: 3, name: 'South - Beta', description: 'Beta support channel', created_by_name: 'Ada', tier: 'coordination' }
 ]
 
 /**
@@ -855,10 +855,10 @@ describe('Channel_Tree_Row contrast: GlobalChannels.jsx (Reqs 5, 6, 7)', () => {
       }
     })
 
-    it('found the folder rows in ALL FOUR channel sections (BCH, XtraTools, Response, Support)', () => {
-      // The page renders four trees (BCH, XtraTools, Response, Support) --
+    it('found the folder rows in ALL FOUR channel sections (BCH, XtraTools, Response, Coordination)', () => {
+      // The page renders four trees (BCH, XtraTools, Response, Coordination) --
       // BCH/XtraTools both come from the ONE getBchChannels fetch, split
-      // client-side by `channel.category`, and Response/Support both come
+      // client-side by `channel.category`, and Response/Coordination both come
       // from the ONE getRegionChannels fetch, split client-side by
       // `channel.tier`, so a fixture/filter mismatch on either category or
       // either tier would measure fewer than four folders.

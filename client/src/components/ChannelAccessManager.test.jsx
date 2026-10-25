@@ -56,7 +56,7 @@ describe('ChannelAccessManager (mounted)', () => {
     await act(async () => {
       root.render(
         <ChannelAccessManager
-          org={{ id: 42, response_channel_access: false, support_channel_access: true }}
+          org={{ id: 42, response_channel_access: false, coordination_channel_access: true }}
           isGlobalManager={true}
           onSaved={onSaved}
           {...props}
@@ -66,7 +66,7 @@ describe('ChannelAccessManager (mounted)', () => {
   }
 
   const responseCheckbox = () => container.querySelector('#responseChannelAccess')
-  const supportCheckbox = () => container.querySelector('#supportChannelAccess')
+  const coordinationCheckbox = () => container.querySelector('#coordinationChannelAccess')
   const saveButton = () => container.querySelector('button')
 
   const click = async (el) => {
@@ -83,13 +83,13 @@ describe('ChannelAccessManager (mounted)', () => {
   it('seeds the two checkboxes from the org prop', async () => {
     await mount()
     expect(responseCheckbox().checked).toBe(false)
-    expect(supportCheckbox().checked).toBe(true)
+    expect(coordinationCheckbox().checked).toBe(true)
   })
 
   it('defaults both checkboxes to false when the org prop carries null/undefined flags', async () => {
-    await mount({ org: { id: 7, response_channel_access: null, support_channel_access: undefined } })
+    await mount({ org: { id: 7, response_channel_access: null, coordination_channel_access: undefined } })
     expect(responseCheckbox().checked).toBe(false)
-    expect(supportCheckbox().checked).toBe(false)
+    expect(coordinationCheckbox().checked).toBe(false)
   })
 
   it('shows no Save Changes button while the checkboxes match the saved baseline', async () => {
@@ -115,7 +115,7 @@ describe('ChannelAccessManager (mounted)', () => {
 
   it('calls teamsAPI.updateChannelAccess with both flags (camelCase) on save', async () => {
     teamsAPI.updateChannelAccess.mockResolvedValue({
-      data: { team: { id: 42, response_channel_access: true, support_channel_access: true } }
+      data: { team: { id: 42, response_channel_access: true, coordination_channel_access: true } }
     })
     await mount()
     await click(responseCheckbox())
@@ -123,12 +123,12 @@ describe('ChannelAccessManager (mounted)', () => {
 
     expect(teamsAPI.updateChannelAccess).toHaveBeenCalledWith(42, {
       responseChannelAccess: true,
-      supportChannelAccess: true
+      coordinationChannelAccess: true
     })
   })
 
   it('calls onSaved with the updated team returned from the API', async () => {
-    const updatedTeam = { id: 42, response_channel_access: true, support_channel_access: true }
+    const updatedTeam = { id: 42, response_channel_access: true, coordination_channel_access: true }
     teamsAPI.updateChannelAccess.mockResolvedValue({ data: { team: updatedTeam } })
     await mount()
     await click(responseCheckbox())
@@ -143,7 +143,7 @@ describe('ChannelAccessManager (mounted)', () => {
     // exists to handle: the parent's onSaved may not refresh the org
     // prop synchronously, so the dirty check must not depend on it.
     teamsAPI.updateChannelAccess.mockResolvedValue({
-      data: { team: { id: 42, response_channel_access: true, support_channel_access: true } }
+      data: { team: { id: 42, response_channel_access: true, coordination_channel_access: true } }
     })
     await mount()
     await click(responseCheckbox())
@@ -157,14 +157,14 @@ describe('ChannelAccessManager (mounted)', () => {
   it('shows an error toast and keeps the Save Changes button visible when the save fails', async () => {
     const toast = (await import('react-hot-toast')).default
     teamsAPI.updateChannelAccess.mockRejectedValue({
-      response: { data: { error: 'Response/Support channel access can only be set on an Organisation, not a Sub_Team' } }
+      response: { data: { error: 'Response/Coordination channel access can only be set on an Organisation, not a Sub_Team' } }
     })
     await mount()
     await click(responseCheckbox())
     await click(saveButton())
 
     expect(toast.error).toHaveBeenCalledWith(
-      'Response/Support channel access can only be set on an Organisation, not a Sub_Team'
+      'Response/Coordination channel access can only be set on an Organisation, not a Sub_Team'
     )
     // Save did not succeed, so the button must still be present (still dirty).
     expect(saveButton()).not.toBeNull()
@@ -184,8 +184,8 @@ describe('ChannelAccessManager (mounted)', () => {
     expect(responseLabel.className).toContain('p-2')
     expect(responseLabel.className).toContain('cursor-pointer')
 
-    const supportLabel = supportCheckbox().closest('label')
-    expect(supportLabel.getAttribute('for')).toBe('supportChannelAccess')
+    const coordinationLabel = coordinationCheckbox().closest('label')
+    expect(coordinationLabel.getAttribute('for')).toBe('coordinationChannelAccess')
 
     // Clicking the LABEL (not the input) toggles the checkbox, exactly
     // like clicking the input itself would.
@@ -195,7 +195,7 @@ describe('ChannelAccessManager (mounted)', () => {
   })
 
   it('re-seeds from a new org prop (and clears any dirty state) when the Organisation being edited changes', async () => {
-    await mount({ org: { id: 1, response_channel_access: false, support_channel_access: false } })
+    await mount({ org: { id: 1, response_channel_access: false, coordination_channel_access: false } })
     await click(responseCheckbox())
     expect(saveButton()).not.toBeNull()
 
@@ -205,7 +205,7 @@ describe('ChannelAccessManager (mounted)', () => {
     await act(async () => {
       root.render(
         <ChannelAccessManager
-          org={{ id: 2, response_channel_access: true, support_channel_access: false }}
+          org={{ id: 2, response_channel_access: true, coordination_channel_access: false }}
           isGlobalManager={true}
           onSaved={onSaved}
         />
@@ -213,7 +213,7 @@ describe('ChannelAccessManager (mounted)', () => {
     })
 
     expect(responseCheckbox().checked).toBe(true)
-    expect(supportCheckbox().checked).toBe(false)
+    expect(coordinationCheckbox().checked).toBe(false)
     expect(saveButton()).toBeNull()
   })
 })

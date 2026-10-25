@@ -587,7 +587,7 @@ CREATE TABLE public.region_channels (
     created_by integer,
     created_at timestamp without time zone DEFAULT now(),
     tier character varying(20),
-    CONSTRAINT region_channels_tier_check CHECK (((tier)::text = ANY ((ARRAY['response'::character varying, 'support'::character varying])::text[])))
+    CONSTRAINT region_channels_tier_check CHECK (((tier)::text = ANY ((ARRAY['response'::character varying, 'coordination'::character varying])::text[])))
 );
 
 
@@ -595,7 +595,7 @@ CREATE TABLE public.region_channels (
 -- Name: COLUMN region_channels.tier; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.region_channels.tier IS 'Which channel tier this region channel belongs to: ''response'' (Emergency_Response, ES-only inner circle, gated by teams.response_channel_access) or ''support'' (all-agency outer circle, gated by teams.support_channel_access). No default -- every insert path supplies it explicitly. See docs.tak.nz Channel Structure.';
+COMMENT ON COLUMN public.region_channels.tier IS 'Which channel tier this region channel belongs to: ''response'' (Emergency_Response, ES-only inner circle, gated by teams.response_channel_access) or ''coordination'' (all-agency outer circle, gated by teams.coordination_channel_access). No default -- every insert path supplies it explicitly. See docs.tak.nz Channel Structure.';
 
 
 --
@@ -913,7 +913,7 @@ CREATE TABLE public.teams (
     callsign_level_selection integer[],
     pseudonymous_usernames boolean,
     response_channel_access boolean,
-    support_channel_access boolean
+    coordination_channel_access boolean
 );
 
 
@@ -932,10 +932,10 @@ COMMENT ON COLUMN public.teams.response_channel_access IS 'Organisation-level on
 
 
 --
--- Name: COLUMN teams.support_channel_access; Type: COMMENT; Schema: public; Owner: -
+-- Name: COLUMN teams.coordination_channel_access; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.teams.support_channel_access IS 'Organisation-level only, exactly as response_channel_access is (see that column''s comment for the tri-state rationale). NULL on a Sub_Team; false or true on an Organisation. Resolved via Team.getAncestorChain(teamId)[0]. Whether members of this Organisation (and its Sub_Teams) are synced into support-tier region channels. Defaults to true at Organisation creation (application-supplied) -- the outer/support tier is the all-agency default, opposite of response_channel_access. Mutable thereafter.';
+COMMENT ON COLUMN public.teams.coordination_channel_access IS 'Organisation-level only, exactly as response_channel_access is (see that column''s comment for the tri-state rationale). NULL on a Sub_Team; false or true on an Organisation. Resolved via Team.getAncestorChain(teamId)[0]. Whether members of this Organisation (and its Sub_Teams) are synced into coordination-tier region channels. Defaults to true at Organisation creation (application-supplied) -- the outer/coordination tier is the all-agency default, opposite of response_channel_access. Mutable thereafter.';
 
 
 --
