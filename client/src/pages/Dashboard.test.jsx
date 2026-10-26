@@ -501,18 +501,18 @@ describe('Dashboard top-level folder icons (bugfix: top-level folder icons)', ()
     expect(icon.getAttribute('class')).not.toContain('tabler-icon')
   })
 
-  it('renders Tabler IconFiretruck for the top-level Response folder', async () => {
+  it('renders Tabler IconUrgent for the top-level Response folder', async () => {
     await mount()
     const icon = folderIconFor('Response')
     expect(icon).toBeTruthy()
-    expect(icon.getAttribute('class')).toContain('tabler-icon-firetruck')
+    expect(icon.getAttribute('class')).toContain('tabler-icon-urgent')
   })
 
-  it('renders Tabler IconBackhoe for the top-level Coordination folder', async () => {
+  it('renders Tabler IconUsersGroup for the top-level Coordination folder', async () => {
     await mount()
     const icon = folderIconFor('Coordination')
     expect(icon).toBeTruthy()
-    expect(icon.getAttribute('class')).toContain('tabler-icon-backhoe')
+    expect(icon.getAttribute('class')).toContain('tabler-icon-users-group')
   })
 
   it('renders Tabler IconTool for the top-level XtraTools folder', async () => {
@@ -553,10 +553,10 @@ describe('Dashboard top-level folder icons (bugfix: top-level folder icons)', ()
     // "Region", which renders immediately after its parent row.
     const coordinationIcons = folderIconsFor('Coordination')
     expect(coordinationIcons).toHaveLength(2)
-    expect(coordinationIcons[0].getAttribute('class')).toContain('tabler-icon-backhoe')
+    expect(coordinationIcons[0].getAttribute('class')).toContain('tabler-icon-users-group')
     const nestedIcon = coordinationIcons[1]
     expect(nestedIcon).toBeTruthy()
-    // The NESTED "Coordination" must NOT get IconBackhoe -- that symbol is
+    // The NESTED "Coordination" must NOT get IconUsersGroup -- that symbol is
     // reserved for the top-level Coordination folder only.
     expect(nestedIcon.getAttribute('class')).not.toContain('tabler-icon')
   })
