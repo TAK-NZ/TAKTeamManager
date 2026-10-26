@@ -1736,7 +1736,7 @@ describe('SyncWorker Authentik failure classification wiring', () => {
       });
 
       const readCallBody = JSON.parse(global.fetch.mock.calls[0][1].body);
-      expect(readCallBody.name).toBe('tak_BCH - Test Channel_READ');
+      expect(readCallBody.name).toBe('tak_Broadcast - Test Channel_READ');
     });
 
     // Special-character bugfix (Māori macrons): TAK cannot handle non-ASCII
@@ -1756,8 +1756,8 @@ describe('SyncWorker Authentik failure classification wiring', () => {
 
       const readCallBody = JSON.parse(global.fetch.mock.calls[0][1].body);
       const writeCallBody = JSON.parse(global.fetch.mock.calls[1][1].body);
-      expect(readCallBody.name).toBe('tak_BCH - Nga Region_READ');
-      expect(writeCallBody.name).toBe('tak_BCH - Nga Region');
+      expect(readCallBody.name).toBe('tak_Broadcast - Nga Region_READ');
+      expect(writeCallBody.name).toBe('tak_Broadcast - Nga Region');
       expect([...readCallBody.name].every((ch) => ch.codePointAt(0) <= 0x7f)).toBe(true);
       expect([...writeCallBody.name].every((ch) => ch.codePointAt(0) <= 0x7f)).toBe(true);
     });
@@ -2394,7 +2394,7 @@ describe('SyncWorker Authentik failure classification wiring', () => {
       });
 
       const readBody = JSON.parse(global.fetch.mock.calls[0][1].body);
-      expect(readBody.name).toBe('tak_BCH - Test Channel_READ');
+      expect(readBody.name).toBe('tak_Broadcast - Test Channel_READ');
     });
 
     it('permanently fails on an invalid category, without calling Authentik at all', async () => {
@@ -2658,8 +2658,8 @@ describe('SyncWorker Authentik failure classification wiring', () => {
         { pk: 'g1', name: `tak_Response${separator}North`, attributes: {} }
       ];
       const page2Groups = [
-        { pk: 'g3', name: `tak_BCH${separator}Alpha_READ`, attributes: {} },
-        { pk: 'g4', name: `tak_BCH${separator}Alpha`, attributes: {} }
+        { pk: 'g3', name: `tak_Broadcast${separator}Alpha_READ`, attributes: {} },
+        { pk: 'g4', name: `tak_Broadcast${separator}Alpha`, attributes: {} }
       ];
 
       global.fetch = jest.fn().mockImplementation((url) => {
@@ -2699,8 +2699,8 @@ describe('SyncWorker Authentik failure classification wiring', () => {
 
     it('stops paginating once pagination.next is absent (single-page case still works)', async () => {
       const groups = [
-        { pk: 'g1', name: `tak_BCH${separator}Solo_READ`, attributes: {} },
-        { pk: 'g2', name: `tak_BCH${separator}Solo`, attributes: {} }
+        { pk: 'g1', name: `tak_Broadcast${separator}Solo_READ`, attributes: {} },
+        { pk: 'g2', name: `tak_Broadcast${separator}Solo`, attributes: {} }
       ];
 
       global.fetch = jest.fn().mockResolvedValue({
@@ -2716,7 +2716,7 @@ describe('SyncWorker Authentik failure classification wiring', () => {
 
   /**
    * bch-channel-category: `syncExistingGlobalChannels` recognizes BOTH
-   * 'tak_BCH...' and 'tak_XtraTools...' prefixed groups (looping
+   * 'tak_Broadcast...' and 'tak_XtraTools...' prefixed groups (looping
    * BCH_CHANNEL_CATEGORY_PREFIX, mirroring how the region-channel loop
    * iterates REGION_CHANNEL_TIER_PREFIX), and scopes its existence
    * check/import by (name, category) so a same-named BCH and UTL channel

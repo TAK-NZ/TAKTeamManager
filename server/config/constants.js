@@ -100,7 +100,7 @@ const REGION_CHANNEL_TIER_DESCRIPTION_QUALIFIER = Object.freeze({
 /**
  * bch-channel-category: maps a `bch_channels.category` value ('BCH' or
  * 'UTL') to the Authentik group-name prefix used for that category
- * (`tak_BCH...`/`tak_XtraTools...`). 'BCH' is the original broadcast/ETL
+ * (`tak_Broadcast...`/`tak_XtraTools...`). 'BCH' is the original broadcast/ETL
  * category (external data feeds pushed in via a service account);
  * 'UTL' is the general miscellaneous/utility category (e.g.
  * "XtraTools - Data Packages", covering things like map overlays and
@@ -124,6 +124,12 @@ const REGION_CHANNEL_TIER_DESCRIPTION_QUALIFIER = Object.freeze({
  * a one-time rename to match (not something this constant alone can
  * retroactively fix).
  *
+ * The 'BCH' category's display prefix was likewise renamed from 'BCH' to
+ * 'Broadcast' (DB category VALUE, `bch_channels` table and `bch` API/route
+ * ids unchanged), because 'BCH' was an opaque abbreviation. 'Broadcast'
+ * sorts in the same position (first, before 'Coordination'). Existing
+ * `tak_BCH...` groups need the same one-time rename in Authentik.
+ *
  * Single source of truth shared by `server/services/GlobalChannelService.js`
  * (channel creation) and `server/workers/syncWorker.js` (the Authentik
  * group create/update/sync handlers), mirroring `REGION_CHANNEL_TIER_PREFIX`
@@ -140,7 +146,7 @@ const REGION_CHANNEL_TIER_DESCRIPTION_QUALIFIER = Object.freeze({
  * treatment.
  */
 const BCH_CHANNEL_CATEGORY_PREFIX = Object.freeze({
-  BCH: 'BCH',
+  BCH: 'Broadcast',
   UTL: 'XtraTools'
 });
 

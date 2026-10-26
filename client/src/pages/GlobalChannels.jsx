@@ -18,13 +18,13 @@ import ServiceAccountActionConfirmDialog from '../components/ServiceAccountActio
 import { useTabs, tabAria, TabPanel } from '../components/Tabs';
 
 // Bugfix (too much scrolling): the four channel types render as tabs
-// instead of four stacked cards, alphabetically ordered (BCH, Coordination,
+// instead of four stacked cards, alphabetically ordered (Broadcast, Coordination,
 // Response, XtraTools) per explicit request. The tab bar itself stays
 // neutral (active/inactive coloring only), matching Admin.jsx's own
 // tab-bar convention -- icon-only below `sm:`, full label restored at
 // `sm:` and up, accessible name constant either way.
 const CHANNEL_TABS = [
-  { id: 'bch', label: 'BCH', icon: RadioIcon },
+  { id: 'bch', label: 'Broadcast', icon: RadioIcon },
   { id: 'coordination', label: 'Coordination', icon: IconUsersGroup },
   { id: 'response', label: 'Response', icon: IconUrgent },
   { id: 'utl', label: 'XtraTools', icon: IconTool }
@@ -107,7 +107,7 @@ export default function GlobalChannels({ user }) {
   // below reads from one table instead of branching four ways at each
   // call site.
   const CHANNEL_TYPE_META = {
-    bch: { label: 'BCH', channels: bchOnlyChannels },
+    bch: { label: 'Broadcast', channels: bchOnlyChannels },
     utl: { label: 'XtraTools', channels: utlChannels },
     response: { label: 'Response', channels: responseChannels },
     coordination: { label: 'Coordination', channels: coordinationChannels }
@@ -623,12 +623,12 @@ export default function GlobalChannels({ user }) {
       <div>
         <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Global Channels</h1>
         <p className="text-gray-600 dark:text-gray-400">
-          Manage BCH (broadcast/ETL), Coordination (all-agency), Response (emergency services), and XtraTools (maps, overlays and other extras) channels that users have access to.
+          Manage Broadcast (external data feeds), Coordination (all-agency), Response (emergency services), and XtraTools (maps, overlays and other extras) channels that users have access to.
         </p>
       </div>
 
       {/* Bugfix (too much scrolling): the four channel types are now tabs
-          in one card, alphabetically ordered (BCH, Coordination, Response,
+          in one card, alphabetically ordered (Broadcast, Coordination, Response,
           XtraTools), instead of four separately-scrolled cards stacked
           on the page. Every `TabPanel` below is `keepMounted` -- content
           is hidden via CSS (`hidden`), never unmounted -- so all four
@@ -664,7 +664,7 @@ export default function GlobalChannels({ user }) {
         </div>
 
         <div className="pt-4">
-          {/* BCH Channels */}
+          {/* Broadcast Channels */}
           <TabPanel id="bch" activeTab={activeChannelTab} keepMounted>
             {/* Bugfix: `flex-wrap gap-2` (was a non-wrapping row) so the
                 section title, the Expand/Collapse All buttons and the
@@ -675,7 +675,7 @@ export default function GlobalChannels({ user }) {
               <div className="flex items-center">
                 <RadioIcon className="h-6 w-6 text-blue-600 mr-2" />
                 <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
-                  BCH Channels (Broadcast/ETL)
+                  Broadcast Channels (External Data Feeds)
                 </h2>
               </div>
               <div className="flex items-center gap-2">
@@ -706,14 +706,14 @@ export default function GlobalChannels({ user }) {
                     className="btn-primary flex items-center justify-center"
                   >
                     <PlusIcon className="h-4 w-4 mr-2 flex-shrink-0" />
-                    Create BCH Channel
+                    Create Broadcast Channel
                   </button>
                 )}
               </div>
             </div>
 
             {bchOnlyChannels.length === 0 ? (
-              <p className="text-gray-500 dark:text-gray-400">No BCH channels configured.</p>
+              <p className="text-gray-500 dark:text-gray-400">No Broadcast channels configured.</p>
             ) : (
               <div className="space-y-3">
                 {renderFolderTree(buildFolderTree(bchOnlyChannels, folderSeparator, 'name'), '', 'bch')}
@@ -923,7 +923,7 @@ export default function GlobalChannels({ user }) {
             )}
           </div>
           <div className="space-y-2 text-sm text-gray-600 dark:text-gray-400">
-            <p>• <strong>Sync Existing Channels:</strong> Import BCH, Response and Coordination channels that already exist in Authentik</p>
+            <p>• <strong>Sync Existing Channels:</strong> Import Broadcast, Response and Coordination channels that already exist in Authentik</p>
             <p>• <strong>Reconcile Global Channel Membership:</strong> Force an immediate reconcile of every active global channel&apos;s membership against the current users. Runs automatically in the background; use this to apply changes now rather than waiting for the next sweep.</p>
             {regionSeedComplete !== true && (
               <p>• <strong>Seed Standard Region Channels:</strong> Create the standard set of Response/Coordination channels for every NZ region, Chatham Islands, and All of New Zealand, All of North Island and All of South Island (coordination only) -- safe to run again, only fills in any missing channels</p>

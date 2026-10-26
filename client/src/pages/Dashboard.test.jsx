@@ -430,7 +430,7 @@ describe('Dashboard top-level folder icons (bugfix: top-level folder icons)', ()
       data: {
         channels: [
           { name: 'tak_teams_alpha', display_name: 'Teams - Alpha', description: 'd' },
-          { name: 'tak_bch_alpha', display_name: 'BCH - Alpha', description: 'd' },
+          { name: 'tak_bch_alpha', display_name: 'Broadcast - Alpha', description: 'd' },
           { name: 'tak_response_alpha', display_name: 'Response - Alpha', description: 'd' },
           { name: 'tak_coordination_alpha', display_name: 'Coordination - Alpha', description: 'd' },
           { name: 'tak_xtratools_alpha', display_name: 'XtraTools - Alpha', description: 'd' },
@@ -489,9 +489,9 @@ describe('Dashboard top-level folder icons (bugfix: top-level folder icons)', ()
       .filter((el) => el.textContent === folderName && el.className.includes('font-medium'))
       .map((span) => span.parentElement.querySelector('svg'))
 
-  it('renders RadioIcon (heroicons) for the top-level BCH folder', async () => {
+  it('renders RadioIcon (heroicons) for the top-level Broadcast folder', async () => {
     await mount()
-    const icon = folderIconFor('BCH')
+    const icon = folderIconFor('Broadcast')
     expect(icon).toBeTruthy()
     // heroicons components carry no stable class-token signature of their
     // own; distinguished here from Tabler's `tabler-icon-*` token instead

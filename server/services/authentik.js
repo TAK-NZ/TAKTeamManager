@@ -405,6 +405,18 @@ class AuthentikService {
     return groups;
   }
 
+  // Rename an Authentik group in place by its `pk`. Sends ONLY `name`: a
+  // PATCH with no `attributes`/`users` key leaves both untouched, so this
+  // can never wipe a group's attributes or membership (contrast the
+  // whole-dict replacement semantics of PATCHing `attributes`). Used by
+  // `scripts/rename-bch-groups-to-broadcast.js`. A 404 propagates -- unlike
+  // `deleteGroup`, a missing group is not a satisfied rename.
+  async renameGroup(groupId, name) {
+    await this._authentikCall('write', () =>
+      this.client.patch(`/core/groups/${encodeURIComponent(groupId)}/`, { name })
+    );
+  }
+
   // Delete an Authentik group by its `pk`. A 404 (group already absent) is
   // treated as a satisfied delete rather than an error, matching the
   // Sync_Worker's `removeTeamChannelGroup` idempotent-delete convention.
