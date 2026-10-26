@@ -1,13 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { PlusIcon, KeyIcon, UserPlusIcon, GlobeAltIcon, RadioIcon, SignalIcon, PencilIcon, TrashIcon, FolderIcon, FolderOpenIcon, ChevronRightIcon, ChevronDownIcon, ChevronUpIcon } from '@heroicons/react/24/outline';
 // Response/Coordination/XtraTools use Tabler icons instead of a heroicons
-// stand-in: heroicons has no fire-truck/ambulance, digger, or wrench+tools
+// stand-in: heroicons has no fire-truck/ambulance, users-group, or wrench+tools
 // glyph, and Tabler (already vetted/added to package.json for this) has an
-// exact match for all three -- IconFiretruck, IconBackhoe, IconTool. BCH
+// exact match for all three -- IconFiretruck, IconUsersGroup, IconTool. BCH
 // keeps its original heroicons RadioIcon, per explicit request ("leave as
 // is"). Tabler components take the same `className` prop heroicons' do, so
 // they drop into the existing `h-6 w-6 text-*` classes unchanged.
-import { IconFiretruck, IconBackhoe, IconTool } from '@tabler/icons-react';
+import { IconFiretruck, IconUsersGroup, IconTool } from '@tabler/icons-react';
 import toast from 'react-hot-toast';
 import { globalChannelsAPI, configAPI } from '../services/api';
 import { buildFolderTree } from '../utils/channelTree';
@@ -25,7 +25,7 @@ import { useTabs, tabAria, TabPanel } from '../components/Tabs';
 // `sm:` and up, accessible name constant either way.
 const CHANNEL_TABS = [
   { id: 'bch', label: 'BCH', icon: RadioIcon },
-  { id: 'coordination', label: 'Coordination', icon: IconBackhoe },
+  { id: 'coordination', label: 'Coordination', icon: IconUsersGroup },
   { id: 'response', label: 'Response', icon: IconFiretruck },
   { id: 'utl', label: 'XtraTools', icon: IconTool }
 ];
@@ -777,7 +777,7 @@ export default function GlobalChannels({ user }) {
           <TabPanel id="coordination" activeTab={activeChannelTab} keepMounted>
             <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
               <div className="flex items-center">
-                <IconBackhoe className="h-6 w-6 text-green-600 mr-2" />
+                <IconUsersGroup className="h-6 w-6 text-green-600 mr-2" />
                 <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
                   Coordination Channels (All Agencies)
                 </h2>
