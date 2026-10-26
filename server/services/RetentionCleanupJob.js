@@ -2,6 +2,20 @@ const pool = require('../config/database');
 const logger = require('../config/logger').createLogger('RetentionCleanupJob');
 const { withJobLock, JOB_LOCK_KEYS } = require('../utils/jobLock');
 
+const DEFAULT_ORG_INTEREST_DISMISSED_RETENTION_DAYS = 7;
+
+/**
+ * Parses an env value as a positive integer number of days, falling back to
+ * `fallback` for anything else (unset, blank, zero, negative, non-numeric).
+ * A negative value must not reach the SQL interval: `NOW() - (-1 day)` is in
+ * the future and would match every dismissed row.
+ */
+function resolvePositiveIntDays(raw, fallback) {
+  if (typeof raw !== 'string' || !/^\d+$/.test(raw.trim())) return fallback;
+  const n = parseInt(raw, 10);
+  return n > 0 ? n : fallback;
+}
+
 /**
  * Requirement 25 (Data Retention) / task 47.1: implements the
  * Retention_Cleanup_Job described in design.md's Section 20 ("Data
@@ -161,6 +175,11 @@ class RetentionCleanupJob {
    * already passed. Unlike the other two tables, this has no
    * configurable days-based threshold -- see the class-level comment.
    *
+   * `org_interest_requests`: deletes `dismissed` rows whose dismissal
+   * (`status_changed_at`) is older than
+   * `ORG_INTEREST_DISMISSED_RETENTION_DAYS` (default 7). `pending` and
+   * `actioned` rows are never deleted.
+   *
    * Retention day thresholds for the first two tables are read directly
    * from `SYNC_OPERATIONS_RETENTION_DAYS` (default 90) and
    * `AUDIT_LOGS_RETENTION_DAYS` (default 365) on every run (rather than
@@ -168,7 +187,7 @@ class RetentionCleanupJob {
    * takes effect on the very next scheduled pass without requiring a
    * process restart.
    *
-   * @returns {Promise<{syncOperationsDeleted: number, auditLogsDeleted: number, tokenRevocationsDeleted: number}>}
+   * @returns {Promise<{syncOperationsDeleted: number, auditLogsDeleted: number, tokenRevocationsDeleted: number, orgInterestDismissedDeleted: number}>}
    */
   async deleteExpiredRows() {
     const syncOperationsRetentionDays =
@@ -193,10 +212,29 @@ class RetentionCleanupJob {
       `DELETE FROM token_revocations WHERE expires_at < NOW()`
     );
 
+    // Dismissed Org Interest Requests: unwanted leads (in practice mostly
+    // spam) that hold an email and name, so they are purged a short while
+    // after dismissal. Only `dismissed` rows are touched -- `pending` rows are
+    // unactioned leads and `actioned` rows are the record of why an
+    // Organisation was created. The age is measured from the dismissal, not
+    // from submission; COALESCE covers a dismissal written without a
+    // timestamp (an older instance during a rolling deploy).
+    const orgInterestDismissedRetentionDays = resolvePositiveIntDays(
+      process.env.ORG_INTEREST_DISMISSED_RETENTION_DAYS,
+      DEFAULT_ORG_INTEREST_DISMISSED_RETENTION_DAYS
+    );
+    const orgInterestResult = await this.pool.query(
+      `DELETE FROM org_interest_requests
+       WHERE status = 'dismissed'
+         AND COALESCE(status_changed_at, created_at) < NOW() - INTERVAL '1 day' * $1::integer`,
+      [orgInterestDismissedRetentionDays]
+    );
+
     return {
       syncOperationsDeleted: syncOperationsResult.rowCount,
       auditLogsDeleted: auditLogsResult.rowCount,
-      tokenRevocationsDeleted: tokenRevocationsResult.rowCount
+      tokenRevocationsDeleted: tokenRevocationsResult.rowCount,
+      orgInterestDismissedDeleted: orgInterestResult.rowCount
     };
   }
 }

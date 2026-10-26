@@ -94,6 +94,8 @@ class OrgInterestService {
   /**
    * Update request status (pending → actioned | dismissed).
    * Throws if the request is not found or the status is invalid.
+   * Records `status_changed_at`, which the dismissed-request retention
+   * purge in `RetentionCleanupJob` measures from.
    *
    * @param {number} requestId
    * @param {string} newStatus - 'actioned' or 'dismissed'
@@ -106,7 +108,10 @@ class OrgInterestService {
     }
 
     const result = await pool.query(
-      'UPDATE org_interest_requests SET status = $1 WHERE id = $2 RETURNING id',
+      `UPDATE org_interest_requests
+          SET status = $1, status_changed_at = CURRENT_TIMESTAMP
+        WHERE id = $2
+        RETURNING id`,
       [newStatus, requestId]
     );
 
