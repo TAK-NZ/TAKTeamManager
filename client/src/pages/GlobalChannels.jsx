@@ -1,13 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { PlusIcon, KeyIcon, UserPlusIcon, GlobeAltIcon, RadioIcon, SignalIcon, PencilIcon, TrashIcon, FolderIcon, FolderOpenIcon, ChevronRightIcon, ChevronDownIcon, ChevronUpIcon } from '@heroicons/react/24/outline';
 // Response/Coordination/XtraTools use Tabler icons instead of a heroicons
-// stand-in: heroicons has no fire-truck/ambulance, users-group, or wrench+tools
+// stand-in: heroicons has no siren, users-group, or wrench+tools
 // glyph, and Tabler (already vetted/added to package.json for this) has an
-// exact match for all three -- IconFiretruck, IconUsersGroup, IconTool. BCH
+// exact match for all three -- IconUrgent, IconUsersGroup, IconTool. BCH
 // keeps its original heroicons RadioIcon, per explicit request ("leave as
 // is"). Tabler components take the same `className` prop heroicons' do, so
 // they drop into the existing `h-6 w-6 text-*` classes unchanged.
-import { IconFiretruck, IconUsersGroup, IconTool } from '@tabler/icons-react';
+import { IconUrgent, IconUsersGroup, IconTool } from '@tabler/icons-react';
 import toast from 'react-hot-toast';
 import { globalChannelsAPI, configAPI } from '../services/api';
 import { buildFolderTree } from '../utils/channelTree';
@@ -26,7 +26,7 @@ import { useTabs, tabAria, TabPanel } from '../components/Tabs';
 const CHANNEL_TABS = [
   { id: 'bch', label: 'BCH', icon: RadioIcon },
   { id: 'coordination', label: 'Coordination', icon: IconUsersGroup },
-  { id: 'response', label: 'Response', icon: IconFiretruck },
+  { id: 'response', label: 'Response', icon: IconUrgent },
   { id: 'utl', label: 'XtraTools', icon: IconTool }
 ];
 
@@ -725,7 +725,7 @@ export default function GlobalChannels({ user }) {
           <TabPanel id="response" activeTab={activeChannelTab} keepMounted>
             <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
               <div className="flex items-center">
-                <IconFiretruck className="h-6 w-6 text-red-600 mr-2" />
+                <IconUrgent className="h-6 w-6 text-red-600 mr-2" />
                 <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
                   Response Channels (Emergency Services)
                 </h2>

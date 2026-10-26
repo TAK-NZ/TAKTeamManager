@@ -501,11 +501,11 @@ describe('Dashboard top-level folder icons (bugfix: top-level folder icons)', ()
     expect(icon.getAttribute('class')).not.toContain('tabler-icon')
   })
 
-  it('renders Tabler IconFiretruck for the top-level Response folder', async () => {
+  it('renders Tabler IconUrgent for the top-level Response folder', async () => {
     await mount()
     const icon = folderIconFor('Response')
     expect(icon).toBeTruthy()
-    expect(icon.getAttribute('class')).toContain('tabler-icon-firetruck')
+    expect(icon.getAttribute('class')).toContain('tabler-icon-urgent')
   })
 
   it('renders Tabler IconUsersGroup for the top-level Coordination folder', async () => {

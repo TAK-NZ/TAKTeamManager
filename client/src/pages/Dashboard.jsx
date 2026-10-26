@@ -11,7 +11,7 @@ import { UsersIcon, UserGroupIcon, RadioIcon, ClipboardDocumentListIcon, ArrowUp
 // an open/closed pair the way FolderIcon/FolderOpenIcon do, so one icon is
 // used regardless of expanded state -- matching how GlobalChannels' own
 // section headers render these same icons (never swapped on toggle).
-import { IconFiretruck, IconUsersGroup, IconTool } from '@tabler/icons-react'
+import { IconUrgent, IconUsersGroup, IconTool } from '@tabler/icons-react'
 import { teamsAPI, requestsAPI, configAPI, usersAPI, channelsAPI, deviceManagementAPI, adminAPI, devicesAPI } from '../services/api'
 import { buildFolderTree } from '../utils/channelTree'
 import { getTakColorHex } from '../utils/takColors'
@@ -40,7 +40,7 @@ import { startVisibilityPausedRefresh } from '../utils/visibilityPausedRefresh'
 const TOP_LEVEL_FOLDER_ICONS = Object.freeze({
   Teams: UserGroupIcon,
   BCH: RadioIcon,
-  Response: IconFiretruck,
+  Response: IconUrgent,
   Coordination: IconUsersGroup,
   XtraTools: IconTool
 })
