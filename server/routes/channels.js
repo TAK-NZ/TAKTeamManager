@@ -59,12 +59,12 @@ const router = express.Router();
 //     Dashboard fallback literal 'TAK Channel' instead of its real
 //     description.
 //   - likewise a region channel's base name has an additional tier
-//     prefix ("Response - "/"Support - ") beyond `region_channels.name`,
+//     prefix ("Response - "/"Coordination - ") beyond `region_channels.name`,
 //     per `REGION_CHANNEL_TIER_PREFIX`. The FORMER single, untiered
 //     "Regions - " prefix no longer exists in this deployment (every
 //     region channel was recreated under a tiered prefix -- see
 //     region-channel-tiers) and checking for it here was the second half
-//     of the same bug: neither "Response - " nor "Support - " ever
+//     of the same bug: neither "Response - " nor "Coordination - " ever
 //     started with "Regions - ", so every region channel ALSO fell
 //     through to the team-channel branch and missed.
 router.get('/descriptions', authenticateToken, authorize, async (req, res) => {
@@ -94,7 +94,7 @@ router.get('/descriptions', authenticateToken, authorize, async (req, res) => {
     // per channel) and build lookup maps keyed the same way each table
     // actually stores its own `name` column. bch_channels/region_channels
     // are now keyed by (name, category)/(name, tier) -- a same-named
-    // BCH+UTL pair or Response+Support pair is legitimately two distinct
+    // BCH+UTL pair or Response+Coordination pair is legitimately two distinct
     // rows (see their respective UNIQUE(name, category/tier) constraints),
     // so the lookup maps below are keyed by the SAME composite to avoid
     // one silently shadowing the other.

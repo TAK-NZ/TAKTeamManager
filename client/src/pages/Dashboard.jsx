@@ -4,7 +4,7 @@ import { UsersIcon, UserGroupIcon, RadioIcon, ClipboardDocumentListIcon, ArrowUp
 // Bugfix (top-level folder icons): the five recognized top-level channel
 // folders get a symbol naming what they actually are, rather than the
 // generic FolderIcon/FolderOpenIcon every other folder still uses.
-// BCH/Response/Support/XtraTools mirror GlobalChannels.jsx's own section
+// BCH/Response/Coordination/XtraTools mirror GlobalChannels.jsx's own section
 // icons EXACTLY (RadioIcon stays heroicons there too, per that page's own
 // "leave as is" -- see the comment on CHANNEL_TABS in GlobalChannels.jsx);
 // Teams mirrors Layout.jsx's "Orgs & Teams" nav icon. None of the five has
@@ -31,7 +31,7 @@ import { startVisibilityPausedRefresh } from '../utils/visibilityPausedRefresh'
 // `tak_` and any category/tier prefix are stripped -- 'Teams'
 // (`Team.createTeamChannel`), 'BCH'/'XtraTools'
 // (`BCH_CHANNEL_CATEGORY_PREFIX`, server/config/constants.js), and
-// 'Response'/'Support' (`REGION_CHANNEL_TIER_PREFIX`, same file). A folder
+// 'Response'/'Coordination' (`REGION_CHANNEL_TIER_PREFIX`, same file). A folder
 // name not in this map (a plain team/region name with no recognized
 // prefix, e.g. a literal Region name before tiering existed, or any other
 // ad-hoc top-level group) keeps the existing generic FolderIcon/
@@ -41,7 +41,7 @@ const TOP_LEVEL_FOLDER_ICONS = Object.freeze({
   Teams: UserGroupIcon,
   BCH: RadioIcon,
   Response: IconFiretruck,
-  Support: IconBackhoe,
+  Coordination: IconBackhoe,
   XtraTools: IconTool
 })
 
@@ -374,7 +374,7 @@ export default function Dashboard({ user }) {
         // name's dedicated symbol instead of the generic Folder/FolderOpen
         // pair -- checked on `path`, not `folderPath`, because a NESTED
         // folder could coincidentally share one of these names (e.g. some
-        // team's own sub-team literally named "Support") and must keep the
+        // team's own sub-team literally named "Coordination") and must keep the
         // ordinary folder glyph.
         const TopLevelIcon = path === '' ? TOP_LEVEL_FOLDER_ICONS[folderName] : undefined
         items.push(

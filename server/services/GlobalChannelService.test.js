@@ -342,7 +342,7 @@ describe('GlobalChannelService.createRegionChannel', () => {
   it('rejects an invalid tier before ever connecting to the database', async () => {
     await expect(
       service.createRegionChannel({ name: 'Northland', description: 'x', tier: 'bogus' }, 7)
-    ).rejects.toThrow("Invalid channel tier: must be 'response' or 'support'");
+    ).rejects.toThrow("Invalid channel tier: must be 'response' or 'coordination'");
 
     expect(pool.connect).not.toHaveBeenCalled();
     expect(EventPublisher.publishOperation).not.toHaveBeenCalled();
@@ -351,7 +351,7 @@ describe('GlobalChannelService.createRegionChannel', () => {
   it('rejects a missing/undefined tier', async () => {
     await expect(
       service.createRegionChannel({ name: 'Northland', description: 'x' }, 7)
-    ).rejects.toThrow("Invalid channel tier: must be 'response' or 'support'");
+    ).rejects.toThrow("Invalid channel tier: must be 'response' or 'coordination'");
     expect(pool.connect).not.toHaveBeenCalled();
   });
 
@@ -369,14 +369,14 @@ describe('GlobalChannelService.createRegionChannel', () => {
   });
 
   it('publishes create_region_channel_group with the tier included in the payload', async () => {
-    await service.createRegionChannel({ name: 'Northland', description: 'x', tier: 'support' }, 7);
+    await service.createRegionChannel({ name: 'Northland', description: 'x', tier: 'coordination' }, 7);
 
     expect(EventPublisher.publishOperation).toHaveBeenCalledWith(
       'create_region_channel_group',
       expect.objectContaining({
         region_channel_id: 42,
         channel_name: 'Northland',
-        tier: 'support'
+        tier: 'coordination'
       }),
       7
     );
@@ -392,14 +392,14 @@ describe('GlobalChannelService.createRegionChannel', () => {
     expect(ruleCall[1]).toContain('tak_Response - Northland');
   });
 
-  it('builds the group_membership_rules target_group_pattern with the Support tier prefix', async () => {
-    await service.createRegionChannel({ name: 'Northland', description: 'x', tier: 'support' }, 7);
+  it('builds the group_membership_rules target_group_pattern with the Coordination tier prefix', async () => {
+    await service.createRegionChannel({ name: 'Northland', description: 'x', tier: 'coordination' }, 7);
 
     const ruleCall = mockClient.query.mock.calls.find(
       ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO group_membership_rules')
     );
     expect(ruleCall).toBeDefined();
-    expect(ruleCall[1]).toContain('tak_Support - Northland');
+    expect(ruleCall[1]).toContain('tak_Coordination - Northland');
   });
 
   it('rolls back the transaction and never publishes the sync operation when the INSERT fails', async () => {
@@ -434,20 +434,20 @@ describe('GlobalChannelService.seedRegionChannels', () => {
     service = new GlobalChannelService();
   });
 
-  it('builds a 35-item work list: 16 standard regions x 2 tiers, plus Chatham Islands x 2 tiers, plus All of New Zealand support-only', async () => {
+  it('builds a 37-item work list: 16 standard regions x 2 tiers, plus Chatham Islands x 2 tiers, plus All of New Zealand, All of North Island and All of South Island coordination-only', async () => {
     // No existing rows -- every work item is created.
     pool.query.mockResolvedValue({ rows: [] });
 
     const result = await service.seedRegionChannels(7);
 
-    expect(result).toEqual({ created: 35, skipped: 0, failed: 0 });
-    // 16 * 2 + 2 (Chatham both tiers) + 1 (All of NZ support only) = 35
+    expect(result).toEqual({ created: 37, skipped: 0, failed: 0 });
+    // 16 * 2 + 2 (Chatham both tiers) + 3 (All of NZ, All of North Island, All of South Island coordination only) = 37
     expect(mockClient.query.mock.calls.filter(
       ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO region_channels')
-    )).toHaveLength(35);
+    )).toHaveLength(37);
   });
 
-  it('seeds "All of New Zealand" as support tier only, never response', async () => {
+  it('seeds "All of New Zealand" as coordination tier only, never response', async () => {
     pool.query.mockResolvedValue({ rows: [] });
 
     await service.seedRegionChannels(7);
@@ -458,9 +458,20 @@ describe('GlobalChannelService.seedRegionChannels', () => {
       .filter((params) => params[0] === 'All of New Zealand')
       .map((params) => params[3]);
 
-    expect(insertedTiersForNzWide).toEqual(['support']);
+    expect(insertedTiersForNzWide).toEqual(['coordination']);
   });
 
+  it('seeds "All of North Island" and "All of South Island" as coordination tier only, never response', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+    await service.seedRegionChannels(7);
+    const tiersFor = (name) => mockClient.query.mock.calls
+      .filter(([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO region_channels'))
+      .map(([, params]) => params)
+      .filter((params) => params[0] === name)
+      .map((params) => params[3]);
+    expect(tiersFor('All of North Island')).toEqual(['coordination']);
+    expect(tiersFor('All of South Island')).toEqual(['coordination']);
+  });
   it('seeds "Chatham Islands" for both tiers', async () => {
     pool.query.mockResolvedValue({ rows: [] });
 
@@ -473,7 +484,7 @@ describe('GlobalChannelService.seedRegionChannels', () => {
       .map((params) => params[3])
       .sort();
 
-    expect(insertedTiersForChatham).toEqual(['response', 'support']);
+    expect(insertedTiersForChatham).toEqual(['coordination', 'response']);
   });
 
   it('is idempotent: an existing (name, tier) row is skipped, not duplicated', async () => {
@@ -482,17 +493,17 @@ describe('GlobalChannelService.seedRegionChannels', () => {
 
     const result = await service.seedRegionChannels(7);
 
-    expect(result).toEqual({ created: 0, skipped: 35, failed: 0 });
+    expect(result).toEqual({ created: 0, skipped: 37, failed: 0 });
     expect(mockClient.query.mock.calls.filter(
       ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO region_channels')
     )).toHaveLength(0);
   });
 
-  // Bugfix: a seeded response/support pair for the same region name must
+  // Bugfix: a seeded response/coordination pair for the same region name must
   // have DISTINGUISHABLE descriptions -- `description: name` alone gave
   // "Auckland" for both, with no way for a user to tell which tier they
   // were looking at.
-  it('gives the response and support channel for the same region name distinguishable descriptions', async () => {
+  it('gives the response and coordination channel for the same region name distinguishable descriptions', async () => {
     pool.query.mockResolvedValue({ rows: [] });
 
     await service.seedRegionChannels(7);
@@ -507,11 +518,11 @@ describe('GlobalChannelService.seedRegionChannels', () => {
     const descriptionsByTier = Object.fromEntries(
       aucklandInserts.map((params) => [params[3], params[2]])
     );
-    expect(descriptionsByTier.response).not.toBe(descriptionsByTier.support);
+    expect(descriptionsByTier.response).not.toBe(descriptionsByTier.coordination);
     expect(descriptionsByTier.response).toContain('Auckland');
-    expect(descriptionsByTier.support).toContain('Auckland');
+    expect(descriptionsByTier.coordination).toContain('Auckland');
     expect(descriptionsByTier.response).toMatch(/Response/);
-    expect(descriptionsByTier.support).toMatch(/Support/);
+    expect(descriptionsByTier.coordination).toMatch(/Coordination/);
   });
 
   it('checks existence case-insensitively and scoped by tier via a single ILIKE + tier query', async () => {
@@ -548,7 +559,7 @@ describe('GlobalChannelService.seedRegionChannels', () => {
     const result = await service.seedRegionChannels(7);
 
     expect(result.failed).toBe(1);
-    expect(result.created).toBe(34);
+    expect(result.created).toBe(36);
     expect(result.skipped).toBe(0);
   });
 

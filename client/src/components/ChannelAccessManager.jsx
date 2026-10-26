@@ -3,12 +3,12 @@ import toast from 'react-hot-toast'
 import { teamsAPI } from '../services/api'
 
 /**
- * region-channel-tiers: Response/Support channel-access flag editor for an
+ * region-channel-tiers: Response/Coordination channel-access flag editor for an
  * Organisation, Global_Manager-only.
  *
  * Mirrors `OrgDomainManager`'s shape deliberately: its OWN independent
  * fetch is unnecessary here (the Organisation row -- and therefore its
- * current `response_channel_access`/`support_channel_access` values -- is
+ * current `response_channel_access`/`coordination_channel_access` values -- is
  * already available as the `org` prop from the parent dialog's own
  * `team`/`editingTeam`), but its SAVE is kept independent, via
  * `teamsAPI.updateChannelAccess`, a route deliberately SEPARATE from the
@@ -35,7 +35,7 @@ import { teamsAPI } from '../services/api'
  */
 export default function ChannelAccessManager({ org, isGlobalManager, onSaved }) {
   const [responseChannelAccess, setResponseChannelAccess] = useState(Boolean(org?.response_channel_access))
-  const [supportChannelAccess, setSupportChannelAccess] = useState(Boolean(org?.support_channel_access))
+  const [coordinationChannelAccess, setCoordinationChannelAccess] = useState(Boolean(org?.coordination_channel_access))
   const [saving, setSaving] = useState(false)
   // The last-known-saved baseline this component compares against for its
   // `dirty` state, updated in TWO places: the seeding effect below (when
@@ -52,7 +52,7 @@ export default function ChannelAccessManager({ org, isGlobalManager, onSaved }) 
   // afterward.
   const [savedBaseline, setSavedBaseline] = useState({
     responseChannelAccess: Boolean(org?.response_channel_access),
-    supportChannelAccess: Boolean(org?.support_channel_access)
+    coordinationChannelAccess: Boolean(org?.coordination_channel_access)
   })
 
   // Re-seeds from the Organisation's CURRENT stored values whenever the
@@ -63,27 +63,27 @@ export default function ChannelAccessManager({ org, isGlobalManager, onSaved }) 
   useEffect(() => {
     const seeded = {
       responseChannelAccess: Boolean(org?.response_channel_access),
-      supportChannelAccess: Boolean(org?.support_channel_access)
+      coordinationChannelAccess: Boolean(org?.coordination_channel_access)
     }
     setResponseChannelAccess(seeded.responseChannelAccess)
-    setSupportChannelAccess(seeded.supportChannelAccess)
+    setCoordinationChannelAccess(seeded.coordinationChannelAccess)
     setSavedBaseline(seeded)
-  }, [org?.id, org?.response_channel_access, org?.support_channel_access])
+  }, [org?.id, org?.response_channel_access, org?.coordination_channel_access])
 
   if (!isGlobalManager) return null
 
   const dirty =
     responseChannelAccess !== savedBaseline.responseChannelAccess ||
-    supportChannelAccess !== savedBaseline.supportChannelAccess
+    coordinationChannelAccess !== savedBaseline.coordinationChannelAccess
 
   const handleSave = async () => {
     setSaving(true)
     try {
       const response = await teamsAPI.updateChannelAccess(org.id, {
         responseChannelAccess,
-        supportChannelAccess
+        coordinationChannelAccess
       })
-      setSavedBaseline({ responseChannelAccess, supportChannelAccess })
+      setSavedBaseline({ responseChannelAccess, coordinationChannelAccess })
       onSaved(response.data.team)
       toast.success('Channel access saved')
     } catch (err) {
@@ -95,10 +95,10 @@ export default function ChannelAccessManager({ org, isGlobalManager, onSaved }) 
 
   return (
     <div className="card">
-      <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-2">Response/Support Channel Access</h3>
+      <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-2">Response/Coordination Channel Access</h3>
       <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
         Controls whether members of this Organisation (and its Sub-teams) are synced into the
-        Response (Emergency_Response, ES-only) and Support (all-agency) region channels. Global admin only.
+        Response (Emergency_Response, ES-only) and Coordination (all-agency) region channels. Global admin only.
       </p>
 
       {/* Bugfix (mobile tap target too small): the outer element of each
@@ -124,16 +124,16 @@ export default function ChannelAccessManager({ org, isGlobalManager, onSaved }) 
             </p>
           </span>
         </label>
-        <label htmlFor="supportChannelAccess" className="flex items-start -m-2 p-2 rounded-lg cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50">
+        <label htmlFor="coordinationChannelAccess" className="flex items-start -m-2 p-2 rounded-lg cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50">
           <input
             type="checkbox"
-            id="supportChannelAccess"
-            checked={supportChannelAccess}
-            onChange={(e) => setSupportChannelAccess(e.target.checked)}
+            id="coordinationChannelAccess"
+            checked={coordinationChannelAccess}
+            onChange={(e) => setCoordinationChannelAccess(e.target.checked)}
             className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded mt-1"
           />
           <span className="ml-3 text-sm text-gray-700 dark:text-gray-300 font-medium">
-            Support channel access
+            Coordination channel access
             <p className="text-xs text-gray-500 dark:text-gray-400 font-normal">
               All-agency coordination channels, outer circle. Defaults to on for a new Organisation.
             </p>

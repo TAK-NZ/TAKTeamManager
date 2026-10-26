@@ -36,6 +36,7 @@ beforeEach(() => {
   delete process.env.PINNED_MEMBERS_BCH;
   delete process.env.PINNED_MEMBERS_XTRATOOLS;
   delete process.env.PINNED_MEMBERS_RESPONSE;
+  delete process.env.PINNED_MEMBERS_COORDINATION;
   delete process.env.PINNED_MEMBERS_SUPPORT;
   // Default: rate limiter runs the fn.
   mockRun.mockImplementation((_opts, fn) => fn());
@@ -74,13 +75,29 @@ describe('getPinnedUsernames', () => {
 
   it('reads the correct env var per category', () => {
     process.env.PINNED_MEMBERS_XTRATOOLS = 'ckadmin';
-    process.env.PINNED_MEMBERS_SUPPORT = 'other';
+    process.env.PINNED_MEMBERS_COORDINATION = 'other';
     expect(getPinnedUsernames('xtratools')).toEqual(['ckadmin']);
-    expect(getPinnedUsernames('support')).toEqual(['other']);
+    expect(getPinnedUsernames('coordination')).toEqual(['other']);
     expect(getPinnedUsernames('bch')).toEqual([]);
   });
 });
 
+describe('getPinnedUsernames deprecated PINNED_MEMBERS_SUPPORT alias', () => {
+  it('falls back to PINNED_MEMBERS_SUPPORT for the coordination category when the new variable is unset', () => {
+    process.env.PINNED_MEMBERS_SUPPORT = 'legacy1, legacy2';
+    expect(getPinnedUsernames('coordination')).toEqual(['legacy1', 'legacy2']);
+  });
+  it('prefers PINNED_MEMBERS_COORDINATION when both are set', () => {
+    process.env.PINNED_MEMBERS_COORDINATION = 'current';
+    process.env.PINNED_MEMBERS_SUPPORT = 'legacy';
+    expect(getPinnedUsernames('coordination')).toEqual(['current']);
+  });
+  it('does not apply the alias to any other category', () => {
+    process.env.PINNED_MEMBERS_SUPPORT = 'legacy';
+    expect(getPinnedUsernames('response')).toEqual([]);
+    expect(getPinnedUsernames('bch')).toEqual([]);
+  });
+});
 describe('resolvePinnedPks', () => {
   it('returns [] immediately (no Authentik call) when the list is empty', async () => {
     const pks = await resolvePinnedPks('bch');
@@ -110,7 +127,7 @@ describe('resolvePinnedPks', () => {
   });
 
   it('is best-effort on a lookup transport failure: that username contributes nothing, no throw', async () => {
-    process.env.PINNED_MEMBERS_SUPPORT = 'ckadmin,boom';
+    process.env.PINNED_MEMBERS_COORDINATION = 'ckadmin,boom';
     mockFetch.mockImplementation((url) => {
       if (url.includes('boom')) {
         return Promise.resolve({ ok: false, status: 503, statusText: 'Service Unavailable' });
@@ -118,7 +135,7 @@ describe('resolvePinnedPks', () => {
       return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ results: [{ pk: 42, username: 'ckadmin' }] }) });
     });
 
-    const pks = await resolvePinnedPks('support');
+    const pks = await resolvePinnedPks('coordination');
 
     expect(pks).toEqual(['42']);
   });

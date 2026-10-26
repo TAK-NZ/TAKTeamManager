@@ -24,7 +24,7 @@
  *                      provisionBchServiceAccount).
  *   - BCH write      -> the channel's service account ONLY.
  *   - region         -> direct-membership users whose Organisation's
- *                      response/support flag (per tier) is true
+ *                      response/coordination flag (per tier) is true
  *                      (assignUserToGlobalChannels).
  *   - cloudtak       -> the Team's Direct_Admin_Set (getDirectAdmins),
  *                      deliberately WITHOUT an is_active gate, to match
@@ -184,7 +184,7 @@ async function desiredRegionMembers(regionChannelId, client = pool) {
     [regionChannelId]
   );
   const tier = rowResult.rows[0]?.tier;
-  if (tier !== 'response' && tier !== 'support') {
+  if (tier !== 'response' && tier !== 'coordination') {
     // A missing/invalid tier is a permanent data problem, not a transient
     // one: surface it as a permanent Authentik-shaped error so the caller
     // does not retry forever, and never PATCH on it.
@@ -197,7 +197,7 @@ async function desiredRegionMembers(regionChannelId, client = pool) {
   // The Organisation column to gate on, chosen by tier. Column name is NOT
   // interpolated from user input -- it is one of two literals selected here.
   const flagColumn =
-    tier === 'response' ? 'response_channel_access' : 'support_channel_access';
+    tier === 'response' ? 'response_channel_access' : 'coordination_channel_access';
 
   // NOTE: this query has NO bind parameters. Membership is gated purely on
   // the (literal, tier-chosen) `flagColumn` and the direct-membership /
@@ -214,10 +214,10 @@ async function desiredRegionMembers(regionChannelId, client = pool) {
     JOIN users u ON u.id = tm.user_id
     JOIN LATERAL (
       WITH RECURSIVE ancestors AS (
-        SELECT id, parent_team_id, response_channel_access, support_channel_access
+        SELECT id, parent_team_id, response_channel_access, coordination_channel_access
         FROM teams WHERE id = tm.team_id
         UNION ALL
-        SELECT t.id, t.parent_team_id, t.response_channel_access, t.support_channel_access
+        SELECT t.id, t.parent_team_id, t.response_channel_access, t.coordination_channel_access
         FROM teams t JOIN ancestors a ON t.id = a.parent_team_id
       )
       SELECT ${flagColumn} AS flag
@@ -231,8 +231,8 @@ async function desiredRegionMembers(regionChannelId, client = pool) {
   const members = result.rows.map((r) => String(r.authentik_user_id));
 
   // Pinned members (best-effort, additive): PINNED_MEMBERS_RESPONSE /
-  // PINNED_MEMBERS_SUPPORT target their own tier's region groups. `tier` was
-  // validated to be exactly 'response' or 'support' above, so it maps
+  // PINNED_MEMBERS_COORDINATION target their own tier's region groups. `tier` was
+  // validated to be exactly 'response' or 'coordination' above, so it maps
   // directly to the pin category.
   const pinned = await resolvePinnedPks(tier);
   members.push(...pinned);

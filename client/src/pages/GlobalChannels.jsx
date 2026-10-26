@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { PlusIcon, KeyIcon, UserPlusIcon, GlobeAltIcon, RadioIcon, SignalIcon, PencilIcon, TrashIcon, FolderIcon, FolderOpenIcon, ChevronRightIcon, ChevronDownIcon, ChevronUpIcon } from '@heroicons/react/24/outline';
-// Response/Support/XtraTools use Tabler icons instead of a heroicons
+// Response/Coordination/XtraTools use Tabler icons instead of a heroicons
 // stand-in: heroicons has no fire-truck/ambulance, digger, or wrench+tools
 // glyph, and Tabler (already vetted/added to package.json for this) has an
 // exact match for all three -- IconFiretruck, IconBackhoe, IconTool. BCH
@@ -18,15 +18,15 @@ import ServiceAccountActionConfirmDialog from '../components/ServiceAccountActio
 import { useTabs, tabAria, TabPanel } from '../components/Tabs';
 
 // Bugfix (too much scrolling): the four channel types render as tabs
-// instead of four stacked cards, alphabetically ordered (BCH, Response,
-// Support, XtraTools) per explicit request. The tab bar itself stays
+// instead of four stacked cards, alphabetically ordered (BCH, Coordination,
+// Response, XtraTools) per explicit request. The tab bar itself stays
 // neutral (active/inactive coloring only), matching Admin.jsx's own
 // tab-bar convention -- icon-only below `sm:`, full label restored at
 // `sm:` and up, accessible name constant either way.
 const CHANNEL_TABS = [
   { id: 'bch', label: 'BCH', icon: RadioIcon },
+  { id: 'coordination', label: 'Coordination', icon: IconBackhoe },
   { id: 'response', label: 'Response', icon: IconFiretruck },
-  { id: 'support', label: 'Support', icon: IconBackhoe },
   { id: 'utl', label: 'XtraTools', icon: IconTool }
 ];
 
@@ -34,13 +34,13 @@ export default function GlobalChannels({ user }) {
   const [bchChannels, setBchChannels] = useState([]);
   // region-channel-tiers: `regionChannels` still holds every region row
   // from the single GET /api/global-channels/region fetch (each row now
-  // carries `tier`); the two Response/Support cards below FILTER this one
+  // carries `tier`); the two Response/Coordination cards below FILTER this one
   // array client-side by `channel.tier` rather than fetching separately.
   const [regionChannels, setRegionChannels] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
-  // createType/editChannel.type are now 3-way: 'bch' | 'response' | 'support'.
+  // createType/editChannel.type are now 3-way: 'bch' | 'response' | 'coordination'.
   const [createType, setCreateType] = useState('bch');
   const [editChannel, setEditChannel] = useState(null);
   const [deleteChannel, setDeleteChannel] = useState(null);
@@ -52,7 +52,7 @@ export default function GlobalChannels({ user }) {
   // seed action, following the same pattern as showAssignDialog/assigningUsers.
   const [showSeedDialog, setShowSeedDialog] = useState(false);
   const [seedingRegions, setSeedingRegions] = useState(false);
-  // Bugfix: whether the standard Response/Support region-channel seed set
+  // Bugfix: whether the standard Response/Coordination region-channel seed set
   // is already complete -- null while unknown (still loading, or the
   // status check itself failed), so the button defaults to SHOWN rather
   // than being hidden on a false negative. Only an explicit `true` from
@@ -84,16 +84,16 @@ export default function GlobalChannels({ user }) {
 
   const isGlobalManager = user?.is_global_manager; // Global managers only
 
-  // region-channel-tiers: the two tier-filtered views every Response/Support
+  // region-channel-tiers: the two tier-filtered views every Response/Coordination
   // card, create/edit modal, and folder-tree helper below reads from.
   const responseChannels = regionChannels.filter((channel) => channel.tier === 'response');
-  const supportChannels = regionChannels.filter((channel) => channel.tier === 'support');
+  const coordinationChannels = regionChannels.filter((channel) => channel.tier === 'coordination');
 
   // bch-channel-category: `bchChannels` still holds every row from the
   // single GET /api/global-channels/bch fetch (each row now carries
   // `category`); the two BCH/XtraTools cards below FILTER this one array
   // client-side by `channel.category`, exactly mirroring how
-  // responseChannels/supportChannels above split ONE regionChannels
+  // responseChannels/coordinationChannels above split ONE regionChannels
   // fetch by `tier` rather than fetching separately. A row with no
   // `category` at all (defensive only -- the column is NOT NULL with a
   // DEFAULT server-side, so this should never actually happen) falls
@@ -101,7 +101,7 @@ export default function GlobalChannels({ user }) {
   const utlChannels = bchChannels.filter((channel) => channel.category === 'UTL');
   const bchOnlyChannels = bchChannels.filter((channel) => channel.category !== 'UTL');
 
-  // Maps a 4-way channelType ('bch'/'utl'/'response'/'support') to the
+  // Maps a 4-way channelType ('bch'/'utl'/'response'/'coordination') to the
   // channel list it renders from and the human-readable label used in
   // headings/dialog titles/toast messages, so the create/edit/render code
   // below reads from one table instead of branching four ways at each
@@ -110,7 +110,7 @@ export default function GlobalChannels({ user }) {
     bch: { label: 'BCH', channels: bchOnlyChannels },
     utl: { label: 'XtraTools', channels: utlChannels },
     response: { label: 'Response', channels: responseChannels },
-    support: { label: 'Support', channels: supportChannels }
+    coordination: { label: 'Coordination', channels: coordinationChannels }
   };
 
   useEffect(() => {
@@ -209,7 +209,7 @@ export default function GlobalChannels({ user }) {
   // successful seed run -- NOT after every edit/delete of a region
   // channel, since editing an existing standard channel's name/
   // description doesn't remove it from the seeded set (only a delete of
-  // one of the 35 standard rows would reintroduce a gap, and re-checking
+  // one of the 37 standard rows would reintroduce a gap, and re-checking
   // on every fetchChannels() call would mean this status query firing on
   // every unrelated BCH create/edit too).
   const fetchRegionSeedStatus = async () => {
@@ -239,7 +239,7 @@ export default function GlobalChannels({ user }) {
           createType === 'utl' ? { ...formData, category: 'UTL' } : formData
         );
       } else {
-        // region-channel-tiers: 'response'/'support' both create a region
+        // region-channel-tiers: 'response'/'coordination' both create a region
         // channel row, distinguished only by the `tier` field the server
         // requires (server/routes/globalChannels.js validates it's one of
         // the two values).
@@ -286,9 +286,9 @@ export default function GlobalChannels({ user }) {
       // Bugfix: renaming a standard region channel's `name` away from
       // its seeded region name reintroduces a gap in the standard set
       // (the seed check matches by name+tier), so re-check on every
-      // response/support edit -- BCH channels are outside the seeded
+      // response/coordination edit -- BCH channels are outside the seeded
       // set entirely and never affect this.
-      if (editChannel.type === 'response' || editChannel.type === 'support') {
+      if (editChannel.type === 'response' || editChannel.type === 'coordination') {
         fetchRegionSeedStatus();
       }
     } catch (error) {
@@ -301,14 +301,14 @@ export default function GlobalChannels({ user }) {
   };
 
   // region-channel-tiers/bch-channel-category: `deleteChannel.type` carries
-  // the 4-way UI type ('bch'/'utl'/'response'/'support'), but
+  // the 4-way UI type ('bch'/'utl'/'response'/'coordination'), but
   // DELETE /api/global-channels/:channelType/:channelId is server-scoped
   // to CHANNEL_TABLE_ALLOWLIST's two actual table types -- 'bch'/'region',
   // with no notion of category/tier at all (a bch_channels row is deleted
   // the same way regardless of its category, exactly like a region
   // channel regardless of its tier). This maps the UI type down to the
   // server's channelType before the call.
-  const toServerChannelType = (type) => (type === 'response' || type === 'support' ? 'region' : 'bch');
+  const toServerChannelType = (type) => (type === 'response' || type === 'coordination' ? 'region' : 'bch');
 
   const confirmDelete = async () => {
     if (!deleteChannel) return;
@@ -318,11 +318,11 @@ export default function GlobalChannels({ user }) {
       await globalChannelsAPI.deleteChannel(toServerChannelType(deleteChannel.type), deleteChannel.id);
       toast.success(`${CHANNEL_TYPE_META[deleteChannel.type].label} channel deleted successfully`);
       fetchChannels();
-      // Bugfix: deleting one of the 35 standard region channels
+      // Bugfix: deleting one of the 37 standard region channels
       // reintroduces a gap in the standard set -- re-check so the Seed
       // button reappears rather than staying hidden. BCH deletes never
       // affect this.
-      if (deleteChannel.type === 'response' || deleteChannel.type === 'support') {
+      if (deleteChannel.type === 'response' || deleteChannel.type === 'coordination') {
         fetchRegionSeedStatus();
       }
       setDeleteChannel(null);
@@ -623,12 +623,12 @@ export default function GlobalChannels({ user }) {
       <div>
         <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Global Channels</h1>
         <p className="text-gray-600 dark:text-gray-400">
-          Manage BCH (broadcast/ETL), Response (emergency services), Support (all-agency), and XtraTools (maps, overlays and other extras) channels that users have access to.
+          Manage BCH (broadcast/ETL), Coordination (all-agency), Response (emergency services), and XtraTools (maps, overlays and other extras) channels that users have access to.
         </p>
       </div>
 
       {/* Bugfix (too much scrolling): the four channel types are now tabs
-          in one card, alphabetically ordered (BCH, Response, Support,
+          in one card, alphabetically ordered (BCH, Coordination, Response,
           XtraTools), instead of four separately-scrolled cards stacked
           on the page. Every `TabPanel` below is `keepMounted` -- content
           is hidden via CSS (`hidden`), never unmounted -- so all four
@@ -773,20 +773,20 @@ export default function GlobalChannels({ user }) {
             )}
           </TabPanel>
 
-          {/* Support Channels */}
-          <TabPanel id="support" activeTab={activeChannelTab} keepMounted>
+          {/* Coordination Channels */}
+          <TabPanel id="coordination" activeTab={activeChannelTab} keepMounted>
             <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
               <div className="flex items-center">
                 <IconBackhoe className="h-6 w-6 text-green-600 mr-2" />
                 <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
-                  Support Channels (All Agencies)
+                  Coordination Channels (All Agencies)
                 </h2>
               </div>
               <div className="flex items-center gap-2">
-                {supportChannels.length > 0 && Object.keys(buildFolderTree(supportChannels, folderSeparator, 'name').folders).length > 0 && (
+                {coordinationChannels.length > 0 && Object.keys(buildFolderTree(coordinationChannels, folderSeparator, 'name').folders).length > 0 && (
                   <div className="flex items-center space-x-2">
                     <button
-                      onClick={() => expandAllFolders(supportChannels)}
+                      onClick={() => expandAllFolders(coordinationChannels)}
                       className="inline-flex items-center px-3 py-1 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600"
                     >
                       <ChevronDownIcon className="h-4 w-4 mr-1" />
@@ -804,23 +804,23 @@ export default function GlobalChannels({ user }) {
                 {isGlobalManager && (
                   <button
                     onClick={() => {
-                      setCreateType('support');
+                      setCreateType('coordination');
                       setShowCreateModal(true);
                     }}
                     className="btn-primary flex items-center justify-center"
                   >
                     <PlusIcon className="h-4 w-4 mr-2 flex-shrink-0" />
-                    Create Support Channel
+                    Create Coordination Channel
                   </button>
                 )}
               </div>
             </div>
 
-            {supportChannels.length === 0 ? (
-              <p className="text-gray-500 dark:text-gray-400">No support channels configured.</p>
+            {coordinationChannels.length === 0 ? (
+              <p className="text-gray-500 dark:text-gray-400">No coordination channels configured.</p>
             ) : (
               <div className="space-y-3">
-                {renderFolderTree(buildFolderTree(supportChannels, folderSeparator, 'name'), '', 'support')}
+                {renderFolderTree(buildFolderTree(coordinationChannels, folderSeparator, 'name'), '', 'coordination')}
               </div>
             )}
           </TabPanel>
@@ -923,10 +923,10 @@ export default function GlobalChannels({ user }) {
             )}
           </div>
           <div className="space-y-2 text-sm text-gray-600 dark:text-gray-400">
-            <p>• <strong>Sync Existing Channels:</strong> Import BCH, Response and Support channels that already exist in Authentik</p>
+            <p>• <strong>Sync Existing Channels:</strong> Import BCH, Response and Coordination channels that already exist in Authentik</p>
             <p>• <strong>Reconcile Global Channel Membership:</strong> Force an immediate reconcile of every active global channel&apos;s membership against the current users. Runs automatically in the background; use this to apply changes now rather than waiting for the next sweep.</p>
             {regionSeedComplete !== true && (
-              <p>• <strong>Seed Standard Region Channels:</strong> Create the standard set of Response/Support channels for every NZ region, Chatham Islands, and All of New Zealand (support only) -- safe to run again, only fills in any missing channels</p>
+              <p>• <strong>Seed Standard Region Channels:</strong> Create the standard set of Response/Coordination channels for every NZ region, Chatham Islands, and All of New Zealand, All of North Island and All of South Island (coordination only) -- safe to run again, only fills in any missing channels</p>
             )}
           </div>
         </div>
@@ -1109,7 +1109,7 @@ export default function GlobalChannels({ user }) {
                 Seed Standard Region Channels
               </h3>
               <p className="text-gray-600 dark:text-gray-400 mb-6">
-                This will create up to 35 Response/Support channels (every NZ region, Chatham Islands, and All of New Zealand support-only) that don't already exist. Existing channels are left unchanged. Continue?
+                This will create up to 37 Response/Coordination channels (every NZ region and Chatham Islands, plus All of New Zealand, All of North Island and All of South Island as coordination-only) that don't already exist. Existing channels are left unchanged. Continue?
               </p>
               <div className="flex justify-end space-x-3">
                 <button

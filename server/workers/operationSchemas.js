@@ -172,7 +172,7 @@ module.exports = {
     }
   },
 
-  // region-channel-tiers: `tier` ('response'/'support') is required --
+  // region-channel-tiers: `tier` ('response'/'coordination') is required --
   // GlobalChannelService.createRegionChannel always supplies it, having
   // already validated it against the same two-value set the migration's
   // CHECK constraint enforces, before ever enqueueing this operation.

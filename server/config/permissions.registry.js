@@ -70,7 +70,7 @@ const routes = {
   // inherits automatically with no change here.
   'GET /api/teams/:teamId/callsign-level-options': ['team:read'],
   'DELETE /api/teams/:teamId': ['team:delete:global'],
-  // Response/Support channel-tier access flags (region-channel-tiers):
+  // Response/Coordination channel-tier access flags (region-channel-tiers):
   // Organisation-only, Global_Manager-only, no Team_Admin fallback --
   // mirrors 'team:delete:global' exactly, deliberately NOT 'team:update'.
   // A Team_Admin of an Organisation may edit that Organisation's name/
@@ -288,7 +288,7 @@ const routes = {
   'PUT /api/global-channels/bch/:channelId': ['global_channel:manage'],
   'PUT /api/global-channels/region/:channelId': ['global_channel:manage'],
   'POST /api/global-channels/sync-existing': ['global_channel:manage'],
-  // region-channel-tiers: seeds the standard Response/Support region
+  // region-channel-tiers: seeds the standard Response/Coordination region
   // channel set, reusing 'global_channel:manage' -- the same permission
   // every other channel-management action here already requires.
   'POST /api/global-channels/seed-regions': ['global_channel:manage'],

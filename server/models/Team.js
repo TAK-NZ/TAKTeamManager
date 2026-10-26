@@ -80,7 +80,7 @@ class PseudonymousUsernamePolicySubTeamError extends Error {
 
 /**
  * Thrown by `Team.create`/`Team.update` when a `response_channel_access`
- * or `support_channel_access` value is supplied for a Sub_Team (a team
+ * or `coordination_channel_access` value is supplied for a Sub_Team (a team
  * whose `parent_team_id` is not null). Both flags are Organisation-only
  * in EXACTLY the way `pseudonymous_usernames` is -- this mirrors
  * `PseudonymousUsernamePolicySubTeamError`'s placement (outside the
@@ -338,15 +338,15 @@ class Team {
     // is defaulted to `false` (root team) or forced to `null` (Sub_Team)
     // below, before ever reaching the INSERT.
     let { pseudonymous_usernames } = teamData;
-    // response_channel_access/support_channel_access are Organisation-only
+    // response_channel_access/coordination_channel_access are Organisation-only
     // fields, mirroring pseudonymous_usernames exactly in tri-state shape:
     // declared with `let` because each is defaulted (root team) or forced
     // to `null` (Sub_Team) below, before ever reaching the INSERT. Unlike
     // pseudonymous_usernames, both are freely mutable after creation via
-    // Team.update -- flipping either only triggers Response/Support
+    // Team.update -- flipping either only triggers Response/Coordination
     // group-membership reconciliation, never an identifier/certificate
     // consequence, so neither carries an immutability guard.
-    let { response_channel_access, support_channel_access } = teamData;
+    let { response_channel_access, coordination_channel_access } = teamData;
     // Foreign_Partner Organisation country prefix feature: `country_code`
     // is an Organisation-only field, mirroring `pseudonymous_usernames`'s
     // tri-state shape -- declared with `let` because it is validated and
@@ -475,7 +475,7 @@ class Team {
       }
     }
 
-    // response_channel_access/support_channel_access: only ever stored on
+    // response_channel_access/coordination_channel_access: only ever stored on
     // an Organisation row (`parent_team_id IS NULL`) -- a Sub_Team's value
     // is always `NULL`, and a Sub_Team creation request that supplies
     // either is a typed rejection, exactly as `pseudonymous_usernames`
@@ -487,24 +487,24 @@ class Team {
       if (response_channel_access !== undefined && response_channel_access !== null) {
         throw new ChannelTierAccessSubTeamError('responseChannelAccess');
       }
-      if (support_channel_access !== undefined && support_channel_access !== null) {
-        throw new ChannelTierAccessSubTeamError('supportChannelAccess');
+      if (coordination_channel_access !== undefined && coordination_channel_access !== null) {
+        throw new ChannelTierAccessSubTeamError('coordinationChannelAccess');
       }
       response_channel_access = null;
-      support_channel_access = null;
+      coordination_channel_access = null;
     } else {
       // Organisation (root team): the migration deliberately carries no
       // column default, so the application supplies one here.
       // response_channel_access defaults to `false` -- the Response/
-      // Emergency_Response tier is ES-only and opt-in. support_channel_access
-      // defaults to `true` -- the Support/outer tier is the all-agency
+      // Emergency_Response tier is ES-only and opt-in. coordination_channel_access
+      // defaults to `true` -- the Coordination/outer tier is the all-agency
       // continuation of what the former single Region tier already did.
       response_channel_access = response_channel_access === undefined || response_channel_access === null
         ? false
         : Boolean(response_channel_access);
-      support_channel_access = support_channel_access === undefined || support_channel_access === null
+      coordination_channel_access = coordination_channel_access === undefined || coordination_channel_access === null
         ? true
-        : Boolean(support_channel_access);
+        : Boolean(coordination_channel_access);
     }
 
     // Foreign_Partner Organisation country prefix feature: `country_code`
@@ -553,8 +553,8 @@ class Team {
 
     try {
       const result = await pool.query(
-        'INSERT INTO teams (name, description, callsign_prefix, color, visibility, can_join, parent_team_id, created_by, callsign_name_format, callsign_level_selection, pseudonymous_usernames, response_channel_access, support_channel_access, country_code, callsign_team_hyphenated) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING *',
-        [name, description, callsign_prefix, color, visibility, can_join, parent_team_id, created_by, callsign_name_format, callsign_level_selection, pseudonymous_usernames, response_channel_access, support_channel_access, country_code, callsign_team_hyphenated]
+        'INSERT INTO teams (name, description, callsign_prefix, color, visibility, can_join, parent_team_id, created_by, callsign_name_format, callsign_level_selection, pseudonymous_usernames, response_channel_access, coordination_channel_access, country_code, callsign_team_hyphenated) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING *',
+        [name, description, callsign_prefix, color, visibility, can_join, parent_team_id, created_by, callsign_name_format, callsign_level_selection, pseudonymous_usernames, response_channel_access, coordination_channel_access, country_code, callsign_team_hyphenated]
       );
       
       const team = result.rows[0];
@@ -674,14 +674,14 @@ class Team {
    * itself -- ordered ROOT-FIRST, each row carrying `id`, `name`,
    * `callsign_prefix`, `color`, `callsign_name_format`, `visibility`,
    * `parent_team_id`, `pseudonymous_usernames`, `response_channel_access`,
-   * `support_channel_access`, and `depth` (0 at the Organisation,
+   * `coordination_channel_access`, and `depth` (0 at the Organisation,
    * incrementing by one per level down to the given Team).
    *
-   * region-channel-tiers: `response_channel_access`/`support_channel_access`
+   * region-channel-tiers: `response_channel_access`/`coordination_channel_access`
    * are included for the same reason `pseudonymous_usernames` is (see
    * below) -- `syncWorker.assignUserToGlobalChannels` reads both from
    * index 0 (the Organisation) of this same call to decide Response/
-   * Support region-channel membership; on every other row both are
+   * Coordination region-channel membership; on every other row both are
    * always `NULL` (Sub_Teams never carry a value) and must never be read
    * positionally from the tail.
    *
@@ -713,21 +713,21 @@ class Team {
         WITH RECURSIVE ancestors AS (
           SELECT id, parent_team_id, name, callsign_prefix, color,
                  callsign_name_format, visibility, callsign_level_selection,
-                 pseudonymous_usernames, response_channel_access, support_channel_access,
+                 pseudonymous_usernames, response_channel_access, coordination_channel_access,
                  country_code, callsign_team_hyphenated,
                  0 AS hops_from_target
           FROM teams WHERE id = $1
           UNION ALL
           SELECT t.id, t.parent_team_id, t.name, t.callsign_prefix, t.color,
                  t.callsign_name_format, t.visibility, t.callsign_level_selection,
-                 t.pseudonymous_usernames, t.response_channel_access, t.support_channel_access,
+                 t.pseudonymous_usernames, t.response_channel_access, t.coordination_channel_access,
                  t.country_code, t.callsign_team_hyphenated,
                  a.hops_from_target + 1
           FROM teams t JOIN ancestors a ON t.id = a.parent_team_id
         )
         SELECT id, parent_team_id, name, callsign_prefix, color,
                callsign_name_format, visibility, callsign_level_selection,
-               pseudonymous_usernames, response_channel_access, support_channel_access,
+               pseudonymous_usernames, response_channel_access, coordination_channel_access,
                country_code, callsign_team_hyphenated,
                (SELECT MAX(hops_from_target) FROM ancestors) - hops_from_target AS depth
         FROM ancestors ORDER BY depth ASC
@@ -1348,14 +1348,14 @@ class Team {
     // (resubmitting the currently-stored value) or a rejection -- there
     // is no "change" case that reaches the UPDATE at all.
     let { pseudonymous_usernames } = updateData;
-    // response_channel_access/support_channel_access are validated/
+    // response_channel_access/coordination_channel_access are validated/
     // rejected below, before ever reaching the UPDATE. Unlike
     // pseudonymous_usernames, a value supplied on an EXISTING Organisation
     // is simply APPLIED (no immutability guard, no no-op-only handling) --
-    // flipping either flag only triggers Response/Support group-membership
+    // flipping either flag only triggers Response/Coordination group-membership
     // reconciliation via the Sync_Worker, never an identifier/certificate
     // consequence.
-    let { response_channel_access, support_channel_access } = updateData;
+    let { response_channel_access, coordination_channel_access } = updateData;
     // Foreign_Partner Organisation country prefix feature: `country_code`
     // is WRITE-ONCE on an Organisation -- exactly the same shape as
     // `callsign_prefix` above. A no-op resubmission of the current value
@@ -1365,7 +1365,7 @@ class Team {
     // one, so a value supplied on a Sub_Team update is a typed rejection.
     let { country_code } = updateData;
     // Callsign Team-segment separator toggle: rejected/ignored on a
-    // Sub_Team exactly like response_channel_access/support_channel_access
+    // Sub_Team exactly like response_channel_access/coordination_channel_access
     // below -- but UNLIKE country_code/callsign_prefix, freely APPLIED on
     // an existing Organisation with no immutability guard: it only
     // changes how the callsign is DISPLAYED going forward, never a
@@ -1393,7 +1393,7 @@ class Team {
       pseudonymous_usernames !== undefined ||
       callsign_prefix !== undefined ||
       response_channel_access !== undefined ||
-      support_channel_access !== undefined ||
+      coordination_channel_access !== undefined ||
       country_code !== undefined ||
       callsign_team_hyphenated !== undefined
     ) {
@@ -1419,14 +1419,14 @@ class Team {
       if (pseudonymous_usernames !== undefined) {
         throw new PseudonymousUsernamePolicySubTeamError();
       }
-      // response_channel_access/support_channel_access: reject (never
+      // response_channel_access/coordination_channel_access: reject (never
       // silently ignore) either value supplied on a Sub_Team update,
       // mirroring pseudonymous_usernames's typed rejection exactly.
       if (response_channel_access !== undefined) {
         throw new ChannelTierAccessSubTeamError('responseChannelAccess');
       }
-      if (support_channel_access !== undefined) {
-        throw new ChannelTierAccessSubTeamError('supportChannelAccess');
+      if (coordination_channel_access !== undefined) {
+        throw new ChannelTierAccessSubTeamError('coordinationChannelAccess');
       }
       // Foreign_Partner country prefix: a country_code supplied on a
       // Sub_Team update is a typed rejection, mirroring the guards above.
@@ -1485,7 +1485,7 @@ class Team {
       pseudonymous_usernames = undefined;
     }
 
-    // response_channel_access/support_channel_access: freely mutable on
+    // response_channel_access/coordination_channel_access: freely mutable on
     // an existing Organisation, unlike pseudonymous_usernames -- no
     // no-op-only/immutability guard, just a boolean normalisation so the
     // UPDATE's COALESCE always receives a real boolean or `undefined`
@@ -1497,12 +1497,12 @@ class Team {
     if (response_channel_access !== undefined) {
       response_channel_access = response_channel_access === null ? undefined : Boolean(response_channel_access);
     }
-    if (support_channel_access !== undefined) {
-      support_channel_access = support_channel_access === null ? undefined : Boolean(support_channel_access);
+    if (coordination_channel_access !== undefined) {
+      coordination_channel_access = coordination_channel_access === null ? undefined : Boolean(coordination_channel_access);
     }
     // Callsign Team-segment separator toggle: freely mutable on an
     // existing Organisation, exactly like response_channel_access/
-    // support_channel_access above -- same `null` -> `undefined`
+    // coordination_channel_access above -- same `null` -> `undefined`
     // normalisation so COALESCE never re-introduces the Sub_Team-only
     // NULL state on an Organisation row.
     if (callsign_team_hyphenated !== undefined) {
@@ -1617,8 +1617,8 @@ class Team {
 
     try {
       const result = await pool.query(
-        'UPDATE teams SET name = COALESCE($1, name), description = COALESCE($2, description), visibility = COALESCE($3, visibility), can_join = COALESCE($4, can_join), parent_team_id = $5, callsign_name_format = COALESCE($6, callsign_name_format), color = COALESCE($8, color), callsign_level_selection = COALESCE($9, callsign_level_selection), pseudonymous_usernames = COALESCE($10, pseudonymous_usernames), callsign_prefix = COALESCE($11, callsign_prefix), response_channel_access = COALESCE($12, response_channel_access), support_channel_access = COALESCE($13, support_channel_access), country_code = COALESCE($14, country_code), callsign_team_hyphenated = COALESCE($15, callsign_team_hyphenated), updated_at = CURRENT_TIMESTAMP WHERE id = $7 RETURNING *',
-        [name, description, visibility, can_join, parent_team_id, callsign_name_format, teamId, color, callsign_level_selection, pseudonymous_usernames, callsign_prefix, response_channel_access, support_channel_access, country_code, callsign_team_hyphenated]
+        'UPDATE teams SET name = COALESCE($1, name), description = COALESCE($2, description), visibility = COALESCE($3, visibility), can_join = COALESCE($4, can_join), parent_team_id = $5, callsign_name_format = COALESCE($6, callsign_name_format), color = COALESCE($8, color), callsign_level_selection = COALESCE($9, callsign_level_selection), pseudonymous_usernames = COALESCE($10, pseudonymous_usernames), callsign_prefix = COALESCE($11, callsign_prefix), response_channel_access = COALESCE($12, response_channel_access), coordination_channel_access = COALESCE($13, coordination_channel_access), country_code = COALESCE($14, country_code), callsign_team_hyphenated = COALESCE($15, callsign_team_hyphenated), updated_at = CURRENT_TIMESTAMP WHERE id = $7 RETURNING *',
+        [name, description, visibility, can_join, parent_team_id, callsign_name_format, teamId, color, callsign_level_selection, pseudonymous_usernames, callsign_prefix, response_channel_access, coordination_channel_access, country_code, callsign_team_hyphenated]
       );
       const updatedTeam = result.rows[0];
 

@@ -324,7 +324,7 @@ class UserProvisioningService {
     // Bugfix (create-and-add / bulk-imported users had NO global channels):
     // the above only assigns TEAM channels (the target team's primary
     // channel plus each ancestor's). Global channels -- every BCH read
-    // group unconditionally, plus the Organisation's Response/Support
+    // group unconditionally, plus the Organisation's Response/Coordination
     // region groups -- are assigned by a separate, idempotent per-user
     // reconcile driven by the `assign_user_to_global_channels`
     // Sync_Operation. `TeamMembershipService.addUserToTeam` (the

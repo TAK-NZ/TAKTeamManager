@@ -1217,7 +1217,7 @@ export default function TeamFormDialog({
             passes the CURRENTLY STORED team row -- not `formData`, which
             only ever carries the main form's fields -- so this reads the
             Organisation's actual response_channel_access/
-            support_channel_access straight from the same object the page's
+            coordination_channel_access straight from the same object the page's
             list already has, no extra fetch needed. */}
         {editingTeam && !formData.parentTeamId && isGlobalManager && activeFormTab === 'channelAccess' && (
           <div className="px-6 pb-6 pt-6">

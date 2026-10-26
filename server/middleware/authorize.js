@@ -440,7 +440,7 @@ const rowScopedResolvers = {
    * fallback. Mirrors `team:delete:global` exactly, deliberately NOT
    * `team:update`'s `Team.isAdmin` fallback: a Team_Admin of an
    * Organisation may edit that Organisation's ordinary fields via
-   * `team:update`, but response_channel_access/support_channel_access
+   * `team:update`, but response_channel_access/coordination_channel_access
    * govern which Authentik region-channel groups the whole
    * Organisation's membership is synced into, which is reserved for a
    * Global_Manager regardless of Team_Admin status.
