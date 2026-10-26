@@ -101,11 +101,73 @@ describe('RetentionCleanupJob.deleteExpiredRows', () => {
     pool.query
       .mockResolvedValueOnce({ rowCount: 12 })
       .mockResolvedValueOnce({ rowCount: 34 })
-      .mockResolvedValueOnce({ rowCount: 7 });
+      .mockResolvedValueOnce({ rowCount: 7 })
+      .mockResolvedValueOnce({ rowCount: 3 });
 
     const result = await job.deleteExpiredRows();
 
-    expect(result).toEqual({ syncOperationsDeleted: 12, auditLogsDeleted: 34, tokenRevocationsDeleted: 7 });
+    expect(result).toEqual({
+      syncOperationsDeleted: 12,
+      auditLogsDeleted: 34,
+      tokenRevocationsDeleted: 7,
+      orgInterestDismissedDeleted: 3
+    });
+  });
+
+  describe('dismissed org_interest_requests', () => {
+    const originalOrgInterestDays = process.env.ORG_INTEREST_DISMISSED_RETENTION_DAYS;
+
+    afterEach(() => {
+      if (originalOrgInterestDays === undefined) {
+        delete process.env.ORG_INTEREST_DISMISSED_RETENTION_DAYS;
+      } else {
+        process.env.ORG_INTEREST_DISMISSED_RETENTION_DAYS = originalOrgInterestDays;
+      }
+    });
+
+    const orgInterestCall = () =>
+      pool.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('DELETE FROM org_interest_requests')
+      );
+
+    it('defaults to 7 days when the variable is unset', async () => {
+      delete process.env.ORG_INTEREST_DISMISSED_RETENTION_DAYS;
+
+      await job.deleteExpiredRows();
+
+      expect(orgInterestCall()).toBeDefined();
+      expect(orgInterestCall()[1]).toEqual([7]);
+    });
+
+    it('reads the configured threshold from the environment on every run', async () => {
+      process.env.ORG_INTEREST_DISMISSED_RETENTION_DAYS = '14';
+
+      await job.deleteExpiredRows();
+
+      expect(orgInterestCall()[1]).toEqual([14]);
+    });
+
+    it.each(['0', '-1', '-30', 'abc', '', '  ', '1.5x'])(
+      'falls back to 7 days for the invalid value %j instead of widening the delete',
+      async (value) => {
+        process.env.ORG_INTEREST_DISMISSED_RETENTION_DAYS = value;
+
+        await job.deleteExpiredRows();
+
+        expect(orgInterestCall()[1]).toEqual([7]);
+      }
+    );
+
+    it('only ever deletes dismissed rows, measured from the dismissal', async () => {
+      await job.deleteExpiredRows();
+
+      const sql = orgInterestCall()[0];
+      expect(sql).toContain("status = 'dismissed'");
+      expect(sql).toContain('COALESCE(status_changed_at, created_at)');
+      // pending (unactioned leads) and actioned (record of why an
+      // Organisation was created) must never be named as deletable.
+      expect(sql).not.toMatch(/'pending'|'actioned'/);
+    });
   });
 
   /**
@@ -216,12 +278,18 @@ describe('RetentionCleanupJob.runCleanup', () => {
     pool.query
       .mockResolvedValueOnce({ rowCount: 5 })
       .mockResolvedValueOnce({ rowCount: 2 })
-      .mockResolvedValueOnce({ rowCount: 1 });
+      .mockResolvedValueOnce({ rowCount: 1 })
+      .mockResolvedValueOnce({ rowCount: 4 });
 
     await job.runCleanup();
 
     expect(mockLoggerInstance.info).toHaveBeenCalledWith(
-      { syncOperationsDeleted: 5, auditLogsDeleted: 2, tokenRevocationsDeleted: 1 },
+      {
+        syncOperationsDeleted: 5,
+        auditLogsDeleted: 2,
+        tokenRevocationsDeleted: 1,
+        orgInterestDismissedDeleted: 4
+      },
       expect.stringContaining('Retention cleanup run completed')
     );
   });
@@ -233,9 +301,9 @@ describe('RetentionCleanupJob.runCleanup', () => {
     await job.runCleanup();
 
     // 1 failed call (sync_operations DELETE only, since it rejected) +
-    // 3 successful calls (sync_operations + audit_logs + token_revocations
-    // DELETEs) = 4 total.
-    expect(pool.query).toHaveBeenCalledTimes(4);
+    // 4 successful calls (sync_operations + audit_logs + token_revocations +
+    // org_interest_requests DELETEs) = 5 total.
+    expect(pool.query).toHaveBeenCalledTimes(5);
   });
 });
 

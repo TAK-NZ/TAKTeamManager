@@ -259,6 +259,16 @@ describe('OrgInterestService.updateStatus', () => {
     await expect(service.updateStatus(1, 'dismissed')).resolves.toBeUndefined();
   });
 
+  it('records status_changed_at so the dismissed-request purge can age from the dismissal', async () => {
+    pool.query.mockResolvedValueOnce({ rows: [{ id: 1 }] });
+
+    await service.updateStatus(1, 'dismissed');
+
+    const [sql, params] = pool.query.mock.calls[0];
+    expect(sql).toContain('status_changed_at = CURRENT_TIMESTAMP');
+    expect(params).toEqual(['dismissed', 1]);
+  });
+
   it('rejects invalid status', async () => {
     await expect(service.updateStatus(1, 'approved')).rejects.toThrow('Invalid status');
     await expect(service.updateStatus(1, '')).rejects.toThrow('Invalid status');
