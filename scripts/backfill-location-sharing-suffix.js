@@ -7,6 +7,13 @@
  * Authentik-sync op so each group's `attributes.description` (LDAP-visible)
  * and the /dashboard tree converge on the same stored value.
  *
+ * SUPERSEDED for the local rows: migration
+ * `1790500000002_standardize-location-sharing-suffix` applies the same
+ * normalisation to `channels` and `region_channels` on deploy, and the periodic
+ * Authentik sync converges the group descriptions
+ * (`reconcileRegionChannelGroups` / `reconcileTeamChannelGroupDescriptions`).
+ * This script remains for an environment that needs a dry-run report.
+ *
  * MUST RUN AFTER THE FIX IS DEPLOYED. The unified suffix now lives IN the
  * stored `description` column (single source of truth); this script brings
  * pre-fix rows up to that shape:

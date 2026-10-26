@@ -23,6 +23,8 @@ const {
   runMigrationChain
 } = require('../../testHelpers/throwawayDatabase');
 
+const { LOCATION_SHARING_DESCRIPTION_SUFFIX: SUFFIX } = require('../../../server/config/constants');
+
 const MIGRATIONS_DIR = path.join(__dirname, '..');
 const MIGRATION_FILE = '1790500000001_rename-island-region-channels.cjs';
 const migrationPresent = fs.existsSync(path.join(MIGRATIONS_DIR, MIGRATION_FILE));
@@ -101,10 +103,13 @@ describeIfPresent('rename island region channels migration', () => {
     const { rows } = await pool.query(
       `SELECT group_id, description FROM region_channels WHERE tier = 'coordination' ORDER BY group_id`
     );
+    // The chain is run to the latest migration, so the later
+    // standardize-location-sharing-suffix migration has appended the unified
+    // suffix to descriptions that lacked it; 'loc' here is just seeded text.
     expect(rows).toEqual([
-      { group_id: 'g-n', description: 'All of North Island (Coordination - All Agencies) loc' },
-      { group_id: 'g-s', description: 'hand written by an operator' },
-      { group_id: 'g-w', description: 'Waikato (Coordination - All Agencies)' }
+      { group_id: 'g-n', description: `All of North Island (Coordination - All Agencies) loc${SUFFIX}` },
+      { group_id: 'g-s', description: `hand written by an operator${SUFFIX}` },
+      { group_id: 'g-w', description: `Waikato (Coordination - All Agencies)${SUFFIX}` }
     ]);
   });
 

@@ -34,6 +34,8 @@ const {
   runMigrationChain
 } = require('../../testHelpers/throwawayDatabase');
 
+const { LOCATION_SHARING_DESCRIPTION_SUFFIX: SUFFIX } = require('../../../server/config/constants');
+
 const MIGRATIONS_DIR = path.join(__dirname, '..');
 const MIGRATION_FILE = '1790500000000_rename-support-tier-to-coordination.cjs';
 const migrationPresent = fs.existsSync(path.join(MIGRATIONS_DIR, MIGRATION_FILE));
@@ -129,11 +131,14 @@ describeIfPresent('rename support tier -> coordination migration', () => {
   });
 
   it('rewrites the description qualifier only where it was the stock text', async () => {
+    // The chain is run to the latest migration, and the later
+    // standardize-location-sharing-suffix migration appends the unified suffix
+    // to every region description, so it is part of what is observed here.
     const { rows } = await pool.query(`SELECT name, description FROM region_channels WHERE tier = 'coordination' AND name <> 'Probe' ORDER BY name`);
     expect(rows).toEqual([
-      { name: 'Auckland', description: 'Auckland (Coordination - All Agencies)' },
-      { name: 'Otago', description: 'Otago (Coordination - All Agencies)' },
-      { name: 'Waikato', description: 'custom text' }
+      { name: 'Auckland', description: `Auckland (Coordination - All Agencies)${SUFFIX}` },
+      { name: 'Otago', description: `Otago (Coordination - All Agencies)${SUFFIX}` },
+      { name: 'Waikato', description: `custom text${SUFFIX}` }
     ]);
   });
 

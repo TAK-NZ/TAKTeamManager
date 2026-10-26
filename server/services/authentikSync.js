@@ -6,7 +6,8 @@ const { normaliseAuthentikEmail } = require('../utils/authentikEmail');
 const { isIgnoredAuthentikUsername } = require('../config/authentikSyncIgnore');
 const EventPublisher = require('./EventPublisher');
 const { resolveChannelFolderSeparator } = require('../utils/channelFolderSeparator');
-const { selectRegionGroupRenames } = require('../utils/regionGroupName');
+const { selectRegionGroupUpdates } = require('../utils/regionGroupName');
+const { selectGroupDescriptionDrift } = require('../utils/groupDescriptionDrift');
 // Authentik scaling (Phase 1): the periodic reconciliation sweep is another
 // Authentik load source (a full paginated user + group fetch every cycle,
 // plus a per-user attribute PATCH on drift). Route its calls through the
@@ -136,9 +137,11 @@ class AuthentikSyncService {
       // the outer try/catch's exception propagation -- a partial
       // `allGroups`/`groupMap` (from an interrupted pagination loop) must
       // never be used to process a user batch.
+      let groups;
       let groupMap;
       try {
-        groupMap = await this.fetchGroupMap();
+        groups = await this.fetchGroups();
+        groupMap = this.buildGroupMap(groups);
       } catch (groupFetchError) {
         logger.error({ err: groupFetchError }, 'Authentik group list fetch failed; aborting user sync before any user_cache write');
 
@@ -206,7 +209,8 @@ class AuthentikSyncService {
 
       // Self-healing region-group names. Runs on the same success path, with
       // the group map this run already fetched, and never fails the sync.
-      await this.reconcileRegionChannelGroupNames(groupMap);
+      await this.reconcileRegionChannelGroups(groups);
+      await this.reconcileTeamChannelGroupDescriptions(groups);
       // Update sync status. The cache sync itself succeeded, so status is
       // 'success' either way -- but when the sweep was SKIPPED for an
       // incomplete fetch, `error_message` carries that skip reason (instead of
@@ -234,40 +238,53 @@ class AuthentikSyncService {
   }
 
   /**
-   * Converges the Authentik group name of every region channel onto the name
-   * the CURRENT code expects (`tak_<TierPrefix> - <Name>`).
+   * Converges every region channel's Authentik group onto the local row: the
+   * group NAME the current code expects (`tak_<TierPrefix> - <Name>`) and the
+   * group DESCRIPTION stored on the row (which carries the location-sharing
+   * suffix).
    *
-   * WHY THIS EXISTS. A region channel's group name is derived from code (the
-   * tier prefix in `REGION_CHANNEL_TIER_PREFIX`), so changing a prefix leaves
-   * every existing group with a stale name. A one-shot rename queued by a
-   * migration is not reliable: the Sync_Worker service deliberately runs old
-   * and new tasks side by side during a deploy (and production runs two), and
-   * an old task that claims the operation after the database has changed
-   * either fails it permanently or renames the group to its existing name. A
-   * convergent check has no such window: whatever an old task did or failed
-   * to do, the next run compares real names to expected names and queues the
-   * difference again.
+   * WHY THIS EXISTS. Both values are derived from local state (a code constant
+   * and a column), so changing either leaves existing groups stale: a renamed
+   * tier prefix leaves every group with the old name, and channels created
+   * before the description suffix existed keep a description without it. A
+   * one-shot rename queued by a migration is not reliable: the Sync_Worker
+   * service deliberately runs old and new tasks side by side during a deploy
+   * (and production runs two), and an old task that claims the operation after
+   * the database has changed either fails it permanently or writes the stale
+   * value back. A convergent check has no such window: whatever an old task did
+   * or failed to do, the next run compares real values to expected values and
+   * queues the difference again.
    *
-   * SAFETY. Only groups that are PRESENT in the fetched map are considered,
-   * so a group deleted in Authentik, or a short fetch, never causes a rename.
-   * The rename itself is the normal queued `update_region_channel_group`
-   * operation (retry, backoff, rate limiting, audit trail). A channel that
-   * already has a pending or processing rename is skipped so a slow queue
-   * does not accumulate duplicates. A failure here is logged and swallowed:
-   * it must never fail the user sync.
+   * SAFETY. Only groups that are PRESENT in the fetched list are considered, so
+   * a group deleted in Authentik, or a short fetch, never causes an update. The
+   * update itself is the normal queued `update_region_channel_group` operation
+   * (retry, backoff, rate limiting, audit trail), which PATCHes name and
+   * description together and keeps the group's pk, so memberships are
+   * preserved. A channel that already has a pending or processing update is
+   * skipped so a slow queue does not accumulate duplicates. A failure here is
+   * logged and swallowed: it must never fail the user sync.
    *
-   * @param {Record<string,string>} groupMap Authentik group pk -> current name
-   * @returns {Promise<number>} the number of rename operations enqueued
+   * @param {Array<{pk: string|number, name: string, attributes?: {description?: string}|null}>} groups
+   *   the full Authentik group list fetched by this sync run
+   * @returns {Promise<number>} the number of update operations enqueued
    */
-  async reconcileRegionChannelGroupNames(groupMap) {
+  async reconcileRegionChannelGroups(groups) {
     try {
+      const groupsByPk = {};
+      for (const group of groups) {
+        groupsByPk[group.pk] = {
+          name: group.name,
+          description: group.attributes ? group.attributes.description : undefined
+        };
+      }
+
       const { rows: channels } = await db.query(
         `SELECT id, name, description, tier, group_id
            FROM region_channels
           WHERE group_id IS NOT NULL`
       );
-      const renames = selectRegionGroupRenames(channels, groupMap, resolveChannelFolderSeparator());
-      if (renames.length === 0) {
+      const updates = selectRegionGroupUpdates(channels, groupsByPk, resolveChannelFolderSeparator());
+      if (updates.length === 0) {
         return 0;
       }
 
@@ -277,12 +294,12 @@ class AuthentikSyncService {
           WHERE operation_type = 'update_region_channel_group'
             AND status IN ('pending', 'processing')
             AND (payload ->> 'region_channel_id')::int = ANY($1::int[])`,
-        [renames.map(({ channel }) => channel.id)]
+        [updates.map(({ channel }) => channel.id)]
       );
       const alreadyQueued = new Set(inFlight.map((row) => row.region_channel_id));
 
       let enqueued = 0;
-      for (const { channel, expectedName, currentName } of renames) {
+      for (const { channel, expectedName, currentName, nameDrift, descriptionDrift } of updates) {
         if (alreadyQueued.has(channel.id)) continue;
         await EventPublisher.publishOperation('update_region_channel_group', {
           region_channel_id: channel.id,
@@ -291,19 +308,89 @@ class AuthentikSyncService {
         }, null);
         enqueued++;
         logger.info(
-          { regionChannelId: channel.id, currentName, expectedName },
-          'Region channel group name is stale; enqueued an in-place rename'
+          { regionChannelId: channel.id, nameDrift, descriptionDrift, currentName, expectedName },
+          'Region channel group has drifted from its local row; enqueued an in-place update'
         );
       }
       return enqueued;
     } catch (error) {
-      logger.error({ err: error }, 'Region channel group name reconcile failed; continuing');
+      logger.error({ err: error }, 'Region channel group reconcile failed; continuing');
+      return 0;
+    }
+  }
+
+  /**
+   * Converges the Authentik group description of every primary team channel
+   * onto the stored `channels.description` (which carries the unified
+   * " (Bi-directional location sharing)" suffix).
+   *
+   * Team channels created before the suffix was unified were written with
+   * " (Location sharing enabled)"; the migration that standardises the local
+   * rows cannot reach Authentik, and a queued one-shot is not reliable across
+   * a deploy (see `reconcileRegionChannelGroups`). Same safety rules: only
+   * groups present in the fetched list are considered, channels with a
+   * pending or processing `update_channel_group` are skipped, and a failure is
+   * logged and swallowed so it never fails the user sync.
+   *
+   * The enqueued `update_channel_group { channel_id }` re-derives the main
+   * group's full attribute set from the row, so nothing else about the group
+   * is changed.
+   *
+   * @param {Array<{pk: string|number, name: string, attributes?: {description?: string}|null}>} groups
+   * @returns {Promise<number>} the number of update operations enqueued
+   */
+  async reconcileTeamChannelGroupDescriptions(groups) {
+    try {
+      const groupsByPk = {};
+      for (const group of groups) {
+        groupsByPk[group.pk] = {
+          name: group.name,
+          description: group.attributes ? group.attributes.description : undefined
+        };
+      }
+
+      const { rows: channels } = await db.query(
+        `SELECT id, description, authentik_group_id AS group_id
+           FROM channels
+          WHERE is_primary = true
+            AND team_id IS NOT NULL
+            AND authentik_group_id IS NOT NULL`
+      );
+      const drifted = selectGroupDescriptionDrift(channels, groupsByPk);
+      if (drifted.length === 0) {
+        return 0;
+      }
+
+      const { rows: inFlight } = await db.query(
+        `SELECT DISTINCT (payload ->> 'channel_id')::int AS channel_id
+           FROM sync_operations
+          WHERE operation_type = 'update_channel_group'
+            AND status IN ('pending', 'processing')
+            AND (payload ->> 'channel_id')::int = ANY($1::int[])`,
+        [drifted.map(({ row }) => row.id)]
+      );
+      const alreadyQueued = new Set(inFlight.map((r) => r.channel_id));
+
+      let enqueued = 0;
+      for (const { row, currentDescription } of drifted) {
+        if (alreadyQueued.has(row.id)) continue;
+        await EventPublisher.publishOperation('update_channel_group', { channel_id: row.id }, null);
+        enqueued++;
+        logger.info(
+          { channelId: row.id, currentDescription, expectedDescription: row.description },
+          'Team channel group description has drifted from its local row; enqueued an in-place update'
+        );
+      }
+      return enqueued;
+    } catch (error) {
+      logger.error({ err: error }, 'Team channel group description reconcile failed; continuing');
       return 0;
     }
   }
 
   // Requirement 11.1/11.6: fetches the full Authentik group list, paginated,
-  // exactly once per sync run, and returns the completed pk->name map.
+  // exactly once per sync run, and returns the complete list of group objects
+  // (`buildGroupMap` derives the pk->name map from it).
   // Throws if any page of the pagination loop fails, so a partial
   // `allGroups` list is never returned to the caller and never used to
   // build a groupMap for processBatch.
@@ -314,7 +401,7 @@ class AuthentikSyncService {
   // a CloudTAK agency-group sync running alongside a bulk team import).
   // `ordering=num_pk` (the group's own stable integer key, distinct from
   // its UUID `pk`) is unaffected by concurrent name changes/inserts.
-  async fetchGroupMap() {
+  async fetchGroups() {
     let allGroups = [];
     let currentPage = 1;
     let hasMorePages = true;
@@ -334,12 +421,22 @@ class AuthentikSyncService {
       }
     }
 
+    return allGroups;
+  }
+
+  // pk -> name map built from a completed `fetchGroups()` result.
+  buildGroupMap(groups) {
     const groupMap = {};
-    allGroups.forEach(group => {
+    groups.forEach(group => {
       groupMap[group.pk] = group.name;
     });
-
     return groupMap;
+  }
+
+  // Requirement 11.1/11.6 (see `fetchGroups`): the pk -> name map form of the
+  // full group list, used where only names are needed.
+  async fetchGroupMap() {
+    return this.buildGroupMap(await this.fetchGroups());
   }
 
   /**
