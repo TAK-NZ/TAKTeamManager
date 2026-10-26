@@ -116,8 +116,8 @@ describe('GET /api/channels/descriptions', () => {
     });
   });
 
-  it('returns the real local description for a BCH channel, matched by name+category with the "BCH - " prefix stripped', async () => {
-    mockUserGroups = ['tak_BCH - Community - Amateur Radio APRS_READ'];
+  it('returns the real local description for a BCH channel, matched by name+category with the "Broadcast - " prefix stripped', async () => {
+    mockUserGroups = ['tak_Broadcast - Community - Amateur Radio APRS_READ'];
     mockTables({
       bch: [
         { name: 'Community - Amateur Radio APRS', category: 'BCH', description: 'Amateur Radio APRS location data' }
@@ -128,14 +128,14 @@ describe('GET /api/channels/descriptions', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.channels[0]).toMatchObject({
-      name: 'tak_BCH - Community - Amateur Radio APRS',
-      display_name: 'BCH - Community - Amateur Radio APRS',
+      name: 'tak_Broadcast - Community - Amateur Radio APRS',
+      display_name: 'Broadcast - Community - Amateur Radio APRS',
       description: 'Amateur Radio APRS location data'
     });
   });
 
   // Bugfix (bch-channel-category): a UTL channel's base name never
-  // started with the single literal 'BCH - ' prefix the route used to
+  // started with the single literal 'Broadcast - ' prefix the route used to
   // check, so it fell through to the team-channel branch and always
   // missed, rendering the 'TAK Channel' fallback regardless of the real
   // description stored on the row. 'XtraTools' is the current Authentik
@@ -164,7 +164,7 @@ describe('GET /api/channels/descriptions', () => {
   // UNIQUE(name, category)) -- the lookup must never let one shadow the
   // other's description.
   it('does not conflate a BCH and a UTL channel that share the same underlying name', async () => {
-    mockUserGroups = ['tak_BCH - Shared_READ', 'tak_XtraTools - Shared_READ'];
+    mockUserGroups = ['tak_Broadcast - Shared_READ', 'tak_XtraTools - Shared_READ'];
     mockTables({
       bch: [
         { name: 'Shared', category: 'BCH', description: 'The BCH one' },
@@ -175,7 +175,7 @@ describe('GET /api/channels/descriptions', () => {
     const res = await request(app).get('/api/channels/descriptions');
 
     const byName = Object.fromEntries(res.body.channels.map((c) => [c.display_name, c.description]));
-    expect(byName['BCH - Shared']).toBe('The BCH one');
+    expect(byName['Broadcast - Shared']).toBe('The BCH one');
     expect(byName['XtraTools - Shared']).toBe('The UTL one');
   });
 
@@ -245,7 +245,7 @@ describe('GET /api/channels/descriptions', () => {
   });
 
   it('deduplicates _READ/_WRITE suffixes into a single base channel entry using the real description', async () => {
-    mockUserGroups = ['tak_BCH - Community - Amateur Radio APRS_READ', 'tak_BCH - Community - Amateur Radio APRS'];
+    mockUserGroups = ['tak_Broadcast - Community - Amateur Radio APRS_READ', 'tak_Broadcast - Community - Amateur Radio APRS'];
     mockTables({
       bch: [{ name: 'Community - Amateur Radio APRS', category: 'BCH', description: 'Amateur Radio APRS location data' }]
     });

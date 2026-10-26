@@ -4,7 +4,7 @@ import { UsersIcon, UserGroupIcon, RadioIcon, ClipboardDocumentListIcon, ArrowUp
 // Bugfix (top-level folder icons): the five recognized top-level channel
 // folders get a symbol naming what they actually are, rather than the
 // generic FolderIcon/FolderOpenIcon every other folder still uses.
-// BCH/Response/Coordination/XtraTools mirror GlobalChannels.jsx's own section
+// Broadcast/Response/Coordination/XtraTools mirror GlobalChannels.jsx's own section
 // icons EXACTLY (RadioIcon stays heroicons there too, per that page's own
 // "leave as is" -- see the comment on CHANNEL_TABS in GlobalChannels.jsx);
 // Teams mirrors Layout.jsx's "Orgs & Teams" nav icon. None of the five has
@@ -27,9 +27,9 @@ import { EXPIRY_STATES, classifyExpiry, getExpiryWarningDays } from '../utils/ex
 import { startVisibilityPausedRefresh } from '../utils/visibilityPausedRefresh'
 
 // Bugfix (top-level folder icons): the exact top-level folder names this
-// server can produce for a Team/BCH/Region channel's group name, once
+// server can produce for a Team/Broadcast/Region channel's group name, once
 // `tak_` and any category/tier prefix are stripped -- 'Teams'
-// (`Team.createTeamChannel`), 'BCH'/'XtraTools'
+// (`Team.createTeamChannel`), 'Broadcast'/'XtraTools'
 // (`BCH_CHANNEL_CATEGORY_PREFIX`, server/config/constants.js), and
 // 'Response'/'Coordination' (`REGION_CHANNEL_TIER_PREFIX`, same file). A folder
 // name not in this map (a plain team/region name with no recognized
@@ -39,7 +39,7 @@ import { startVisibilityPausedRefresh } from '../utils/visibilityPausedRefresh'
 // server is actually known to produce at the top level.
 const TOP_LEVEL_FOLDER_ICONS = Object.freeze({
   Teams: UserGroupIcon,
-  BCH: RadioIcon,
+  Broadcast: RadioIcon,
   Response: IconUrgent,
   Coordination: IconUsersGroup,
   XtraTools: IconTool

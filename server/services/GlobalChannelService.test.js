@@ -229,8 +229,8 @@ describe('GlobalChannelService.createBchChannel', () => {
       ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO group_membership_rules')
     );
     expect(ruleCall).toBeDefined();
-    expect(ruleCall[1]).toContain('tak_BCH - Test Channel_READ');
-    expect(ruleCall[1]).toContain('tak_BCH - Test Channel');
+    expect(ruleCall[1]).toContain('tak_Broadcast - Test Channel_READ');
+    expect(ruleCall[1]).toContain('tak_Broadcast - Test Channel');
   });
 
   it('builds the group_membership_rules target_group_pattern with the UTL category\'s XtraTools display prefix when supplied', async () => {
@@ -264,7 +264,7 @@ describe('GlobalChannelService.updateBchChannel', () => {
   // is no rename-category API, so updateBchChannel reads the row's OWN
   // stored category back (never accepts one from the caller) and
   // forwards it to update_bch_channel_group so the worker's rename PATCH
-  // builds the correct tak_BCH.../tak_UTL... group name.
+  // builds the correct tak_Broadcast.../tak_UTL... group name.
   it('reads the row\'s own stored category back and includes it in the update_bch_channel_group payload', async () => {
     mockClient.query.mockImplementation((sql) => {
       if (typeof sql === 'string' && sql.includes('SELECT category FROM bch_channels')) {
