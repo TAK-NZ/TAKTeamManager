@@ -46,11 +46,10 @@ jobs:
   # npm's only "fix" is a nonsensical major DOWNGRADE of an unrelated parent. Each entry
   # is keyed by its stable GHSA id with a written reason, so a NEW advisory on the same
   # package still fails the build: the allowlist accepts specific, named findings, never
-  # a package forever. As of this change the entries are GHSA-86w9-cpqp-85rv (node-forge,
-  # exact-pinned, no patched release) and GHSA-vfj7-8cjw-p6xm (braces, build-time/dev
-  # tooling only, latest braces is still in-range). Everything else: per Requirement 20.3
-  # every high/critical finding fails the build. See scripts/ci-audit.js for the full
-  # rationale and the current list.
+  # a package forever. As of this change the allowlist is EMPTY: node-forge was bumped to
+  # a patched release and the braces advisory no longer applies after dependency updates.
+  # Everything else: per Requirement 20.3 every high/critical finding fails the build.
+  # See scripts/ci-audit.js for the full rationale and the current list.
   security-audit:
     name: Dependency Audit (${{ matrix.tree }})
     runs-on: ubuntu-latest
@@ -106,7 +105,9 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          # Node 24 (matches the Dockerfile): Jest loads ESM-only deps such as htmlparser2@12
+          # (via sanitize-html) through require(esm), which needs Node >= 24.9.
+          node-version: 24
 
       - name: npm ci (root)
         run: npm ci

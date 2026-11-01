@@ -23,7 +23,7 @@ function buildValidDependencies(overrides = {}) {
     jsonwebtoken: '9.0.3',
     helmet: '7.2.0',
     'express-rate-limit': '7.5.1',
-    'node-forge': '1.4.0',
+    'node-forge': '1.4.2',
     ...overrides
   };
 }

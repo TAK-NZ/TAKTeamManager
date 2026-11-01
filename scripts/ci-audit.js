@@ -67,33 +67,9 @@ const FAILING_SEVERITIES = ['high', 'critical'];
  * Each entry: the GHSA id, the package it concerns, and WHY it is accepted.
  */
 const AUDIT_EXCEPTIONS = [
-  {
-    id: 'GHSA-86w9-cpqp-85rv',
-    package: 'node-forge',
-    reason:
-      'node-forge RSA PKCS#1 v1.5 signature verification accepts extra ' +
-      'nested DigestAlgorithm elements. node-forge is exact-pinned (P12->PEM ' +
-      'conversion of the TAK Server admin credential); the advisory range is ' +
-      '<=1.4.0 and 1.4.0 IS the latest published release -- no patched ' +
-      'version exists (fixAvailable:false). We do not verify untrusted RSA ' +
-      'PKCS#1 v1.5 signatures with it, so real exposure is minimal. Root tree.'
-  },
-  {
-    id: 'GHSA-vfj7-8cjw-p6xm',
-    package: 'braces',
-    reason:
-      'braces stack-exhaustion DoS through deeply nested glob patterns. ' +
-      'Advisory range is <=3.0.3 and 3.0.3 IS the latest published braces -- ' +
-      'no patched version exists. It reaches us only transitively through ' +
-      'build-time/dev tooling (root: nodemon->chokidar->braces, used only in ' +
-      '`npm run dev`, never CI/prod; client: tailwindcss@3->chokidar/' +
-      'micromatch/fast-glob->braces, a build-time CSS step over our OWN ' +
-      'config, not attacker-controlled glob input). npm\'s only "fix" is a ' +
-      'breaking major DOWNGRADE of the parent (nodemon@1.14.10 / ' +
-      'tailwindcss@4), not a real remediation. Covers braces and every ' +
-      'package whose ONLY high finding is this same advisory id (chokidar, ' +
-      'micromatch, fast-glob, nodemon, tailwindcss). Root + client trees.'
-  }
+  // None at present. The node-forge (GHSA-86w9-cpqp-85rv) and braces
+  // (GHSA-vfj7-8cjw-p6xm) entries were removed once patched releases /
+  // dependency updates made them remediable.
 ];
 
 // Set of accepted advisory ids for O(1) lookup.

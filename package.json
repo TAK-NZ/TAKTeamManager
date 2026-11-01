@@ -18,7 +18,7 @@
     "migrate:create": "npm run migrate -- create",
     "cloudtak:backfill": "node scripts/create-cloudtak-groups.js",
     "sync:users": "node -e \"require('./server/services/authentikSync').syncUsers().then(() => process.exit(0)).catch((e) => { console.error(e); process.exit(1); })\"",
-    "test": "jest --forceExit",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --forceExit",
     "lint": "eslint server scripts database eslint.config.js",
     "lint:pinned-deps": "node scripts/check-pinned-deps.js"
   },
@@ -39,7 +39,7 @@
     "helmet": "7.2.0",
     "jsonwebtoken": "9.0.3",
     "multer": "2.5.0",
-    "node-forge": "1.4.0",
+    "node-forge": "1.4.2",
     "node-pg-migrate": "^9.0.0",
     "nodemailer": "10.2.1",
     "p-limit": "3.1.0",
@@ -47,10 +47,12 @@
     "pg": "^8.11.3",
     "pino": "10.3.1",
     "qrcode": "^1.5.4",
-    "sanitize-html": "2.17.5"
+    "sanitize-html": "2.18.1"
   },
   "overrides": {
-    "qs": "6.16.0",
+    "qs": "6.17.1",
+    "minimatch": "11.0.3",
+    "glob": "14.0.3",
     "proxy-addr": "2.0.8",
     "source-map-js": "1.2.2",
     "brace-expansion": "2.1.7",
