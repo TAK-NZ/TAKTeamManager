@@ -231,7 +231,12 @@ class SignupCodeService {
   }
 
   /**
-   * Generate a branded PDF with QR code, URL, and instructions.
+   * Generate a branded one-page A4 PDF that introduces TAK.NZ to the members of
+   * a team and invites them to join: hero photo, the "When Where Matters"
+   * pitch, the three headline benefits, and a call-to-action card with the QR
+   * code, sign-up URL and code. Copy and imagery come from https://tak.nz/ and
+   * https://tak.nz/about/; the image files live in `server/assets/signup-pdf/`.
+   *
    * @param {string} code - 8-char code (no dash)
    * @param {string} teamName - Name of the team for display
    * @returns {Promise<Buffer>} PDF document buffer
@@ -239,50 +244,137 @@ class SignupCodeService {
   async generatePdf(code, teamName) {
     const url = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/request-access?code=${code}`;
     const qrBuffer = await this.generateQrPng(code);
+    const assets = path.join(__dirname, '../assets/signup-pdf');
+
+    // Brand colours, taken from the tak.nz stylesheet.
+    const NAVY = '#003366';
+    const BLUE = '#0066cc';
+    const INK = '#2f2f41';
+    const MUTED = '#5c5a5a';
+    const TINT = '#e8f0f8';
+    const PANEL = '#f8f9fa';
+    const RULE = '#dee2e6';
 
     return new Promise((resolve, reject) => {
-      const doc = new PDFDocument({ size: 'A4', margin: 50 });
+      const doc = new PDFDocument({
+        size: 'A4',
+        margin: 0,
+        info: { Title: `Join ${teamName} on TAK.NZ`, Author: 'TAK.NZ' }
+      });
       const chunks = [];
       doc.on('data', chunk => chunks.push(chunk));
       doc.on('end', () => resolve(Buffer.concat(chunks)));
       doc.on('error', reject);
 
-      // Logo
-      const logoPath = path.join(__dirname, '../assets/tak-nz-brand-wide.png');
-      doc.image(logoPath, (doc.page.width - 300) / 2, doc.y, { width: 300 });
-      doc.y += 90;
-      doc.moveDown(0.5);
+      const W = doc.page.width;
+      const H = doc.page.height;
+      const M = 48; // side margin for body content
 
-      // Horizontal rule
-      doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke('#cccccc');
-      doc.moveDown(1);
+      // --- Header band -----------------------------------------------------
+      const HEADER_H = 76;
+      doc.rect(0, 0, W, HEADER_H).fill(NAVY);
+      doc.image(path.join(assets, 'logo-white.png'), M, 19, { height: 38 });
 
-      // Team name
-      doc.fontSize(16).font('Helvetica-Bold').text(`Join: ${teamName}`, { align: 'center' });
-      doc.moveDown(2);
+      // --- Hero photo (cropped to a banner), fading into the navy block ------
+      const HERO_H = 240;
+      const heroW = W;
+      doc.save();
+      doc.rect(0, HEADER_H, W, HERO_H).clip();
+      doc.image(path.join(assets, 'about.jpg'), 0, HEADER_H - 45, { width: heroW });
+      doc.restore();
+      const fadeTop = HEADER_H + HERO_H - 70;
+      const fade = doc.linearGradient(0, fadeTop, 0, HEADER_H + HERO_H);
+      fade.stop(0, NAVY, 0).stop(1, NAVY, 1);
+      doc.rect(0, fadeTop, W, 70).fill(fade);
 
-      // QR Code
-      doc.image(qrBuffer, (doc.page.width - 200) / 2, doc.y, { width: 200 });
-      doc.moveDown(1);
-      doc.y += 210;
+      // --- Headline block ----------------------------------------------------
+      const HEAD_TOP = HEADER_H + HERO_H;
+      const HEAD_H = 92;
+      doc.rect(0, HEAD_TOP, W, HEAD_H).fill(NAVY);
+      doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(34)
+        .text('When Where Matters.', M, HEAD_TOP - 6, { width: W - 2 * M, lineBreak: false });
+      doc.fillColor('#cfe0f2').font('Helvetica').fontSize(14)
+        .text('See your team, share information, save lives.', M, HEAD_TOP + 40, { width: W - 2 * M, lineBreak: false });
+      doc.rect(M, HEAD_TOP + 68, 56, 3).fill(BLUE);
 
-      // Instructions
-      doc.fontSize(11).font('Helvetica').text('Scan the QR code above with your phone camera', { align: 'center' });
-      doc.moveDown(0.3);
-      doc.fontSize(10).text('or visit this URL in your browser:', { align: 'center' });
-      doc.moveDown(0.5);
-      doc.fontSize(11).font('Helvetica-Bold').text(url, { align: 'center', link: url });
-      doc.moveDown(2);
+      // --- Intro -------------------------------------------------------------
+      let y = HEAD_TOP + HEAD_H + 22;
+      doc.fillColor(INK).font('Helvetica').fontSize(11).text(
+        'TAK.NZ (Team Awareness Kit) transforms emergency response in New Zealand by delivering ' +
+        'real-time location data and a unified operational view when seconds count.',
+        M, y, { width: W - 2 * M, lineGap: 3 }
+      );
+      y = doc.y + 20;
 
-      // Sign-up code
-      doc.fontSize(10).font('Helvetica').text('If prompted, enter this sign-up code:', { align: 'center' });
-      doc.moveDown(0.3);
-      doc.fontSize(14).font('Courier-Bold').text(SignupCodeService.formatCode(code), { align: 'center' });
-      doc.moveDown(2);
+      // --- Three benefits ----------------------------------------------------
+      const features = [
+        {
+          icon: 'icon-situational-awareness.png',
+          title: 'Situational Awareness',
+          text: 'Improves the operational efficiency of emergency responders by sharing incident information.'
+        },
+        {
+          icon: 'icon-safety.png',
+          title: 'Safety',
+          text: 'Empowers emergency responders to make well-informed decisions based on real-time data.'
+        },
+        {
+          icon: 'icon-team-coordination.png',
+          title: 'Team Coordination',
+          text: 'Emergency responders can locate themselves, their team members and other enrolled personnel in real-time.'
+        }
+      ];
+      const GAP = 18;
+      const colW = (W - 2 * M - 2 * GAP) / 3;
+      const featTop = y;
+      features.forEach((f, i) => {
+        const x = M + i * (colW + GAP);
+        doc.circle(x + 20, featTop + 20, 20).fill(TINT);
+        doc.image(path.join(assets, f.icon), x + 8, featTop + 8, { width: 24, height: 24 });
+        doc.fillColor(NAVY).font('Helvetica-Bold').fontSize(11.5)
+          .text(f.title, x, featTop + 50, { width: colW, lineBreak: false });
+        doc.fillColor(MUTED).font('Helvetica').fontSize(9.5)
+          .text(f.text, x, featTop + 68, { width: colW, lineGap: 2 });
+      });
 
-      // Footer
-      doc.fontSize(9).font('Helvetica').fillColor('#666666')
-        .text('This code does not expire. Keep this poster in a visible location for team members to scan.', { align: 'center' });
+      // --- Call-to-action card ---------------------------------------------
+      const CARD_H = 168;
+      const cardTop = H - 54 - CARD_H;
+      doc.roundedRect(M, cardTop, W - 2 * M, CARD_H, 10).fill(PANEL);
+      doc.roundedRect(M, cardTop, W - 2 * M, CARD_H, 10).lineWidth(1).stroke(RULE);
+      doc.rect(M, cardTop + 14, 4, CARD_H - 28).fill(BLUE);
+
+      const QR = 124;
+      const qrX = W - M - 22 - QR;
+      const qrY = cardTop + (CARD_H - QR) / 2;
+      const textX = M + 26;
+      const textW = qrX - textX - 22;
+
+      doc.fillColor(BLUE).font('Helvetica-Bold').fontSize(9)
+        .text('YOUR TEAM IS ON TAK.NZ', textX, cardTop + 20, { width: textW, characterSpacing: 1, lineBreak: false });
+      doc.fillColor(NAVY).font('Helvetica-Bold').fontSize(20)
+        .text(`Join ${teamName}`, textX, cardTop + 36, { width: textW, height: 50, ellipsis: true });
+      const afterTitle = Math.max(doc.y, cardTop + 62) + 4;
+      doc.fillColor(INK).font('Helvetica').fontSize(10)
+        .text('Scan the QR code with your phone camera, or visit:', textX, afterTitle, { width: textW });
+      doc.fillColor(BLUE).font('Helvetica-Bold').fontSize(9.5)
+        .text(url, textX, doc.y + 2, { width: textW, link: url, underline: true });
+      const codeY = doc.y + 10;
+      doc.fillColor(MUTED).font('Helvetica').fontSize(9)
+        .text('If prompted, enter this sign-up code:', textX, codeY, { width: textW, lineBreak: false });
+      doc.fillColor(NAVY).font('Courier-Bold').fontSize(18)
+        .text(SignupCodeService.formatCode(code), textX, codeY + 13, { width: textW, characterSpacing: 2, lineBreak: false });
+
+      doc.roundedRect(qrX - 8, qrY - 8, QR + 16, QR + 16, 8).fill('#ffffff');
+      doc.image(qrBuffer, qrX, qrY, { width: QR });
+
+      // --- Footer --------------------------------------------------------------
+      doc.fillColor(MUTED).font('Helvetica').fontSize(8.5).text(
+        'TAK.NZ is available to all New Zealand public safety organisations.  This sign-up code does not expire.',
+        M, H - 36, { width: W - 2 * M, align: 'center', lineBreak: false }
+      );
+      doc.fillColor(BLUE).font('Helvetica-Bold').fontSize(8.5)
+        .text('tak.nz', M, H - 22, { width: W - 2 * M, align: 'center', link: 'https://tak.nz/', lineBreak: false });
 
       doc.end();
     });
