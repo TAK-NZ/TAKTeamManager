@@ -86,13 +86,45 @@ class SignupCodeService {
   }
 
   /**
+   * Base URL of the SPA, as used in every link handed to a person.
+   * @returns {string}
+   */
+  static getFrontendBaseUrl() {
+    return process.env.FRONTEND_URL || 'http://localhost:5173';
+  }
+
+  /**
+   * The canonical sign-up URL: the request-access page with the code
+   * pre-filled. Already in circulation (printed QR codes, shared links), so it
+   * must keep working.
+   *
+   * @param {string} code - 8-char code (no dash)
+   * @returns {string}
+   */
+  static buildSignupUrl(code) {
+    return `${SignupCodeService.getFrontendBaseUrl()}/request-access?code=${code}`;
+  }
+
+  /**
+   * The short, easy-to-type form of the sign-up URL (`/join/<code>`). The
+   * server redirects it to the canonical URL; see `server/routes/join.js`.
+   * Used for anything a person reads, types or scans (PDF, QR code).
+   *
+   * @param {string} code - 8-char code (no dash)
+   * @returns {string}
+   */
+  static buildShortSignupUrl(code) {
+    return `${SignupCodeService.getFrontendBaseUrl()}/join/${code}`;
+  }
+
+  /**
    * Generate a new 8-char code for a team. Replaces any existing code.
    * Verifies the team has can_join = true before generating.
    * Retries on unique constraint violation on the code column (max 3 attempts).
    *
    * @param {number} teamId
    * @param {number} createdBy - user ID of the admin
-   * @returns {Promise<{code: string, formatted: string, url: string}>}
+   * @returns {Promise<{code: string, formatted: string, url: string, shortUrl: string}>}
    */
   async generateCode(teamId, createdBy) {
     // Verify the team has can_join = true
@@ -134,7 +166,8 @@ class SignupCodeService {
         return {
           code,
           formatted: SignupCodeService.formatCode(code),
-          url: `${process.env.FRONTEND_URL}/request-access?code=${code}`
+          url: SignupCodeService.buildSignupUrl(code),
+          shortUrl: SignupCodeService.buildShortSignupUrl(code)
         };
       } catch (err) {
         await client.query('ROLLBACK');
@@ -174,7 +207,7 @@ class SignupCodeService {
    * Get the active code for a team, or null.
    *
    * @param {number} teamId
-   * @returns {Promise<{code: string, formatted: string, url: string} | null>}
+   * @returns {Promise<{code: string, formatted: string, url: string, shortUrl: string} | null>}
    */
   async getCode(teamId) {
     const result = await pool.query(
@@ -190,7 +223,8 @@ class SignupCodeService {
     return {
       code,
       formatted: SignupCodeService.formatCode(code),
-      url: `${process.env.FRONTEND_URL}/request-access?code=${code}`
+      url: SignupCodeService.buildSignupUrl(code),
+      shortUrl: SignupCodeService.buildShortSignupUrl(code)
     };
   }
 
@@ -221,12 +255,14 @@ class SignupCodeService {
   }
 
   /**
-   * Generate a QR code PNG buffer encoding the full sign-up URL.
+   * Generate a QR code PNG buffer encoding the short sign-up URL (`/join/<code>`),
+   * which redirects to the canonical request-access URL. The shorter URL gives a
+   * less dense, more reliably scannable QR code.
    * @param {string} code - 8-char code (no dash)
    * @returns {Promise<Buffer>} PNG image buffer
    */
   async generateQrPng(code) {
-    const url = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/request-access?code=${code}`;
+    const url = SignupCodeService.buildShortSignupUrl(code);
     return QRCode.toBuffer(url, { type: 'png', width: 300, margin: 2 });
   }
 
@@ -242,7 +278,7 @@ class SignupCodeService {
    * @returns {Promise<Buffer>} PDF document buffer
    */
   async generatePdf(code, teamName) {
-    const url = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/request-access?code=${code}`;
+    const url = SignupCodeService.buildShortSignupUrl(code);
     const qrBuffer = await this.generateQrPng(code);
     const assets = path.join(__dirname, '../assets/signup-pdf');
 

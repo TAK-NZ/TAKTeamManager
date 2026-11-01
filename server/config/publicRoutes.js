@@ -41,6 +41,8 @@ const publicRoutes = [
   { method: 'GET', path: '/health' },
   { method: 'GET', path: '/health/ready' },
   { method: 'GET', path: '/health/live' },
+  // --- server/routes/join.js (mounted at /join) ---
+  { method: 'GET', path: '/join/:code' },
 
   // --- server/routes/teams.js ---
   { method: 'GET', path: '/api/teams/joinable' },

@@ -70,8 +70,9 @@ export default function SignupCodeManager({ teamId, teamName, isAdmin }) {
   }
 
   const handleCopyUrl = () => {
-    // Use the URL from the server response, or construct one from the raw code
-    const copyUrl = code?.url || `${window.location.origin}/request-access?code=${(code?.code || '').replace(/-/g, '')}`
+    // Prefer the short /join/ URL from the server response (easier to type and
+    // read out), then the canonical URL, then construct one from the raw code
+    const copyUrl = code?.shortUrl || code?.url || `${window.location.origin}/request-access?code=${(code?.code || '').replace(/-/g, '')}`
     if (!copyUrl) return
     // navigator.clipboard requires HTTPS; fall back to execCommand for HTTP
     if (navigator.clipboard && window.isSecureContext) {
