@@ -124,6 +124,7 @@ function buildTestApp() {
   app.use('/api/offline-maps', require('../routes/offlineMaps'));
 
   app.use('/health', require('../routes/health'));
+  app.use('/join', require('../routes/join'));
 
   return app;
 }

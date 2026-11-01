@@ -199,6 +199,40 @@ describe('SignupCodeService database methods', () => {
     });
   });
 
+  describe('sign-up URL builders', () => {
+    it('buildSignupUrl returns the canonical request-access URL', () => {
+      expect(SignupCodeService.buildSignupUrl('ABCD5678'))
+        .toBe('https://app.example.com/request-access?code=ABCD5678');
+    });
+
+    it('buildShortSignupUrl returns the /join/ URL', () => {
+      expect(SignupCodeService.buildShortSignupUrl('ABCD5678'))
+        .toBe('https://app.example.com/join/ABCD5678');
+    });
+
+    it('generateQrPng encodes the short /join/ URL', async () => {
+      const QRCode = require('qrcode');
+      const spy = jest.spyOn(QRCode, 'toBuffer').mockResolvedValueOnce(Buffer.from('png'));
+      try {
+        await service.generateQrPng('ABCD5678');
+        expect(spy).toHaveBeenCalledWith('https://app.example.com/join/ABCD5678', expect.any(Object));
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('falls back to the local dev URL when FRONTEND_URL is unset', () => {
+      const original = process.env.FRONTEND_URL;
+      delete process.env.FRONTEND_URL;
+      try {
+        expect(SignupCodeService.buildShortSignupUrl('ABCD5678'))
+          .toBe('http://localhost:5173/join/ABCD5678');
+      } finally {
+        process.env.FRONTEND_URL = original;
+      }
+    });
+  });
+
   describe('getCode', () => {
     it('returns formatted object when code exists', async () => {
       pool.query.mockResolvedValueOnce({ rows: [{ code: 'ABCD5678' }] });
@@ -208,7 +242,8 @@ describe('SignupCodeService database methods', () => {
       expect(result).toEqual({
         code: 'ABCD5678',
         formatted: 'ABCD-5678',
-        url: 'https://app.example.com/request-access?code=ABCD5678'
+        url: 'https://app.example.com/request-access?code=ABCD5678',
+        shortUrl: 'https://app.example.com/join/ABCD5678'
       });
     });
 

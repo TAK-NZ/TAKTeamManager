@@ -212,6 +212,10 @@ app.set('trust proxy', getTrustProxyHops());
   // 'healthy'} on success or 503 {status: 'unhealthy', reason} otherwise.
   app.use('/health', require('./routes/health'));
 
+  // Short sign-up link: GET /join/:code redirects to /request-access?code=...
+  // Public (listed in publicRoutes.js); the canonical URL is unchanged.
+  app.use('/join', require('./routes/join'));
+
   // Serve React app for all non-API routes
   app.get('*', (req, res) => {
     if (!req.path.startsWith('/api') && !req.path.startsWith('/health')) {
