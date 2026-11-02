@@ -23,29 +23,6 @@ const { enqueueRegionTierReconciles } = require('../services/OwnedGroupReconcile
 
 const router = express.Router();
 
-// Get joinable teams (public endpoint)
-//
-// Performance-hardening: previously unbounded -- an unauthenticated
-// endpoint returning every public, joinable team with no LIMIT at all is
-// a soft scaling/DoS surface as the joinable-team count grows. Applies
-// the same shared `paginationParams` middleware every other list endpoint
-// uses (default pageSize 50, max 200), and reports `total`/`page`/
-// `pageSize` alongside the page of results so a client can page through
-// the full set.
-router.get('/joinable', paginationParams, async (req, res) => {
-  try {
-    const { page, pageSize, offset } = req.pagination;
-    const [teams, total] = await Promise.all([
-      Team.getJoinableTeams(pageSize, offset),
-      Team.getJoinableTeamsCount()
-    ]);
-    res.json({ teams, pagination: { page, pageSize, total } });
-  } catch (error) {
-    getLogger().error({ err: error }, 'Failed to fetch joinable teams');
-    res.status(500).json({ error: 'Failed to fetch joinable teams' });
-  }
-});
-
 // Get user's teams
 //
 // Requirement 11.4: the admin "all teams" branch (`Team.getAllTeams()`) is
@@ -207,7 +184,11 @@ router.post('/', authenticateToken, authorize, [
   // by `Team.create` itself and mapped to its specific 400 message in
   // this route's catch block below, mirroring pseudonymousUsernames'
   // own pattern exactly.
-  body('callsignTeamHyphenated').optional().isBoolean()
+  body('callsignTeamHyphenated').optional().isBoolean(),
+  // Sign-up code covers Sub_Teams: request-shape validation only. The
+  // Organisation-only rule is enforced by Team.create/Team.update (typed
+  // ChannelTierAccessSubTeamError, mapped to 400 in the catch block below).
+  body('signupCodeCoversSubTeams').optional().isBoolean()
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -215,7 +196,7 @@ router.post('/', authenticateToken, authorize, [
   }
 
   try {
-    let { name, description, callsignPrefix, color, visibility, canJoin, parentTeamId, callsignNameFormat, callsignLevelSelection, pseudonymousUsernames, countryCode, callsignTeamHyphenated } = req.body;
+    let { name, description, callsignPrefix, color, visibility, canJoin, parentTeamId, callsignNameFormat, callsignLevelSelection, pseudonymousUsernames, countryCode, callsignTeamHyphenated, signupCodeCoversSubTeams } = req.body;
 
     // Authorization (root team requires Global_Manager, sub-team requires
     // Global_Manager or parent-team admin) is enforced centrally by
@@ -285,7 +266,9 @@ router.post('/', authenticateToken, authorize, [
       country_code: !parentTeamId ? countryCode : null,
       // Callsign Team-segment separator toggle: Organisation-only,
       // mirroring country_code's own `!parentTeamId ? ... : null` wiring.
-      callsign_team_hyphenated: !parentTeamId ? callsignTeamHyphenated : null
+      callsign_team_hyphenated: !parentTeamId ? callsignTeamHyphenated : null,
+      // Sign-up code covers Sub_Teams: Organisation-only, same wiring.
+      signup_code_covers_sub_teams: !parentTeamId ? signupCodeCoversSubTeams : null
     });
 
     // Skip adding creator as admin for now since user ID is string
@@ -402,7 +385,11 @@ router.put('/:teamId', authenticateToken, authorize, [
   // this route's catch block below. Unlike pseudonymousUsernames, a
   // changed value on an existing Organisation is simply APPLIED, no
   // immutability guard.
-  body('callsignTeamHyphenated').optional().isBoolean()
+  body('callsignTeamHyphenated').optional().isBoolean(),
+  // Sign-up code covers Sub_Teams: request-shape validation only. The
+  // Organisation-only rule is enforced by Team.create/Team.update (typed
+  // ChannelTierAccessSubTeamError, mapped to 400 in the catch block below).
+  body('signupCodeCoversSubTeams').optional().isBoolean()
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -419,7 +406,7 @@ router.put('/:teamId', authenticateToken, authorize, [
       return res.status(404).json({ error: 'Team not found' });
     }
 
-    const { name, description, callsignPrefix, color, visibility, canJoin, parentTeamId, callsignNameFormat, callsignLevelSelection, pseudonymousUsernames, countryCode, callsignTeamHyphenated } = req.body;
+    const { name, description, callsignPrefix, color, visibility, canJoin, parentTeamId, callsignNameFormat, callsignLevelSelection, pseudonymousUsernames, countryCode, callsignTeamHyphenated, signupCodeCoversSubTeams } = req.body;
 
     // takserver-enrollment Requirement 2.2/2.4: an Organisation's
     // callsign_prefix must remain non-empty across an edit -- checked
@@ -476,7 +463,10 @@ router.put('/:teamId', authenticateToken, authorize, [
       // Team.update rejects it on a Sub_Team, but freely APPLIES a
       // changed value on an existing Organisation -- no immutability
       // guard, unlike callsign_prefix/country_code above.
-      callsign_team_hyphenated: callsignTeamHyphenated
+      callsign_team_hyphenated: callsignTeamHyphenated,
+      // Sign-up code covers Sub_Teams: Team.update rejects it on a Sub_Team
+      // and freely applies a changed value on an Organisation.
+      signup_code_covers_sub_teams: signupCodeCoversSubTeams
     });
 
     // When canJoin is explicitly set to false, revoke any existing

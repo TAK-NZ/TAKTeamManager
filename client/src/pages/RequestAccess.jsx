@@ -49,6 +49,18 @@ export function filterTeamsBySearch(teams, searchTerm) {
   })
 }
 
+// The text shown for a team in the selector. A team nested below a direct
+// child of its Organisation also names the teams it sits under, so a deep
+// hierarchy stays readable ("LSAR - Auckland (in Specialist Teams > Cave)").
+// `path` is the server's chain of team names between the Organisation and the
+// team, joined with " > " (absent for the Organisation itself and for lists
+// that don't carry it). Exported for direct unit testing.
+export function teamOptionLabel(team) {
+  const base = String(team?.display_name || team?.name || '')
+  const path = typeof team?.path === 'string' ? team.path : ''
+  const parents = path.split(' > ').slice(0, -1).filter(Boolean)
+  return parents.length > 0 ? `${base} (in ${parents.join(' > ')})` : base
+}
 // Steps in the sign-up state machine
 const STEPS = {
   EMAIL: 'email',
@@ -83,7 +95,10 @@ export default function RequestAccess() {
   const [lastName, setLastName] = useState('')
   const [selectedTeamId, setSelectedTeamId] = useState('')
   const [teamSearch, setTeamSearch] = useState('') // free-text filter over the team list
-  const [codeTeamId, setCodeTeamId] = useState(null) // the team ID the sign-up code maps to
+  const [codeTeamId, setCodeTeamId] = useState(null) // the team ID the sign-up code maps to (selection is locked to it)
+  // An Organisation code that covers its sub-teams: the selector stays open,
+  // limited to that Organisation's teams, and the Organisation is preselected.
+  const [orgCodeTeamId, setOrgCodeTeamId] = useState(null)
   // If the current search filters out the team the user had selected,
   // clear the selection so the dropdown never shows a blank-but-selected
   // value. Skipped while a sign-up code has locked the team (that branch
@@ -119,8 +134,13 @@ export default function RequestAccess() {
         setVerifiedEmail(tokenEmail || '')
         if (availableTeams && availableTeams.length > 0) {
           setTeams(availableTeams)
-          // If a sign-up code was used, lock the team selection to that team
-          if (res.data.codeTeamId) {
+          // A Team code locks the selection to that team. An Organisation code
+          // that covers its sub-teams keeps the selector open (the server has
+          // already limited the list to that Organisation) and preselects it.
+          if (res.data.codeTeamId && res.data.codeScope === 'organisation') {
+            setOrgCodeTeamId(res.data.codeTeamId)
+            setSelectedTeamId(String(res.data.codeTeamId))
+          } else if (res.data.codeTeamId) {
             setCodeTeamId(res.data.codeTeamId)
             setSelectedTeamId(String(res.data.codeTeamId))
           } else if (availableTeams.length === 1) {
@@ -436,6 +456,13 @@ export default function RequestAccess() {
                       const filteredTeams = filterTeamsBySearch(teams, teamSearch)
                       return (
                         <>
+                          {orgCodeTeamId && (
+                            <p className="text-xs mb-2">
+                              <span className="bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200 px-2 py-0.5 rounded-full">
+                                via sign-up code
+                              </span>
+                            </p>
+                          )}
                           <select
                             className="input w-full"
                             value={selectedTeamId}
@@ -445,7 +472,7 @@ export default function RequestAccess() {
                             <option value="">Select a team...</option>
                             {filteredTeams.map((team) => (
                               <option key={team.id} value={team.id}>
-                                {team.display_name || team.name}
+                                {teamOptionLabel(team)}
                               </option>
                             ))}
                           </select>
@@ -458,15 +485,19 @@ export default function RequestAccess() {
                       )
                     })()}
                     <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                      Select the team or organisation you would like to request access to.
+                      {orgCodeTeamId
+                        ? 'Your sign-up code lets you choose any of these teams. Select the one you would like to request access to.'
+                        : 'Select the team or organisation you would like to request access to.'}
                     </p>
-                    <button
-                      type="button"
-                      onClick={() => setStep(STEPS.NO_TEAMS)}
-                      className="text-sm text-primary-600 hover:text-primary-500 underline mt-1"
-                    >
-                      Can't find your team? Request a new team here.
-                    </button>
+                    {!orgCodeTeamId && (
+                      <button
+                        type="button"
+                        onClick={() => setStep(STEPS.NO_TEAMS)}
+                        className="text-sm text-primary-600 hover:text-primary-500 underline mt-1"
+                      >
+                        Can't find your team? Request a new team here.
+                      </button>
+                    )}
                   </>
                 )}
               </div>

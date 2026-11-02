@@ -233,7 +233,6 @@ export const teamsAPI = {
     }
     return teams
   },
-  getJoinable: () => api.get('/teams/joinable'),
   create: (data) => api.post('/teams', data),
   update: (id, data) => api.put(`/teams/${id}`, data),
   getById: (id) => api.get(`/teams/${id}`),

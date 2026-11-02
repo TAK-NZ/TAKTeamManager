@@ -1027,3 +1027,45 @@ describe('TeamFormDialog — modal size/position stable across tabs (bugfix)', (
     expect(submitAttrIndex).toBeGreaterThan(footerDivIndex)
   })
 })
+
+// Sign-up code covers Sub_Teams (signupCodeCoversSubTeams): Organisation-only,
+// shown only while "Allow join requests" is on. Source-contract checks plus the
+// pure payload builder, matching this file's established convention.
+describe('TeamFormDialog — sign-up code covers sub-teams (signupCodeCoversSubTeams)', () => {
+  it('buildTeamSubmitPayload omits it for a Sub_Team and keeps it for an Organisation', () => {
+    const subTeam = buildTeamSubmitPayload({ parentTeamId: 42, signupCodeCoversSubTeams: false, name: 'Sub' })
+    expect(subTeam).not.toHaveProperty('signupCodeCoversSubTeams')
+
+    const org = { parentTeamId: null, signupCodeCoversSubTeams: true, name: 'Org' }
+    expect(buildTeamSubmitPayload(org)).toEqual(org)
+  })
+
+  it('EMPTY_FORM_DATA defaults it to false (existing behaviour unchanged)', () => {
+    const start = dialogSource.indexOf('const EMPTY_FORM_DATA = {')
+    expect(start).toBeGreaterThan(-1)
+    const block = dialogSource.slice(start, dialogSource.indexOf('\n}', start))
+    expect(block).toContain('signupCodeCoversSubTeams: false')
+  })
+
+  it('seeds from team.signup_code_covers_sub_teams on edit, and forces false for a Sub_Team', () => {
+    expect(dialogSource).toContain('signupCodeCoversSubTeams: team.parent_team_id ? false : Boolean(team.signup_code_covers_sub_teams)')
+  })
+
+  it('renders the checkbox only for an Organisation that allows join requests', () => {
+    const controlIndex = dialogSource.indexOf('id="signupCodeCoversSubTeams"')
+    expect(controlIndex).toBeGreaterThan(-1)
+    const gate = dialogSource.lastIndexOf('{!formData.parentTeamId && formData.canJoin && (', controlIndex)
+    expect(gate).toBeGreaterThan(-1)
+    // No other JSX gate opens between the gate and the control.
+    expect(dialogSource.slice(gate + 10, controlIndex)).not.toMatch(/\{!?formData\.[A-Za-z]+ && \(/)
+  })
+
+  it('is a whole-row label with an unlocked padlock and an explanatory tooltip', () => {
+    const controlIndex = dialogSource.indexOf('id="signupCodeCoversSubTeams"')
+    const block = dialogSource.slice(controlIndex - 400, controlIndex + 1600)
+    expect(block).toContain('htmlFor="signupCodeCoversSubTeams"')
+    expect(block).toContain('locked={false}')
+    expect(block).toContain('<InfoTooltip')
+    expect(block).toMatch(/no sign-up code, its sub-teams are not offered|has no sign-up code, its sub-teams are not offered/)
+  })
+})

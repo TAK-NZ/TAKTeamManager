@@ -13,9 +13,9 @@ Some screens and buttons described here only exist if your deployment has certai
 
 If you don't have an account yet, go to the Request Access page (`/request-access`).
 
-1. **Enter your email address.** If your team gave you a sign-up code (an 8-character code shaped like `XXXX-XXXX`), enter that too — it pre-selects your team so you don't have to find it in a list. You may also need to complete a quick, invisible spam check (reCAPTCHA).
+1. **Enter your email address.** If your team gave you a sign-up code (an 8-character code shaped like `XXXX-XXXX`), enter that too — it pre-selects your team so you don't have to find it in a list. If the code belongs to an organisation that has opted in, you'll instead be shown a list of that organisation's teams to choose from. You may also need to complete a quick, invisible spam check (reCAPTCHA).
 2. **Check your email.** You'll receive a verification link. This step just confirms the email address is really yours — you haven't been approved for a team yet.
-3. **Click the link and fill in your details.** You'll land back on the Request Access page with your name fields and a team dropdown (already locked in if you used a sign-up code). Add a short reason for requesting access, and accept the terms of service if shown.
+3. **Click the link and fill in your details.** You'll land back on the Request Access page with your name fields and a team dropdown (already locked in if you used a team's sign-up code, or limited to your organisation's teams if you used an organisation code that covers its sub-teams). Add a short reason for requesting access, and accept the terms of service if shown.
 4. **Wait for approval.** You'll see a "Request Submitted" confirmation. A team admin now needs to review and approve your request — there's no live status page, so just watch your inbox.
 
 If your email's domain doesn't match any team, you'll be offered an "Organisation Interest" form instead — this tells the organisation's administrators that someone from your organisation wants access, even though no team exists for you yet.

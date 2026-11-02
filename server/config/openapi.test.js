@@ -16,8 +16,8 @@ const publicRoutes = require('./publicRoutes');
 
 describe('translatePath', () => {
   it('leaves a path with no parameters unchanged and reports no param names', () => {
-    expect(translatePath('/api/teams/joinable')).toEqual({
-      openApiPath: '/api/teams/joinable',
+    expect(translatePath('/api/config/public')).toEqual({
+      openApiPath: '/api/config/public',
       paramNames: []
     });
   });
@@ -156,20 +156,20 @@ describe('buildOpenApiDocument', () => {
 
   describe('a public (Public_Route_Registry) route', () => {
     it('carries no security requirement and no x-permission', () => {
-      const publicEntry = publicRoutes.find((r) => r.path === '/api/teams/joinable');
+      const publicEntry = publicRoutes.find((r) => r.path === '/api/config/public');
       expect(publicEntry).toBeDefined();
-      const operation = doc.paths['/api/teams/joinable'][publicEntry.method.toLowerCase()];
+      const operation = doc.paths['/api/config/public'][publicEntry.method.toLowerCase()];
       expect(operation.security).toBeUndefined();
       expect(operation['x-permission']).toBeUndefined();
     });
 
     it('responds with a bare 200, no 403 or 404', () => {
-      const operation = doc.paths['/api/teams/joinable'].get;
+      const operation = doc.paths['/api/config/public'].get;
       expect(Object.keys(operation.responses)).toEqual(['200']);
     });
 
     it('declares no parameters for a public route with no :param segments', () => {
-      const operation = doc.paths['/api/teams/joinable'].get;
+      const operation = doc.paths['/api/config/public'].get;
       expect(operation.parameters).toBeUndefined();
     });
   });

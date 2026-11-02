@@ -48,8 +48,6 @@ jest.mock('../models/Team', () => {
   return {
     getAllTeams: jest.fn(),
     getTeamCount: jest.fn(),
-    getJoinableTeams: jest.fn(),
-    getJoinableTeamsCount: jest.fn(),
     getUserTeams: jest.fn(),
     getSubTeamsForCallsignLevel: jest.fn(),
     getSubTeams: jest.fn(),
@@ -249,83 +247,6 @@ describe('GET /api/teams/my-teams pagination (Requirement 11.4)', () => {
       expect(res.status).toBe(400);
       expect(Team.getUserTeams).not.toHaveBeenCalled();
     });
-  });
-});
-
-/**
- * Performance-hardening: `GET /api/teams/joinable` (public, no auth) was
- * previously fully unbounded -- no pagination applied at all. It now uses
- * the same shared `paginationParams` middleware as `GET /my-teams`'s
- * admin branch above, mirroring that same request/response contract.
- */
-describe('GET /api/teams/joinable pagination (performance-hardening)', () => {
-  let app;
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-    app = buildApp();
-  });
-
-  it('returns 400 for an out-of-range pageSize before calling Team.getJoinableTeams', async () => {
-    const res = await request(app).get('/api/teams/joinable').query({ pageSize: 500 });
-
-    expect(res.status).toBe(400);
-    expect(Team.getJoinableTeams).not.toHaveBeenCalled();
-    expect(Team.getJoinableTeamsCount).not.toHaveBeenCalled();
-  });
-
-  it('returns 400 for a non-numeric page before calling Team.getJoinableTeams', async () => {
-    const res = await request(app).get('/api/teams/joinable').query({ page: 'abc' });
-
-    expect(res.status).toBe(400);
-    expect(Team.getJoinableTeams).not.toHaveBeenCalled();
-  });
-
-  it('passes the resolved pageSize/offset through to Team.getJoinableTeams and echoes pagination metadata', async () => {
-    Team.getJoinableTeams.mockResolvedValue([{ id: 1, name: 'Team A', display_name: 'Team A' }]);
-    Team.getJoinableTeamsCount.mockResolvedValue(42);
-
-    const res = await request(app).get('/api/teams/joinable').query({ page: 2, pageSize: 5 });
-
-    expect(res.status).toBe(200);
-    // page=2, pageSize=5 -> offset = (2-1)*5 = 5
-    expect(Team.getJoinableTeams).toHaveBeenCalledWith(5, 5);
-    expect(res.body.pagination).toEqual({ page: 2, pageSize: 5, total: 42 });
-    expect(res.body.teams).toEqual([{ id: 1, name: 'Team A', display_name: 'Team A' }]);
-  });
-
-  it('defaults to page 1 / pageSize 50 when no query params are supplied', async () => {
-    Team.getJoinableTeams.mockResolvedValue([]);
-    Team.getJoinableTeamsCount.mockResolvedValue(0);
-
-    const res = await request(app).get('/api/teams/joinable');
-
-    expect(res.status).toBe(200);
-    expect(Team.getJoinableTeams).toHaveBeenCalledWith(50, 0);
-    expect(res.body.pagination).toEqual({ page: 1, pageSize: 50, total: 0 });
-  });
-
-  it('is reachable without authentication (no authenticateToken/authorize gate)', async () => {
-    Team.getJoinableTeams.mockResolvedValue([]);
-    Team.getJoinableTeamsCount.mockResolvedValue(0);
-
-    // buildApp() mounts the real router with no auth middleware bypass
-    // needed -- this route runs unauthenticated in production too (see
-    // publicRoutes.js), so simply not sending any credential is the
-    // correct test shape here.
-    const res = await request(app).get('/api/teams/joinable');
-
-    expect(res.status).toBe(200);
-  });
-
-  it('returns 500 without leaking the underlying error when Team.getJoinableTeams rejects', async () => {
-    Team.getJoinableTeams.mockRejectedValue(new Error('db unavailable'));
-    Team.getJoinableTeamsCount.mockResolvedValue(0);
-
-    const res = await request(app).get('/api/teams/joinable');
-
-    expect(res.status).toBe(500);
-    expect(res.body.error).toBe('Failed to fetch joinable teams');
   });
 });
 
@@ -1324,6 +1245,86 @@ describe('callsignTeamHyphenated validation (Callsign Team-segment separator tog
   });
 });
 
+/**
+ * Unit tests for `signupCodeCoversSubTeams` handling on `POST /api/teams` and
+ * `PUT /api/teams/:teamId`. Organisation-only like `callsignTeamHyphenated`:
+ * the model rejects it on a Sub_Team (typed error mapped to 400 here), and a
+ * changed value on an existing Organisation is simply applied.
+ */
+describe('signupCodeCoversSubTeams (sign-up code covers Sub_Teams)', () => {
+  let app;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockIsAdmin = true;
+    app = buildApp();
+  });
+
+  describe('POST /api/teams', () => {
+    it('rejects a non-boolean value with 400 before calling Team.create', async () => {
+      const res = await request(app)
+        .post('/api/teams')
+        .send({ name: 'FENZ', callsignPrefix: 'FENZ', signupCodeCoversSubTeams: 'nope' });
+
+      expect(res.status).toBe(400);
+      expect(Team.create).not.toHaveBeenCalled();
+    });
+
+    it('passes a supplied value through to Team.create for an Organisation', async () => {
+      Team.create.mockResolvedValue({ id: 1, name: 'FENZ', signup_code_covers_sub_teams: true });
+
+      const res = await request(app)
+        .post('/api/teams')
+        .send({ name: 'FENZ', callsignPrefix: 'FENZ', signupCodeCoversSubTeams: true });
+
+      expect(res.status).toBe(201);
+      expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ signup_code_covers_sub_teams: true }));
+    });
+
+    it('nulls the value when a Sub_Team creation request supplies one', async () => {
+      Team.findById.mockResolvedValue({ id: 42, color: 'Blue', parent_team_id: null });
+      Team.create.mockResolvedValue({ id: 2, name: 'Sub Team', parent_team_id: 42, signup_code_covers_sub_teams: null });
+
+      const res = await request(app)
+        .post('/api/teams')
+        .send({ name: 'Sub Team', parentTeamId: 42, signupCodeCoversSubTeams: true });
+
+      expect(res.status).toBe(201);
+      expect(Team.create).toHaveBeenCalledWith(expect.objectContaining({ signup_code_covers_sub_teams: null }));
+    });
+  });
+
+  describe('PUT /api/teams/:teamId', () => {
+    beforeEach(() => {
+      Team.findById.mockResolvedValue({ id: 42, color: 'Blue', parent_team_id: null });
+    });
+
+    it('rejects a non-boolean value with 400 before calling Team.update', async () => {
+      const res = await request(app).put('/api/teams/42').send({ signupCodeCoversSubTeams: 'nope' });
+
+      expect(res.status).toBe(400);
+      expect(Team.update).not.toHaveBeenCalled();
+    });
+
+    it('passes a supplied value through to Team.update', async () => {
+      Team.update.mockResolvedValue({ id: 42, signup_code_covers_sub_teams: true });
+
+      const res = await request(app).put('/api/teams/42').send({ signupCodeCoversSubTeams: true });
+
+      expect(res.status).toBe(200);
+      expect(Team.update).toHaveBeenCalledWith('42', expect.objectContaining({ signup_code_covers_sub_teams: true }));
+    });
+
+    it('responds 400 with the Organisation-only message when Team.update rejects it for a Sub_Team', async () => {
+      Team.update.mockRejectedValue(new Team.ChannelTierAccessSubTeamError('signupCodeCoversSubTeams'));
+
+      const res = await request(app).put('/api/teams/42').send({ signupCodeCoversSubTeams: true });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('signupCodeCoversSubTeams can only be set on an Organisation');
+    });
+  });
+});
 /**
  * Unit tests for `pseudonymousUsernames` handling on `POST /api/teams`
  * and `PUT /api/teams/:teamId` (takserver-enrollment Requirements 6.1,

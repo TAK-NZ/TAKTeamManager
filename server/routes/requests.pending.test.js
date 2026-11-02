@@ -17,8 +17,8 @@
  *     clause is the one Requirements 4.1/4.2 name and then applies that
  *     predicate itself, so the SQL-side half of the filter is simulated
  *     independently of the reference computation below rather than assumed.
- *     `server/models/Team.test.js`'s `getJoinableTeams` property is the model
- *     for that arrangement.
+ *     the removed `Team.getJoinableTeams` property test used the same
+ *     arrangement.
  *   - `Team.isAdmin` runs `simulateTeamIsAdmin`, which re-implements the
  *     recursive CTE in `server/models/Team.js` against the generated
  *     `team_memberships` rows. Its own correctness is covered by
@@ -38,7 +38,6 @@ jest.mock('../config/database', () => ({
 
 jest.mock('../models/Team', () => ({
   findById: jest.fn(),
-  getJoinableTeams: jest.fn(),
   getAncestorChain: jest.fn(),
   isAdmin: jest.fn()
 }));

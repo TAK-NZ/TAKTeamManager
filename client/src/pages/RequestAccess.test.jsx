@@ -5,8 +5,8 @@ import { shouldShowCallsignSuffixInput, isValidCodeFormat, filterTeamsBySearch }
 //
 // RequestAccess.jsx conditionally renders a required "Preferred Callsign
 // Suffix" input only when the selected joinable-team row's
-// `callsignNameFormat` (a field added to GET /api/teams/joinable's response
-// shape by server/models/Team.js's `getJoinableTeams`, per task 34.1) is
+// `callsignNameFormat` (a field once returned by the since-removed
+// GET /api/teams/joinable endpoint, per task 34.1) is
 // `user_defined`. No component-render test harness (e.g.
 // @testing-library/react) is set up in this project -- see
 // Requests.test.jsx and TeamDetail.test.jsx, which both test extracted pure

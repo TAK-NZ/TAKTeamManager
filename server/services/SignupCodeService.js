@@ -275,9 +275,12 @@ class SignupCodeService {
    *
    * @param {string} code - 8-char code (no dash)
    * @param {string} teamName - Name of the team for display
+   * @param {{ coversSubTeams?: boolean }} [options] - `coversSubTeams` is true for an
+   *   Organisation whose code also unlocks its sub-teams; the instructions then
+   *   tell the reader they will choose their team after following the link.
    * @returns {Promise<Buffer>} PDF document buffer
    */
-  async generatePdf(code, teamName) {
+  async generatePdf(code, teamName, { coversSubTeams = false } = {}) {
     const url = SignupCodeService.buildShortSignupUrl(code);
     const qrBuffer = await this.generateQrPng(code);
     const assets = path.join(__dirname, '../assets/signup-pdf');
@@ -389,10 +392,15 @@ class SignupCodeService {
       doc.fillColor(BLUE).font('Helvetica-Bold').fontSize(9)
         .text('YOUR TEAM IS ON TAK.NZ', textX, cardTop + 20, { width: textW, characterSpacing: 1, lineBreak: false });
       doc.fillColor(NAVY).font('Helvetica-Bold').fontSize(20)
-        .text(`Join ${teamName}`, textX, cardTop + 36, { width: textW, height: 50, ellipsis: true });
+        .text(teamName, textX, cardTop + 36, { width: textW, height: 50, ellipsis: true });
       const afterTitle = Math.max(doc.y, cardTop + 62) + 4;
       doc.fillColor(INK).font('Helvetica').fontSize(10)
-        .text('Scan the QR code with your phone camera, or visit:', textX, afterTitle, { width: textW });
+        .text(
+          coversSubTeams
+            ? 'Scan the QR code with your phone camera, or visit the link below, then choose your team:'
+            : 'Scan the QR code with your phone camera, or visit:',
+          textX, afterTitle, { width: textW }
+        );
       doc.fillColor(BLUE).font('Helvetica-Bold').fontSize(9.5)
         .text(url, textX, doc.y + 2, { width: textW, link: url, underline: true });
       const codeY = doc.y + 10;

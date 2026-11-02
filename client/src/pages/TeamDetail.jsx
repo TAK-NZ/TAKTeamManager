@@ -225,9 +225,8 @@ export function isPseudonymousOrganisation(team, allTeams) {
 // LandSAR > Specialist Teams > Cave Search and Rescue > Auckland showed
 // "CAVE - Auckland" (Cave being the immediate parent) instead of the
 // correct "LSAR - Auckland" that the server's own display-name query
-// (`SignupFlowService.getAvailableTeams` / `Team.getJoinableTeams`, both
-// resolving the org via the ancestor-chain root) and the `/request-access`
-// page already produce.
+// (`SignupFlowService.getAvailableTeams`, which resolves the org via the
+// ancestor-chain root) and the `/request-access` page already produce.
 //
 // This resolves the root Organisation's label by walking `parent_team_id`
 // up through the already-fetched `allTeams` list to the root -- the SAME
@@ -1966,6 +1965,7 @@ export default function TeamDetail({ user, refreshUser }) {
           teamId={team.id}
           teamName={team.display_name || team.name}
           isAdmin={canManageTeam}
+          coversSubTeams={!team.parent_team_id && Boolean(team.signup_code_covers_sub_teams)}
         />
       )}
 

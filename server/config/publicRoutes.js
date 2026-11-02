@@ -44,8 +44,6 @@ const publicRoutes = [
   // --- server/routes/join.js (mounted at /join) ---
   { method: 'GET', path: '/join/:code' },
 
-  // --- server/routes/teams.js ---
-  { method: 'GET', path: '/api/teams/joinable' },
 
   // --- server/routes/auth.js ---
   // Every route below runs without `authenticateToken` by definition: the

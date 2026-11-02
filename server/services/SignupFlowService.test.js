@@ -476,3 +476,119 @@ describe('SignupFlowService.submitTeamAccess — token consumption', () => {
     })).rejects.toThrow('Invalid or expired verification link');
   });
 });
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Organisation code covering Sub_Teams (signup_code_covers_sub_teams)
+//
+// These mock `pool.query`, so they prove the service's scoping/response logic.
+// The eligibility SQL itself is proven against real Postgres by
+// signupEligibility.integration.test.js.
+// ──────────────────────────────────────────────────────────────────────────────
+describe('SignupFlowService.getAvailableTeams — Organisation code covering Sub_Teams', () => {
+  let service;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    service = new SignupFlowService();
+  });
+
+  const tokenRow = { rows: [{ id: 1, requester_email: 'user@example.com', signup_code_used: 'ABCD2345' }] };
+  const orgA = { id: 1, name: 'A', display_name: 'A', org_id: 1 };
+  const subA1 = { id: 2, name: 'A1', display_name: 'A - A1', org_id: 1, path: 'A1' };
+  const open = { id: 9, name: 'Open', display_name: 'Open', org_id: 9 };
+
+  it('narrows the list to the Organisation and its Sub_Teams, and flags the scope', async () => {
+    pool.query
+      .mockResolvedValueOnce(tokenRow)
+      .mockResolvedValueOnce({ rows: [orgA, subA1, open] })
+      .mockResolvedValueOnce({ rows: [{ team_id: 1, parent_team_id: null, signup_code_covers_sub_teams: true }] });
+
+    const result = await service.getAvailableTeams('valid-token', null);
+
+    expect(result.codeScope).toBe('organisation');
+    expect(result.codeTeamId).toBe(1);
+    expect(result.teams.map((t) => t.id)).toEqual([1, 2]);
+  });
+
+  it('does not return the internal org_id column', async () => {
+    pool.query
+      .mockResolvedValueOnce(tokenRow)
+      .mockResolvedValueOnce({ rows: [orgA, subA1, open] })
+      .mockResolvedValueOnce({ rows: [{ team_id: 1, parent_team_id: null, signup_code_covers_sub_teams: true }] });
+
+    const result = await service.getAvailableTeams('valid-token', null);
+
+    for (const team of result.teams) {
+      expect(team).not.toHaveProperty('org_id');
+    }
+  });
+
+  it('keeps a Team code locked to that team (scope "team") and does not narrow the list', async () => {
+    pool.query
+      .mockResolvedValueOnce(tokenRow)
+      .mockResolvedValueOnce({ rows: [subA1, open] })
+      .mockResolvedValueOnce({ rows: [{ team_id: 2, parent_team_id: 1, signup_code_covers_sub_teams: null }] });
+
+    const result = await service.getAvailableTeams('valid-token', null);
+
+    expect(result.codeScope).toBe('team');
+    expect(result.codeTeamId).toBe(2);
+    expect(result.teams.map((t) => t.id)).toEqual([2, 9]);
+  });
+
+  it('treats an Organisation code as a Team code when the Organisation does not cover its Sub_Teams', async () => {
+    pool.query
+      .mockResolvedValueOnce(tokenRow)
+      .mockResolvedValueOnce({ rows: [orgA, open] })
+      .mockResolvedValueOnce({ rows: [{ team_id: 1, parent_team_id: null, signup_code_covers_sub_teams: false }] });
+
+    const result = await service.getAvailableTeams('valid-token', null);
+
+    expect(result.codeScope).toBe('team');
+    expect(result.teams.map((t) => t.id)).toEqual([1, 9]);
+  });
+
+  it('leaves the list unchanged and explains why when the code\'s Organisation is excluded (e.g. by domain)', async () => {
+    pool.query
+      .mockResolvedValueOnce(tokenRow)
+      .mockResolvedValueOnce({ rows: [open] })
+      .mockResolvedValueOnce({ rows: [{ team_id: 1, parent_team_id: null, signup_code_covers_sub_teams: true }] });
+
+    const result = await service.getAvailableTeams('valid-token', null);
+
+    expect(result.codeTeamMessage).toContain('requires an email address');
+    expect(result.codeScope).toBeUndefined();
+    expect(result.teams.map((t) => t.id)).toEqual([9]);
+  });
+
+  it('adds no scope fields when no code is presented', async () => {
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ id: 1, requester_email: 'user@example.com', signup_code_used: '' }] })
+      .mockResolvedValueOnce({ rows: [open] });
+
+    const result = await service.getAvailableTeams('valid-token', null);
+
+    expect(result.codeScope).toBeUndefined();
+    expect(result.codeTeamId).toBeUndefined();
+    expect(result.teams.map((t) => t.id)).toEqual([9]);
+  });
+
+  it('uses the shared eligibility SQL for both the list and the submit-time re-check', async () => {
+    const { buildEligibilityConditions } = require('./signupEligibility');
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ id: 1, requester_email: 'user@example.com', signup_code_used: '' }] })
+      .mockResolvedValueOnce({ rows: [] });
+    await service.getAvailableTeams('valid-token', null);
+    const listSql = pool.query.mock.calls[1][0];
+
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ id: 1, requester_email: 'user@example.com', signup_code_used: '' }] })
+      .mockResolvedValueOnce({ rows: [{ id: 5 }] })
+      .mockResolvedValueOnce({ rows: [] });
+    await service.submitTeamAccess({ token: 't', firstName: 'A', lastName: 'B', teamId: 5, reason: 'Because reasons' });
+    const submitSql = pool.query.mock.calls[3][0];
+
+    expect(listSql).toContain(buildEligibilityConditions({ codeParam: 1, domainParam: 2 }));
+    expect(submitSql).toContain(buildEligibilityConditions({ codeParam: 2, domainParam: 3 }));
+  });
+});

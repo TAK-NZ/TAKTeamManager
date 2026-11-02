@@ -7,9 +7,12 @@ import toast from 'react-hot-toast'
  * SignupCodeManager — panel for TeamDetail page showing the team's current
  * sign-up code and management actions. Only rendered for team admins.
  *
- * @param {{ teamId: number, teamName: string, isAdmin: boolean }} props
+ * @param {{ teamId: number, teamName: string, isAdmin: boolean, coversSubTeams?: boolean }} props
+ *   `coversSubTeams` is true for an Organisation whose code also unlocks
+ *   sign-up to its sub-teams (`signup_code_covers_sub_teams`); it only adds
+ *   explanatory text, the behaviour itself is decided server-side.
  */
-export default function SignupCodeManager({ teamId, teamName, isAdmin }) {
+export default function SignupCodeManager({ teamId, teamName, isAdmin, coversSubTeams = false }) {
   const [code, setCode] = useState(null) // { code, formatted_code, created_at } or null
   const [loading, setLoading] = useState(true)
   const [generating, setGenerating] = useState(false)
@@ -147,6 +150,14 @@ export default function SignupCodeManager({ teamId, teamName, isAdmin }) {
         }
       </h3>
 
+      {coversSubTeams && (
+        <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+          {code
+            ? 'This code also lets people choose any sub-team that allows join requests.'
+            : 'Sub-teams are not offered for sign-up until a code is generated.'}
+        </p>
+      )}
+
       {code ? (
         <>
 
@@ -217,6 +228,7 @@ export default function SignupCodeManager({ teamId, teamName, isAdmin }) {
             <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
               Generating a code will hide this team from the general sign-up list.
               Only users with the code will be able to request access to this team.
+              {coversSubTeams && ' Its sub-teams will also only be offered to people who use the code.'}
               {code && ' The existing code will be replaced and all previous links will stop working.'}
             </p>
             <div className="flex justify-end space-x-3">
@@ -252,6 +264,7 @@ export default function SignupCodeManager({ teamId, teamName, isAdmin }) {
             </h3>
             <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
               Are you sure you want to revoke this code? All distributed links and QR codes will stop working immediately.
+              {coversSubTeams && ' Sub-teams will not be offered for sign-up at all until a new code is generated.'}
             </p>
             <div className="flex justify-end space-x-3">
               <button

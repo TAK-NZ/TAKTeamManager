@@ -233,6 +233,16 @@ describe('SignupCodeService database methods', () => {
     });
   });
 
+  describe('generatePdf', () => {
+    it('renders a one-page PDF for an ordinary team and for an Organisation whose code covers sub-teams', async () => {
+      for (const options of [undefined, { coversSubTeams: true }]) {
+        const buffer = await service.generatePdf('ABCD5678', 'Example Search and Rescue', options);
+        expect(buffer.subarray(0, 5).toString()).toBe('%PDF-');
+        expect((buffer.toString('latin1').match(/\/Type \/Page\b/g) || []).length).toBe(1);
+      }
+    });
+  });
+
   describe('getCode', () => {
     it('returns formatted object when code exists', async () => {
       pool.query.mockResolvedValueOnce({ rows: [{ code: 'ABCD5678' }] });

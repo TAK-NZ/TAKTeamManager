@@ -7,7 +7,7 @@
  *
  * `routes` is now populated with an entry for every genuinely-authenticated
  * route mounted in `server/index.js` (task 12.1). Public/no-auth routes
- * (e.g. `GET /api/teams/joinable`, `GET /health`, the OAuth2 `/api/auth/*`
+ * (e.g. `GET /api/requests/available-teams`, `GET /health`, the OAuth2 `/api/auth/*`
  * flow routes, and other entries already tracked in
  * `server/config/publicRoutes.js`) are intentionally NOT registered here,
  * since Requirement 33.3 requires the Public_Route_Registry and this
@@ -44,8 +44,6 @@ const routes = {
   'GET /api/auth/me': ['user:read:own'],
 
   // --- /api/teams (server/routes/teams.js) ---
-  // `GET /api/teams/joinable` runs without `authenticateToken` (public) and
-  // is tracked in publicRoutes.js instead, not here.
   'GET /api/teams/my-teams': ['team:read:own'],
   'POST /api/teams': ['team:create:root_or_sub'],
   'PUT /api/teams/:teamId': ['team:update'],
