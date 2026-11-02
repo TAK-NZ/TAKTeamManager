@@ -82,8 +82,8 @@ export function getParentBreadcrumb(team, teams) {
  * its `name` as a fallback), NOT the immediate parent's.
  *
  * This mirrors the server's canonical team-display-name rule (see
- * `SignupFlowService.getAvailableTeams` / `Team.getJoinableTeams`, which
- * resolve the org via the ancestor chain's root, `parent_team_id IS
+ * `SignupFlowService.getAvailableTeams`, which resolves the org via the
+ * ancestor chain's root, `parent_team_id IS
  * NULL`) so `/teams` matches what `/request-access` shows. Using the
  * IMMEDIATE parent's prefix instead was the bug: a deeply-nested team
  * like LandSAR > Specialist Teams > Cave Search and Rescue > Auckland

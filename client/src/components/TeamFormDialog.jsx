@@ -99,6 +99,8 @@ export function buildTeamSubmitPayload(formData) {
   // countryCode immediately above -- the server rejects it outright on a
   // Sub_Team.
   delete payload.callsignTeamHyphenated
+  // Sign-up code covers Sub_Teams: Organisation-only, same reason.
+  delete payload.signupCodeCoversSubTeams
   return payload
 }
 
@@ -209,7 +211,12 @@ const EMPTY_FORM_DATA = {
   // does not opt in. Organisation-only, mirroring countryCode's own
   // default; never rendered or submitted for a Sub_Team
   // (buildTeamSubmitPayload drops it).
-  callsignTeamHyphenated: false
+  callsignTeamHyphenated: false,
+  // Sign-up code covers Sub_Teams: `false` keeps today's behaviour (the
+  // Organisation's code unlocks only the Organisation itself). Organisation-
+  // only; never rendered or submitted for a Sub_Team (buildTeamSubmitPayload
+  // drops it).
+  signupCodeCoversSubTeams: false
 }
 
 /**
@@ -362,7 +369,8 @@ export default function TeamFormDialog({
         // (never rendered there), the stored boolean on an Organisation.
         // Normalised with `Boolean(...)` since the server may return
         // `null`/`undefined` rather than `false`.
-        callsignTeamHyphenated: team.parent_team_id ? false : Boolean(team.callsign_team_hyphenated)
+        callsignTeamHyphenated: team.parent_team_id ? false : Boolean(team.callsign_team_hyphenated),
+        signupCodeCoversSubTeams: team.parent_team_id ? false : Boolean(team.signup_code_covers_sub_teams)
       })
       setCountrySearch('')
 
@@ -1077,6 +1085,37 @@ export default function TeamFormDialog({
                   </div>
                 </label>
               </div>
+
+              {/* Sign-up code covers Sub_Teams: Organisation-only, and only
+                  meaningful while "Allow join requests" is on (a sign-up
+                  code needs a joinable team). Whole-row <label> for a real
+                  mobile tap target, matching the checkbox rows above. */}
+              {!formData.parentTeamId && formData.canJoin && (
+                <div>
+                  <label
+                    htmlFor="signupCodeCoversSubTeams"
+                    className="flex items-start -m-2 p-2 rounded-lg cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50"
+                  >
+                    <input
+                      type="checkbox"
+                      id="signupCodeCoversSubTeams"
+                      checked={formData.signupCodeCoversSubTeams}
+                      onChange={(e) => setFormData({ ...formData, signupCodeCoversSubTeams: e.target.checked })}
+                      className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded mt-1"
+                    />
+                    <span className="ml-3 text-sm font-medium text-gray-700 dark:text-gray-300">
+                      Sign-up code also covers sub-teams
+                      <span onClick={(e) => e.stopPropagation()} className="inline-flex">
+                        <FieldLockIndicator
+                          locked={false}
+                          editableReason="Editable at any time, before or after creation"
+                        />
+                        <InfoTooltip text="People who sign up with this Organisation's code can choose any sub-team that allows join requests. Sub-teams are then only offered to people who use the code, so a sub-team that is open to everyone today stops being listed publicly. While the Organisation has no sign-up code, its sub-teams are not offered at all." />
+                      </span>
+                    </span>
+                  </label>
+                </div>
+              )}
 
               {/*
                 takserver-enrollment Requirement 6.1/6.2/7.1/7.2/9.7

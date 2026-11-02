@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const pool = require('../config/database');
 const EmailService = require('./EmailService');
 const SignupCodeService = require('./SignupCodeService');
+const { ORGANISATION_JOIN, buildEligibilityConditions } = require('./signupEligibility');
 const logger = require('../config/logger').createLogger('SignupFlowService');
 
 const emailService = new EmailService();
@@ -192,7 +193,7 @@ class SignupFlowService {
    * Applies: can_join + code visibility + org domain restrictions.
    * @param {string} token - verification token
    * @param {string|null} code - optional sign-up code from session
-   * @returns {Promise<{teams: Array, email: string, codeTeamMessage?: string}>}
+   * @returns {Promise<{teams: Array, email: string, codeTeamMessage?: string, codeTeamId?: number, codeScope?: 'team'|'organisation'}>}
    */
   async getAvailableTeams(token, code) {
     // 1. Validate the verification token
@@ -221,72 +222,87 @@ class SignupFlowService {
       ? code.replace(/-/g, '').toUpperCase()
       : (row.signup_code_used || '');
 
-    // 4. Run the team filtering query
+    // 4. Run the team filtering query. The eligibility rule (can_join, public,
+    // private-ancestor cascade, sign-up code gate, Organisation domain
+    // restriction) is defined once in ./signupEligibility.js and shared with
+    // submitTeamAccess so the list and the submit-time re-check cannot drift.
+    //
+    // `path` is the chain of Sub_Team names between the Organisation and the
+    // team (NULL for the Organisation itself), so a deeply nested team can be
+    // shown in context. `org_id` is used below to scope the list to an
+    // Organisation when its code was presented, and is not returned.
     const teamsResult = await pool.query(
       `SELECT t.id, t.name, t.description,
               CASE
                 WHEN t.parent_team_id IS NOT NULL THEN
                   COALESCE(org.callsign_prefix, org.name, '') || ' - ' || t.name
                 ELSE t.name
-              END as display_name
+              END as display_name,
+              org.id AS org_id,
+              (
+                WITH RECURSIVE chain AS (
+                  SELECT id, name, parent_team_id, 0 AS depth FROM teams WHERE id = t.id
+                  UNION ALL
+                  SELECT p.id, p.name, p.parent_team_id, c.depth + 1
+                  FROM teams p JOIN chain c ON p.id = c.parent_team_id
+                )
+                SELECT string_agg(name, ' > ' ORDER BY depth DESC) FROM chain WHERE parent_team_id IS NOT NULL
+              ) AS path
        FROM teams t
-       JOIN LATERAL (
-           WITH RECURSIVE ancestors AS (
-               SELECT id, name, callsign_prefix, parent_team_id FROM teams WHERE id = t.id
-               UNION ALL
-               SELECT p.id, p.name, p.callsign_prefix, p.parent_team_id
-               FROM teams p JOIN ancestors a ON p.id = a.parent_team_id
-           )
-           SELECT id, name, callsign_prefix FROM ancestors WHERE parent_team_id IS NULL
-       ) org ON true
-       WHERE t.can_join = true
-         AND t.visibility = 'public'
-         AND NOT EXISTS (
-           WITH RECURSIVE visibility_ancestors AS (
-             SELECT parent_team_id FROM teams WHERE id = t.id
-             UNION ALL
-             SELECT p.parent_team_id FROM teams p
-             JOIN visibility_ancestors a ON p.id = a.parent_team_id
-           )
-           SELECT 1 FROM teams anc
-           JOIN visibility_ancestors a ON anc.id = a.parent_team_id
-           WHERE anc.visibility = 'private'
-         )
-         AND (
-             NOT EXISTS (SELECT 1 FROM signup_codes sc WHERE sc.team_id = t.id)
-             OR EXISTS (SELECT 1 FROM signup_codes sc WHERE sc.team_id = t.id AND sc.code = $1)
-         )
-         AND (
-             NOT EXISTS (SELECT 1 FROM org_allowed_domains oad WHERE oad.org_id = org.id)
-             OR EXISTS (SELECT 1 FROM org_allowed_domains oad WHERE oad.org_id = org.id AND oad.domain = $2)
-         )
+       ${ORGANISATION_JOIN}
+       WHERE ${buildEligibilityConditions({ codeParam: 1, domainParam: 2 })}
        ORDER BY display_name`,
       [effectiveCode, domain]
     );
 
-    const teams = teamsResult.rows;
+    let teams = teamsResult.rows;
 
-    // 5. Check if code was provided but team is excluded due to domain restrictions
+    // 5. If a code was presented, work out what it unlocks.
+    //   - A Team code: the client locks the selection to that team
+    //     (`codeTeamId`), exactly as before.
+    //   - An Organisation code where the Organisation covers its Sub_Teams
+    //     (`codeScope: 'organisation'`): the list is narrowed to that
+    //     Organisation and its eligible Sub_Teams and the client shows a
+    //     selector, preselected on the Organisation.
+    // A code whose team is excluded (e.g. by the Organisation's domain
+    // restriction) gets a message, and the list is left as it was.
     let codeTeamMessage;
     let codeTeamIdForClient;
+    let codeScope;
     if (effectiveCode) {
-      // Check if the code resolves to a team
       const codeTeamResult = await pool.query(
-        'SELECT team_id FROM signup_codes WHERE code = $1',
+        `SELECT sc.team_id, t.parent_team_id, t.signup_code_covers_sub_teams
+         FROM signup_codes sc JOIN teams t ON t.id = sc.team_id
+         WHERE sc.code = $1`,
         [effectiveCode]
       );
 
       if (codeTeamResult.rows.length > 0) {
-        const codeTeamId = codeTeamResult.rows[0].team_id;
-        // Check if the coded team is NOT in the returned list
+        const codeRow = codeTeamResult.rows[0];
+        const codeTeamId = codeRow.team_id;
         const codeTeamInList = teams.some(t => t.id === codeTeamId);
         if (!codeTeamInList) {
           codeTeamMessage = 'The team associated with this code requires an email address from that organisation';
         } else {
           codeTeamIdForClient = codeTeamId;
+          const isOrgCoveringSubTeams = codeRow.parent_team_id == null
+            && codeRow.signup_code_covers_sub_teams === true;
+          if (isOrgCoveringSubTeams) {
+            codeScope = 'organisation';
+            teams = teams.filter(t => t.org_id === codeTeamId);
+          } else {
+            codeScope = 'team';
+          }
         }
       }
     }
+
+    // `org_id` is an internal scoping column, not part of the response.
+    teams = teams.map((team) => {
+      const copy = { ...team };
+      delete copy.org_id;
+      return copy;
+    });
 
     const result = { teams, email };
     if (codeTeamMessage) {
@@ -294,6 +310,9 @@ class SignupFlowService {
     }
     if (codeTeamIdForClient) {
       result.codeTeamId = codeTeamIdForClient;
+    }
+    if (codeScope) {
+      result.codeScope = codeScope;
     }
     return result;
   }
@@ -366,37 +385,9 @@ class SignupFlowService {
     const eligibilityResult = await pool.query(
       `SELECT t.id
        FROM teams t
-       JOIN LATERAL (
-           WITH RECURSIVE ancestors AS (
-               SELECT id, name, callsign_prefix, parent_team_id FROM teams WHERE id = t.id
-               UNION ALL
-               SELECT p.id, p.name, p.callsign_prefix, p.parent_team_id
-               FROM teams p JOIN ancestors a ON p.id = a.parent_team_id
-           )
-           SELECT id, name, callsign_prefix FROM ancestors WHERE parent_team_id IS NULL
-       ) org ON true
+       ${ORGANISATION_JOIN}
        WHERE t.id = $1
-         AND t.can_join = true
-         AND t.visibility = 'public'
-         AND NOT EXISTS (
-           WITH RECURSIVE visibility_ancestors AS (
-             SELECT parent_team_id FROM teams WHERE id = t.id
-             UNION ALL
-             SELECT p.parent_team_id FROM teams p
-             JOIN visibility_ancestors a ON p.id = a.parent_team_id
-           )
-           SELECT 1 FROM teams anc
-           JOIN visibility_ancestors a ON anc.id = a.parent_team_id
-           WHERE anc.visibility = 'private'
-         )
-         AND (
-             NOT EXISTS (SELECT 1 FROM signup_codes sc WHERE sc.team_id = t.id)
-             OR EXISTS (SELECT 1 FROM signup_codes sc WHERE sc.team_id = t.id AND sc.code = $2)
-         )
-         AND (
-             NOT EXISTS (SELECT 1 FROM org_allowed_domains oad WHERE oad.org_id = org.id)
-             OR EXISTS (SELECT 1 FROM org_allowed_domains oad WHERE oad.org_id = org.id AND oad.domain = $3)
-         )`,
+         AND ${buildEligibilityConditions({ codeParam: 2, domainParam: 3 })}`,
       [teamId, storedCode, domain]
     );
 

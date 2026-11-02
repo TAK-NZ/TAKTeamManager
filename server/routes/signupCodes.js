@@ -140,7 +140,8 @@ router.get('/:teamId/pdf', authenticateToken, authorize, [
       }
     }
 
-    const pdfBuffer = await signupCodeService.generatePdf(code.code, teamDisplayName);
+    const coversSubTeams = Boolean(team && !team.parent_team_id && team.signup_code_covers_sub_teams);
+    const pdfBuffer = await signupCodeService.generatePdf(code.code, teamDisplayName, { coversSubTeams });
     res.set('Content-Type', 'application/pdf');
     res.set('Content-Disposition', `attachment; filename="signup-${req.params.teamId}.pdf"`);
     res.send(pdfBuffer);

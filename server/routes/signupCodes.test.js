@@ -225,5 +225,25 @@ describe('signupCodes routes (Task 7.3)', () => {
       expect(res.status).toBe(200);
       expect(res.headers['content-type']).toContain('application/pdf');
     });
+
+    it('tells the PDF generator an Organisation whose code covers sub-teams does so', async () => {
+      const Team = require('../models/Team');
+      Team.findById.mockResolvedValueOnce({ id: 1, name: 'LSAR', parent_team_id: null, signup_code_covers_sub_teams: true });
+      mockGetCode.mockResolvedValueOnce({ code: 'ABCD5678', formatted: 'ABCD-5678' });
+      mockGeneratePdf.mockResolvedValueOnce(Buffer.from('fake-pdf'));
+
+      await request(app).get('/api/signup-codes/1/pdf');
+
+      expect(mockGeneratePdf).toHaveBeenLastCalledWith('ABCD5678', 'LSAR', { coversSubTeams: true });
+    });
+
+    it('does not set coversSubTeams for an ordinary team', async () => {
+      mockGetCode.mockResolvedValueOnce({ code: 'ABCD5678', formatted: 'ABCD-5678' });
+      mockGeneratePdf.mockResolvedValueOnce(Buffer.from('fake-pdf'));
+
+      await request(app).get('/api/signup-codes/1/pdf');
+
+      expect(mockGeneratePdf).toHaveBeenLastCalledWith('ABCD5678', 'Test Team', { coversSubTeams: false });
+    });
   });
 });

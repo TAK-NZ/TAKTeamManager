@@ -5,7 +5,6 @@ jest.mock('../config/database', () => ({
 
 jest.mock('../models/Team', () => ({
   findById: jest.fn(),
-  getJoinableTeams: jest.fn(),
   getAncestorChain: jest.fn(),
   isAdmin: jest.fn()
 }));

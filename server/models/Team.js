@@ -366,6 +366,12 @@ class Team {
     // cascade-to-descendants -- a Sub_Team's own stored value is simply
     // always NULL and never consulted.
     let { callsign_team_hyphenated } = teamData;
+    // Sign-up code covers Sub_Teams: `signup_code_covers_sub_teams` is an
+    // Organisation-only field with the same tri-state shape as
+    // `callsign_team_hyphenated` -- defaulted to `false` (root team) or forced
+    // to `null` (Sub_Team) below, before ever reaching the INSERT. It is only
+    // ever read off the Organisation row (the root of the Ancestor_Chain).
+    let { signup_code_covers_sub_teams } = teamData;
 
     // Requirement 2.2/2.3: compute the Team_Depth this Sub_Team would
     // occupy (the parent's Team_Depth plus one), or 0 for a root
@@ -551,10 +557,25 @@ class Team {
         : Boolean(callsign_team_hyphenated);
     }
 
+    // signup_code_covers_sub_teams: Organisation-only; a Sub_Team creation
+    // request that supplies one is a typed rejection (outside the try/catch
+    // below, like every other Organisation-only guard), an Organisation
+    // defaults to `false`.
+    if (parent_team_id) {
+      if (signup_code_covers_sub_teams !== undefined && signup_code_covers_sub_teams !== null) {
+        throw new ChannelTierAccessSubTeamError('signupCodeCoversSubTeams');
+      }
+      signup_code_covers_sub_teams = null;
+    } else {
+      signup_code_covers_sub_teams = signup_code_covers_sub_teams === undefined || signup_code_covers_sub_teams === null
+        ? false
+        : Boolean(signup_code_covers_sub_teams);
+    }
+
     try {
       const result = await pool.query(
-        'INSERT INTO teams (name, description, callsign_prefix, color, visibility, can_join, parent_team_id, created_by, callsign_name_format, callsign_level_selection, pseudonymous_usernames, response_channel_access, coordination_channel_access, country_code, callsign_team_hyphenated) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING *',
-        [name, description, callsign_prefix, color, visibility, can_join, parent_team_id, created_by, callsign_name_format, callsign_level_selection, pseudonymous_usernames, response_channel_access, coordination_channel_access, country_code, callsign_team_hyphenated]
+        'INSERT INTO teams (name, description, callsign_prefix, color, visibility, can_join, parent_team_id, created_by, callsign_name_format, callsign_level_selection, pseudonymous_usernames, response_channel_access, coordination_channel_access, country_code, callsign_team_hyphenated, signup_code_covers_sub_teams) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING *',
+        [name, description, callsign_prefix, color, visibility, can_join, parent_team_id, created_by, callsign_name_format, callsign_level_selection, pseudonymous_usernames, response_channel_access, coordination_channel_access, country_code, callsign_team_hyphenated, signup_code_covers_sub_teams]
       );
       
       const team = result.rows[0];
@@ -744,7 +765,7 @@ class Team {
    * for a Sub_Team, or the bare `name` for an Organisation (root) team.
    *
    * This is the SAME rule the SQL `display_name` columns already encode
-   * (`getOrganisationTeams`, `getJoinableTeams`, `GET /api/users`'
+   * (`getOrganisationTeams`, `GET /api/users`'
    * `team_name`, `SignupFlowService`): the prefix segment is the ROOT
    * Organisation's `callsign_prefix` (falling back to its `name`), NOT the
    * concatenation of every ancestor's prefix. So a deeply nested team
@@ -978,7 +999,7 @@ class Team {
           -- prefix/name -- looked up once from that root row -- is the
           -- correct prefix for EVERY Sub_Team here, matching the
           -- ancestor-chain-root rule the other display_name query sites
-          -- (Team.getJoinableTeams, SignupFlowService.getAvailableTeams,
+          -- (SignupFlowService.getAvailableTeams,
           -- GET /users/me) already use. The Organisation's own row shows
           -- its bare name (no prefix), same as those sites. This lets the
           -- Users Create-User picker and the Transfer dialog's source-
@@ -1371,6 +1392,10 @@ class Team {
     // changes how the callsign is DISPLAYED going forward, never a
     // Managed_Identifier already minted.
     let { callsign_team_hyphenated } = updateData;
+    // Sign-up code covers Sub_Teams: rejected on a Sub_Team, freely APPLIED on
+    // an existing Organisation (it only changes which teams a sign-up code
+    // reveals; no identifier or certificate is affected).
+    let { signup_code_covers_sub_teams } = updateData;
 
     // Requirement 3.3/5.6/7.2: determine whether `teamId` is a Sub_Team (a
     // non-null `parent_team_id`) BEFORE building the UPDATE, so the
@@ -1395,7 +1420,8 @@ class Team {
       response_channel_access !== undefined ||
       coordination_channel_access !== undefined ||
       country_code !== undefined ||
-      callsign_team_hyphenated !== undefined
+      callsign_team_hyphenated !== undefined ||
+      signup_code_covers_sub_teams !== undefined
     ) {
       existingTeam = await this.findById(teamId);
     }
@@ -1438,6 +1464,10 @@ class Team {
       // (never silently ignored, unlike color/callsign_name_format).
       if (callsign_team_hyphenated !== undefined) {
         throw new ChannelTierAccessSubTeamError('callsignTeamHyphenated');
+      }
+      // Sign-up code covers Sub_Teams: Organisation-only, typed rejection.
+      if (signup_code_covers_sub_teams !== undefined) {
+        throw new ChannelTierAccessSubTeamError('signupCodeCoversSubTeams');
       }
     } else if (callsign_level_selection !== undefined && callsign_level_selection !== null) {
       // Organisation: validate every element is an integer in
@@ -1507,6 +1537,11 @@ class Team {
     // NULL state on an Organisation row.
     if (callsign_team_hyphenated !== undefined) {
       callsign_team_hyphenated = callsign_team_hyphenated === null ? undefined : Boolean(callsign_team_hyphenated);
+    }
+    // Same `null` -> `undefined` normalisation for signup_code_covers_sub_teams,
+    // so COALESCE never re-introduces the Sub_Team-only NULL on an Organisation.
+    if (signup_code_covers_sub_teams !== undefined) {
+      signup_code_covers_sub_teams = signup_code_covers_sub_teams === null ? undefined : Boolean(signup_code_covers_sub_teams);
     }
 
     // Bugfix (callsign-handling): an Organisation's `callsign_prefix` is
@@ -1617,8 +1652,8 @@ class Team {
 
     try {
       const result = await pool.query(
-        'UPDATE teams SET name = COALESCE($1, name), description = COALESCE($2, description), visibility = COALESCE($3, visibility), can_join = COALESCE($4, can_join), parent_team_id = $5, callsign_name_format = COALESCE($6, callsign_name_format), color = COALESCE($8, color), callsign_level_selection = COALESCE($9, callsign_level_selection), pseudonymous_usernames = COALESCE($10, pseudonymous_usernames), callsign_prefix = COALESCE($11, callsign_prefix), response_channel_access = COALESCE($12, response_channel_access), coordination_channel_access = COALESCE($13, coordination_channel_access), country_code = COALESCE($14, country_code), callsign_team_hyphenated = COALESCE($15, callsign_team_hyphenated), updated_at = CURRENT_TIMESTAMP WHERE id = $7 RETURNING *',
-        [name, description, visibility, can_join, parent_team_id, callsign_name_format, teamId, color, callsign_level_selection, pseudonymous_usernames, callsign_prefix, response_channel_access, coordination_channel_access, country_code, callsign_team_hyphenated]
+        'UPDATE teams SET name = COALESCE($1, name), description = COALESCE($2, description), visibility = COALESCE($3, visibility), can_join = COALESCE($4, can_join), parent_team_id = $5, callsign_name_format = COALESCE($6, callsign_name_format), color = COALESCE($8, color), callsign_level_selection = COALESCE($9, callsign_level_selection), pseudonymous_usernames = COALESCE($10, pseudonymous_usernames), callsign_prefix = COALESCE($11, callsign_prefix), response_channel_access = COALESCE($12, response_channel_access), coordination_channel_access = COALESCE($13, coordination_channel_access), country_code = COALESCE($14, country_code), callsign_team_hyphenated = COALESCE($15, callsign_team_hyphenated), signup_code_covers_sub_teams = COALESCE($16, signup_code_covers_sub_teams), updated_at = CURRENT_TIMESTAMP WHERE id = $7 RETURNING *',
+        [name, description, visibility, can_join, parent_team_id, callsign_name_format, teamId, color, callsign_level_selection, pseudonymous_usernames, callsign_prefix, response_channel_access, coordination_channel_access, country_code, callsign_team_hyphenated, signup_code_covers_sub_teams]
       );
       const updatedTeam = result.rows[0];
 
@@ -2209,123 +2244,6 @@ class Team {
     }
   }
 
-  /**
-   * Requirement 7.1/7.2 (task 15.1): the public, unauthenticated
-   * team-access-request flow's joinable-teams listing. In addition to
-   * the existing `t.can_join = true AND t.visibility = 'public'` filter
-   * (which already excludes a Team whose OWN `visibility` is `private`,
-   * Requirement 7.1), this also excludes a Team whose Ancestor_Chain
-   * contains a `private` Team, even when the Team itself is `public`
-   * (Requirement 7.2) -- a private-branch cascade.
-   *
-   * This is DELIBERATELY a standalone, unconditional exclusion rule, not
-   * a call into `TeamVisibilityService` (Requirement 6's Visible_Branch):
-   * this route has no `req.user` at all (it is fully anonymous), and
-   * Requirement 7's rule is simpler than Visible_Branch -- there is no
-   * Global_Manager bypass and no membership exception here, full stop.
-   * See `TeamVisibilityService`'s own doc comment for the same point
-   * from the other side.
-   *
-   * Implemented as a correlated `NOT EXISTS` subquery per row, matching
-   * this query's own existing style of a recursive-CTE-per-correlated-
-   * subquery (as already done above for the `rt` LEFT JOIN): for each
-   * candidate Team `t`, walk its Ancestor_Chain via a recursive CTE
-   * (starting from `t.parent_team_id`, i.e. `t`'s STRICT ancestors --
-   * `t`'s own `visibility` is already constrained to `'public'` by the
-   * outer `WHERE`, so it does not need to be re-checked here) and check
-   * whether any row reached that way is `private`.
-   *
-   * Requirement 11.9/11.10 (task 34.1): each row also carries the
-   * resolved root Team's (i.e. `t`'s Organisation's) `callsign_name_format`
-   * value as `callsignNameFormat`, reusing the same `rt` LEFT JOIN already
-   * computed above for `display_name` rather than adding a second
-   * root-resolution subquery. The Client (`RequestAccess.jsx`) uses this
-   * to conditionally render a required "Preferred Callsign Suffix" input
-   * only when the selected Team's Organisation's format is `user_defined`,
-   * without an extra request.
-   */
-  // Performance-hardening: `limit`/`offset` are optional so any other
-  // caller (there are none elsewhere in the codebase today, per a
-  // repo-wide grep) keeps the original unbounded behavior by simply
-  // omitting them. Mirrors `getAllTeams(limit, offset)`'s own optional-
-  // pagination shape above. `GET /api/teams/joinable` (the sole caller)
-  // always supplies both, via the shared `paginationParams` middleware.
-  static async getJoinableTeams(limit, offset) {
-    try {
-      const hasPagination = Number.isInteger(limit) && Number.isInteger(offset);
-      const query = `
-        SELECT t.id, t.name, t.description, t.visibility,
-               rt.callsign_name_format AS "callsignNameFormat",
-               CASE 
-                 WHEN t.parent_team_id IS NOT NULL THEN 
-                   COALESCE(rt.callsign_prefix, rt.name, '') || ' - ' || t.name
-                 ELSE t.name
-               END as display_name
-        FROM teams t
-        LEFT JOIN teams rt ON rt.id = (
-          WITH RECURSIVE root_team AS (
-            SELECT id, name, parent_team_id FROM teams WHERE id = t.id
-            UNION ALL
-            SELECT p.id, p.name, p.parent_team_id 
-            FROM teams p JOIN root_team r ON p.id = r.parent_team_id
-          )
-          SELECT id FROM root_team WHERE parent_team_id IS NULL
-        )
-        WHERE t.can_join = true AND t.visibility = 'public'
-        AND NOT EXISTS (
-          WITH RECURSIVE ancestors AS (
-            SELECT parent_team_id FROM teams WHERE id = t.id
-            UNION ALL
-            SELECT p.parent_team_id FROM teams p
-            JOIN ancestors a ON p.id = a.parent_team_id
-          )
-          SELECT 1 FROM teams anc
-          JOIN ancestors a ON anc.id = a.parent_team_id
-          WHERE anc.visibility = 'private'
-        )
-        ORDER BY display_name
-        ${hasPagination ? 'LIMIT $1 OFFSET $2' : ''}
-      `;
-      const result = hasPagination
-        ? await pool.query(query, [limit, offset])
-        : await pool.query(query);
-      return result.rows;
-    } catch (error) {
-      logger.error({ err: error }, 'Error fetching joinable teams');
-      return [];
-    }
-  }
-
-  // Performance-hardening: total joinable-team count, used alongside the
-  // paginated `getJoinableTeams()` result to report pagination metadata
-  // to GET /api/teams/joinable's caller. Mirrors the exact same
-  // WHERE/NOT EXISTS predicate `getJoinableTeams()` filters on, so the
-  // reported total always matches what a full (unpaginated) fetch of
-  // that same predicate would return.
-  static async getJoinableTeamsCount() {
-    try {
-      const result = await pool.query(`
-        SELECT COUNT(*) as count
-        FROM teams t
-        WHERE t.can_join = true AND t.visibility = 'public'
-        AND NOT EXISTS (
-          WITH RECURSIVE ancestors AS (
-            SELECT parent_team_id FROM teams WHERE id = t.id
-            UNION ALL
-            SELECT p.parent_team_id FROM teams p
-            JOIN ancestors a ON p.id = a.parent_team_id
-          )
-          SELECT 1 FROM teams anc
-          JOIN ancestors a ON anc.id = a.parent_team_id
-          WHERE anc.visibility = 'private'
-        )
-      `);
-      return parseInt(result.rows[0].count, 10);
-    } catch (error) {
-      logger.error({ err: error }, 'Error counting joinable teams');
-      return 0;
-    }
-  }
 
   /**
    * Bugfix (a renamed team's Authentik group kept its stale name):

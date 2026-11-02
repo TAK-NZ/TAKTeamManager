@@ -39,8 +39,8 @@ const logger = require('../config/logger').createLogger('TeamVisibilityService')
  * This function is NOT used for the fully-anonymous, unauthenticated
  * public join-request flow -- that flow has its own, simpler,
  * unconditional private-branch exclusion rule with no Global_Manager or
- * membership exception (Requirement 7), implemented separately against
- * `Team.getJoinableTeams`. Conflating the two would incorrectly apply
+ * membership exception (Requirement 7), implemented separately in
+ * `server/services/signupEligibility.js`. Conflating the two would incorrectly apply
  * Requirement 6's Organisation-scoping (which assumes an authenticated
  * viewer with their own Organisation membership) to a flow that has no
  * viewer at all.

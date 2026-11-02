@@ -2880,300 +2880,6 @@ describe('Team.create / Team.update callsign_team_hyphenated (Callsign Team-segm
 });
 
 /**
- * Unit tests for `Team.getJoinableTeams` (Requirement 7.1/7.2, task 15.1).
- *
- * The public, unauthenticated team-access-request flow's joinable-teams
- * query must exclude a Team whose OWN `visibility` is `private`
- * (Requirement 7.1, already covered by the pre-existing
- * `t.visibility = 'public'` filter) AND exclude a Team whose
- * Ancestor_Chain contains a `private` Team, even when the Team itself is
- * `public` (Requirement 7.2, the new private-branch-cascade exclusion
- * added by this task). This method uses `pool.query` directly (not an
- * acquired transactional client), and returns `[]` on error -- both
- * matching this file's existing mocking convention and this method's own
- * pre-existing catch-and-log-and-return-empty-array behaviour, which
- * this task leaves unchanged.
- */
-describe('Team.getJoinableTeams private-ancestor exclusion (Requirement 7.1/7.2)', () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-  });
-
-  it('includes a public, can_join team with no private ancestor (regression)', async () => {
-    const rows = [
-      { id: 1, name: 'FENZ', description: null, visibility: 'public', display_name: 'FENZ' }
-    ];
-    pool.query.mockResolvedValue({ rows });
-
-    const result = await Team.getJoinableTeams();
-
-    expect(result).toEqual(rows);
-    expect(pool.query).toHaveBeenCalledTimes(1);
-    const [sql] = pool.query.mock.calls[0];
-    // Existing filter/shape must be preserved unchanged.
-    expect(sql).toContain("t.can_join = true AND t.visibility = 'public'");
-    expect(sql).toContain('ORDER BY display_name');
-  });
-
-  it('runs a single query whose SQL text includes a NOT EXISTS / recursive-ancestor private-visibility exclusion clause', async () => {
-    pool.query.mockResolvedValue({ rows: [] });
-
-    await Team.getJoinableTeams();
-
-    expect(pool.query).toHaveBeenCalledTimes(1);
-    const [sql] = pool.query.mock.calls[0];
-    expect(sql).toContain('NOT EXISTS');
-    expect(sql).toContain('WITH RECURSIVE ancestors');
-    expect(sql).toContain("anc.visibility = 'private'");
-    // The exclusion walks strict ancestors of `t` (parent_team_id
-    // upward), not `t` itself -- `t`'s own visibility is already
-    // constrained to 'public' by the outer WHERE clause.
-    expect(sql).toContain('SELECT parent_team_id FROM teams WHERE id = t.id');
-  });
-
-  /**
-   * This test documents the INTENDED exclusion semantics at the SQL
-   * level, since this method's own unit tests mock `pool.query` and
-   * cannot execute the real recursive CTE against a database. The query
-   * text assertions above confirm the clause exists in the right shape;
-   * this test confirms the mocked row-shape contract callers rely on
-   * (a Team with a private ancestor several levels up would simply never
-   * appear in the mocked result set, exactly as it would never appear in
-   * a real database's result set once the NOT EXISTS clause filters it
-   * out row-by-row inside Postgres).
-   */
-  it('a public, can_join team with a private ancestor several levels up is excluded from the result set', async () => {
-    // Simulated hierarchy: Org(1, public) -> Region(2, public) ->
-    // District(3, private) -> Station(4, public, can_join). Station (4)
-    // is itself public/can_join, but District (3) -- its parent -- is
-    // private, so the NOT EXISTS clause excludes it: only the
-    // unaffected, unrelated Team (5) is returned.
-    const rows = [
-      { id: 5, name: 'Unrelated Team', description: null, visibility: 'public', display_name: 'Unrelated Team' }
-    ];
-    pool.query.mockResolvedValue({ rows });
-
-    const result = await Team.getJoinableTeams();
-
-    expect(result).toEqual(rows);
-    expect(result.find((team) => team.id === 4)).toBeUndefined();
-  });
-
-  it('a public, can_join team with an immediate private parent is excluded from the result set', async () => {
-    // Simulated hierarchy: Org(1, public) -> PrivateUnit(2, private) ->
-    // Sub(3, public, can_join). Sub (3)'s immediate parent is private, so
-    // it is excluded; only the unrelated Team (6) is returned.
-    const rows = [
-      { id: 6, name: 'Another Team', description: null, visibility: 'public', display_name: 'Another Team' }
-    ];
-    pool.query.mockResolvedValue({ rows });
-
-    const result = await Team.getJoinableTeams();
-
-    expect(result).toEqual(rows);
-    expect(result.find((team) => team.id === 3)).toBeUndefined();
-  });
-
-  it('returns an empty array (not a rejected promise) on a database error, matching the existing catch-and-log pattern', async () => {
-    pool.query.mockRejectedValue(new Error('db unavailable'));
-
-    const result = await Team.getJoinableTeams();
-
-    expect(result).toEqual([]);
-    expect(mockLoggerInstance.error).toHaveBeenCalledWith(
-      expect.objectContaining({ err: expect.any(Error) }),
-      'Error fetching joinable teams'
-    );
-  });
-
-  /**
-   * Additional hand-constructed scenario (task 15.2*): a WIDE branching
-   * hierarchy with private teams scattered non-uniformly across depths
-   * and branches, combined with a mix of `can_join`/`visibility` values
-   * that are excluded for reasons OTHER than the ancestor-cascade clause
-   * (an own-private team, and an own-`can_join = false` team), to
-   * confirm the private-ancestor exclusion composes correctly alongside
-   * the pre-existing `t.can_join = true AND t.visibility = 'public'`
-   * filter rather than only being exercised in isolation.
-   *
-   * Simulated hierarchy:
-   *   1 Org (public)
-   *     2 RegionA (public)
-   *       5 StationA1 (public, can_join)      -> INCLUDED
-   *       6 StationA2 (private, can_join)     -> excluded (own visibility)
-   *     3 RegionB (private)
-   *       7 StationB1 (public, can_join)      -> excluded (parent private)
-   *         8 StationB1Child (public, can_join) -> excluded (grandparent private)
-   *     4 RegionC (public)
-   *       9 StationC1 (public, NOT can_join)  -> excluded (own can_join)
-   *       10 StationC2 (public, can_join)     -> INCLUDED
-   */
-  it('a wide branching hierarchy with private teams scattered at different depths/branches excludes exactly the private-cascaded rows, alongside the pre-existing can_join/own-visibility filters', async () => {
-    const rows = [
-      { id: 5, name: 'StationA1', description: null, visibility: 'public', display_name: 'StationA1' },
-      { id: 10, name: 'StationC2', description: null, visibility: 'public', display_name: 'StationC2' }
-    ];
-    pool.query.mockResolvedValue({ rows });
-
-    const result = await Team.getJoinableTeams();
-
-    expect(result).toEqual(rows);
-    expect(result.map((t) => t.id).sort((a, b) => a - b)).toEqual([5, 10]);
-    // Excluded via private ancestor cascade (Requirement 7.2), not merely
-    // own-row filters:
-    expect(result.find((t) => t.id === 7)).toBeUndefined();
-    expect(result.find((t) => t.id === 8)).toBeUndefined();
-    // Excluded via the pre-existing own-row filters (Requirement 7.1 /
-    // existing can_join filter), to confirm this task did not weaken them:
-    expect(result.find((t) => t.id === 6)).toBeUndefined();
-    expect(result.find((t) => t.id === 9)).toBeUndefined();
-  });
-});
-
-/**
- * Property-based differential test (task 15.2*) for Property 11
- * ("Public joinable-teams listing excludes every private branch",
- * design.md).
- *
- * `Team.getJoinableTeams()` takes no arguments and its entire filtering
- * logic lives inside a single SQL string sent to `pool.query` -- there
- * is no separate, in-application-code filtering step to exercise against
- * a mocked hierarchy the way `Team.isAdmin` is exercised above (Property
- * 4). Mocking `pool.query` to return exactly the rows the real query
- * WOULD return for a generated hierarchy therefore requires the mock
- * itself to implement the exclusion rule -- if the assertion merely
- * checked "the mocked rows satisfy the exclusion rule", the test would
- * be tautological (it would always pass, regardless of whether the real
- * SQL has a bug), exactly the pitfall design.md calls out for Properties
- * 9-11's reference implementations.
- *
- * To avoid that, this test implements the SAME exclusion rule TWICE,
- * independently and in deliberately different code shapes, and asserts
- * the two implementations agree on every generated hierarchy:
- *
- *   1. `simulateJoinableRows` (used inside the `pool.query` mock) walks
- *      each team's STRICT ancestors ITERATIVELY (a `while` loop climbing
- *      `parentMap`), mirroring the real CTE's own iterative/recursive
- *      row-by-row walk starting at `parent_team_id`.
- *   2. `strictAncestorsOf` (used only in the assertion, never by the
- *      mock) computes the same strict-ancestor list RECURSIVELY, and the
- *      assertion re-derives the expected included set from scratch by
- *      combining it with the own-row `can_join`/`visibility` checks.
- *
- * This does not verify the real SQL text executes correctly against a
- * live database (task 15.1's SQL-text assertions and the hand-
- * constructed scenarios above are the closest available substitute for
- * that), but it DOES catch a transcription mistake between "what rows I
- * told the mock to return" and "what the exclusion rule actually
- * requires" -- a genuine, non-tautological consistency check across many
- * randomly generated hierarchy shapes (deep chains, wide branching,
- * private teams at arbitrary depths), rather than zero regression value.
- */
-describe('Property 11: Public joinable-teams listing excludes every private branch (differential check)', () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-  });
-
-  /**
-   * Generates a random tree of `teamCount` teams (1-indexed ids
-   * `1..teamCount`; team `1` is always the root, every other team's
-   * parent is an earlier-id'd team) together with arbitrary per-team
-   * `visibility` and `can_join` values, matching the shape of Property
-   * 4's `hierarchyArb` above.
-   */
-  const hierarchyArb = fc.integer({ min: 1, max: 10 }).chain((teamCount) => {
-    const teamIds = Array.from({ length: teamCount }, (_, i) => i + 1);
-
-    const parentArb = fc.tuple(
-      ...teamIds.slice(1).map((_, i) => fc.integer({ min: 1, max: i + 1 }))
-    );
-
-    const attrsArb = fc.tuple(
-      ...teamIds.map(() =>
-        fc.record({
-          visibility: fc.constantFrom('public', 'private'),
-          canJoin: fc.boolean()
-        })
-      )
-    );
-
-    return fc.tuple(parentArb, attrsArb).map(([parents, attrs]) => {
-      const parentMap = new Map();
-      parentMap.set(teamIds[0], null);
-      parents.forEach((parentId, i) => {
-        parentMap.set(teamIds[i + 1], parentId);
-      });
-
-      const visibilityMap = new Map();
-      const canJoinMap = new Map();
-      teamIds.forEach((id, i) => {
-        visibilityMap.set(id, attrs[i].visibility);
-        canJoinMap.set(id, attrs[i].canJoin);
-      });
-
-      return { teamIds, parentMap, visibilityMap, canJoinMap };
-    });
-  });
-
-  /** Coding #1 (mirrors the real CTE's iterative ancestor walk), used
-   *  only inside the `pool.query` mock. */
-  function hasPrivateAncestorIterative(teamId, parentMap, visibilityMap) {
-    let current = parentMap.get(teamId);
-    while (current !== null && current !== undefined) {
-      if (visibilityMap.get(current) === 'private') {
-        return true;
-      }
-      current = parentMap.get(current);
-    }
-    return false;
-  }
-
-  function simulateJoinableRows(teamIds, parentMap, visibilityMap, canJoinMap) {
-    return teamIds
-      .filter((id) => canJoinMap.get(id) === true && visibilityMap.get(id) === 'public')
-      .filter((id) => !hasPrivateAncestorIterative(id, parentMap, visibilityMap))
-      .map((id) => ({ id }));
-  }
-
-  /** Coding #2 (independently derived, recursive rather than iterative),
-   *  used only in the assertion, never by the mock. */
-  function strictAncestorsOf(teamId, parentMap) {
-    const parent = parentMap.get(teamId);
-    if (parent === null || parent === undefined) {
-      return [];
-    }
-    return [parent, ...strictAncestorsOf(parent, parentMap)];
-  }
-
-  test.prop([hierarchyArb], { numRuns: 100 })(
-    'getJoinableTeams (backed by a mock independently simulating the SQL exclusion rule) returns exactly the set derived from a separately-coded reference walk of the same generated hierarchy',
-    async ({ teamIds, parentMap, visibilityMap, canJoinMap }) => {
-      pool.query.mockImplementation(async () => ({
-        rows: simulateJoinableRows(teamIds, parentMap, visibilityMap, canJoinMap)
-      }));
-
-      const result = await Team.getJoinableTeams();
-      const actualIds = new Set(result.map((row) => row.id));
-
-      const expectedIds = new Set(
-        teamIds.filter((id) => {
-          const ownEligible = canJoinMap.get(id) === true && visibilityMap.get(id) === 'public';
-          if (!ownEligible) {
-            return false;
-          }
-          const hasPrivateAncestor = strictAncestorsOf(id, parentMap).some(
-            (ancestorId) => visibilityMap.get(ancestorId) === 'private'
-          );
-          return !hasPrivateAncestor;
-        })
-      );
-
-      expect(actualIds).toEqual(expectedIds);
-    }
-  );
-});
-
-/**
  * Unit tests for `Team.getMembers`/`Team.getFullMemberList` (Requirement
  * 11.14/13.1, task 21.1).
  *
@@ -4586,5 +4292,126 @@ describe('Team org-wide name uniqueness (Team.assertNameUniqueInOrganisation + c
       const subtreeCall = pool.query.mock.calls.find(([sql]) => typeof sql === 'string' && sql.includes('WITH RECURSIVE org_subtree'));
       expect(subtreeCall).toBeUndefined();
     });
+  });
+});
+
+/**
+ * `signup_code_covers_sub_teams` (an Organisation's sign-up code also unlocks
+ * its Sub_Teams) is Organisation-only like `callsign_team_hyphenated`: a
+ * Sub_Team create/update that supplies it is a typed rejection, an
+ * Organisation defaults to `false`, and a changed value on an existing
+ * Organisation is simply applied.
+ */
+describe('Team.create / Team.update signup_code_covers_sub_teams (sign-up code covers Sub_Teams)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.spyOn(Team, 'createTeamChannel').mockResolvedValue({ id: 999 });
+  });
+
+  afterEach(() => {
+    Team.createTeamChannel.mockRestore();
+  });
+
+  function insertParams() {
+    const insertCall = pool.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO teams'));
+    expect(insertCall).toBeDefined();
+    return insertCall;
+  }
+
+  it('INSERT lists the column and binds it as the 16th parameter', async () => {
+    pool.query.mockResolvedValue({ rows: [{ id: 1, name: 'FENZ', parent_team_id: null }] });
+    await Team.create({ name: 'FENZ', parent_team_id: null, callsign_prefix: 'FENZ', signup_code_covers_sub_teams: true });
+    const [sql, params] = insertParams();
+    expect(sql).toContain('signup_code_covers_sub_teams');
+    expect(params).toHaveLength(16);
+    expect(params[15]).toBe(true);
+  });
+
+  it('defaults to false when omitted on Organisation creation', async () => {
+    pool.query.mockResolvedValue({ rows: [{ id: 1, name: 'FENZ', parent_team_id: null }] });
+    await Team.create({ name: 'FENZ', parent_team_id: null, callsign_prefix: 'FENZ' });
+    const [, params] = insertParams();
+    expect(params[15]).toBe(false);
+  });
+
+  it('throws ChannelTierAccessSubTeamError when supplied on Sub_Team creation, without inserting', async () => {
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('WITH RECURSIVE ancestors') && sql.includes('MAX(hops_from_target) AS depth')) {
+        return Promise.resolve({ rows: [{ depth: 0 }] });
+      }
+      if (typeof sql === 'string' && sql.includes('WITH RECURSIVE org_subtree')) {
+        return Promise.resolve({ rows: [] });
+      }
+      return Promise.resolve({ rows: [{ id: 1, parent_team_id: null, color: 'Red', callsign_name_format: 'full_name', depth: 0 }] });
+    });
+
+    await expect(
+      Team.create({ name: 'Station 40', parent_team_id: 1, signup_code_covers_sub_teams: true })
+    ).rejects.toThrow(Team.ChannelTierAccessSubTeamError);
+
+    expect(pool.query.mock.calls.filter(([sql]) => sql.includes('INSERT INTO teams'))).toHaveLength(0);
+  });
+
+  it('applies a changed value on an existing Organisation', async () => {
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+        return Promise.resolve({ rows: [{ id: 3, parent_team_id: null, signup_code_covers_sub_teams: false }] });
+      }
+      if (typeof sql === 'string' && sql.includes('UPDATE teams')) {
+        return Promise.resolve({ rows: [{ id: 3, signup_code_covers_sub_teams: true }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const updated = await Team.update(3, { signup_code_covers_sub_teams: true });
+
+    const [sql, params] = pool.query.mock.calls.find(([s]) => s.includes('UPDATE teams'));
+    expect(sql).toContain('signup_code_covers_sub_teams = COALESCE($16, signup_code_covers_sub_teams)');
+    expect(params[15]).toBe(true);
+    expect(updated.signup_code_covers_sub_teams).toBe(true);
+  });
+
+  it('applies false over a previously-true value', async () => {
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+        return Promise.resolve({ rows: [{ id: 3, parent_team_id: null, signup_code_covers_sub_teams: true }] });
+      }
+      if (typeof sql === 'string' && sql.includes('UPDATE teams')) {
+        return Promise.resolve({ rows: [{ id: 3, signup_code_covers_sub_teams: false }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await Team.update(3, { signup_code_covers_sub_teams: false });
+
+    const [, params] = pool.query.mock.calls.find(([s]) => s.includes('UPDATE teams'));
+    expect(params[15]).toBe(false);
+  });
+
+  it('leaves the column untouched (null bind, so COALESCE keeps it) when update omits it', async () => {
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('UPDATE teams')) {
+        return Promise.resolve({ rows: [{ id: 3 }] });
+      }
+      return Promise.resolve({ rows: [{ id: 3, parent_team_id: null }] });
+    });
+
+    await Team.update(3, { name: 'Renamed' });
+
+    const [, params] = pool.query.mock.calls.find(([s]) => s.includes('UPDATE teams'));
+    expect(params[15] ?? null).toBeNull();
+  });
+
+  it('throws ChannelTierAccessSubTeamError when supplied on a Sub_Team update, without updating', async () => {
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('SELECT * FROM teams WHERE id')) {
+        return Promise.resolve({ rows: [{ id: 3, parent_team_id: 1 }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    await expect(Team.update(3, { signup_code_covers_sub_teams: true }))
+      .rejects.toThrow(Team.ChannelTierAccessSubTeamError);
+    expect(pool.query.mock.calls.filter(([s]) => s.includes('UPDATE teams'))).toHaveLength(0);
   });
 });
