@@ -246,6 +246,14 @@ ops to `reconcile_owned_group`.
     no ignored prefixes configured and a failed read it falls back to the
     unconditional PATCH, exactly as before. The log line is
     `Group membership already matches; PATCH skipped`.
+  - **Users Authentik no longer has are omitted, not fatal.** A local row can
+    outlive its Authentik account (the remove-user routes delete the Authentik
+    account first and the local row second, and the local delete can fail on the
+    audit_logs FK; an orphaned row is never deleted). If Authentik rejects a
+    group PATCH with `Invalid pk "N" - object does not exist.`, the reconciler
+    drops that pk and retries (bounded, remembered per process, logged). See
+    `docs/authentik-scaling-lessons.md`. It must stay REMOVE-only and keyed on
+    Authentik's exact message; never filter by local `account_status`.
   - CloudTAK create/update/delete and team-channel group create/delete were
     left unchanged (already whole-group reconciles or create/delete, not
     per-user fan-out).

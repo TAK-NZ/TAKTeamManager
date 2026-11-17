@@ -160,3 +160,35 @@ the same as a populated one. `replaceGroupMembers` now skips the PATCH when the
 group's current members already equal the desired set. When sizing or throttling
 any new bulk Authentik writer, count events and queued tasks per write, not only
 requests per second.
+
+## One half-deleted user fails every "all users" group, forever (2026-11)
+
+A user whose Authentik account is gone but whose local `users` row remains keeps
+its `authentik_user_id`. The BCH-read desired set is every user with a non-null
+pk, so it kept containing that pk. Authentik answers a group PATCH naming a
+non-existent user with HTTP 400
+`{"users": ["Invalid pk \"474\" - object does not exist."]}` and writes
+nothing, so all 13 BCH-read groups in the demo environment failed on every
+hourly sweep from the day it happened. The 400 is classified `permanent`, so
+nothing retried it, and the log line carried no reason.
+
+How the row got into that state (demo, 2026-11-09 04:33 UTC, from the logs and
+`server/routes/users.js`): an admin used "permanently delete" (bulk-remove). The
+route removes memberships, deletes the Authentik account, then runs
+`DELETE FROM users`. That last statement failed on `audit_logs_user_id_fkey`
+(the user had audit history and the FK does not cascade), so the Authentik
+account was already gone while the local row survived; the retries then hit
+`Failed to get user: Not Found`, and the next Reconciliation_Sweep marked the
+row `orphaned`. An orphaned row is never deleted by design (see the
+`users.account_status` column comment), and the Users list and team views hide
+it, so nothing in the UI shows it or can clean it up. The delete routes are the
+root cause and are NOT fixed by the change described below.
+
+`replaceGroupMembers` now omits exactly the pks Authentik names as non-existent
+and retries (a 400 writes nothing, so this is safe; it only ever removes an id,
+never adds or keeps one), bounded to 5 retries, and remembers the pk for the
+life of the process. It logs a warning naming the pk and group. Every other 400
+still fails as before, now with Authentik's own message in the error. Do NOT
+instead filter `orphaned` users out of the desired sets: the false-orphan
+incident above wrongly orphaned about 1,100 real users, and a status filter
+would have stripped all of them from every BCH-read group.

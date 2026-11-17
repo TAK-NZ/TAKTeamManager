@@ -59,6 +59,7 @@ const {
 const { resolvePinnedPks } = require('../config/pinnedGroupMembers');
 const { isIgnoredAuthentikUsername, getIgnoredUsernamePrefixes } = require('../config/authentikSyncIgnore');
 const { sameMemberSet } = require('../utils/groupMembershipDiff');
+const { extractMissingUserPks } = require('../utils/authentikValidationErrors');
 
 const AUTHENTIK_URL = () => process.env.AUTHENTIK_URL;
 const AUTHENTIK_TOKEN = () => process.env.AUTHENTIK_API_TOKEN;
@@ -393,6 +394,65 @@ async function preserveIgnoredMembers(groupUuid, desiredPks, logContext = {}, kn
 }
 
 // ---------------------------------------------------------------------------
+// Users Authentik no longer has.
+//
+// Team Manager can keep a local `users` row (with its `authentik_user_id`) for a
+// user whose Authentik account no longer exists. Two known ways: the
+// remove-user routes delete the Authentik account first and the local row
+// second, and the local `DELETE FROM users` fails on the non-cascading
+// audit_logs FK for any user with audit history, so the row survives and the
+// Reconciliation_Sweep later marks it `orphaned` (an orphaned row is never
+// deleted and keeps its pk); or the account was deleted directly in Authentik.
+// The "every user" desired sets (BCH read) still contain that pk, and Authentik
+// rejects the WHOLE group PATCH with HTTP 400
+//   { "users": ["Invalid pk \"474\" - object does not exist."] }
+// and nothing is written, so every group that contains the stale pk failed on
+// every sweep, permanently (seen 2026-11: all 13 BCH-read groups, hourly, from
+// the day one user was removed this way).
+//
+// Authentik is the authority on whether a user exists. When it names a pk that
+// does not exist, that pk cannot be a member, so omit it and retry. This only
+// ever REMOVES an id from what we were about to write (it can never add or keep
+// anyone), it acts only on Authentik's own exact validation message, and a 400
+// writes nothing, so the retry is safe. Anything else about a 400 still fails
+// the operation exactly as before.
+//
+// DRF reports one invalid pk per response, so a few deleted users need a few
+// rounds; MAX_MISSING_PK_RETRIES bounds that. Learned pks are remembered for the
+// life of the process so later groups omit them up front (and, with them gone,
+// are then recognised as unchanged and skipped). The stale local row is
+// logged, not repaired: that is an operator decision.
+// ---------------------------------------------------------------------------
+const MAX_MISSING_PK_RETRIES = 5;
+const knownMissingUserPks = new Set();
+
+/** Test hook: forget learned pks so tests are independent. */
+function resetKnownMissingUserPks() {
+  knownMissingUserPks.clear();
+}
+
+/**
+ * Read and parse an error response body, never throwing and never reading more
+ * than needed. Returns { body, snippet }: `body` the parsed JSON (or null) and
+ * `snippet` a short single-line text of it for error messages.
+ */
+async function readErrorBody(response) {
+  try {
+    const text = await response.text();
+    let body = null;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = null;
+    }
+    const snippet = String(text).replace(/\s+/g, ' ').trim().slice(0, 300);
+    return { body, snippet };
+  } catch {
+    return { body: null, snippet: '' };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // The full-replace PATCH primitive.
 // ---------------------------------------------------------------------------
 
@@ -447,7 +507,17 @@ async function replaceGroupMembers(groupUuid, memberPks, logContext = {}) {
   // to ignore. Additive-only. Runs before the dry-run branch too, so the
   // dry-run log reflects the set that WOULD be written.
   const preservedPks = await preserveIgnoredMembers(groupUuid, memberPks, logContext, currentMembers);
-  const numericPks = preservedPks.map((pk) => Number(pk)).filter((n) => Number.isFinite(n));
+  let numericPks = preservedPks.map((pk) => Number(pk)).filter((n) => Number.isFinite(n));
+  if (knownMissingUserPks.size > 0) {
+    const omitted = numericPks.filter((pk) => knownMissingUserPks.has(pk));
+    if (omitted.length > 0) {
+      numericPks = numericPks.filter((pk) => !knownMissingUserPks.has(pk));
+      logger.debug(
+        { ...logContext, groupUuid, omittedPks: omitted },
+        'Omitting user pks Authentik previously reported as non-existent'
+      );
+    }
+  }
 
   // Nothing to write: Authentik already holds exactly this member set. Only
   // reached when the current members were read successfully AND provably equal
@@ -468,39 +538,67 @@ async function replaceGroupMembers(groupUuid, memberPks, logContext = {}) {
     return { patched: false, unchanged: false, dryRun: true, memberCount: numericPks.length };
   }
 
+  const droppedMissingPks = [];
   let response;
-  try {
-    response = await authentikRequest.run({ kind: 'write' }, () =>
-      fetchWithTimeout(`${AUTHENTIK_URL()}/api/v3/core/groups/${encodeURIComponent(groupUuid)}/`, {
-        method: 'PATCH',
-        headers: {
-          Authorization: `Bearer ${AUTHENTIK_TOKEN()}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ users: numericPks })
-      })
-    );
-  } catch (err) {
-    // Network/timeout, or a RateLimitAcquireError -- all retryable. Never a
-    // partial write: fetch either delivered the whole body or it did not.
-    throw new AuthentikApiError(
-      `Failed to PATCH group ${groupUuid} membership: ${err.message}`,
-      classifyFailure(err)
-    );
-  }
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      response = await authentikRequest.run({ kind: 'write' }, () =>
+        fetchWithTimeout(`${AUTHENTIK_URL()}/api/v3/core/groups/${encodeURIComponent(groupUuid)}/`, {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${AUTHENTIK_TOKEN()}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ users: numericPks })
+        })
+      );
+    } catch (err) {
+      // Network/timeout, or a RateLimitAcquireError -- all retryable. Never a
+      // partial write: fetch either delivered the whole body or it did not.
+      throw new AuthentikApiError(
+        `Failed to PATCH group ${groupUuid} membership: ${err.message}`,
+        classifyFailure(err)
+      );
+    }
+    if (response.ok) break;
 
-  if (!response.ok) {
+    // A 400 that names users Authentik does not have: omit them and retry (see
+    // the block comment above). Nothing was written by the rejected request.
+    let detail = '';
+    if (response.status === 400) {
+      const { body, snippet } = await readErrorBody(response);
+      detail = snippet ? ` - ${snippet}` : '';
+      const missing = extractMissingUserPks(body).filter((pk) => numericPks.includes(pk));
+      if (missing.length > 0 && attempt < MAX_MISSING_PK_RETRIES) {
+        for (const pk of missing) {
+          knownMissingUserPks.add(pk);
+          droppedMissingPks.push(pk);
+        }
+        numericPks = numericPks.filter((pk) => !knownMissingUserPks.has(pk));
+        logger.warn(
+          { ...logContext, groupUuid, missingPks: missing, retriesLeft: MAX_MISSING_PK_RETRIES - attempt - 1 },
+          'Authentik reports user(s) that do not exist; omitting them from the group membership and retrying (a local users row still points at a deleted Authentik user)'
+        );
+        continue;
+      }
+    }
     throw new AuthentikApiError(
-      `Failed to PATCH group ${groupUuid} membership: ${response.status} ${response.statusText}`,
+      `Failed to PATCH group ${groupUuid} membership: ${response.status} ${response.statusText}${detail}`,
       classifyFailure(response.status)
     );
   }
 
   logger.info(
-    { ...logContext, groupUuid, memberCount: numericPks.length, dryRun: false },
+    {
+      ...logContext,
+      groupUuid,
+      memberCount: numericPks.length,
+      dryRun: false,
+      ...(droppedMissingPks.length > 0 ? { droppedMissingPks } : {})
+    },
     'Replaced group membership via full PATCH'
   );
-  return { patched: true, unchanged: false, dryRun: false, memberCount: numericPks.length };
+  return { patched: true, unchanged: false, dryRun: false, memberCount: numericPks.length, droppedMissingPks };
 }
 
 module.exports = {
@@ -510,6 +608,7 @@ module.exports = {
   desiredRegionMembers,
   desiredCloudTakMembers,
   replaceGroupMembers,
+  resetKnownMissingUserPks,
   preserveIgnoredMembers,
   fetchGroupMemberUsernames,
   // re-exported for the worker handler's convenience

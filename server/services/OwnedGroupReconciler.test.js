@@ -45,6 +45,7 @@ const ORIGINAL_ENV = { ...process.env };
 
 beforeEach(() => {
   jest.clearAllMocks();
+  reconciler.resetKnownMissingUserPks();
   process.env.AUTHENTIK_URL = 'https://authentik.example';
   process.env.AUTHENTIK_API_TOKEN = 'test-token';
   // Default: rate limiter simply runs the fn (token granted).
@@ -281,7 +282,7 @@ describe('replaceGroupMembers', () => {
   it('issues ONE PATCH with the full numeric member list when armed', async () => {
     const authentik = mockAuthentik([]);
     const result = await reconciler.replaceGroupMembers('grp-uuid', ['10', '11', '12']);
-    expect(result).toEqual({ patched: true, unchanged: false, dryRun: false, memberCount: 3 });
+    expect(result).toEqual({ patched: true, unchanged: false, dryRun: false, memberCount: 3, droppedMissingPks: [] });
     // One read (to check for a change), then one write.
     expect(mockRun.mock.calls.map((c) => c[0].kind)).toEqual(['read', 'write']);
     expect(authentik.patchCalls()).toHaveLength(1);
@@ -485,5 +486,133 @@ describe('replaceGroupMembers: ignored-prefix member preservation', () => {
     // what WOULD be written), but no PATCH is issued.
     expect(result).toEqual({ patched: false, unchanged: false, dryRun: true, memberCount: 2 });
     expect(authentik.patchCalls()).toHaveLength(0);
+  });
+});
+
+// A user whose Authentik account is gone can leave a local row whose authentik_user_id
+// is still in the "every user" desired sets. Authentik then rejects the whole
+// PATCH with HTTP 400 `Invalid pk "N" - object does not exist.` and writes
+// nothing. The reconciler omits exactly the pks Authentik names and retries.
+describe('replaceGroupMembers: users Authentik no longer has', () => {
+  const missingPkBody = (pk) => JSON.stringify({ users: [`Invalid pk "${pk}" - object does not exist.`] });
+  const bad400 = (pk) => ({ ok: false, status: 400, statusText: 'Bad Request', text: async () => missingPkBody(pk) });
+  const ok200 = { ok: true, status: 200 };
+
+  // GET returns `current`; PATCH answers come from `patchResponses` in order.
+  const mockWith = (current, patchResponses) => {
+    const queue = [...patchResponses];
+    global.fetch = jest.fn().mockImplementation((url, options) => {
+      if ((options?.method ?? 'GET') === 'GET') return Promise.resolve(groupDetail(current));
+      return Promise.resolve(queue.shift() ?? ok200);
+    });
+    return {
+      patchBodies: () =>
+        global.fetch.mock.calls.filter(([, o]) => o?.method === 'PATCH').map(([, o]) => JSON.parse(o.body).users)
+    };
+  };
+
+  beforeEach(() => {
+    mockDryRun.mockReturnValue(false);
+    delete process.env.AUTHENTIK_SYNC_IGNORED_USERNAME_PREFIXES;
+  });
+
+  it('omits the pk Authentik says does not exist, retries, and succeeds', async () => {
+    const authentik = mockWith([{ pk: 10, username: 'a' }], [bad400(474), ok200]);
+    const result = await reconciler.replaceGroupMembers('grp-uuid', ['10', '11', '474']);
+    expect(authentik.patchBodies()).toEqual([[10, 11, 474], [10, 11]]);
+    expect(result).toMatchObject({ patched: true, memberCount: 2, droppedMissingPks: [474] });
+    // Each attempt went through the write lane (and its rate limit).
+    expect(mockRun.mock.calls.filter((c) => c[0].kind === 'write')).toHaveLength(2);
+  });
+
+  it('never ADDS or KEEPS anyone: the retry body is the original minus only the named pk', async () => {
+    const authentik = mockWith([], [bad400(12), ok200]);
+    await reconciler.replaceGroupMembers('grp-uuid', ['10', '11', '12', '13']);
+    const [first, second] = authentik.patchBodies();
+    expect(second).toEqual(first.filter((pk) => pk !== 12));
+    expect(second.every((pk) => first.includes(pk))).toBe(true);
+  });
+
+  it('handles several deleted users, one per Authentik response', async () => {
+    const authentik = mockWith([], [bad400(7), bad400(474), ok200]);
+    const result = await reconciler.replaceGroupMembers('grp-uuid', ['7', '10', '474']);
+    expect(authentik.patchBodies()).toEqual([[7, 10, 474], [10, 474], [10]]);
+    expect(result.droppedMissingPks).toEqual([7, 474]);
+  });
+
+  it('remembers the pk, so the NEXT group omits it up front and an already-correct group is skipped', async () => {
+    mockWith([{ pk: 10, username: 'a' }], [bad400(474), ok200]);
+    await reconciler.replaceGroupMembers('grp-1', ['10', '474']);
+    // Second group: Authentik already holds exactly [10]; desired is [10, 474].
+    const authentik = mockWith([{ pk: 10, username: 'a' }], []);
+    const result = await reconciler.replaceGroupMembers('grp-2', ['10', '474']);
+    expect(authentik.patchBodies()).toEqual([]);
+    expect(result).toMatchObject({ patched: false, unchanged: true, memberCount: 1 });
+  });
+
+  it('omits a remembered pk up front when the next group does need a PATCH (one request, not a failed one first)', async () => {
+    mockWith([], [bad400(474), ok200]);
+    await reconciler.replaceGroupMembers('grp-1', ['10', '474']);
+    const authentik = mockWith([{ pk: 10, username: 'a' }], []);
+    await reconciler.replaceGroupMembers('grp-2', ['10', '11', '474']);
+    expect(authentik.patchBodies()).toEqual([[10, 11]]);
+  });
+
+  it('is bounded: gives up with a permanent error after the retry limit instead of looping', async () => {
+    // A different missing pk every time, forever.
+    let n = 100;
+    global.fetch = jest.fn().mockImplementation((url, options) => {
+      if ((options?.method ?? 'GET') === 'GET') return Promise.resolve(groupDetail([]));
+      n += 1;
+      return Promise.resolve(bad400(n - 1));
+    });
+    const members = Array.from({ length: 20 }, (_, i) => String(100 + i));
+    await expect(reconciler.replaceGroupMembers('grp-uuid', members)).rejects.toMatchObject({
+      name: 'AuthentikApiError',
+      classification: 'permanent'
+    });
+    const patches = global.fetch.mock.calls.filter(([, o]) => o?.method === 'PATCH');
+    expect(patches).toHaveLength(6); // first try + 5 retries
+  });
+
+  it('does NOT retry a 400 that is not the missing-user message, and puts Authentik\'s reason in the error', async () => {
+    const authentik = mockWith([], [
+      { ok: false, status: 400, statusText: 'Bad Request', text: async () => JSON.stringify({ users: ['This list may not be empty.'] }) }
+    ]);
+    let caught;
+    try {
+      await reconciler.replaceGroupMembers('grp-uuid', ['10']);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toMatchObject({ name: 'AuthentikApiError', classification: 'permanent' });
+    expect(caught.message).toContain('400 Bad Request');
+    expect(caught.message).toContain('This list may not be empty.');
+    expect(authentik.patchBodies()).toHaveLength(1);
+  });
+
+  it('does NOT retry when the named pk is not one we sent (nothing to omit)', async () => {
+    const authentik = mockWith([], [bad400(999)]);
+    await expect(reconciler.replaceGroupMembers('grp-uuid', ['10', '11'])).rejects.toMatchObject({
+      classification: 'permanent'
+    });
+    expect(authentik.patchBodies()).toHaveLength(1);
+  });
+
+  it('does NOT learn from a 5xx or a malformed body', async () => {
+    const authentik = mockWith([], [
+      { ok: false, status: 500, statusText: 'Server Error', text: async () => missingPkBody(10) },
+    ]);
+    await expect(reconciler.replaceGroupMembers('grp-uuid', ['10'])).rejects.toMatchObject({ classification: 'retryable' });
+    expect(authentik.patchBodies()).toHaveLength(1);
+    // And nothing was remembered: the pk is still sent next time.
+    const next = mockWith([], [ok200]);
+    await reconciler.replaceGroupMembers('grp-uuid-2', ['10']);
+    expect(next.patchBodies()).toEqual([[10]]);
+  });
+
+  it('survives an error response whose body cannot be read', async () => {
+    mockWith([], [{ ok: false, status: 400, statusText: 'Bad Request', text: async () => { throw new Error('socket closed'); } }]);
+    await expect(reconciler.replaceGroupMembers('grp-uuid', ['10'])).rejects.toMatchObject({ classification: 'permanent' });
   });
 });
