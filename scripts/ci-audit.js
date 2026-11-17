@@ -67,9 +67,16 @@ const FAILING_SEVERITIES = ['high', 'critical'];
  * Each entry: the GHSA id, the package it concerns, and WHY it is accepted.
  */
 const AUDIT_EXCEPTIONS = [
-  // None at present. The node-forge (GHSA-86w9-cpqp-85rv) and braces
-  // (GHSA-vfj7-8cjw-p6xm) entries were removed once patched releases /
-  // dependency updates made them remediable.
+  {
+    id: 'GHSA-fc5q-39xc-vjpf',
+    pkg: 'picomatch',
+    reason:
+      'ReDoS in picomatch <= 4.0.7 via repeated extglobs. 4.0.7 is the latest ' +
+      'release and no patched version exists. Reached only through build and test ' +
+      'tooling (vite, jest, chokidar/anymatch), never with untrusted glob input. ' +
+      "npm's suggested fix is a major downgrade of an unrelated parent. Remove this " +
+      'entry once a patched picomatch is published.'
+  }
 ];
 
 // Set of accepted advisory ids for O(1) lookup.

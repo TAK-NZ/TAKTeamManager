@@ -53,7 +53,9 @@ write the full truth (never a delta), so they converge and never flip-flop.
    `add_user_to_group`/`remove_user_from_group` fan-out for owned groups.
 2. **Periodic anti-drift sweep** — a worker `setInterval` job, feature-
    flagged and paced, that walks all owned groups, computes desired-vs-current,
-   and PATCHes only the groups that differ. Corrects any missed event.
+   and PATCHes only the groups that differ (the reconciler reads the group's
+   current members and skips the PATCH when they already equal the desired set;
+   see "Unchanged groups are not PATCHed" below). Corrects any missed event.
 
 Authority: the sweep is the source of truth; event-driven reconciles are a
 latency optimisation. Never "optimise" an event path into writing deltas.
@@ -230,6 +232,20 @@ ops to `reconcile_owned_group`.
     `BULK_GROUP_RECONCILE_ENABLED`, interval `OWNED_GROUP_SWEEP_INTERVAL_MINUTES`
     (default 60, floored at 1). Enqueues a reconcile for every owned group;
     the rate-limited worker drains them.
+  - **Unchanged groups are not PATCHed.** A group PATCH is not free on the
+    Authentik side even when nothing changes: each one creates an event and
+    queues two background tasks (event-trigger dispatch, SCIM dispatch), about
+    2 s of database work each. Measured 2026-11: a test environment with 663
+    teams (about 1,384 owned groups, 96% of them empty) PATCHed all of them
+    every hour, held the Authentik database at 82-99% CPU for about 9 minutes
+    per sweep, and tipped it into an outage; a demo environment with 108 owned
+    groups did the same sweep in 35 s at 24-28% CPU. `replaceGroupMembers` now
+    reads the group's current members (one read, shared with the ignored-prefix
+    preservation) and skips the PATCH when they provably equal the set it would
+    write (`server/utils/groupMembershipDiff.js`: any doubt means PATCH). With
+    no ignored prefixes configured and a failed read it falls back to the
+    unconditional PATCH, exactly as before. The log line is
+    `Group membership already matches; PATCH skipped`.
   - CloudTAK create/update/delete and team-channel group create/delete were
     left unchanged (already whole-group reconciles or create/delete, not
     per-user fan-out).
