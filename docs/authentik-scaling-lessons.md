@@ -141,3 +141,22 @@ background job** — this is expected, not a bug. Consequences to remember:
   partial import (e.g. failures during an Authentik outage) can be resumed by
   re-running over the same CSV; genuinely-conflicting rows (e.g. a duplicate
   callsign-suffix within a team) are real data conflicts, not retry candidates.
+
+## An unchanged group PATCH still costs the Authentik database (2026-11)
+
+The rate limiter caps how fast Team Manager writes, not how much it writes, and
+a group PATCH that changes nothing is still expensive: Authentik records an
+event and queues two background tasks for it (about 2 s of database work). The
+hourly anti-drift sweep PATCHed every owned group whether or not it had drifted.
+On a test environment with 663 teams that is about 1,384 PATCHes an hour (96%
+of them to empty groups), which kept the Authentik database (Serverless v2, 4
+ACU cap) at 82-99% CPU for about 9 minutes per sweep. That load was the
+recurring peak that the database failed under during a multi-day Authentik
+degradation, together with a burst of LDAP logins. A demo environment with 108 owned groups ran
+the same sweep in 35 s at 24-28% CPU.
+
+Cost scales with the NUMBER of owned groups, not their size: an empty group costs
+the same as a populated one. `replaceGroupMembers` now skips the PATCH when the
+group's current members already equal the desired set. When sizing or throttling
+any new bulk Authentik writer, count events and queued tasks per write, not only
+requests per second.

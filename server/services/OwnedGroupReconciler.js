@@ -58,6 +58,7 @@ const {
 } = require('../config/bulkGroupReconcile');
 const { resolvePinnedPks } = require('../config/pinnedGroupMembers');
 const { isIgnoredAuthentikUsername, getIgnoredUsernamePrefixes } = require('../config/authentikSyncIgnore');
+const { sameMemberSet } = require('../utils/groupMembershipDiff');
 
 const AUTHENTIK_URL = () => process.env.AUTHENTIK_URL;
 const AUTHENTIK_TOKEN = () => process.env.AUTHENTIK_API_TOKEN;
@@ -329,10 +330,25 @@ async function fetchGroupMemberUsernames(groupUuid) {
   }
 
   const body = await response.json();
+  // Every current member, not only the ones with a readable username: this
+  // list is also compared against the desired set to decide whether the PATCH
+  // can be skipped, so a member dropped here would look like "not a member" and
+  // a stale one could be left in place. A member with no string username is
+  // kept with an empty username (never matches an ignored prefix). The bare
+  // `users` pk array, when Authentik returns it, is unioned in as a cross-check:
+  // a superset can only make the sets differ, which means "PATCH", never "skip".
+  const byPk = new Map();
   const usersObj = Array.isArray(body?.users_obj) ? body.users_obj : [];
-  return usersObj
-    .filter((u) => u && u.pk !== null && u.pk !== undefined && typeof u.username === 'string')
-    .map((u) => ({ pk: String(u.pk), username: u.username }));
+  for (const u of usersObj) {
+    if (!u || u.pk === null || u.pk === undefined) continue;
+    byPk.set(String(u.pk), typeof u.username === 'string' ? u.username : '');
+  }
+  const bareUsers = Array.isArray(body?.users) ? body.users : [];
+  for (const pk of bareUsers) {
+    if (pk === null || pk === undefined) continue;
+    if (!byPk.has(String(pk))) byPk.set(String(pk), '');
+  }
+  return [...byPk.entries()].map(([pk, username]) => ({ pk, username }));
 }
 
 /**
@@ -343,18 +359,24 @@ async function fetchGroupMemberUsernames(groupUuid) {
  * @param {string} groupUuid
  * @param {string[]} desiredPks  the DB-computed desired set.
  * @param {object} logContext
+ * @param {Array<{pk: string, username: string}>|null} [knownCurrentMembers]
+ *   the group's current members if the caller already read them; when null the
+ *   members are read here.
  * @returns {Promise<string[]>} the desired set with preserved ignored members
  *   unioned in.
  * @throws {AuthentikApiError} if the current-member read fails (fail-closed).
  */
-async function preserveIgnoredMembers(groupUuid, desiredPks, logContext = {}) {
+async function preserveIgnoredMembers(groupUuid, desiredPks, logContext = {}, knownCurrentMembers = null) {
   // No configured prefixes -> nothing to preserve, and no reason to spend a
   // read on every group.
   if (getIgnoredUsernamePrefixes().length === 0) {
     return desiredPks;
   }
 
-  const currentMembers = await fetchGroupMemberUsernames(groupUuid);
+  // A caller that has already read the members (replaceGroupMembers does, to
+  // decide whether it can skip the PATCH) passes them in, so one write cycle
+  // uses one consistent snapshot and one read.
+  const currentMembers = knownCurrentMembers ?? (await fetchGroupMemberUsernames(groupUuid));
   const preserved = currentMembers
     .filter((m) => isIgnoredAuthentikUsername(m.username))
     .map((m) => m.pk);
@@ -383,27 +405,67 @@ async function preserveIgnoredMembers(groupUuid, desiredPks, logContext = {}) {
  * @param {number[]} memberPks - the COMPLETE desired member set (integer
  *   Authentik user pks). Authentik's users array is `type: integer`.
  * @param {object} logContext - extra fields for the structured log line.
- * @returns {Promise<{ patched: boolean, dryRun: boolean, memberCount: number }>}
+ * Issues no PATCH when the group's current members, read just before, are
+ * provably identical to `memberPks` (plus preserved ignored members): the
+ * result then has `unchanged: true`.
+ *
+ * @returns {Promise<{ patched: boolean, unchanged: boolean, dryRun: boolean, memberCount: number }>}
  * @throws {AuthentikApiError} on a non-2xx / network failure (classified).
  */
 async function replaceGroupMembers(groupUuid, memberPks, logContext = {}) {
   const dryRun = isBulkGroupReconcileDryRun();
 
+  // Read the group's current members once. It serves two purposes:
+  //   1. ignored-prefix preservation (below);
+  //   2. skipping a PATCH that would change nothing. Authentik turns every
+  //      group PATCH into an event plus queued event-trigger and SCIM tasks even
+  //      when the membership is identical, so the hourly anti-drift sweep used
+  //      to saturate the Authentik database on an environment with many owned
+  //      groups, nearly all of them already correct.
+  //
+  // Failure handling keeps the previous contract exactly:
+  //   - ignored prefixes configured: the read is required to prove the replace
+  //     will not strip an ignored member, so a failure throws (retryable) and no
+  //     PATCH is issued (fail-closed), as before;
+  //   - no ignored prefixes: no read was ever needed, so a failed read only
+  //     means we cannot prove the group is unchanged. Fall back to the
+  //     unconditional PATCH, as before, rather than blocking the reconcile.
+  const prefixesConfigured = getIgnoredUsernamePrefixes().length > 0;
+  let currentMembers = null;
+  try {
+    currentMembers = await fetchGroupMemberUsernames(groupUuid);
+  } catch (err) {
+    if (prefixesConfigured) throw err;
+    logger.warn(
+      { ...logContext, groupUuid, err: err.message },
+      'Could not read current group members to check for changes; writing membership unconditionally'
+    );
+  }
+
   // Preserve any currently-present ignored-prefix members (e.g. `etl-`
   // service accounts) so the full replace never strips a user TTM was told
-  // to ignore. Additive-only and fail-closed: a read failure here throws
-  // (retryable) and no PATCH is issued. Runs before the dry-run branch too,
-  // so the dry-run log reflects the set that WOULD be written.
-  const preservedPks = await preserveIgnoredMembers(groupUuid, memberPks, logContext);
-
+  // to ignore. Additive-only. Runs before the dry-run branch too, so the
+  // dry-run log reflects the set that WOULD be written.
+  const preservedPks = await preserveIgnoredMembers(groupUuid, memberPks, logContext, currentMembers);
   const numericPks = preservedPks.map((pk) => Number(pk)).filter((n) => Number.isFinite(n));
+
+  // Nothing to write: Authentik already holds exactly this member set. Only
+  // reached when the current members were read successfully AND provably equal
+  // the set about to be written (any doubt returns false and we PATCH).
+  if (currentMembers && sameMemberSet(currentMembers.map((m) => m.pk), numericPks)) {
+    logger.info(
+      { ...logContext, groupUuid, memberCount: numericPks.length, dryRun },
+      'Group membership already matches; PATCH skipped'
+    );
+    return { patched: false, unchanged: true, dryRun, memberCount: numericPks.length };
+  }
 
   if (dryRun) {
     logger.info(
       { ...logContext, groupUuid, memberCount: numericPks.length, dryRun: true },
       'Dry-run: would PATCH group membership (no Authentik write issued)'
     );
-    return { patched: false, dryRun: true, memberCount: numericPks.length };
+    return { patched: false, unchanged: false, dryRun: true, memberCount: numericPks.length };
   }
 
   let response;
@@ -438,7 +500,7 @@ async function replaceGroupMembers(groupUuid, memberPks, logContext = {}) {
     { ...logContext, groupUuid, memberCount: numericPks.length, dryRun: false },
     'Replaced group membership via full PATCH'
   );
-  return { patched: true, dryRun: false, memberCount: numericPks.length };
+  return { patched: true, unchanged: false, dryRun: false, memberCount: numericPks.length };
 }
 
 module.exports = {
