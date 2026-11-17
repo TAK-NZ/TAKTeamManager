@@ -71,6 +71,10 @@ jest.mock('../services/AccountLifecycleService', () => {
   return mockService;
 });
 
+jest.mock('../services/UserRemovalService', () => ({
+  permanentlyRemoveUser: jest.fn()
+}));
+
 jest.mock('../services/TeamMembershipService', () => ({
   removeUserFromTeam: jest.fn()
 }));
@@ -121,7 +125,7 @@ const Team = require('../models/Team');
 const User = require('../models/User');
 const AccountLifecycleService = require('../services/AccountLifecycleService');
 const TeamMembershipService = require('../services/TeamMembershipService');
-const UserAttributesService = require('../services/userAttributes');
+const UserRemovalService = require('../services/UserRemovalService');
 const { TeamTransferService } = require('../services/TeamTransferService');
 const usersRouter = require('./users');
 
@@ -548,44 +552,75 @@ describe('POST /api/users/bulk-remove-from-team', () => {
     expect(TeamMembershipService.removeUserFromTeam).not.toHaveBeenCalled();
   });
 
-  it('permanently deletes every row for a Global_Manager, reporting authentikAccountDeleted per row', async () => {
+  it('permanently deletes every row for a Global_Manager, reporting the outcome per row', async () => {
     asGlobalManager();
-    pool.query.mockImplementation((sql) => {
-      if (sql.includes('SELECT authentik_user_id FROM users')) {
-        return Promise.resolve({ rows: [{ authentik_user_id: 999 }] });
-      }
-      return Promise.resolve({ rows: [] });
+    UserRemovalService.permanentlyRemoveUser.mockResolvedValue({
+      groupsQueued: 1,
+      authentikAccountDeleted: true,
+      certificateRevocationDryRun: true,
+      localRowRetained: false
     });
-    TeamMembershipService.removeUserFromTeam.mockResolvedValue({ success: true, groupsQueued: 1 });
-    UserAttributesService.clearUserAttributes.mockResolvedValue();
 
     const res = await request(app).post('/api/users/bulk-remove-from-team').send({ userIds: [10, 11], teamId: 5 });
 
     expect(res.status).toBe(200);
     expect(res.body.successCount).toBe(2);
-    expect(res.body.results[0]).toEqual(
-      expect.objectContaining({ userId: 10, success: true, authentikAccountDeleted: true })
-    );
-    expect(TeamMembershipService.removeUserFromTeam).toHaveBeenCalledTimes(2);
+    expect(res.body.results[0]).toEqual({
+      userId: 10,
+      success: true,
+      authentikAccountDeleted: true,
+      certificateRevocationDryRun: true,
+      localRowRetained: false
+    });
+    expect(UserRemovalService.permanentlyRemoveUser).toHaveBeenCalledTimes(2);
+    expect(UserRemovalService.permanentlyRemoveUser).toHaveBeenNthCalledWith(1, 10, expect.anything());
+    expect(UserRemovalService.permanentlyRemoveUser).toHaveBeenNthCalledWith(2, 11, expect.anything());
+  });
+
+  it('reports a row whose local record had to be kept (the user has history) as a success', async () => {
+    asGlobalManager();
+    UserRemovalService.permanentlyRemoveUser.mockResolvedValue({
+      groupsQueued: 1,
+      authentikAccountDeleted: true,
+      certificateRevocationDryRun: false,
+      localRowRetained: true
+    });
+
+    const res = await request(app).post('/api/users/bulk-remove-from-team').send({ userIds: [10], teamId: 5 });
+
+    expect(res.body.successCount).toBe(1);
+    expect(res.body.results[0]).toMatchObject({ userId: 10, success: true, localRowRetained: true });
   });
 
   it("one row's missing-user 'not found' failure does not affect another row's success (per-row isolation)", async () => {
     asGlobalManager();
-    pool.query.mockImplementation((sql, params) => {
-      if (sql.includes('SELECT authentik_user_id FROM users')) {
-        if (params[0] === 10) {
-          return Promise.resolve({ rows: [] });
-        }
-        return Promise.resolve({ rows: [{ authentik_user_id: 999 }] });
-      }
-      return Promise.resolve({ rows: [] });
-    });
-    TeamMembershipService.removeUserFromTeam.mockResolvedValue({ success: true, groupsQueued: 1 });
-    UserAttributesService.clearUserAttributes.mockResolvedValue();
+    UserRemovalService.permanentlyRemoveUser.mockImplementation((userId) =>
+      Promise.resolve(
+        userId === 10
+          ? null
+          : { groupsQueued: 1, authentikAccountDeleted: true, certificateRevocationDryRun: true, localRowRetained: false }
+      )
+    );
 
     const res = await request(app).post('/api/users/bulk-remove-from-team').send({ userIds: [10, 11], teamId: 5 });
 
     expect(res.body.results[0]).toEqual({ userId: 10, success: false, error: 'User not found' });
     expect(res.body.results[1]).toEqual(expect.objectContaining({ userId: 11, success: true }));
+  });
+
+  it("one row's removal error (nothing changed for it) does not stop the other rows", async () => {
+    asGlobalManager();
+    UserRemovalService.permanentlyRemoveUser.mockImplementation((userId) =>
+      userId === 10
+        ? Promise.reject(new Error('connection reset'))
+        : Promise.resolve({ groupsQueued: 1, authentikAccountDeleted: true, certificateRevocationDryRun: true, localRowRetained: false })
+    );
+
+    const res = await request(app).post('/api/users/bulk-remove-from-team').send({ userIds: [10, 11], teamId: 5 });
+
+    expect(res.body.successCount).toBe(1);
+    expect(res.body.failureCount).toBe(1);
+    expect(res.body.results[0]).toEqual({ userId: 10, success: false, error: 'connection reset' });
+    expect(res.body.results[1]).toMatchObject({ userId: 11, success: true });
   });
 });

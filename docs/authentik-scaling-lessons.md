@@ -181,8 +181,21 @@ account was already gone while the local row survived; the retries then hit
 `Failed to get user: Not Found`, and the next Reconciliation_Sweep marked the
 row `orphaned`. An orphaned row is never deleted by design (see the
 `users.account_status` column comment), and the Users list and team views hide
-it, so nothing in the UI shows it or can clean it up. The delete routes are the
-root cause and are NOT fixed by the change described below.
+it, so nothing in the UI shows it or can clean it up.
+
+The delete routes were the root cause and are fixed in
+`server/services/UserRemovalService.js`, shared by both routes: all local work
+(memberships, queued operations, `user_cache`, the `users` row) now runs in one
+transaction that commits BEFORE Authentik is touched; a user whose history
+blocks the row delete (SQLSTATE 23503) is kept as an `orphaned` tombstone with
+`authentik_user_id` cleared (history retained, no dangling Authentik id for the
+group sets); any other local failure rolls back with nothing changed in
+Authentik. The response carries `localRowRetained` so an admin can tell the
+two outcomes apart.
+
+The change below is the second layer: it keeps group syncs working if a stale
+pk ever reaches the desired sets some other way (for example an account deleted
+directly in Authentik, or rows left by the old routes).
 
 `replaceGroupMembers` now omits exactly the pks Authentik names as non-existent
 and retries (a 400 writes nothing, so this is safe; it only ever removes an id,
