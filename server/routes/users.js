@@ -9,6 +9,7 @@ const authentikService = require('../services/authentik');
 const { isIgnoredAuthentikUsername, getIgnoredUsernamePrefixes } = require('../config/authentikSyncIgnore');
 const UserAttributesService = require('../services/userAttributes');
 const TeamMembershipService = require('../services/TeamMembershipService');
+const UserRemovalService = require('../services/UserRemovalService');
 const UserProvisioningService = require('../services/UserProvisioningService');
 const ManagedIdentifierService = require('../services/ManagedIdentifierService');
 const DirectoryScopeService = require('../services/DirectoryScopeService');
@@ -39,7 +40,6 @@ const {
   TargetUserNotFoundError
 } = AccountLifecycleService;
 const { isCloudTakEnabled } = require('../config/cloudtak');
-const { isDeviceMgmtRevokeEnabled } = require('../config/deviceMgmt');
 const pool = require('../config/database');
 const { writeAuditLog } = require('../utils/auditLog');
 const { getLogger } = require('../middleware/requestContext');
@@ -1695,119 +1695,33 @@ router.delete('/remove-from-team/:userId', authenticateToken, authorize, [
 
   try {
     const { userId } = req.params;
-    
-    // Get user's Authentik ID
-    const userResult = await pool.query(
-      'SELECT authentik_user_id FROM users WHERE id = $1',
-      [userId]
-    );
-    
-    if (userResult.rows.length === 0) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-    
-    const authentikUserId = userResult.rows[0].authentik_user_id;
-    
+    // `removeUserFromTeam` (called by the service) unconditionally deletes
+    // EVERY team_memberships row for this user (no team_id filter), and this
+    // app enforces at most one direct team per user, so the user is always left
+    // teamless -- its "no teams left" branch always fires, meaning a
+    // `revoke_tak_certificates` operation is always enqueued here.
+    //
+    // The service does all LOCAL work in one transaction BEFORE touching
+    // Authentik, and keeps an orphaned tombstone row for a user whose history
+    // blocks deleting it; see UserRemovalService for why that order matters.
     // req.user.userId is already the local users.id -- see comment on the
     // add-to-team route above.
-    const requestingUserId = req.user.userId;
-    
-    // Use new service layer for team removal. `removeUserFromTeam`
-    // unconditionally deletes EVERY team_memberships row for this user
-    // (no team_id filter), and this app enforces at most one direct team
-    // per user, so this call always leaves the user with zero teams --
-    // its "no teams left" branch always fires here, meaning a
-    // `revoke_tak_certificates` operation is always enqueued for this
-    // delete (never skipped because the user "still had another team").
-    const result = await TeamMembershipService.removeUserFromTeam(userId, requestingUserId);
-
-    // Bugfix (silent revoke-disarmed outcome): the certificate revoke
-    // enqueued above is always processed ASYNCHRONOUSLY by the sync
-    // worker, and -- independent of that -- completes as a no-op
-    // Revoke_Dry_Run whenever DEVICE_MGMT_REVOKE_ENABLED is not the exact
-    // string 'true' (per that flag's own arming contract). Neither of
-    // those facts changes what THIS route does (the account is deleted
-    // either way), but an admin who just permanently deleted a user has
-    // no way to know their TAK Server certificates were never actually
-    // revoked unless that outcome is recorded somewhere inspectable.
-    // Recorded here, at enqueue time, rather than waiting on the worker,
-    // since the flag's value is already fully known now and doesn't
-    // change between enqueue and drain.
-    const certificateRevocationDryRun = !isDeviceMgmtRevokeEnabled();
-
-    // Clear TAK attributes in Authentik and deactivate the user
-    await UserAttributesService.clearUserAttributes(authentikUserId);
-
-    // Bugfix (silent Authentik-delete failure): a failed/unreachable
-    // delete call previously only got logged, and local rows were
-    // deleted anyway -- leaving a fully intact, loginable Authentik
-    // account with no record that anything went wrong. Mirrors the
-    // create-and-add route's own compensating-action pattern: a
-    // non-2xx/non-404 response (404 means the account is already gone,
-    // not a failure) falls back to enqueueing `cleanup_orphaned_authentik_user`
-    // so the Sync_Worker retries the delete asynchronously, and the
-    // outcome is recorded rather than silently assumed.
-    let authentikAccountDeleted = true;
-    try {
-      const deleteResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
-        method: 'DELETE',
-        headers: {
-          'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}`
-        }
-      });
-
-      if (!deleteResponse.ok && deleteResponse.status !== 404) {
-        throw new Error(`Authentik delete responded with status ${deleteResponse.status}`);
-      }
-    } catch (deleteErr) {
-      getLogger().error({ err: deleteErr }, 'Failed to delete user from Authentik');
-      authentikAccountDeleted = false;
-
-      try {
-        await EventPublisher.publishOperation(
-          'cleanup_orphaned_authentik_user',
-          { authentik_user_id: authentikUserId },
-          req.user.userId
-        );
-      } catch (enqueueErr) {
-        getLogger().error(
-          { err: enqueueErr, authentikUserId },
-          'Failed to enqueue cleanup_orphaned_authentik_user compensating operation'
-        );
-      }
+    const outcome = await UserRemovalService.permanentlyRemoveUser(userId, req.user.userId);
+    if (outcome === null) {
+      return res.status(404).json({ error: 'User not found' });
     }
-
-    // Delete user from local system entirely
-    await pool.query('DELETE FROM user_cache WHERE authentik_id = $1', [String(authentikUserId)]);
-    await pool.query('DELETE FROM users WHERE id = $1', [userId]);
-
-    try {
-      await pool.query(
-        'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
-        [
-          req.user.userId,
-          'user.remove_from_team',
-          'user',
-          parseInt(req.params.userId, 10),
-          JSON.stringify({ authentikAccountDeleted, certificateRevocationDryRun })
-        ]
-      );
-    } catch (auditErr) {
-      getLogger().error({ err: auditErr }, 'Failed to write audit log');
-    }
-    
-    res.json({ 
+    res.json({
       message: 'User removed from team successfully',
-      operationsQueued: result.groupsQueued,
-      authentikAccountDeleted,
-      certificateRevocationDryRun
+      operationsQueued: outcome.groupsQueued,
+      authentikAccountDeleted: outcome.authentikAccountDeleted,
+      certificateRevocationDryRun: outcome.certificateRevocationDryRun,
+      localRowRetained: outcome.localRowRetained
     });
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to remove user from team');
     res.status(500).json({ error: 'Failed to remove user from team' });
   }
 });
-
 
 // ---------------------------------------------------------------------
 // Team_Transfer -- POST /api/users/:userId/transfer
@@ -2803,65 +2717,19 @@ router.post('/bulk-remove-from-team', authenticateToken, authorize, [
 
   for (const userId of userIds) {
     try {
-      const userResult = await pool.query('SELECT authentik_user_id FROM users WHERE id = $1', [userId]);
-      if (userResult.rows.length === 0) {
+      const outcome = await UserRemovalService.permanentlyRemoveUser(userId, req.user.userId);
+      if (outcome === null) {
         results.push({ userId, success: false, error: 'User not found' });
         failureCount++;
         continue;
       }
-      const authentikUserId = userResult.rows[0].authentik_user_id;
-
-      await TeamMembershipService.removeUserFromTeam(userId, req.user.userId);
-
-      const certificateRevocationDryRun = !isDeviceMgmtRevokeEnabled();
-
-      await UserAttributesService.clearUserAttributes(authentikUserId);
-
-      let authentikAccountDeleted = true;
-      try {
-        const deleteResponse = await fetchWithTimeout(`${process.env.AUTHENTIK_URL}/api/v3/core/users/${authentikUserId}/`, {
-          method: 'DELETE',
-          headers: { 'Authorization': `Bearer ${process.env.AUTHENTIK_API_TOKEN}` }
-        });
-        if (!deleteResponse.ok && deleteResponse.status !== 404) {
-          throw new Error(`Authentik delete responded with status ${deleteResponse.status}`);
-        }
-      } catch (deleteErr) {
-        getLogger().error({ err: deleteErr, userId }, 'Failed to delete user from Authentik during bulk remove');
-        authentikAccountDeleted = false;
-        try {
-          await EventPublisher.publishOperation(
-            'cleanup_orphaned_authentik_user',
-            { authentik_user_id: authentikUserId },
-            req.user.userId
-          );
-        } catch (enqueueErr) {
-          getLogger().error(
-            { err: enqueueErr, authentikUserId },
-            'Failed to enqueue cleanup_orphaned_authentik_user compensating operation during bulk remove'
-          );
-        }
-      }
-
-      await pool.query('DELETE FROM user_cache WHERE authentik_id = $1', [String(authentikUserId)]);
-      await pool.query('DELETE FROM users WHERE id = $1', [userId]);
-
-      try {
-        await pool.query(
-          'INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
-          [
-            req.user.userId,
-            'user.remove_from_team',
-            'user',
-            userId,
-            JSON.stringify({ authentikAccountDeleted, certificateRevocationDryRun })
-          ]
-        );
-      } catch (auditErr) {
-        getLogger().error({ err: auditErr }, 'Failed to write audit log');
-      }
-
-      results.push({ userId, success: true, authentikAccountDeleted, certificateRevocationDryRun });
+      results.push({
+        userId,
+        success: true,
+        authentikAccountDeleted: outcome.authentikAccountDeleted,
+        certificateRevocationDryRun: outcome.certificateRevocationDryRun,
+        localRowRetained: outcome.localRowRetained
+      });
       successCount++;
     } catch (error) {
       getLogger().error({ err: error, userId }, 'Failed to bulk-remove user from team');
