@@ -277,11 +277,24 @@ const scenarioArb = fc
     // slides windows of its first argument across its second, so either
     // ordering alone could miss an overlap when the two strings differ
     // substantially in length.
+    //
+    // The email local part is excluded against the whole deterministic
+    // stem `<prefix>-U` for the same reason: it derives from
+    // `requestedUsername` (e.g. `localEqualsRequestedUsername`), which is
+    // unconstrained, so it can contain the prefix or the `-U` marker by
+    // chance (observed: requestedUsername "rX-" vs stem "rX-U", seed
+    // 8580324). That text comes from the legitimate prefix, not a leak.
+    const stem = `${prefix}-U`;
+    const localPart = emailLocalPart(
+      buildEmail(scenario.emailScenario, scenario.requestedUsername)
+    );
     return (
       !sharesSubstringOfAtLeastThreeChars([prefix], scenario.firstName) &&
       !sharesSubstringOfAtLeastThreeChars([scenario.firstName], prefix) &&
       !sharesSubstringOfAtLeastThreeChars([prefix], scenario.lastName) &&
-      !sharesSubstringOfAtLeastThreeChars([scenario.lastName], prefix)
+      !sharesSubstringOfAtLeastThreeChars([scenario.lastName], prefix) &&
+      !sharesSubstringOfAtLeastThreeChars([stem], localPart) &&
+      !sharesSubstringOfAtLeastThreeChars([localPart], stem)
     );
   });
 
