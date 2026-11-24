@@ -26,6 +26,8 @@ const LIVE = Object.freeze({
   ANDROID: 'ANDROID-63040a40563b5fab',
   IOS: 'CE17C84D-9700-4080-BA5A-44AF51809453',
   WINDOWS: 'S-1-5-21-2281966494-490247268-205662872-1002',
+  // TAKx on Windows: a version-1 (time-based, MAC-derived) UUID, not iOS.
+  TAKX_WINDOWS: '64b4fc4e-e60a-11f1-9cdb-00155d7f9f54',
   UNCLASSIFIABLE: 'some-random-client-name'
 });
 
@@ -49,7 +51,7 @@ describe('classifyClientType classifies each rule\'s live example (Criterion 15.
     expect(classifyClientType(LIVE.ANDROID)).toBe(CLIENT_TYPES.ANDROID);
   });
 
-  it('classifies a UUID Client_Uid as iOS / iTAK', () => {
+  it('classifies a version-4 UUID Client_Uid as iOS / iTAK', () => {
     expect(classifyClientType(LIVE.IOS)).toBe(CLIENT_TYPES.IOS);
   });
 
@@ -122,6 +124,20 @@ describe('classifyClientType leaves near-misses unknown (Criterion 15.5)', () =>
     expect(classifyClientType('tak-ANDROID-63040a40563b5fab')).toBe(CLIENT_TYPES.UNKNOWN);
   });
 
+  it('classifies a version-1 UUID (TAKx on Windows) as unknown, not iOS', () => {
+    expect(classifyClientType(LIVE.TAKX_WINDOWS)).toBe(CLIENT_TYPES.UNKNOWN);
+  });
+  it.each([
+    ['version 1', '64b4fc4e-e60a-11f1-9cdb-00155d7f9f54'],
+    ['version 3', '6fa459ea-ee8a-3ca4-894e-db77e160355e'],
+    ['version 5', '886313e1-3b8a-5372-9b90-0c9aee199e5d'],
+    ['version 7', '018f3b1e-7c2a-7a3b-8c4d-123456789abc']
+  ])('classifies a %s UUID as unknown, not iOS', (_label, uid) => {
+    expect(classifyClientType(uid)).toBe(CLIENT_TYPES.UNKNOWN);
+  });
+  it('rejects a version-4 shape whose variant digit is outside 8, 9, a, b', () => {
+    expect(classifyClientType('CE17C84D-9700-4080-CA5A-44AF51809453')).toBe(CLIENT_TYPES.UNKNOWN);
+  });
   it('rejects a UUID with an extra hex digit', () => {
     expect(classifyClientType(`${LIVE.IOS}A`)).toBe(CLIENT_TYPES.UNKNOWN);
   });

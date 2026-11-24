@@ -82,12 +82,18 @@ function isDigitGroup(text) {
   return text.length > 0 && [...text].every((ch) => DECIMAL_DIGITS.includes(ch));
 }
 
-/** Rule 3 restated: `8-4-4-4-12` hex groups, whole string. */
+/** `8-4-4-4-12` hex groups, whole string. */
 function isUuidShaped(value) {
   const groups = value.split('-');
   const lengths = [8, 4, 4, 4, 12];
   return groups.length === lengths.length
     && groups.every((group, index) => isHexGroup(group, lengths[index]));
+}
+/** Rule 3 restated: UUID-shaped, third group opens with `4`, fourth with `8 9 a b`. */
+function isUuidV4(value) {
+  if (!isUuidShaped(value)) return false;
+  const groups = value.split('-');
+  return groups[2][0] === '4' && '89abAB'.includes(groups[3][0]);
 }
 
 /** Rule 4 restated: `S-1-5-21-` plus four decimal groups, whole string. */
@@ -119,7 +125,7 @@ function expectedClientType(value) {
     return CLIENT_TYPES.CLOUDTAK;
   }
   if (lower.startsWith('android-')) return CLIENT_TYPES.ANDROID;
-  if (isUuidShaped(value)) return CLIENT_TYPES.IOS;
+  if (isUuidV4(value)) return CLIENT_TYPES.IOS;
   if (isSidShaped(value)) return CLIENT_TYPES.WINDOWS;
   return CLIENT_TYPES.UNKNOWN;
 }
@@ -132,16 +138,32 @@ function expectedClientType(value) {
 const blockOf = (chars, minLength, maxLength = minLength) =>
   fc.array(fc.constantFrom(...chars), { minLength, maxLength }).map((cs) => cs.join(''));
 
-/** `8-4-4-4-12` hex, mixed case, e.g. `CE17C84D-9700-4080-BA5A-44AF51809453`. */
+/**
+ * Version-4 UUID, mixed case, e.g. `CE17C84D-9700-4080-BA5A-44AF51809453`:
+ * `4` opens the third group and one of `8 9 a b` opens the fourth.
+ */
 const uuidArb = fc
   .tuple(
     blockOf(HEX_DIGITS, 8),
     blockOf(HEX_DIGITS, 4),
+    blockOf('4', 1),
+    blockOf(HEX_DIGITS, 3),
+    blockOf('89abAB', 1),
+    blockOf(HEX_DIGITS, 3),
+    blockOf(HEX_DIGITS, 12)
+  )
+  .map(([a, g2, v, b, variant, c, d]) => [a, g2, `${v}${b}`, `${variant}${c}`, d].join('-'));
+/** A UUID-shaped string that is NOT version 4 (e.g. TAKx's v1): must be unknown. */
+const nonV4UuidArb = fc
+  .tuple(
+    blockOf(HEX_DIGITS, 8),
     blockOf(HEX_DIGITS, 4),
+    blockOf('012356789abcdefABCDEF', 1),
+    blockOf(HEX_DIGITS, 3),
     blockOf(HEX_DIGITS, 4),
     blockOf(HEX_DIGITS, 12)
   )
-  .map((groups) => groups.join('-'));
+  .map(([a, g2, v, b, c, d]) => [a, g2, `${v}${b}`, c, d].join('-'));
 
 /** `S-1-5-21-<digits>-<digits>-<digits>-<digits>`, e.g. a real WinTAK SID. */
 const sidArb = fc
@@ -197,6 +219,8 @@ const plainAsciiArb = fc.string({ unit: fc.constantFrom(...UID_CHARS), maxLength
  * deliberately does not trim.
  */
 const nearMissArb = fc.oneof(
+  nonV4UuidArb, // a UUID of another version, e.g. TAKx's v1, is not iTAK
+  uuidArb.map((uuid) => uuid.slice(0, 19) + 'c' + uuid.slice(20)), // variant digit outside 8-b
   uuidArb.map((uuid) => `${uuid}a`), // one hex digit too many
   uuidArb.map((uuid) => uuid.slice(1)), // one hex digit too few
   uuidArb.map((uuid) => uuid.replace(/-/g, '')), // no group separators
@@ -267,7 +291,9 @@ const LIVE_WINDOWS = [
   'S-1-5-21-3905910803-2204963604-4021719043-1001',
   'S-1-5-21-259247192-2041132692-1012567362-500',
 ];
-const LIVE_UIDS = [...LIVE_CLOUDTAK, ...LIVE_ANDROID, ...LIVE_IOS, ...LIVE_WINDOWS];
+/** Observed UUID-shaped Client_Uids that are NOT iTAK (TAKx on Windows, v1). */
+const LIVE_UNKNOWN_UUID = ['64b4fc4e-e60a-11f1-9cdb-00155d7f9f54'];
+const LIVE_UIDS = [...LIVE_CLOUDTAK, ...LIVE_ANDROID, ...LIVE_IOS, ...LIVE_WINDOWS, ...LIVE_UNKNOWN_UUID];
 
 /** Pinned single-argument examples: every live Client_Uid, plus the odd ones. */
 const LIVE_EXAMPLES = [...LIVE_UIDS, '', ' ', 'no-idea-what-this-is'].map((uid) => [uid]);
@@ -371,6 +397,7 @@ describe('Property 11: Client_Type classification is total, deterministic, and p
         ...LIVE_ANDROID.map((value) => [{ value, expected: CLIENT_TYPES.ANDROID }]),
         ...LIVE_IOS.map((value) => [{ value, expected: CLIENT_TYPES.IOS }]),
         ...LIVE_WINDOWS.map((value) => [{ value, expected: CLIENT_TYPES.WINDOWS }]),
+        ...LIVE_UNKNOWN_UUID.map((value) => [{ value, expected: CLIENT_TYPES.UNKNOWN }]),
       ],
     }
   )('classifies each rule\'s own shape by that rule (Criteria 15.3, 15.5)', ({ value, expected }) => {

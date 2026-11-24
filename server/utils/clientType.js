@@ -19,7 +19,9 @@
  *                                         `ANDROID-CloudTAK-chris@chriselsen.net`
  *   2. Android / ATAK    starts with `ANDROID-`
  *                                      -- `ANDROID-63040a40563b5fab`
- *   3. iOS / iTAK        a UUID, `8-4-4-4-12` hex groups
+ *   3. iOS / iTAK        a version-4 (random) UUID, `8-4-4-4-12` hex
+ *                        groups with `4` opening the third group and one
+ *                        of `8 9 a b` opening the fourth
  *                                      -- `CE17C84D-9700-4080-BA5A-44AF51809453`
  *   4. Windows / WinTAK  a Windows SID, `S-1-5-21-<digits>-<digits>-<digits>-<digits>`
  *                                      -- `S-1-5-21-2281966494-490247268-205662872-1002`
@@ -32,6 +34,16 @@
  * CloudTAK browser session, not an ATAK device; testing the `ANDROID-` prefix
  * first would misclassify it. The ordering of the two branches in
  * `classifyClientType` is therefore load-bearing, not incidental.
+ *
+ * Rule 3 is deliberately limited to version-4 UUIDs. iTAK generates its
+ * Client_Uid with Swift's `UUID()`, which is always v4, so every iTAK device
+ * observed on the live server matches. A UUID of any other version is NOT
+ * evidence of iOS: a TAKx client on Windows was observed with the v1
+ * (time-based, MAC-derived) Client_Uid
+ * `64b4fc4e-e60a-11f1-9cdb-00155d7f9f54` and was wrongly shown as iOS when
+ * rule 3 accepted any UUID shape. Such values are `unknown`. TAKx itself is
+ * not classified: one sample is not a reliable signature, and it runs on
+ * both Windows and Linux.
  *
  * Criterion 15.5: `unknown` is a first-class outcome with its own icon and
  * label. An unrecognised Client_Uid is never nudged into a neighbouring
@@ -71,8 +83,12 @@ const CLOUDTAK_PATTERN = /\(ETL\)|\(Web\)|CloudTAK/i;
 /** Rule 2: the `ANDROID-` prefix. Anchored at the start only. */
 const ANDROID_PREFIX_PATTERN = /^ANDROID-/i;
 
-/** Rule 3: a UUID — `8-4-4-4-12` hex groups, whole string. */
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/**
+ * Rule 3: a version-4 UUID — `8-4-4-4-12` hex groups, whole string, with the
+ * version digit `4` opening the third group and the RFC 4122 variant digit
+ * (`8`, `9`, `a` or `b`) opening the fourth.
+ */
+const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /** Rule 4: a Windows SID — `S-1-5-21-` plus four digit groups, whole string. */
 const WINDOWS_SID_PATTERN = /^S-1-5-21-\d+-\d+-\d+-\d+$/i;
@@ -105,8 +121,8 @@ function classifyClientType(clientUid) {
     return CLIENT_TYPES.ANDROID;
   }
 
-  // Rule 3 — iOS / iTAK.
-  if (UUID_PATTERN.test(clientUid)) {
+  // Rule 3 — iOS / iTAK. Version-4 UUIDs only; any other UUID is unknown.
+  if (UUID_V4_PATTERN.test(clientUid)) {
     return CLIENT_TYPES.IOS;
   }
 
