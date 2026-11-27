@@ -28,7 +28,7 @@ jest.mock('../config/database', () => ({
 }));
 
 // `server/routes/users.js` requires the Authentik service at load time (for
-// createUser/setUserPassword on the write routes). None of the GET routes this
+// createUser on the write routes). None of the GET routes this
 // file exercises call it — the list route was migrated to a local-only query
 // and no longer fetches from Authentik — but the module is stubbed so the real
 // HTTP-client module never loads during these route-level unit tests.

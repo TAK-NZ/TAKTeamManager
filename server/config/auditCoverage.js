@@ -50,7 +50,6 @@ const auditCoverage = {
   'DELETE /api/teams/:teamId': { action: 'team.delete' },
 
   // ---- users.js ----
-  'POST /api/users': { action: 'user.create' },
   'POST /api/users/create-and-add': { action: 'user.create' },
   'POST /api/users/add-to-team': { action: 'user.add_to_team' },
   'DELETE /api/users/remove-from-team/:userId': { action: 'user.remove_from_team' },

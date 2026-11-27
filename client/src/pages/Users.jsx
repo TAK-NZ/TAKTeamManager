@@ -1196,7 +1196,7 @@ export default function Users({ user }) {
                 Resend Welcome Email
               </h3>
               <p className="text-gray-600 dark:text-gray-400 mb-6">
-                Send a new welcome email to {resendingWelcomeTo.email}?
+                Send a new welcome email with a one-time sign-in link to {resendingWelcomeTo.email}? The link works for 24 hours. If this person has lost every way of signing in, check who they are before you send it.
               </p>
               <div className="flex justify-end space-x-3">
                 <button

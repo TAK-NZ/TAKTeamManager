@@ -127,6 +127,7 @@ const AccountLifecycleService = require('../services/AccountLifecycleService');
 const TeamMembershipService = require('../services/TeamMembershipService');
 const UserRemovalService = require('../services/UserRemovalService');
 const { TeamTransferService } = require('../services/TeamTransferService');
+const EmailService = require('../services/EmailService');
 const usersRouter = require('./users');
 
 function buildApp() {
@@ -330,7 +331,7 @@ describe('POST /api/users/bulk-resend-welcome', () => {
     app = buildApp();
     pool.query.mockImplementation((sql) => {
       if (sql.includes('FROM users u LEFT JOIN user_cache')) {
-        return Promise.resolve({ rows: [{ id: 10, email: 'a@example.com', first_name: 'A', last_name: 'B', tak_callsign: null }] });
+        return Promise.resolve({ rows: [{ id: 10, email: 'a@example.com', first_name: 'A', last_name: 'B', authentik_user_id: 'ak-10', tak_callsign: null }] });
       }
       return Promise.resolve({ rows: [] });
     });
@@ -340,6 +341,9 @@ describe('POST /api/users/bulk-resend-welcome', () => {
     const res = await request(app).post('/api/users/bulk-resend-welcome').send({ userIds: [10], teamId: null });
 
     expect(res.status).toBe(200);
+    // the resent email carries a fresh activation link made for that Authentik user
+    const sent = EmailService.mock.results.map((r) => r.value.sendApprovalEmail).filter((f) => f.mock.calls.length);
+    expect(sent[0].mock.calls[0][1]).toEqual(expect.objectContaining({ activationUserId: 'ak-10' }));
     expect(res.body).toEqual({
       successCount: 1,
       failureCount: 0,

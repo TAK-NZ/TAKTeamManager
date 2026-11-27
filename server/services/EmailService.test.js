@@ -371,6 +371,42 @@ describe('EmailService', () => {
       delete process.env.ACCOUNT_LOGIN_URL;
     });
 
+    it('uses a one-time activation link made for the user when activationUserId is given, not the generic page', async () => {
+      process.env.PASSWORD_RESET_URL = 'https://reset.example.com';
+      const authentikService = require('./authentik');
+      const spy = jest.spyOn(authentikService, 'createActivationLink').mockResolvedValue('https://account.example.test/flow?flow_token=t1');
+      pool.query.mockResolvedValue({
+        rows: [{ subject_template: 'Approved', body_template: 'Reset: {{password_reset_url}}' }]
+      });
+      await service.sendApprovalEmail('user@example.com', { teamPath: 'FENZ - Southland', activationUserId: 'pk-42' });
+      expect(spy).toHaveBeenCalledWith('pk-42');
+      expect(mockSendMail.mock.calls[0][0].text).toBe('Reset: https://account.example.test/flow?flow_token=t1');
+      spy.mockRestore();
+      delete process.env.PASSWORD_RESET_URL;
+    });
+    it('keeps the generic page for an existing user (no activationUserId) and makes no link', async () => {
+      process.env.PASSWORD_RESET_URL = 'https://reset.example.com';
+      const authentikService = require('./authentik');
+      const spy = jest.spyOn(authentikService, 'createActivationLink');
+      pool.query.mockResolvedValue({
+        rows: [{ subject_template: 'Approved', body_template: 'Reset: {{password_reset_url}}' }]
+      });
+      await service.sendApprovalEmail('user@example.com', { teamPath: 'FENZ - Southland' });
+      expect(spy).not.toHaveBeenCalled();
+      expect(mockSendMail.mock.calls[0][0].text).toBe('Reset: https://reset.example.com');
+      spy.mockRestore();
+      delete process.env.PASSWORD_RESET_URL;
+    });
+    it('sends nothing when the activation link cannot be made', async () => {
+      const authentikService = require('./authentik');
+      const spy = jest.spyOn(authentikService, 'createActivationLink').mockRejectedValue(new Error('Authentik is down'));
+      pool.query.mockResolvedValue({
+        rows: [{ subject_template: 'Approved', body_template: 'Reset: {{password_reset_url}}' }]
+      });
+      await expect(service.sendApprovalEmail('user@example.com', { activationUserId: 'pk-42' })).rejects.toThrow('Authentik is down');
+      expect(mockSendMail).not.toHaveBeenCalled();
+      spy.mockRestore();
+    });
     it('threads the audit context through to the email.sent row', async () => {
       pool.query.mockResolvedValue({
         rows: [{ subject_template: 'Approved', body_template: 'Body' }]

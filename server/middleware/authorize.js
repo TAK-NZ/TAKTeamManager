@@ -159,12 +159,10 @@ async function resolveRequestActionPermission(req) {
 }
 
 /**
- * Shared row-scoped resolver backing THREE identifiers, all of which ask
+ * Shared row-scoped resolver backing two identifiers, both of which ask
  * the identical question — "is the requester a Global_Manager, or a
  * Team_Admin of the `teamId` named in the request body?":
  *
- *   - `user:create:team_admin` — `POST /api/users` (the older create-user
- *     route). This was the original home of the logic.
  *   - `user:create`            — `POST /api/users/create-and-add` AND
  *     `POST /api/users/callsign-suffix-preview`.
  *   - `user:team:add`          — `POST /api/users/add-to-team`. Adding an
@@ -175,7 +173,7 @@ async function resolveRequestActionPermission(req) {
  * `user:create` and `user:team:add` both had Permission_Registry entries
  * but NO resolver and no place in `roleDefaults.authenticated_user`, so
  * nothing except a Global_Manager's `'*'` wildcard could satisfy them:
- * every Team_Admin was denied 403 on all three routes. The user-visible
+ * every Team_Admin was denied 403 on those routes. The user-visible
  * symptom was the Add Member dialog's Callsign Suffix field staying empty
  * (showing only its placeholder) because the preview request 403'd, and
  * "Add Existing User" failing outright.
@@ -453,19 +451,12 @@ const rowScopedResolvers = {
   },
 
   /**
-   * `user:create:team_admin` — `POST /api/users` (the older create-user
-   * route). Mirrors the inline check that used to live in `users.js`'s
-   * `POST /`; that inline check incorrectly compared against
-   * `req.user.id` (the Authentik id), while the shared implementation
-   * correctly uses `req.user.userId` (the local `users.id` that
-   * `team_memberships.user_id` references).
-   *
    * `user:create` — `POST /api/users/create-and-add` and
    * `POST /api/users/callsign-suffix-preview`.
    *
    * `user:team:add` — `POST /api/users/add-to-team`.
    *
-   * All three are the same rule (Global_Manager, or `Team.isAdmin` of
+   * Both are the same rule (Global_Manager, or `Team.isAdmin` of
    * `req.body.teamId`) and therefore share the single
    * `resolveTeamAdminOfBodyTeamId` implementation defined above this
    * object — see its doc comment for why `user:create`/`user:team:add`
@@ -473,7 +464,6 @@ const rowScopedResolvers = {
    * `user:create` gate, and why `user:team:remove` is deliberately still
    * resolver-less.
    */
-  'user:create:team_admin': resolveTeamAdminOfBodyTeamId,
   'user:create': resolveTeamAdminOfBodyTeamId,
   'user:team:add': resolveTeamAdminOfBodyTeamId,
 

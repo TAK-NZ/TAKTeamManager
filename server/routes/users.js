@@ -5,7 +5,6 @@ const authorize = require('../middleware/authorize');
 const { paginationParams } = require('../middleware/pagination');
 const User = require('../models/User');
 const Team = require('../models/Team');
-const authentikService = require('../services/authentik');
 const { isIgnoredAuthentikUsername, getIgnoredUsernamePrefixes } = require('../config/authentikSyncIgnore');
 const UserAttributesService = require('../services/userAttributes');
 const TeamMembershipService = require('../services/TeamMembershipService');
@@ -527,141 +526,6 @@ router.get('/me', authenticateToken, authorize, async (req, res) => {
   } catch (error) {
     getLogger().error({ err: error }, 'Failed to fetch user profile');
     res.status(500).json({ error: 'Failed to fetch profile' });
-  }
-});
-
-// Create new user in Authentik and local DB
-router.post('/', authenticateToken, authorize, [
-  body('username').trim().isLength({ min: 1, max: 150 }),
-  body('email').isEmail().normalizeEmail(),
-  body('firstName').trim().isLength({ min: 1, max: 150 }),
-  body('lastName').trim().isLength({ min: 1, max: 150 }),
-  body('password').isLength({ min: 8 }),
-  body('teamId').isInt()
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({ errors: errors.array() });
-  }
-
-  try {
-    const { username, email, firstName, lastName, password, teamId, callsignSuffix } = req.body;
-
-    // Authorization (team admin of teamId, or global manager) is enforced
-    // centrally by authorize.js via the 'POST /api/users': ['user:create:team_admin']
-    // Permission_Registry entry.
-
-    // takserver-enrollment Requirements 6.3, 6.6, 6.8 (task 5.3): resolve
-    // the username AND the callsign_suffix default together, BEFORE
-    // creating anything in Authentik, via the single Phase-0 choke point.
-    // Under a policy-disabled Organisation this is unchanged from the
-    // Phase-0 behaviour it replaces: `resolveNewUserIdentity` returns
-    // `requestedUsername` (the caller-supplied `username`) verbatim and
-    // runs the same callsign_suffix resolution
-    // `resolveCallsignSuffixForNewUser` used to. Under a
-    // Pseudonymous_Organisation, the caller-supplied `username` is
-    // IGNORED (design decision 8) and a freshly minted
-    // Pseudonymous_Username is returned instead, along with a `claimId`
-    // naming the Claim_Row already inserted under it.
-    //
-    // A CallsignSuffixRequiredError/CallsignSuffixConflictError/
-    // OrganisationPrefixMissingError is a request-validation failure and
-    // is returned as a 400 without ever creating an Authentik user for
-    // it -- the same reasoning that already placed the Phase-0 resolution
-    // ahead of every Authentik call on this route.
-    // ManagedIdentifierExhaustionError is the one 500: it names a defect
-    // in the generator's random source, not something the caller can fix.
-    let identity;
-    try {
-      identity = await UserProvisioningService.resolveNewUserIdentity(null, {
-        firstName,
-        lastName,
-        email,
-        teamId,
-        requestedUsername: username,
-        requestedCallsignSuffix: callsignSuffix
-      });
-    } catch (resolutionError) {
-      if (
-        resolutionError instanceof UserProvisioningService.CallsignSuffixRequiredError ||
-        resolutionError instanceof CallsignSuffixConflictError ||
-        resolutionError instanceof ManagedIdentifierService.OrganisationPrefixMissingError
-      ) {
-        return res.status(400).json({ error: resolutionError.message });
-      }
-      if (resolutionError instanceof ManagedIdentifierService.ManagedIdentifierExhaustionError) {
-        getLogger().error({ err: resolutionError }, 'Managed_Identifier mint exhausted while creating user');
-        return res.status(500).json({ error: 'Failed to create user' });
-      }
-      throw resolutionError;
-    }
-
-    const { username: resolvedUsername, callsignSuffix: resolvedCallsignSuffix, claimId } = identity;
-
-    // Create user in Authentik with the RESOLVED username -- the minted
-    // Pseudonymous_Username under a pseudonymous Organisation, or the
-    // caller-supplied `username` verbatim otherwise.
-    const authentikUser = await authentikService.createUser({
-      username: resolvedUsername,
-      name: `${firstName} ${lastName}`,
-      email
-    });
-
-    // Set password
-    await authentikService.setUserPassword(authentikUser.pk, password);
-
-    let localUser;
-    if (claimId != null) {
-      // takserver-enrollment Requirement 6.4 (task 5.3): this route uses
-      // `User.create`, a DIFFERENT model than
-      // `UserProvisioningService.createAndAddUser` (which already
-      // supports `claimId` adoption per task 5.2). `User.create` does a
-      // plain INSERT, which would insert a SECOND row for the same
-      // Authentik user and leave the Claim_Row `resolveNewUserIdentity`
-      // already inserted behind forever -- invisible to every existing
-      // surface (it has `authentik_user_id IS NULL`, `is_active =
-      // false`) and permanently holding `users_email_key` for this
-      // email. So this route adopts the exact Claim_Row by primary key
-      // instead of calling `User.create`, mirroring the
-      // `UPDATE ... WHERE id = $claimId` `createAndAddUser` already
-      // performs for the same reason.
-      const adoptResult = await pool.query(
-        'UPDATE users SET authentik_user_id = $1, username = $2, email = $3, first_name = $4, last_name = $5, is_active = true, callsign_suffix = $6 WHERE id = $7 RETURNING *',
-        [authentikUser.pk, resolvedUsername, email, firstName, lastName, resolvedCallsignSuffix, claimId]
-      );
-      localUser = adoptResult.rows[0];
-    } else {
-      // Create local user record
-      localUser = await User.create({
-        authentik_user_id: authentikUser.pk,
-        username: resolvedUsername,
-        email,
-        first_name: firstName,
-        last_name: lastName,
-        callsign_suffix: resolvedCallsignSuffix
-      });
-    }
-
-    // Add to team
-    await Team.addMember(teamId, localUser.id, 'member');
-
-    // Audit the account creation. Best-effort (the account already exists);
-    // resource is the new local users.id, details name the team + email.
-    await writeAuditLog({
-      userId: req.user.userId,
-      action: 'user.create',
-      resourceType: 'user',
-      resourceId: localUser.id,
-      details: { email, teamId, username: resolvedUsername }
-    });
-
-    res.status(201).json({ 
-      user: localUser,
-      message: 'User created successfully'
-    });
-  } catch (error) {
-    getLogger().error({ err: error }, 'User creation failed');
-    res.status(500).json({ error: 'Failed to create user' });
   }
 });
 
@@ -1394,7 +1258,8 @@ router.post('/create-and-add', authenticateToken, authorize, [
       teamPath,
       username: email,
       callsign: attributes?.callsign || 'Will be assigned',
-      firstName
+      firstName,
+      activationUserId: newUser.pk
     }, { actorUserId: req.user?.userId ?? null, targetUserId: localUserId ?? null });
   } catch (emailErr) {
     getLogger().error({ err: emailErr }, 'Failed to send welcome email to new user');
@@ -2202,7 +2067,7 @@ router.post('/:userId/unsuspend', authenticateToken, authorize, async (req, res)
  */
 async function sendWelcomeEmailToUser(userId, teamId, actingUserId) {
   const userResult = await pool.query(
-    'SELECT u.id, u.email, u.first_name, u.last_name, uc.tak_callsign FROM users u LEFT JOIN user_cache uc ON uc.authentik_id = u.authentik_user_id::text WHERE u.id = $1',
+    'SELECT u.id, u.email, u.first_name, u.last_name, u.authentik_user_id, uc.tak_callsign FROM users u LEFT JOIN user_cache uc ON uc.authentik_id = u.authentik_user_id::text WHERE u.id = $1',
     [userId]
   );
   if (userResult.rows.length === 0) {
@@ -2230,7 +2095,10 @@ async function sendWelcomeEmailToUser(userId, teamId, actingUserId) {
     teamPath,
     username: user.email,
     callsign: user.tak_callsign || 'Will be assigned',
-    firstName: user.first_name || ''
+    firstName: user.first_name || '',
+    // a fresh one-time link and a new activation window, so a resend also serves an account whose
+    // authenticators an administrator has removed
+    activationUserId: user.authentik_user_id || undefined
   }, { actorUserId: actingUserId ?? null, targetUserId: parseInt(userId, 10) });
 
   try {

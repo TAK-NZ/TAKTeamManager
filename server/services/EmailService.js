@@ -228,14 +228,25 @@ class EmailService {
     }, context);
   }
 
-  async sendApprovalEmail(email, { teamPath, username, callsign, firstName, additionalDetails } = {}, context = {}) {
+  // `activationUserId` (the Authentik user id) is passed for an account that is new or being re-invited. Then
+  // {{password_reset_url}} is a one-time activation link made for that user (24 hours, see
+  // AuthentikService.createActivationLink), not the generic recovery page. Without it (an existing user whose
+  // request was approved) the link is PASSWORD_RESET_URL as before. When the link cannot be made, this throws and
+  // nothing is sent: the generic page would turn the user away, because an account without an authenticator and
+  // without an open activation window is refused.
+  async sendApprovalEmail(email, { teamPath, username, callsign, firstName, additionalDetails, activationUserId } = {}, context = {}) {
+    let passwordResetUrl = process.env.PASSWORD_RESET_URL || '';
+    if (activationUserId) {
+      const authentikService = require('./authentik');
+      passwordResetUrl = await authentikService.createActivationLink(activationUserId);
+    }
     return this.sendEmail(email, 'access_request_approved', {
       team_path: teamPath || '',
       username: username || email,
       first_name: firstName || '',
       callsign: callsign || 'Will be assigned',
       additional_details: additionalDetails || '',
-      password_reset_url: process.env.PASSWORD_RESET_URL || '',
+      password_reset_url: passwordResetUrl,
       login_url: process.env.ACCOUNT_LOGIN_URL || '',
       docs_url: process.env.DOCS_URL || ''
     }, context);
