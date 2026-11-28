@@ -319,6 +319,7 @@ export const usersAPI = {
     api.post('/users/add-to-team', { userId, teamId, ...corrections }),
   removeFromTeam: (userId, teamId) => api.delete(`/users/remove-from-team/${userId}`, { data: { teamId } }),
   resendWelcome: (userId, teamId) => api.post(`/users/${userId}/resend-welcome`, { teamId }),
+  resetMfa: (userId, identityConfirmed) => api.post(`/users/${userId}/reset-mfa`, { identityConfirmed }),
   // data: { targetTeamId, justification?, callsignSuffix? }. Resolves 200 with
   // { status: 'completed', ... } when the caller administers both sides, or 202
   // with { status: 'pending_approval', ... } when the move needs the other

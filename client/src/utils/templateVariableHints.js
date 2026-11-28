@@ -18,6 +18,7 @@ export const TEMPLATE_VARIABLE_HINTS = {
   access_request_verification: ['first_name', 'verification_link', 'team_path', 'expiry_hours'],
   access_request_approved: ['first_name', 'team_path', 'callsign', 'username', 'password_reset_url'],
   access_request_denied: ['first_name', 'team_path', 'denial_reason'],
+  mfa_reset: ['first_name', 'username', 'password_reset_url', 'login_url'],
   admin_notification_digest: ['pending_count', 'request_list'],
   signup_pending_review: ['first_name', 'team_path'],
   signup_already_active: ['first_name', 'username'],

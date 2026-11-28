@@ -27,6 +27,8 @@ import MemberEditRow, {
 } from '../components/MemberEditRow'
 import MemberActions from '../components/MemberActions'
 import SuspendAccountDialog from '../components/SuspendAccountDialog'
+import ResetMfaDialog from '../components/ResetMfaDialog'
+import { describeActivationBadge } from '../utils/activationBadge'
 import AdminActions from '../components/AdminActions'
 import ChannelMembersDialog from '../components/ChannelMembersDialog'
 import EnrollmentView from './EnrollmentView'
@@ -495,6 +497,8 @@ export default function TeamDetail({ user, refreshUser }) {
   // "danger" framing those other two dialogs use would overstate it.
   const [resendingWelcomeTo, setResendingWelcomeTo] = useState(null)
   const [resendingWelcomeInFlight, setResendingWelcomeInFlight] = useState(false)
+  // The member whose MFA reset confirmation is open, or null when closed.
+  const [resettingMfaFor, setResettingMfaFor] = useState(null)
   // Requirements 11.13, 13.1, 13.2, 13.3, 13.5 (task 33.2): per-row inline
   // Member_List edit state. `editingMemberId` tracks which member/admin row
   // (by user id) currently has its inline edit form open -- at most one row
@@ -2245,6 +2249,14 @@ export default function TeamDetail({ user, refreshUser }) {
                           {describeAccountStatusBadge(member.account_status).label}
                         </span>
                       )}
+                      {describeActivationBadge(member.activation_status) && (
+                        <span
+                          className={describeActivationBadge(member.activation_status).className}
+                          title={describeActivationBadge(member.activation_status).title}
+                        >
+                          {describeActivationBadge(member.activation_status).label}
+                        </span>
+                      )}
                       {/* Bugfix (list-width reduction): "TAK Callsign & Role"
                           -- the callsign shown at normal size, the TAK_Role
                           shown small and without color underneath it
@@ -2262,6 +2274,7 @@ export default function TeamDetail({ user, refreshUser }) {
                           devicesEnabled={devicesEnabled}
                           onEdit={handleStartEditMember}
                           onResendWelcome={handleResendWelcomeClick}
+                          onResetMfa={member.account_status === 'active' ? setResettingMfaFor : undefined}
                           onTransfer={setTransferringMember}
                           onViewDevices={setDevicesForMember}
                           onRemove={handleRemoveUser}
@@ -2362,6 +2375,16 @@ export default function TeamDetail({ user, refreshUser }) {
                               </span>
                             </div>
                           )}
+                          {describeActivationBadge(member.activation_status) && (
+                            <div className="mt-1">
+                              <span
+                                className={describeActivationBadge(member.activation_status).className}
+                                title={describeActivationBadge(member.activation_status).title}
+                              >
+                                {describeActivationBadge(member.activation_status).label}
+                              </span>
+                            </div>
+                          )}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400 font-mono">
                           {member.username}
@@ -2389,6 +2412,7 @@ export default function TeamDetail({ user, refreshUser }) {
                               devicesEnabled={devicesEnabled}
                               onEdit={handleStartEditMember}
                               onResendWelcome={handleResendWelcomeClick}
+                              onResetMfa={member.account_status === 'active' ? setResettingMfaFor : undefined}
                               onTransfer={setTransferringMember}
                               onViewDevices={setDevicesForMember}
                               onRemove={handleRemoveUser}
@@ -4244,6 +4268,14 @@ export default function TeamDetail({ user, refreshUser }) {
         />
       )}
 
+      {resettingMfaFor && (
+        <ResetMfaDialog
+          targetUserId={resettingMfaFor.id}
+          targetName={`${resettingMfaFor.first_name || ''} ${resettingMfaFor.last_name || ''}`.trim() || resettingMfaFor.username}
+          targetEmail={resettingMfaFor.email}
+          onClose={() => setResettingMfaFor(null)}
+        />
+      )}
       {/* Orgs & Teams multi-select: bulk-action dialogs, all built on
           the eligibility-screened `selectedMembersUnique` set --
           `handleBulkActionClick` never opens one of these unless every

@@ -276,4 +276,27 @@ describe('MemberActions (mounted) -- Suspend/Unsuspend action', () => {
     expect(buttonByLabel('Unsuspend account').className).toContain('text-gray-600')
     expect(buttonByLabel('Unsuspend account').className).not.toContain('text-red-600')
   })
+  it('renders no Reset MFA button when onResetMfa is not passed', async () => {
+    await mount()
+    expect(buttonByLabel('Reset MFA (lost sign-in methods)')).toBeNull()
+  })
+  it('calls onResetMfa with the member when the Reset MFA button is clicked', async () => {
+    const onResetMfa = vi.fn()
+    await mount({ onResetMfa })
+    await act(async () => {
+      buttonByLabel('Reset MFA (lost sign-in methods)').dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(onResetMfa).toHaveBeenCalledWith(MEMBER)
+  })
+  it('disables Reset MFA, with the no-team title, when hasTeam is false', async () => {
+    const onResetMfa = vi.fn()
+    await mount({ onResetMfa, hasTeam: false })
+    const disabledButtons = Array.from(container.querySelectorAll('button[disabled]'))
+    // Edit, Resend, Reset MFA, Transfer, View devices and Delete are all disabled
+    expect(disabledButtons).toHaveLength(6)
+    await act(async () => {
+      disabledButtons[2].dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(onResetMfa).not.toHaveBeenCalled()
+  })
 })

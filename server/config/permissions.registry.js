@@ -110,6 +110,10 @@ const routes = {
   'GET /api/users/count': ['user:read:team_admin'],
   'GET /api/users/me': ['user:read:own'],
   'POST /api/users/:userId/resend-welcome': ['user:resend_welcome:team_admin'],
+  // MFA reset: row-scoped like resend-welcome (Global_Manager, or an admin of one of the target's teams). The route
+  // adds what a resolver cannot: no self-reset, no team device, an Authentik administrator only for a Global_Manager.
+  // Not in `roleDefaults.authenticated_user`, for the same reason as the routes above (a static grant skips the resolver).
+  'POST /api/users/:userId/reset-mfa': ['user:reset_mfa:team_admin'],
   'GET /api/users/search': ['user:read:team_admin'],
   'GET /api/users/available': ['user:read:team_admin'],
   // The next three entries ('user:create' twice, then 'user:team:add') are

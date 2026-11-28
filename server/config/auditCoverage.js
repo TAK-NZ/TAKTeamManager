@@ -57,6 +57,7 @@ const auditCoverage = {
   'POST /api/users/:userId/suspend': { action: 'user.suspend' },
   'POST /api/users/:userId/unsuspend': { action: 'user.unsuspend' },
   'POST /api/users/:userId/resend-welcome': { action: 'user.resend_welcome' },
+  'POST /api/users/:userId/reset-mfa': { action: 'user.mfa_reset' },
   // Bulk user ops: one audit row PER AFFECTED USER (not per request), via
   // delegation to the same service/shared-core the single-item route uses.
   'POST /api/users/bulk-suspend': { action: 'user.suspend', perRow: true },

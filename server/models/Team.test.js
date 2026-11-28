@@ -2910,7 +2910,7 @@ describe('Team.getMembers / Team.getFullMemberList (Requirement 11.14/13.1)', ()
     expect(params).toEqual([5]);
   });
 
-  it('getMembers: returns the rows produced by the primary query unchanged', async () => {
+  it('getMembers: returns the rows produced by the primary query, adding only the derived activation_status', async () => {
     const rows = [
       { id: 1, first_name: 'John', last_name: 'Doe', callsign_suffix: 'J.Doe', tak_role: 'Team Member', role: 'member' }
     ];
@@ -2918,7 +2918,24 @@ describe('Team.getMembers / Team.getFullMemberList (Requirement 11.14/13.1)', ()
 
     const result = await Team.getMembers(5);
 
-    expect(result).toEqual(rows);
+    expect(result).toEqual([{ ...rows[0], activation_status: null }]);
+  });
+
+  it('getMembers: derives activation_status from the sign-in and the window, and does not pass the sign-in time on', async () => {
+    const future = new Date(Date.now() + 86400000).toISOString();
+    const past = new Date(Date.now() - 86400000).toISOString();
+    pool.query.mockResolvedValue({
+      rows: [
+        { id: 1, last_login_for_status: '2026-01-01T00:00:00Z', activation_expires_at: past },
+        { id: 2, last_login_for_status: null, activation_expires_at: future },
+        { id: 3, last_login_for_status: null, activation_expires_at: past }
+      ]
+    });
+
+    const result = await Team.getMembers(5);
+
+    expect(result.map(r => r.activation_status)).toEqual(['active', 'invited', 'expired']);
+    expect(result.every(r => !('last_login_for_status' in r))).toBe(true);
   });
 
   it('getFullMemberList: delegates to getMembers, calling pool.query with identical SQL/params for the same teamId', async () => {
@@ -3025,7 +3042,7 @@ describe('Team.isAdmin / Team.getMembers inherited-admin-badge compatibility (Re
 
     const result = await Team.getMembers(2);
 
-    expect(result).toEqual(rows);
+    expect(result).toEqual([{ ...rows[0], activation_status: null }]);
     const admin = result.find(r => r.id === 42);
     // This is exactly the condition TeamDetail.jsx's Team Admins tab uses
     // to select the "Inherited Admin from X" badge variant over the

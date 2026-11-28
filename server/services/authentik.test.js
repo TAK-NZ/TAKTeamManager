@@ -286,7 +286,7 @@ describe('AuthentikService.createActivationLink', () => {
     mockClient.patch.mockResolvedValue({ data: {} });
     mockClient.post.mockResolvedValue({ data: { link: 'https://account.example.test/if/flow/tak-recovery-flow/?flow_token=x' } });
     const before = Date.now();
-    const link = await authentikService.createActivationLink(42);
+    const { link, windowExpiresAt } = await authentikService.createActivationLink(42);
     const after = Date.now();
     expect(link).toBe('https://account.example.test/if/flow/tak-recovery-flow/?flow_token=x');
     const [patchUrl, patchBody] = mockClient.patch.mock.calls[0];
@@ -298,6 +298,8 @@ describe('AuthentikService.createActivationLink', () => {
     const sevenDays = 7 * 24 * 60 * 60 * 1000;
     expect(expires).toBeGreaterThanOrEqual(before + sevenDays);
     expect(expires).toBeLessThanOrEqual(after + sevenDays);
+    // the date that is returned is the one that was written to Authentik
+    expect(windowExpiresAt.toISOString()).toBe(patchBody.attributes.tak_activation_expires);
     expect(mockClient.post).toHaveBeenCalledWith('/core/users/42/recovery/', { token_duration: 'hours=24' });
     // the window is open before the link exists
     expect(mockClient.patch.mock.invocationCallOrder[0]).toBeLessThan(mockClient.post.mock.invocationCallOrder[0]);
@@ -425,5 +427,104 @@ describe('AuthentikService.getUsers', () => {
 
     const [, options] = mockClient.get.mock.calls[0];
     expect(options.params).not.toHaveProperty('search');
+  });
+});
+
+describe('AuthentikService.removeUserAuthenticators / endUserSessions', () => {
+  let mockClient;
+  let authentikService;
+  beforeEach(() => {
+    jest.resetModules();
+    jest.clearAllMocks();
+    mockClient = { post: jest.fn(), get: jest.fn(), patch: jest.fn(), delete: jest.fn() };
+    const axios = require('axios');
+    axios.create = jest.fn(() => mockClient);
+    authentikService = require('./authentik');
+  });
+  it('lists the devices of that user only and deletes each through its own kind endpoint', async () => {
+    mockClient.get.mockResolvedValue({ data: [
+      { meta_model_name: 'authentik_stages_authenticator_webauthn.webauthndevice', pk: 1 },
+      { meta_model_name: 'authentik_stages_authenticator_totp.totpdevice', pk: 2 },
+      { meta_model_name: 'authentik_stages_authenticator_static.staticdevice', pk: 3 }
+    ] });
+    mockClient.delete.mockResolvedValue({});
+    const result = await authentikService.removeUserAuthenticators(42);
+    expect(mockClient.get).toHaveBeenCalledWith('/authenticators/admin/all/', { params: { user: 42 } });
+    expect(mockClient.delete.mock.calls.map(c => c[0])).toEqual([
+      '/authenticators/admin/webauthn/1/',
+      '/authenticators/admin/totp/2/',
+      '/authenticators/admin/static/3/'
+    ]);
+    expect(result.removed).toHaveLength(3);
+    expect(result.failed).toEqual([]);
+  });
+  it('counts an already deleted device as removed and reports a failed one without stopping', async () => {
+    mockClient.get.mockResolvedValue({ data: [
+      { meta_model_name: 'authentik_stages_authenticator_webauthn.webauthndevice', pk: 1 },
+      { meta_model_name: 'authentik_stages_authenticator_totp.totpdevice', pk: 2 },
+      { meta_model_name: 'authentik_stages_authenticator_static.staticdevice', pk: 3 }
+    ] });
+    const gone = Object.assign(new Error('not found'), { response: { status: 404 } });
+    mockClient.delete
+      .mockRejectedValueOnce(gone)
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValueOnce({});
+    const result = await authentikService.removeUserAuthenticators(42);
+    expect(result.removed).toEqual([{ kind: 'webauthn', id: 1 }, { kind: 'static', id: 3 }]);
+    expect(result.failed).toEqual([{ kind: 'totp', id: 2, error: 'boom' }]);
+  });
+  it('reports a device of an unsupported kind as failed and does not delete it', async () => {
+    mockClient.get.mockResolvedValue({ data: [{ meta_model_name: 'authentik_stages_authenticator_sms.smsdevice', pk: 9 }] });
+    const result = await authentikService.removeUserAuthenticators(42);
+    expect(mockClient.delete).not.toHaveBeenCalled();
+    expect(result.failed).toHaveLength(1);
+  });
+  it('filters sessions by the username and ends only the sessions that belong to the user, across pages', async () => {
+    mockClient.get
+      .mockResolvedValueOnce({ data: { pk: 42, username: 'pat' } })
+      .mockResolvedValueOnce({ data: { results: [
+        { uuid: 'a', user: 42 },
+        { uuid: 'b', user: 99 }
+      ], pagination: { next: 2 } } })
+      .mockResolvedValueOnce({ data: { results: [{ uuid: 'c', user: 42 }], pagination: { next: 0 } } });
+    mockClient.delete.mockResolvedValue({});
+    const ended = await authentikService.endUserSessions(42);
+    expect(ended).toBe(2);
+    expect(mockClient.get.mock.calls[1][1].params).toMatchObject({ user__username: 'pat', page: 1 });
+    expect(mockClient.delete.mock.calls.map(c => c[0])).toEqual([
+      '/core/authenticated_sessions/a/',
+      '/core/authenticated_sessions/c/'
+    ]);
+  });
+  it('also reads an owner given as an object with a pk', async () => {
+    mockClient.get
+      .mockResolvedValueOnce({ data: { pk: 42, username: 'pat' } })
+      .mockResolvedValueOnce({ data: { results: [{ uuid: 'a', user: { pk: 42 } }], pagination: { next: 0 } } });
+    mockClient.delete.mockResolvedValue({});
+    expect(await authentikService.endUserSessions(42)).toBe(1);
+  });
+  it('ends nothing when the user has no username in the response', async () => {
+    mockClient.get.mockResolvedValueOnce({ data: { pk: 42 } });
+    await expect(authentikService.endUserSessions(42)).rejects.toThrow('username');
+    expect(mockClient.delete).not.toHaveBeenCalled();
+  });
+});
+
+describe('AuthentikService.invalidateUserPassword', () => {
+  it('sets a long random password that differs on every call', async () => {
+    jest.resetModules();
+    const mockClient = { post: jest.fn().mockResolvedValue({ data: {} }), get: jest.fn(), patch: jest.fn(), delete: jest.fn() };
+    require('axios').create = jest.fn(() => mockClient);
+    const authentikService = require('./authentik');
+    await authentikService.invalidateUserPassword(42);
+    await authentikService.invalidateUserPassword(42);
+    const [[url1, body1], [, body2]] = mockClient.post.mock.calls;
+    expect(url1).toBe('/core/users/42/set_password/');
+    expect(body1.password.length).toBeGreaterThanOrEqual(48);
+    expect(body1.password).toMatch(/[A-Z]/);
+    expect(body1.password).toMatch(/[a-z]/);
+    expect(body1.password).toMatch(/[0-9]/);
+    expect(body1.password).toMatch(/[^A-Za-z0-9]/);
+    expect(body1.password).not.toBe(body2.password);
   });
 });

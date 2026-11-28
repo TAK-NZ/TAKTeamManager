@@ -138,6 +138,8 @@ const RetentionCleanupJob = require('../services/RetentionCleanupJob');
 // the other scheduled jobs. Writes one daily_stats row per day (the four
 // /admin totals) so the Statistics page can chart their history.
 const DailyStatsSnapshotJob = require('../services/DailyStatsSnapshotJob');
+// Suspends accounts whose activation window has passed without a first sign-in.
+const ActivationExpiryJob = require('../services/ActivationExpiryJob');
 // Authentik scaling (Phase 3): the periodic anti-drift sweep, started/
 // stopped alongside the other scheduled jobs. Its own `start()` gates on
 // both OWNED_GROUP_SWEEP_ENABLED and BULK_GROUP_RECONCILE_ENABLED, so it is
@@ -522,6 +524,7 @@ class SyncWorker {
     // construction, like the jobs around it); its `start()` runs one snapshot
     // immediately then on its own interval.
     this.dailyStatsSnapshotJob = new DailyStatsSnapshotJob();
+    this.activationExpiryJob = new ActivationExpiryJob();
 
     // Authentik scaling (Phase 3): the anti-drift sweep, constructed
     // unconditionally (no timer/I/O at construction) like the jobs above;
@@ -612,6 +615,7 @@ class SyncWorker {
     // Statistics page: start the daily snapshot job (its own single-runner
     // advisory lock keeps only one worker writing today's row per tick).
     this.dailyStatsSnapshotJob.start();
+    this.activationExpiryJob.start();
 
     // Authentik scaling (Phase 3): start the anti-drift sweep. Its own
     // `start()` no-ops unless OWNED_GROUP_SWEEP_ENABLED and
@@ -769,6 +773,7 @@ class SyncWorker {
 
     // Statistics page: stop the daily snapshot job alongside the others.
     this.dailyStatsSnapshotJob.stop();
+    this.activationExpiryJob.stop();
 
     // Authentik scaling (Phase 3): stop the anti-drift sweep alongside the
     // other scheduled jobs.
