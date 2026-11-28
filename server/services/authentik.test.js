@@ -479,20 +479,34 @@ describe('AuthentikService.removeUserAuthenticators / endUserSessions', () => {
     expect(mockClient.delete).not.toHaveBeenCalled();
     expect(result.failed).toHaveLength(1);
   });
-  it('ends only the sessions that belong to the user, across pages', async () => {
+  it('filters sessions by the username and ends only the sessions that belong to the user, across pages', async () => {
     mockClient.get
+      .mockResolvedValueOnce({ data: { pk: 42, username: 'pat' } })
       .mockResolvedValueOnce({ data: { results: [
-        { uuid: 'a', user: { pk: 42 } },
-        { uuid: 'b', user: { pk: 99 } }
+        { uuid: 'a', user: 42 },
+        { uuid: 'b', user: 99 }
       ], pagination: { next: 2 } } })
-      .mockResolvedValueOnce({ data: { results: [{ uuid: 'c', user: { pk: 42 } }], pagination: { next: 0 } } });
+      .mockResolvedValueOnce({ data: { results: [{ uuid: 'c', user: 42 }], pagination: { next: 0 } } });
     mockClient.delete.mockResolvedValue({});
     const ended = await authentikService.endUserSessions(42);
     expect(ended).toBe(2);
+    expect(mockClient.get.mock.calls[1][1].params).toMatchObject({ user__username: 'pat', page: 1 });
     expect(mockClient.delete.mock.calls.map(c => c[0])).toEqual([
       '/core/authenticated_sessions/a/',
       '/core/authenticated_sessions/c/'
     ]);
+  });
+  it('also reads an owner given as an object with a pk', async () => {
+    mockClient.get
+      .mockResolvedValueOnce({ data: { pk: 42, username: 'pat' } })
+      .mockResolvedValueOnce({ data: { results: [{ uuid: 'a', user: { pk: 42 } }], pagination: { next: 0 } } });
+    mockClient.delete.mockResolvedValue({});
+    expect(await authentikService.endUserSessions(42)).toBe(1);
+  });
+  it('ends nothing when the user has no username in the response', async () => {
+    mockClient.get.mockResolvedValueOnce({ data: { pk: 42 } });
+    await expect(authentikService.endUserSessions(42)).rejects.toThrow('username');
+    expect(mockClient.delete).not.toHaveBeenCalled();
   });
 });
 

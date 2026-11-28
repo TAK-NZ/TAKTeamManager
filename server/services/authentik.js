@@ -250,17 +250,28 @@ class AuthentikService {
     return { removed, failed };
   }
   // Ends every session of the user, so a session that was open when the authenticators were removed does not survive.
-  // The session's owner is checked on the response as well: a user filter that Authentik ignored must not end somebody
+  //
+  // `GET /core/authenticated_sessions/` has no `user` filter (a `?user=` is silently ignored and every session comes
+  // back), only `user__username`, so the username is read first. In the response `user` is the numeric pk, not an
+  // object. The owner is checked on every row as well, so a filter that Authentik ignored can never end somebody
   // else's session. Returns the number of sessions ended.
   async endUserSessions(userId) {
+    const user = await this._authentikCall('read', () =>
+      this.client.get(`/core/users/${userId}/`)
+    );
+    const username = user.data?.username;
+    if (!username) {
+      throw new Error('Authentik did not return the username of the user');
+    }
     let ended = 0;
     for (let page = 1; page <= 20; page += 1) {
       const response = await this._authentikCall('read', () =>
-        this.client.get('/core/authenticated_sessions/', { params: { user: userId, page, page_size: 100 } })
+        this.client.get('/core/authenticated_sessions/', { params: { user__username: username, page, page_size: 100 } })
       );
       const results = response.data?.results || [];
       for (const session of results) {
-        if (String(session.user?.pk) !== String(userId)) {
+        const ownerPk = session.user && typeof session.user === 'object' ? session.user.pk : session.user;
+        if (String(ownerPk) !== String(userId)) {
           continue;
         }
         await this._authentikCall('write_priority', () =>
