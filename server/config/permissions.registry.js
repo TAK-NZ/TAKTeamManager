@@ -109,7 +109,6 @@ const routes = {
   // directory" concern, just as a single number instead of a page of rows.
   'GET /api/users/count': ['user:read:team_admin'],
   'GET /api/users/me': ['user:read:own'],
-  'POST /api/users': ['user:create:team_admin'],
   'POST /api/users/:userId/resend-welcome': ['user:resend_welcome:team_admin'],
   'GET /api/users/search': ['user:read:team_admin'],
   'GET /api/users/available': ['user:read:team_admin'],

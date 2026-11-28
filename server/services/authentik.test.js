@@ -267,6 +267,62 @@ describe('AuthentikService.createUser', () => {
 });
 
 /**
+ * `createActivationLink`: opens the activation window on the Authentik user and returns a one-time recovery link
+ * (auth-infra's recovery flow only lets a user without an authenticator in while that window is open).
+ */
+describe('AuthentikService.createActivationLink', () => {
+  let mockClient;
+  let authentikService;
+  beforeEach(() => {
+    jest.resetModules();
+    jest.clearAllMocks();
+    mockClient = { post: jest.fn(), get: jest.fn(), patch: jest.fn(), delete: jest.fn() };
+    const axios = require('axios');
+    axios.create = jest.fn(() => mockClient);
+    authentikService = require('./authentik');
+  });
+  it('merges the 7 day window into the current attributes, then asks for a 24 hour link, in that order', async () => {
+    mockClient.get.mockResolvedValue({ data: { pk: 42, attributes: { takCallsign: 'AUK-1', takRole: 'Team Member' } } });
+    mockClient.patch.mockResolvedValue({ data: {} });
+    mockClient.post.mockResolvedValue({ data: { link: 'https://account.example.test/if/flow/tak-recovery-flow/?flow_token=x' } });
+    const before = Date.now();
+    const link = await authentikService.createActivationLink(42);
+    const after = Date.now();
+    expect(link).toBe('https://account.example.test/if/flow/tak-recovery-flow/?flow_token=x');
+    const [patchUrl, patchBody] = mockClient.patch.mock.calls[0];
+    expect(patchUrl).toBe('/core/users/42/');
+    // existing attributes survive: Authentik's PATCH replaces the whole dict
+    expect(patchBody.attributes.takCallsign).toBe('AUK-1');
+    expect(patchBody.attributes.takRole).toBe('Team Member');
+    const expires = Date.parse(patchBody.attributes.tak_activation_expires);
+    const sevenDays = 7 * 24 * 60 * 60 * 1000;
+    expect(expires).toBeGreaterThanOrEqual(before + sevenDays);
+    expect(expires).toBeLessThanOrEqual(after + sevenDays);
+    expect(mockClient.post).toHaveBeenCalledWith('/core/users/42/recovery/', { token_duration: 'hours=24' });
+    // the window is open before the link exists
+    expect(mockClient.patch.mock.invocationCallOrder[0]).toBeLessThan(mockClient.post.mock.invocationCallOrder[0]);
+  });
+  it('works for a user that has no attributes yet', async () => {
+    mockClient.get.mockResolvedValue({ data: { pk: 7 } });
+    mockClient.patch.mockResolvedValue({ data: {} });
+    mockClient.post.mockResolvedValue({ data: { link: 'https://x/y' } });
+    await authentikService.createActivationLink(7);
+    expect(Object.keys(mockClient.patch.mock.calls[0][1].attributes)).toEqual(['tak_activation_expires']);
+  });
+  it('throws when Authentik returns no link, so no email goes out without one', async () => {
+    mockClient.get.mockResolvedValue({ data: { pk: 7, attributes: {} } });
+    mockClient.patch.mockResolvedValue({ data: {} });
+    mockClient.post.mockResolvedValue({ data: {} });
+    await expect(authentikService.createActivationLink(7)).rejects.toThrow('did not return an activation link');
+  });
+  it('does not open a window or ask for a link when the user cannot be read', async () => {
+    mockClient.get.mockRejectedValue(new Error('404'));
+    await expect(authentikService.createActivationLink(7)).rejects.toThrow('404');
+    expect(mockClient.patch).not.toHaveBeenCalled();
+    expect(mockClient.post).not.toHaveBeenCalled();
+  });
+});
+/**
  * Bugfix: `getUsers` must send a stable `ordering=pk` query param on
  * every request -- Authentik's default ordering for `/core/users/` is
  * alphabetical by username, which is NOT stable across a page boundary

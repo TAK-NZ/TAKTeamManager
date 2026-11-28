@@ -7,6 +7,11 @@ const { CircuitBreaker } = require('../utils/circuitBreaker');
 // HTTP via `_authentikCall` below, so the main server's Authentik load and
 // the Sync_Worker's load draw from the SAME token budget.
 const authentikRequest = require('./authentikRequest');
+// How long the one-time activation link works, and how long an account that has
+// no authenticator yet may be activated after it was invited (NZISM: an unused
+// invitation does not stay open).
+const ACTIVATION_LINK_HOURS = 24;
+const ACTIVATION_WINDOW_DAYS = 7;
 
 class AuthentikService {
   constructor() {
@@ -149,15 +154,47 @@ class AuthentikService {
     return response.data;
   }
 
-  // Set user password
-  async setUserPassword(userId, password) {
+
+  // Activation (first sign-in) and re-invitation of an account: opens the
+  // Activation_Window on the Authentik user and returns a one-time link.
+  //
+  // The user attribute `tak_activation_expires` (ISO 8601 time, 7 days) is what
+  // Authentik's recovery flow (auth-infra, tak-flows.yaml) checks for a user who
+  // has no authenticator yet: without an open window such a user is refused, so
+  // a leftover link or an email-only password reset cannot create a first
+  // password and authenticators for an account nobody invited. A user who already
+  // has an authenticator must prove possession of one in the same flow, whatever
+  // the window says.
+  //
+  // `POST /core/users/{id}/recovery/` returns a link to the brand's recovery
+  // flow with a flow token that is valid for `ACTIVATION_LINK_HOURS` and is
+  // used up the first time the flow runs. The link host comes from the host
+  // this service calls, so AUTHENTIK_URL must be the public https address.
+  //
+  // The attribute is merged into the user's current attributes, never written
+  // as a whole object (Authentik's PATCH replaces the whole `attributes` dict).
+  async createActivationLink(userId) {
+    const current = await this._authentikCall('read', () =>
+      this.client.get(`/core/users/${userId}/`)
+    );
+    const attributes = {
+      ...(current.data?.attributes || {}),
+      tak_activation_expires: new Date(Date.now() + ACTIVATION_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString()
+    };
     await this._authentikCall('write', () =>
-      this.client.post(`/core/users/${userId}/set_password/`, {
-        password: password
+      this.client.patch(`/core/users/${userId}/`, { attributes })
+    );
+    const response = await this._authentikCall('write', () =>
+      this.client.post(`/core/users/${userId}/recovery/`, {
+        token_duration: `hours=${ACTIVATION_LINK_HOURS}`
       })
     );
+    const link = response.data?.link;
+    if (!link) {
+      throw new Error('Authentik did not return an activation link');
+    }
+    return link;
   }
-
   // Requirement 27 Criteria 5-7 (task 49.3): creates a short-lived
   // Authentik `app_password` token scoped to a specific user, for
   // rendering as an ATAK/iTAK enrollment QR code by

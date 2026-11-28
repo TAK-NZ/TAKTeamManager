@@ -35,7 +35,8 @@ jest.mock('nodemailer', () => ({
 }));
 
 jest.mock('../services/authentik', () => ({
-  getUsers: jest.fn()
+  getUsers: jest.fn(),
+  createActivationLink: jest.fn()
 }));
 
 jest.mock('../services/userAttributes', () => ({
@@ -115,6 +116,7 @@ jest.mock('../services/ManagedIdentifierService', () => {
 const express = require('express');
 const request = require('supertest');
 const pool = require('../config/database');
+const authentikService = require('../services/authentik');
 const EventPublisher = require('../services/EventPublisher');
 const UserProvisioningService = require('../services/UserProvisioningService');
 const ManagedIdentifierService = require('../services/ManagedIdentifierService');
@@ -1049,18 +1051,35 @@ describe('POST /api/users/create-and-add welcomeEmailSent (bugfix: silent welcom
   it('reports welcomeEmailSent: true when the email template lookup and send both succeed', async () => {
     mockAuthentikSuccess();
     pool.connect.mockResolvedValue(buildMockClient());
+    authentikService.createActivationLink.mockResolvedValue('https://account.example.test/if/flow/tak-recovery-flow/?flow_token=abc');
     pool.query.mockImplementation((sql) => {
       if (typeof sql === 'string' && sql.includes('FROM email_templates')) {
         return Promise.resolve({
-          rows: [{ subject_template: 'Welcome', body_template: 'Hello {{first_name}}' }]
+          rows: [{ subject_template: 'Welcome', body_template: 'Hello {{first_name}} {{password_reset_url}}' }]
         });
       }
       return Promise.resolve({ rows: [] });
     });
-
     const res = await request(app).post('/api/users/create-and-add').send(VALID_BODY);
-
     expect(res.status).toBe(201);
     expect(res.body.welcomeEmailSent).toBe(true);
+    // the welcome email carries a one-time activation link made for the NEW Authentik user, not the generic page
+    expect(authentikService.createActivationLink).toHaveBeenCalledTimes(1);
+    expect(mockSendMail.mock.calls[0][0].html).toContain('flow_token=abc');
+  });
+  it('reports welcomeEmailSent: false and sends nothing when the activation link cannot be made', async () => {
+    mockAuthentikSuccess();
+    pool.connect.mockResolvedValue(buildMockClient());
+    authentikService.createActivationLink.mockRejectedValue(new Error('Authentik is down'));
+    pool.query.mockImplementation((sql) => {
+      if (typeof sql === 'string' && sql.includes('FROM email_templates')) {
+        return Promise.resolve({ rows: [{ subject_template: 'Welcome', body_template: 'Hello {{password_reset_url}}' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    const res = await request(app).post('/api/users/create-and-add').send(VALID_BODY);
+    expect(res.status).toBe(201);
+    expect(res.body.welcomeEmailSent).toBe(false);
+    expect(mockSendMail).not.toHaveBeenCalled();
   });
 });

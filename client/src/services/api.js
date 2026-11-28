@@ -293,7 +293,6 @@ export const usersAPI = {
   // unpaginated count excluding ignored-prefix accounts and Team_Owned_Devices.
   getCount: () => api.get('/users/count'),
   getMe: () => api.get('/users/me'),
-  create: (data) => api.post('/users', data),
   search: (query) => api.get(`/users/search?q=${query}`),
   getAvailable: (search) => api.get(`/users/available${search ? `?search=${encodeURIComponent(search)}` : ''}`),
   // `callsignSuffix` is optional: omitted (or empty) lets the server compute

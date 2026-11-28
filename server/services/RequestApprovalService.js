@@ -322,7 +322,8 @@ class RequestApprovalService {
               username: request.requester_email,
               firstName: request.requested_first_name || request.requester_first_name || '',
               callsign: attributes?.callsign || '',
-              additionalDetails
+              additionalDetails,
+              activationUserId: newAccountAuthentikUser.pk
             },
             // The approving admin is the actor on the email's audit row.
             { actorUserId: adminId ?? null }

@@ -157,7 +157,7 @@ Your request for an account has been approved.
 
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin: 16px 0;"><tr><td style="background-color: #f0f7ff; border-radius: 8px; border-left: 4px solid #348eda; padding: 16px 20px;"><b>Team:</b> {{team_path}}<br><b>Username:</b> <a href="#" style="color: #212124; text-decoration: none; cursor: default; pointer-events: none;">{{username}}</a><br><b>TAK Callsign:</b> <code>{{callsign}}</code></td></tr></table>
 
-Get started: <a href="{{password_reset_url}}">Set a password</a>, or sign in with an Apple or Google account linked to your username above.
+Get started: <a href="{{password_reset_url}}">Set up your sign-in</a>. The link works once and for 24 hours; if it has expired, ask your team administrator for a new one.
 
 Login at: {{login_url}}
 

@@ -202,6 +202,10 @@ describe('RequestApprovalService.approveRequest - new_account', () => {
     expect(mockClient.query).toHaveBeenCalledWith('COMMIT');
     expect(mockClient.release).toHaveBeenCalledTimes(1);
     expect(service.emailService.sendApprovalEmail).toHaveBeenCalled();
+    // a NEW account gets an activation link made for its Authentik user
+    expect(service.emailService.sendApprovalEmail.mock.calls[0][1]).toEqual(
+      expect.objectContaining({ activationUserId: 4242 })
+    );
   });
 
   /**
