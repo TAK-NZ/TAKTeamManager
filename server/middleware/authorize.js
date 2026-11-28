@@ -493,6 +493,28 @@ const rowScopedResolvers = {
   },
 
   /**
+   * `user:reset_mfa:team_admin` — `POST /api/users/:userId/reset-mfa`. The same rule as
+   * `user:resend_welcome:team_admin`: a Global_Manager, or an admin (per `Team.isAdmin`) of at least one of the target
+   * user's current teams. The route itself refuses a self-reset and a team device, and reserves an Authentik
+   * administrator's account for a Global_Manager.
+   *
+   * @param {import('express').Request} req
+   * @returns {Promise<boolean>}
+   */
+  'user:reset_mfa:team_admin': async (req) => {
+    if (req.user && req.user.is_global_manager) {
+      return true;
+    }
+    const targetUserId = req.params && req.params.userId;
+    const userTeams = await User.getTeamMemberships(targetUserId);
+    for (const team of userTeams) {
+      if (await Team.isAdmin(team.id, req.user && req.user.userId)) {
+        return true;
+      }
+    }
+    return false;
+  },
+  /**
    * `user:read:team_admin` — satisfied if the requesting user is a
    * Global_Manager OR holds at least one DIRECT admin membership, i.e. is
    * a Team_Admin of *some* team. Backs the three user-directory LISTING

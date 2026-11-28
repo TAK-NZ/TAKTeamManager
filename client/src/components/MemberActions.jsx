@@ -1,4 +1,4 @@
-import { PencilIcon, EnvelopeIcon, ArrowRightCircleIcon, DevicePhoneMobileIcon, TrashIcon, LockClosedIcon, LockOpenIcon } from '@heroicons/react/24/outline'
+import { PencilIcon, EnvelopeIcon, KeyIcon, ArrowRightCircleIcon, DevicePhoneMobileIcon, TrashIcon, LockClosedIcon, LockOpenIcon } from '@heroicons/react/24/outline'
 
 /**
  * Users-page-action-parity: the Edit/Resend welcome/Transfer/View
@@ -81,6 +81,8 @@ import { PencilIcon, EnvelopeIcon, ArrowRightCircleIcon, DevicePhoneMobileIcon, 
  *   assignment" wording so every existing call site is unaffected.
  * @param {(member: object) => void} props.onEdit
  * @param {(member: object) => void} props.onResendWelcome
+ * @param {(member: object) => void} [props.onResetMfa] opens the Reset MFA confirmation for this row. Omitted
+ *   (no button) where the caller has no reset to offer, or for a row that is not an active account.
  * @param {(member: object) => void} props.onTransfer
  * @param {(member: object) => void} props.onViewDevices
  * @param {(userId: number, roleLabel: string) => void} props.onRemove
@@ -120,6 +122,7 @@ export default function MemberActions({
   disabledReason = 'This user has no team assignment',
   onEdit,
   onResendWelcome,
+  onResetMfa,
   onTransfer,
   onViewDevices,
   onRemove,
@@ -165,6 +168,17 @@ export default function MemberActions({
       >
         <EnvelopeIcon className={iconSizeClass} aria-hidden="true" />
       </button>
+      {onResetMfa && (
+        <button
+          onClick={() => hasTeam && onResetMfa(member)}
+          disabled={!hasTeam}
+          className={`${boxClass} ${hasTeam ? neutralClass : neutralDisabledClass}`}
+          title={hasTeam ? 'Reset MFA (lost sign-in methods)' : noTeamTitle}
+          aria-label={hasTeam ? 'Reset MFA (lost sign-in methods)' : noTeamTitle}
+        >
+          <KeyIcon className={iconSizeClass} aria-hidden="true" />
+        </button>
+      )}
       <button
         onClick={() => hasTeam && onTransfer(member)}
         disabled={!hasTeam}

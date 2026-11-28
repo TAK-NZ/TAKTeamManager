@@ -374,15 +374,50 @@ describe('EmailService', () => {
     it('uses a one-time activation link made for the user when activationUserId is given, not the generic page', async () => {
       process.env.PASSWORD_RESET_URL = 'https://reset.example.com';
       const authentikService = require('./authentik');
-      const spy = jest.spyOn(authentikService, 'createActivationLink').mockResolvedValue('https://account.example.test/flow?flow_token=t1');
+      const spy = jest.spyOn(authentikService, 'createActivationLink').mockResolvedValue({ link: 'https://account.example.test/flow?flow_token=t1', windowExpiresAt: new Date('2030-01-08T00:00:00Z') });
       pool.query.mockResolvedValue({
         rows: [{ subject_template: 'Approved', body_template: 'Reset: {{password_reset_url}}' }]
       });
       await service.sendApprovalEmail('user@example.com', { teamPath: 'FENZ - Southland', activationUserId: 'pk-42' });
       expect(spy).toHaveBeenCalledWith('pk-42');
       expect(mockSendMail.mock.calls[0][0].text).toBe('Reset: https://account.example.test/flow?flow_token=t1');
+      // the end of the window is mirrored into users.activation_expires_at
+      const windowWrite = pool.query.mock.calls.find(([sql]) => String(sql).includes('UPDATE users SET activation_expires_at'));
+      expect(windowWrite[1]).toEqual([new Date('2030-01-08T00:00:00Z'), 'pk-42']);
       spy.mockRestore();
       delete process.env.PASSWORD_RESET_URL;
+    });
+    it('still sends the email when the activation window cannot be recorded', async () => {
+      const authentikService = require('./authentik');
+      const spy = jest.spyOn(authentikService, 'createActivationLink').mockResolvedValue({ link: 'https://account.example.test/flow?flow_token=t2', windowExpiresAt: new Date('2030-01-08T00:00:00Z') });
+      pool.query.mockImplementation((sql) => {
+        if (String(sql).includes('UPDATE users SET activation_expires_at')) {
+          return Promise.reject(new Error('column missing'));
+        }
+        return Promise.resolve({ rows: [{ subject_template: 'Approved', body_template: 'Reset: {{password_reset_url}}' }] });
+      });
+      await service.sendApprovalEmail('user@example.com', { activationUserId: 'pk-42' });
+      expect(mockSendMail.mock.calls[0][0].text).toBe('Reset: https://account.example.test/flow?flow_token=t2');
+      spy.mockRestore();
+    });
+    it('sendMfaResetEmail makes a new activation link, records the window, and sends the mfa_reset template', async () => {
+      const authentikService = require('./authentik');
+      const spy = jest.spyOn(authentikService, 'createActivationLink').mockResolvedValue({ link: 'https://account.example.test/flow?flow_token=t9', windowExpiresAt: new Date('2030-01-08T00:00:00Z') });
+      pool.query.mockResolvedValue({
+        rows: [{ subject_template: 'Again', body_template: 'Hi {{first_name}} {{password_reset_url}}' }]
+      });
+      await service.sendMfaResetEmail('user@example.com', { firstName: 'Pat', activationUserId: 'pk-42' }, { actorUserId: 1, targetUserId: 2 });
+      expect(spy).toHaveBeenCalledWith('pk-42');
+      expect(pool.query.mock.calls.some(([sql, params]) => String(sql).includes('FROM email_templates') && params[0] === 'mfa_reset')).toBe(true);
+      expect(mockSendMail.mock.calls[0][0].text).toBe('Hi Pat https://account.example.test/flow?flow_token=t9');
+      spy.mockRestore();
+    });
+    it('sendMfaResetEmail sends nothing when the link cannot be made', async () => {
+      const authentikService = require('./authentik');
+      const spy = jest.spyOn(authentikService, 'createActivationLink').mockRejectedValue(new Error('Authentik is down'));
+      await expect(service.sendMfaResetEmail('user@example.com', { activationUserId: 'pk-42' })).rejects.toThrow('Authentik is down');
+      expect(mockSendMail).not.toHaveBeenCalled();
+      spy.mockRestore();
     });
     it('keeps the generic page for an existing user (no activationUserId) and makes no link', async () => {
       process.env.PASSWORD_RESET_URL = 'https://reset.example.com';

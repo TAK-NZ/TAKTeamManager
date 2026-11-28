@@ -33,7 +33,8 @@ const KNOWN_KEYS = [
   'signup_already_active',
   'team_transfer_completed',
   'cert_expiry_self_digest',
-  'cert_expiry_team_digest'
+  'cert_expiry_team_digest',
+  'mfa_reset'
 ]
 
 // True iff `key` is an own enumerable Template_Key of the hints map -- the

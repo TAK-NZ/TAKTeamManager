@@ -8,6 +8,7 @@ const { toAsciiIdentifier } = require('../utils/asciiNormalize');
 const { isValidCountryCode, normaliseCountryCode } = require('../utils/isoCountry');
 const { resolveChannelFolderSeparator } = require('../utils/channelFolderSeparator');
 const { deriveTeamChannelName, teamChannelGroupAttributes } = require('../utils/teamChannelGroupName');
+const { deriveActivationStatus } = require('../utils/activationStatus');
 
 /**
  * Requirement 2.2-2.3 (task 5.1): thrown by `Team.create` when the
@@ -1092,6 +1093,7 @@ class Team {
       const result = await pool.query(`
         SELECT u.*, u.callsign_suffix, u.tak_role, tm.role, tm.inherited_from_team_id,
                uc.tak_callsign,
+               uc.last_login AS last_login_for_status,
                CASE 
                  WHEN tm.inherited_from_team_id IS NOT NULL THEN t.name
                  ELSE NULL
@@ -1103,7 +1105,12 @@ class Team {
         WHERE tm.team_id = $1
         ORDER BY tm.role DESC, u.first_name, u.last_name
       `, [teamId]);
-      return result.rows;
+      // Whether each person has activated their account (see utils/activationStatus). The sign-in time itself is not
+      // passed on; only the derived status is.
+      return result.rows.map(({ last_login_for_status, ...row }) => ({
+        ...row,
+        activation_status: deriveActivationStatus({ last_login: last_login_for_status, activation_expires_at: row.activation_expires_at })
+      }));
     } catch (error) {
       logger.error({ err: error, teamId }, 'Error fetching team members with users table');
       try {

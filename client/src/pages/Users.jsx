@@ -14,6 +14,8 @@ import MemberEditRow, {
 } from '../components/MemberEditRow'
 import TransferMemberDialog, { shouldFallBackToAllTeams } from '../components/TransferMemberDialog'
 import SuspendAccountDialog from '../components/SuspendAccountDialog'
+import ResetMfaDialog from '../components/ResetMfaDialog'
+import { describeActivationBadge } from '../utils/activationBadge'
 import { describeAccountStatusBadge } from '../utils/accountStatusBadge'
 import { isValidNewUserEmail, extractCallsignSuffixServerError } from '../utils/newUserForm'
 import { formatNumber } from '../utils/formatNumber'
@@ -116,6 +118,8 @@ export default function Users({ user }) {
   // row itself (not just an id) since the dialog needs its email.
   const [resendingWelcomeTo, setResendingWelcomeTo] = useState(null)
   const [resendingWelcomeInFlight, setResendingWelcomeInFlight] = useState(false)
+  // The row whose MFA reset confirmation is open, or null when closed.
+  const [resettingMfaFor, setResettingMfaFor] = useState(null)
 
   // "Create User" dialog state.
   const [showCreateDialog, setShowCreateDialog] = useState(false)
@@ -732,6 +736,16 @@ export default function Users({ user }) {
                       )}
                     </div>
                   )}
+                  {describeActivationBadge(targetUser.activation_status) && (
+                    <div>
+                      <span
+                        className={describeActivationBadge(targetUser.activation_status).className}
+                        title={describeActivationBadge(targetUser.activation_status).title}
+                      >
+                        {describeActivationBadge(targetUser.activation_status).label}
+                      </span>
+                    </div>
+                  )}
                   {targetUser.local_user_id ? (
                     <MemberActions
                       member={{
@@ -754,6 +768,7 @@ export default function Users({ user }) {
                       }
                       onEdit={() => handleStartEditUser(targetUser)}
                       onResendWelcome={() => handleResendWelcomeClick(targetUser)}
+                      onResetMfa={targetUser.account_status === 'active' ? () => setResettingMfaFor(targetUser) : undefined}
                       onTransfer={() => setTransferringUser(targetUser)}
                       onViewDevices={() => setDevicesForUser(targetUser)}
                       onRemove={() => handleRemoveUser(targetUser)}
@@ -883,6 +898,14 @@ export default function Users({ user }) {
                                 Inactive
                               </span>
                             ) : null}
+                            {describeActivationBadge(targetUser.activation_status) && (
+                              <span
+                                className={describeActivationBadge(targetUser.activation_status).className}
+                                title={describeActivationBadge(targetUser.activation_status).title}
+                              >
+                                {describeActivationBadge(targetUser.activation_status).label}
+                              </span>
+                            )}
                           </div>
                           <div className="text-sm text-gray-500 dark:text-gray-400">{targetUser.email}</div>
                       </div>
@@ -1020,6 +1043,7 @@ export default function Users({ user }) {
                           }
                           onEdit={() => handleStartEditUser(targetUser)}
                           onResendWelcome={() => handleResendWelcomeClick(targetUser)}
+                          onResetMfa={targetUser.account_status === 'active' ? () => setResettingMfaFor(targetUser) : undefined}
                           onTransfer={() => setTransferringUser(targetUser)}
                           onViewDevices={() => setDevicesForUser(targetUser)}
                           onRemove={() => handleRemoveUser(targetUser)}
@@ -1118,6 +1142,15 @@ export default function Users({ user }) {
         />
       )}
 
+      {resettingMfaFor && (
+        <ResetMfaDialog
+          targetUserId={resettingMfaFor.local_user_id}
+          targetName={`${resettingMfaFor.first_name || ''} ${resettingMfaFor.last_name || ''}`.trim() || resettingMfaFor.username}
+          targetEmail={resettingMfaFor.email}
+          onClose={() => setResettingMfaFor(null)}
+          onCompleted={fetchUsers}
+        />
+      )}
       {/* Users-page-action-parity: the same Permanently Delete User
           confirmation dialog TeamDetail.jsx uses, type-in-email gated. */}
       {removeUserId && (() => {

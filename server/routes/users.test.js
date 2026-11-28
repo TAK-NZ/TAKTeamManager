@@ -427,6 +427,21 @@ describe('GET /api/users (local-sourced list)', () => {
     expect(carol.can_manage).toBe(true);
   });
 
+  it('reports activation_status from the sign-in and the recorded activation window', async () => {
+    const future = new Date(Date.now() + 3 * 24 * 3600 * 1000).toISOString();
+    const past = new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString();
+    pool.query.mockResolvedValue({
+      rows: [
+        makeRow({ pk: 1, last_login: '2026-09-01T08:30:00.000Z', activation_expires_at: past, total_count: 4 }),
+        makeRow({ pk: 2, last_login: null, activation_expires_at: future, total_count: 4 }),
+        makeRow({ pk: 3, last_login: null, activation_expires_at: past, total_count: 4 }),
+        makeRow({ pk: 4, last_login: null, activation_expires_at: null, total_count: 4 })
+      ]
+    });
+    const res = await request(app).get('/api/users');
+    expect(res.body.users.map((u) => u.activation_status)).toEqual(['active', 'invited', 'expired', null]);
+  });
+
   it('returns 500 without throwing when the query fails', async () => {
     pool.query.mockRejectedValue(new Error('db unavailable'));
 

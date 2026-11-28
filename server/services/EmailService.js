@@ -238,7 +238,9 @@ class EmailService {
     let passwordResetUrl = process.env.PASSWORD_RESET_URL || '';
     if (activationUserId) {
       const authentikService = require('./authentik');
-      passwordResetUrl = await authentikService.createActivationLink(activationUserId);
+      const { link, windowExpiresAt } = await authentikService.createActivationLink(activationUserId);
+      passwordResetUrl = link;
+      await this.recordActivationWindow(activationUserId, windowExpiresAt);
     }
     return this.sendEmail(email, 'access_request_approved', {
       team_path: teamPath || '',
@@ -252,6 +254,33 @@ class EmailService {
     }, context);
   }
 
+  // Sent after an administrator reset the user's MFA (MfaResetService). {{password_reset_url}} is a new one-time
+  // activation link, made here; when it cannot be made this throws and nothing is sent.
+  async sendMfaResetEmail(email, { firstName, activationUserId } = {}, context = {}) {
+    const authentikService = require('./authentik');
+    const { link, windowExpiresAt } = await authentikService.createActivationLink(activationUserId);
+    await this.recordActivationWindow(activationUserId, windowExpiresAt);
+    return this.sendEmail(email, 'mfa_reset', {
+      first_name: firstName || '',
+      username: email,
+      password_reset_url: link,
+      login_url: process.env.ACCOUNT_LOGIN_URL || ''
+    }, context);
+  }
+  // Mirrors the activation window that was just opened in Authentik (attribute tak_activation_expires) into
+  // users.activation_expires_at, which the user list and ActivationExpiryJob read. Best effort: the link and the window
+  // in Authentik already exist, and the email must go out even when this write fails (the job then has no date for the
+  // user and leaves it alone, which is the safe side).
+  async recordActivationWindow(authentikUserId, windowExpiresAt) {
+    try {
+      await pool.query(
+        'UPDATE users SET activation_expires_at = $1 WHERE authentik_user_id::text = $2::text',
+        [windowExpiresAt, String(authentikUserId)]
+      );
+    } catch (error) {
+      logger.error({ err: error, authentikUserId }, 'Failed to record the activation window');
+    }
+  }
   async sendDenialEmail(email, { teamPath, firstName, denialReason } = {}, context = {}) {
     return this.sendEmail(email, 'access_request_denied', {
       first_name: firstName || '',

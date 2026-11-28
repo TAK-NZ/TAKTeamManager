@@ -177,9 +177,10 @@ class AuthentikService {
     const current = await this._authentikCall('read', () =>
       this.client.get(`/core/users/${userId}/`)
     );
+    const windowExpiresAt = new Date(Date.now() + ACTIVATION_WINDOW_DAYS * 24 * 60 * 60 * 1000);
     const attributes = {
       ...(current.data?.attributes || {}),
-      tak_activation_expires: new Date(Date.now() + ACTIVATION_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString()
+      tak_activation_expires: windowExpiresAt.toISOString()
     };
     await this._authentikCall('write', () =>
       this.client.patch(`/core/users/${userId}/`, { attributes })
@@ -193,7 +194,85 @@ class AuthentikService {
     if (!link) {
       throw new Error('Authentik did not return an activation link');
     }
-    return link;
+    return { link, windowExpiresAt };
+  }
+  // Replaces the user's password with a random one that nobody knows. Part of an MFA reset: with the authenticators
+  // gone, the old password alone would let whoever holds it sign in and enrol their own authenticator. The user sets a
+  // new password through the activation link (the same flow as a first sign-in). Needs `reset_user_password` on the
+  // Team Manager role.
+  async invalidateUserPassword(userId) {
+    const crypto = require('crypto');
+    // 48 random bytes as base64url, plus one character of each class, so that any password policy is satisfied.
+    const password = `${crypto.randomBytes(48).toString('base64url')}aA1!`;
+    await this._authentikCall('write_priority', () =>
+      this.client.post(`/core/users/${userId}/set_password/`, { password })
+    );
+  }
+  // Reset of a user's MFA, after an administrator has checked who the person is (see MfaResetService).
+  //
+  // `GET /authenticators/admin/all/?user=<id>` lists every authenticator the caller may view for that user, of every
+  // kind. (The per-kind endpoints, `/authenticators/admin/webauthn/` and so on, IGNORE a user filter and return the
+  // devices of every user, which is why this one is used.) Each device is then deleted through the endpoint of its
+  // kind. A device that was already gone (404) counts as deleted.
+  //
+  // Returns { removed: [{kind, id}], failed: [{kind, id, error}] }; it never throws for a single device, so the caller
+  // can report a partial reset instead of losing track of what was removed.
+  async removeUserAuthenticators(userId) {
+    const list = await this._authentikCall('read', () =>
+      this.client.get('/authenticators/admin/all/', { params: { user: userId } })
+    );
+    const KIND_BY_MODEL = {
+      'authentik_stages_authenticator_webauthn.webauthndevice': 'webauthn',
+      'authentik_stages_authenticator_totp.totpdevice': 'totp',
+      'authentik_stages_authenticator_static.staticdevice': 'static'
+    };
+    const removed = [];
+    const failed = [];
+    for (const device of Array.isArray(list.data) ? list.data : []) {
+      const kind = KIND_BY_MODEL[String(device.meta_model_name || '').toLowerCase()];
+      if (!kind) {
+        failed.push({ kind: device.meta_model_name, id: device.pk, error: 'unsupported authenticator kind' });
+        continue;
+      }
+      try {
+        await this._authentikCall('write_priority', () =>
+          this.client.delete(`/authenticators/admin/${kind}/${device.pk}/`)
+        );
+        removed.push({ kind, id: device.pk });
+      } catch (error) {
+        if (error?.response?.status === 404) {
+          removed.push({ kind, id: device.pk });
+        } else {
+          failed.push({ kind, id: device.pk, error: error?.message || String(error) });
+        }
+      }
+    }
+    return { removed, failed };
+  }
+  // Ends every session of the user, so a session that was open when the authenticators were removed does not survive.
+  // The session's owner is checked on the response as well: a user filter that Authentik ignored must not end somebody
+  // else's session. Returns the number of sessions ended.
+  async endUserSessions(userId) {
+    let ended = 0;
+    for (let page = 1; page <= 20; page += 1) {
+      const response = await this._authentikCall('read', () =>
+        this.client.get('/core/authenticated_sessions/', { params: { user: userId, page, page_size: 100 } })
+      );
+      const results = response.data?.results || [];
+      for (const session of results) {
+        if (String(session.user?.pk) !== String(userId)) {
+          continue;
+        }
+        await this._authentikCall('write_priority', () =>
+          this.client.delete(`/core/authenticated_sessions/${session.uuid}/`)
+        );
+        ended += 1;
+      }
+      if (!response.data?.pagination?.next) {
+        break;
+      }
+    }
+    return ended;
   }
   // Requirement 27 Criteria 5-7 (task 49.3): creates a short-lived
   // Authentik `app_password` token scoped to a specific user, for

@@ -32,6 +32,8 @@ const { fetchWithTimeout } = require('../utils/fetchWithTimeout');
 // plain-object-of-named-exports shape, so this is a single require, not a
 // destructure.
 const AccountLifecycleService = require('../services/AccountLifecycleService');
+const MfaResetService = require('../services/MfaResetService');
+const { deriveActivationStatus } = require('../utils/activationStatus');
 const {
   AccountAlreadySuspendedError,
   AccountOrphanedError,
@@ -304,6 +306,7 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
           uc.tak_callsign AS tak_callsign,
           uc.tak_color AS tak_color,
           uc.last_login AS last_login,
+          u.activation_expires_at AS activation_expires_at,
           t.id AS team_id,
           root.root_id AS direct_membership_org_id,
           CASE
@@ -438,6 +441,9 @@ router.get('/', authenticateToken, authorize, paginationParams, async (req, res)
         // refreshed each periodic sync). null => never logged in / not yet
         // synced; the /users page renders that as "Never".
         last_login: row.last_login ?? null,
+        // 'active' (has signed in), 'invited' (window open), 'expired' (window passed, never signed in), or null (unknown).
+        activation_status: deriveActivationStatus(row),
+        activation_expires_at: row.activation_expires_at ?? null,
         // The most recent time any of this user's TAK devices was seen
         // connecting to TAK Server (MAX of tak_devices.last_seen_at). null =>
         // no device has ever been seen (or the feature is unused); the /users
@@ -2129,6 +2135,23 @@ router.post('/:userId/resend-welcome', authenticateToken, authorize, async (req,
   }
 });
 
+// Reset a user's MFA (see MfaResetService). The body must say that the administrator has confirmed who the person is.
+router.post('/:userId/reset-mfa', authenticateToken, authorize, async (req, res) => {
+  const { userId } = req.params;
+  if (!req.body || req.body.identityConfirmed !== true) {
+    return res.status(400).json({ error: 'Confirm the identity of the person before resetting their MFA' });
+  }
+  try {
+    const result = await MfaResetService.resetMfa(userId, req.user);
+    return res.json({ message: 'MFA reset; a new activation link was emailed', ...result });
+  } catch (error) {
+    if (error instanceof MfaResetService.MfaResetError) {
+      return res.status(error.status).json({ error: error.message });
+    }
+    getLogger().error({ err: error, userId }, 'Failed to reset MFA');
+    return res.status(500).json({ error: 'Failed to reset MFA' });
+  }
+});
 // ---------------------------------------------------------------------
 // Bulk member-action endpoints (Orgs & Teams multi-select).
 //

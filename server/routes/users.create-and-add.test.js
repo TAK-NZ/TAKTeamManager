@@ -1051,7 +1051,7 @@ describe('POST /api/users/create-and-add welcomeEmailSent (bugfix: silent welcom
   it('reports welcomeEmailSent: true when the email template lookup and send both succeed', async () => {
     mockAuthentikSuccess();
     pool.connect.mockResolvedValue(buildMockClient());
-    authentikService.createActivationLink.mockResolvedValue('https://account.example.test/if/flow/tak-recovery-flow/?flow_token=abc');
+    authentikService.createActivationLink.mockResolvedValue({ link: 'https://account.example.test/if/flow/tak-recovery-flow/?flow_token=abc', windowExpiresAt: new Date('2030-01-08T00:00:00Z') });
     pool.query.mockImplementation((sql) => {
       if (typeof sql === 'string' && sql.includes('FROM email_templates')) {
         return Promise.resolve({

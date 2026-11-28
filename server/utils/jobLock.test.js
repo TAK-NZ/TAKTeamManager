@@ -147,6 +147,7 @@ describe('withJobLock', () => {
     // The locked jobs are present; the credential refresh is deliberately absent.
     expect(Object.keys(JOB_LOCK_KEYS).sort()).toEqual(
       [
+        'ACTIVATION_EXPIRY',
         'CALLSIGN_POLLER',
         'CERT_EXPIRY_NOTIFICATION',
         'DAILY_STATS_SNAPSHOT',
